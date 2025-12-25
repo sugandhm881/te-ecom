@@ -1,0 +1,25 @@
+{
+    "S2512618055": {
+        "success": true,
+        "awb": "30104013381733",
+        "courier": "Delhivery Exclusive",
+        "courier_code": "2005",
+        "shipment_id": "S2512618055",
+        "label": null
+    },
+    "S2512618105": {
+        "success": true,
+        "awb": "30104013381744",
+        "courier": "Delhivery Exclusive",
+        "courier_code": "2005",
+        "shipment_id": "S2512618105",
+        "label": null
+    },
+    "S2512644552": {
+        "success": true,
+        "awb": "77635229593",
+        "courier": "Blue Dart Surface",
+        "courier_code": "18001",
+        "shipment_id": "S2512644552"
+    }
+}

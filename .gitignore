@@ -2,5 +2,4 @@
 .env
 master_order_data.json
 master_api_log.json
-*_cache.json
 .DS_Store
