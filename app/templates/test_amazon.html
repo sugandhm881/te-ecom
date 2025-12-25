@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Amazon API Test</title>
+</head>
+<body>
+    <h1>Amazon SP-API Test</h1>
+    <p>This button tests the backend connection to the Amazon Selling Partner API.</p>
+    <button id="testButton" style="padding: 10px 15px; font-size: 16px;">Fetch Amazon Orders</button>
+    <pre id="response" style="background-color: #f0f0f0; padding: 1em; border: 1px solid #ccc; margin-top: 1em;"></pre>
+
+    <script>
+        document.getElementById('testButton').addEventListener('click', async () => {
+            const responseElement = document.getElementById('response');
+            responseElement.textContent = 'Fetching...';
+            try {
+                // This assumes your Flask app is running on the same domain.
+                // It now requires the auth token.
+                const token = localStorage.getItem('authToken');
+                if (!token) {
+                    responseElement.textContent = 'Error: Not logged in. Please log in on the main page first.';
+                    return;
+                }
+
+                const response = await fetch('/api/test-amazon-api', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    responseElement.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    const errorText = await response.text();
+                    responseElement.textContent = `Error ${response.status}: ${response.statusText}\n\n${errorText}`;
+                }
+            } catch (error) {
+                responseElement.textContent = `A client-side error occurred: ${error.message}`;
+            }
+        });
+    </script>
+</body>
+</html>

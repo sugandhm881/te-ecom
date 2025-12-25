@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-[#f8fafc]">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ecom Central - Unified Dashboard</title>
+<link rel="icon" type="image/png" href="/static/assets/ecom-logo.png">
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+    /* Professional Typography & Scrollbar */
+    body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+    /* Navigation Styling */
+    .nav-section-header {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #94a3b8;
+        font-weight: 600;
+        cursor: pointer;
+        user-select: none;
+    }
+    .nav-section-header:hover { color: #f8fafc; }
+    
+    .sidebar-link { 
+        transition: all 0.2s; 
+        border-radius: 0.5rem;
+        color: #cbd5e1;
+    }
+    .sidebar-link:hover { 
+        background-color: rgba(255, 255, 255, 0.05); 
+        color: white; 
+    }
+    .sidebar-link.active { 
+        background-color: #4f46e5; /* Indigo-600 */
+        color: white; 
+        box-shadow: 0 4px 6px -1px rgba(79, 70, 229, 0.3);
+    }
+    
+    /* Accordion Animation */
+    .nav-content {
+        transition: max-height 0.3s ease-in-out, opacity 0.3s ease-in-out;
+        overflow: hidden;
+    }
+    .nav-content.collapsed {
+        max-height: 0;
+        opacity: 0;
+    }
+    .nav-content.expanded {
+        max-height: 500px; /* Arbitrary large height */
+        opacity: 1;
+    }
+    .arrow-icon { transition: transform 0.3s ease; }
+    .rotate-180 { transform: rotate(180deg); }
+
+    /* Cards */
+    .card { 
+        background: white; 
+        border: 1px solid #e2e8f0; 
+        border-radius: 1rem; 
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+    }
+
+    /* Modern Table Header */
+    .table-header {
+        background-color: #f8fafc;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #64748b;
+        font-weight: 600;
+    }
+
+    /* --- NEW UI: Pill Shaped Filters & Inputs --- */
+    
+    /* Dropdown Styling */
+    .filter-select {
+        -webkit-appearance: none;
+        -moz-appearance: none;
+        appearance: none;
+        background-color: #ffffff;
+        /* Cleaner Chevron Icon */
+        background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%2364748b' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+        background-position: right 1rem center;
+        background-repeat: no-repeat;
+        background-size: 1em 1em;
+        
+        /* Pill Shape & Size */
+        padding: 0.6rem 2.5rem 0.6rem 1.25rem;
+        border: 1px solid #e2e8f0;
+        border-radius: 9999px; /* This makes it pill shaped */
+        
+        /* Typography */
+        color: #334155;
+        font-size: 0.875rem;
+        font-weight: 500;
+        line-height: 1.25;
+        
+        /* Interaction */
+        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        cursor: pointer;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .filter-select:hover {
+        border-color: #cbd5e1;
+        background-color: #f8fafc;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+        transform: translateY(-1px); /* Subtle lift effect */
+    }
+
+    .filter-select:focus {
+        outline: none;
+        border-color: #6366f1;
+        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); /* Soft Indigo Ring */
+    }
+
+    /* Date Input Styling */
+    .date-input {
+        background-color: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 9999px; /* Pill shape */
+        padding: 0.55rem 1.25rem;
+        color: #334155;
+        font-size: 0.875rem;
+        font-weight: 500;
+        outline: none;
+        transition: all 0.2s ease;
+        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    }
+    .date-input:hover {
+        border-color: #cbd5e1;
+        background-color: #f8fafc;
+        transform: translateY(-1px);
+    }
+    .date-input:focus {
+        border-color: #6366f1;
+        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+    }
+
+    /* Buttons */
+    .btn-pill {
+        border-radius: 9999px;
+        padding-left: 1.25rem;
+        padding-right: 1.25rem;
+        padding-top: 0.6rem;
+        padding-bottom: 0.6rem;
+        font-weight: 600;
+        transition: all 0.2s ease;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .btn-pill:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+
+    /* Loading Spinner */
+    .loader-overlay {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(4px);
+        z-index: 9999;
+        display: none; 
+        align-items: center; justify-content: center;
+    }
+    .loader-overlay.active { display: flex; }
+    .spinner {
+        width: 40px; height: 40px;
+        border: 4px solid #e2e8f0;
+        border-top: 4px solid #4f46e5;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    
+    /* Modal Transitions */
+    .modal-panel { transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+    .modal-hidden .modal-panel { transform: scale(0.95) translateY(10px); opacity: 0; }
+    .modal-visible .modal-panel { transform: scale(1) translateY(0); opacity: 1; }
+    .modal-backdrop { transition: opacity 0.3s ease-out; }
+    .modal-hidden .modal-backdrop { opacity: 0; }
+    .modal-visible .modal-backdrop { opacity: 1; }
+    
+    .view-hidden { display: none !important; }
+    .details-row { background-color: #f8fafc; box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.05); }
+</style>
+</head>
+<body class="text-slate-800">
+
+<div id="global-loader" class="loader-overlay">
+    <div class="spinner"></div>
+</div>
+
+<div id="notification" class="hidden fixed top-6 right-6 z-50 transform transition-all duration-300 translate-y-[-150%] opacity-0 cursor-pointer"></div>
+
+<div id="login-view" class="flex items-center justify-center h-screen bg-[#f1f5f9]">
+    <div class="w-full max-w-md card p-10">
+        <div class="text-center mb-8">
+            <img src="/static/assets/ecom-logo.png" alt="Logo" class="w-14 h-14 rounded-xl mx-auto mb-4 shadow-sm">
+            <h1 class="text-2xl font-bold text-slate-900">Sign in to Ecom Central</h1>
+            <p class="text-slate-500 text-sm mt-2">Manage your e-commerce empire</p>
+        </div>
+        <div class="space-y-5">
+            <input type="email" id="login-email" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="name@company.com">
+            <input type="password" id="login-password" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="Password">
+            <button id="login-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5">Continue</button>
+        </div>
+    </div>
+</div>
+
+<div id="app" class="flex h-screen overflow-hidden" style="display: none;">
+    
+    <aside class="w-64 bg-[#0f172a] text-slate-300 flex flex-col border-r border-slate-800 transition-all z-30 hidden lg:flex">
+        <div class="h-16 flex items-center px-6 border-b border-slate-800 bg-[#0f172a]">
+            <img src="/static/assets/ecom-logo.png" class="w-8 h-8 rounded-lg">
+            <span class="ml-3 text-white font-bold text-lg tracking-tight">Ecom Central</span>
+        </div>
+
+        <nav class="flex-1 px-3 py-4 space-y-2 overflow-y-auto select-none">
+            
+            <div class="nav-group">
+                <div class="nav-section-header flex items-center justify-between px-3 py-2 mt-2" data-target="ops-menu">
+                    <span>Operations</span>
+                    <svg class="arrow-icon w-4 h-4 rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+                <div id="ops-menu" class="nav-content expanded space-y-1">
+                    <a href="#" id="nav-orders-dashboard" class="sidebar-link active flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Orders Dashboard</span>
+                    </a>
+                </div>
+            </div>
+            
+            <div class="nav-group">
+                <div class="nav-section-header flex items-center justify-between px-3 py-2 mt-2" data-target="analytics-menu">
+                    <span>Analytics</span>
+                    <svg class="arrow-icon w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+                <div id="analytics-menu" class="nav-content collapsed space-y-1">
+                    <a href="#" id="nav-order-insights" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Order Insights</span>
+                    </a>
+                    <a href="#" id="nav-profitability" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v.01"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Profitability</span>
+                    </a>
+                    <a href="#" id="nav-customer-segments" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Customer Segments</span>
+                    </a>
+                    <a href="#" id="nav-returns-analysis" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Returns Analysis</span>
+                    </a>
+                </div>
+            </div>
+            
+            <div class="nav-group">
+                <div class="nav-section-header flex items-center justify-between px-3 py-2 mt-2" data-target="marketing-menu">
+                    <span>Marketing</span>
+                    <svg class="arrow-icon w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+                <div id="marketing-menu" class="nav-content collapsed space-y-1">
+                    <a href="#" id="nav-ad-ranking" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Ad Ranking</span>
+                    </a>
+                    <a href="#" id="nav-adset-breakdown" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3v18h18"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>
+                        <span class="ml-3 text-sm font-medium">Ad Set Breakdown</span>
+                    </a>
+                    <a href="#" id="nav-ad-analysis" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Ad Analysis</span>
+                    </a>
+                </div>
+            </div>
+
+            <div class="nav-category mt-6 px-3 text-xs font-bold text-slate-500 uppercase tracking-widest">System</div>
+            <a href="#" id="nav-reports" class="sidebar-link flex items-center px-3 py-2 mt-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-6h13M9 7h13M5 7h.01M5 17h.01M5 12h.01"/></svg>
+                <span class="ml-3 text-sm font-medium">Reports</span>
+            </a>
+            <a href="#" id="nav-settings" class="sidebar-link flex items-center px-3 py-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-1.066 2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                <span class="ml-3 text-sm font-medium">Settings</span>
+            </a>
+        </nav>
+
+        <div class="p-4 mt-auto border-t border-slate-800">
+            <button id="logout-btn" class="w-full flex items-center justify-center gap-2 text-rose-400 hover:text-white hover:bg-rose-600/20 py-2.5 rounded-lg transition-colors">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                <span class="text-sm font-medium">Sign Out</span>
+            </button>
+        </div>
+    </aside>
+
+    <main class="flex-1 flex flex-col overflow-y-auto bg-[#f8fafc]">
+
+        <div id="orders-dashboard-view">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 flex justify-between items-center shadow-sm">
+                <h1 class="text-xl font-bold text-slate-800">Orders Dashboard</h1>
+            </header>
+            <div class="p-8 max-w-7xl mx-auto w-full">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                    <div id="kpi-dashboard-new" class="card p-6 border-l-4 border-l-blue-500"></div>
+                    <div id="kpi-dashboard-processing" class="card p-6 border-l-4 border-l-amber-500"></div>
+                    <div id="kpi-dashboard-shipped" class="card p-6 border-l-4 border-l-indigo-500"></div>
+                    <div id="kpi-dashboard-cancelled" class="card p-6 border-l-4 border-l-rose-500"></div>
+                </div>
+
+                <div class="card overflow-hidden">
+                    <div class="px-6 py-5 border-b border-slate-100 flex flex-wrap items-center justify-between gap-4">
+                        <h2 class="text-lg font-bold text-slate-800">Recent Orders</h2>
+                        <div class="flex items-center gap-3">
+                            <select id="status-filter" class="filter-select"></select>
+                            <select id="order-date-preset-filter" class="filter-select"></select>
+                            <div id="custom-date-container" class="hidden items-center gap-2">
+                                <input type="date" id="start-date-filter" class="date-input">
+                                <input type="date" id="end-date-filter" class="date-input">
+                            </div>
+                            <div id="platform-filters" class="flex items-center gap-2 bg-slate-100 p-1.5 rounded-full"></div>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left">
+                            <thead class="table-header">
+                                <tr>
+                                    <th class="py-4 px-6 w-10">
+                                        <input type="checkbox" onclick="toggleSelectAll(this)" class="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer">
+                                    </th>
+                                    <th class="py-4 px-6">Platform</th>
+                                    <th class="py-4 px-6">Date</th>
+                                    <th class="py-4 px-6">Order ID</th>
+                                    <th class="py-4 px-6">Customer</th>
+                                    <th class="py-4 px-6">Total</th>
+                                    <th class="py-4 px-6">Status</th>
+                                    <th class="py-4 px-6 text-right">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="orders-list" class="divide-y divide-slate-50 text-sm text-slate-600"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="order-insights-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex justify-between items-center">
+                <h1 class="text-xl font-bold text-slate-800">Order Insights</h1>
+                <div class="flex gap-3">
+                    <div id="insights-platform-filters" class="flex items-center gap-2 bg-slate-100 p-1.5 rounded-full"></div>
+                    <select id="insights-date-preset-filter" class="filter-select"></select>
+                    <div id="insights-custom-date-container" class="hidden items-center gap-2">
+                        <input type="date" id="insights-start-date-filter" class="date-input">
+                        <input type="date" id="insights-end-date-filter" class="date-input">
+                    </div>
+                </div>
+            </header>
+            <div class="p-8 max-w-7xl mx-auto w-full">
+                <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 mb-8">
+                    <div id="kpi-insights-revenue" class="card p-4"></div>
+                    <div id="kpi-insights-avg-value" class="card p-4"></div>
+                    <div id="kpi-insights-all-orders" class="card p-4"></div>
+                    <div id="kpi-insights-new" class="card p-4"></div>
+                    <div id="kpi-insights-shipped" class="card p-4"></div>
+                    <div id="kpi-insights-rto" class="card p-4"></div>
+                    <div id="kpi-insights-cancelled" class="card p-4"></div>
+                </div>
+                
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div class="lg:col-span-2 card p-6">
+                         <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Revenue Trend</h3>
+                         <div class="relative h-80"><canvas id="revenue-chart"></canvas></div>
+                    </div>
+                    <div class="flex flex-col gap-6">
+                        <div class="card p-6 flex-1">
+                             <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Platform Share</h3>
+                             <div class="relative h-48"><canvas id="platform-chart"></canvas></div>
+                        </div>
+                        <div class="card p-6 flex-1">
+                             <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Payment Method</h3>
+                             <div class="relative h-48"><canvas id="payment-chart"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="profitability-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex justify-between items-center">
+                <h1 class="text-xl font-bold text-slate-800">Profitability Analysis</h1>
+                <div class="flex items-center gap-3">
+                    <select id="profit-date-preset-filter" class="filter-select"></select>
+                    <div id="profit-custom-date-container" class="hidden items-center gap-2">
+                        <input type="date" id="profit-start-date-filter" class="date-input">
+                        <input type="date" id="profit-end-date-filter" class="date-input">
+                    </div>
+                </div>
+            </header>
+            <div class="p-8 max-w-7xl mx-auto w-full">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <div class="card p-6 border-l-4 border-l-emerald-500">
+                        <p class="text-sm font-semibold text-slate-500 uppercase tracking-wide">Total Sales</p>
+                        <p id="profit-kpi-sales" class="text-3xl font-bold text-slate-900 mt-2">₹0</p>
+                    </div>
+                    <div class="card p-6 border-l-4 border-l-rose-500">
+                        <p class="text-sm font-semibold text-slate-500 uppercase tracking-wide">Ad Spend</p>
+                        <p id="profit-kpi-spend" class="text-3xl font-bold text-slate-900 mt-2">₹0</p>
+                    </div>
+                    <div class="card p-6 border-l-4 border-l-indigo-500">
+                        <p class="text-sm font-semibold text-slate-500 uppercase tracking-wide">Marketing Profit</p>
+                        <p id="profit-kpi-net" class="text-3xl font-bold text-slate-900 mt-2">₹0</p>
+                        <p class="text-xs text-slate-400 mt-1">Revenue - Ad Spend</p>
+                    </div>
+                </div>
+                <div class="card p-6">
+                    <h3 class="text-lg font-bold text-slate-800 mb-4">Profit Trend</h3>
+                    <div class="relative h-96"><canvas id="profit-trend-chart"></canvas></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="customer-segments-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex justify-between items-center">
+                <h1 class="text-xl font-bold text-slate-800">Customer Segments</h1>
+                <div class="flex items-center gap-3">
+                    <select id="customer-limit-filter" class="filter-select">
+                        <option value="5">Top 5</option>
+                        <option value="10" selected>Top 10</option>
+                        <option value="50">Top 50</option>
+                        <option value="all">All</option>
+                    </select>
+                </div>
+            </header>
+            <div class="p-8 max-w-7xl mx-auto w-full">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    <div class="card p-6 h-fit">
+                        <h3 class="text-lg font-bold text-slate-800 mb-4">Customer Distribution</h3>
+                        <div class="relative h-64"><canvas id="customer-segment-chart"></canvas></div>
+                        <div class="mt-4 space-y-2">
+                            <div class="flex justify-between text-sm"><span class="text-slate-600">Loyal (>3 Orders)</span><span id="seg-vip-count" class="font-bold">0</span></div>
+                            <div class="flex justify-between text-sm"><span class="text-slate-600">Repeat (2 Orders)</span><span id="seg-repeat-count" class="font-bold">0</span></div>
+                            <div class="flex justify-between text-sm"><span class="text-slate-600">One-Time</span><span id="seg-new-count" class="font-bold">0</span></div>
+                        </div>
+                    </div>
+                    <div class="lg:col-span-2 card overflow-hidden">
+                        <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                            <h3 class="text-lg font-bold text-slate-800">Top Customers</h3>
+                            <span class="text-xs text-slate-400">Click to expand</span>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left">
+                                <thead class="table-header">
+                                    <tr>
+                                        <th class="py-3 px-6 cursor-pointer hover:bg-slate-100" onclick="renderCustomerSegments('name', 'asc')">Name ⬍</th>
+                                        <th class="py-3 px-6 text-center cursor-pointer hover:bg-slate-100" onclick="renderCustomerSegments('count', 'desc')">Orders ⬍</th>
+                                        <th class="py-3 px-6 text-right cursor-pointer hover:bg-slate-100" onclick="renderCustomerSegments('spent', 'desc')">Total Spent ⬍</th>
+                                        <th class="py-3 px-6 text-right cursor-pointer hover:bg-slate-100" onclick="renderCustomerSegments('aov', 'desc')">AOV ⬍</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="vip-customer-list" class="divide-y divide-slate-50 text-sm text-slate-600"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="returns-analysis-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex justify-between items-center">
+                <h1 class="text-xl font-bold text-slate-800">Returns Analysis</h1>
+                <div class="flex items-center gap-3">
+                    <select id="returns-date-preset-filter" class="filter-select"></select>
+                    <div id="returns-custom-date-container" class="hidden items-center gap-2">
+                        <input type="date" id="returns-start-date-filter" class="date-input">
+                        <input type="date" id="returns-end-date-filter" class="date-input">
+                    </div>
+                </div>
+            </header>
+            <div class="p-8 max-w-7xl mx-auto w-full">
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-6 mb-8">
+                    <div id="kpi-rto-rate" class="card p-5 border-l-4 border-l-rose-500"></div>
+                    <div id="kpi-rto-count" class="card p-5 border-l-4 border-l-orange-500"></div>
+                    <div id="kpi-rto-cost" class="card p-5 border-l-4 border-l-slate-500"></div>
+                    <div class="card p-5 border-l-4 border-l-blue-500 flex flex-col justify-center">
+                        <span class="text-xs text-slate-500 uppercase font-bold">Total RTO Orders</span>
+                        <span id="total-rto-val" class="text-2xl font-bold text-slate-800 mt-1">0</span>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    <div class="card overflow-hidden">
+                        <div class="px-6 py-4 border-b border-slate-100">
+                            <h3 class="text-lg font-bold text-slate-800">High Return Products</h3>
+                        </div>
+                        <div class="p-4">
+                            <div class="relative h-64"><canvas id="rto-product-chart"></canvas></div>
+                        </div>
+                    </div>
+                    <div class="card overflow-hidden">
+                        <div class="px-6 py-4 border-b border-slate-100">
+                            <h3 class="text-lg font-bold text-slate-800">Returns by City</h3>
+                        </div>
+                        <div class="overflow-x-auto max-h-80">
+                            <table class="w-full text-left">
+                                <thead class="table-header sticky top-0 bg-slate-50">
+                                    <tr>
+                                        <th class="py-3 px-6">City</th>
+                                        <th class="py-3 px-6 text-center">RTO Count</th>
+                                        <th class="py-3 px-6 text-right">RTO %</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="rto-city-list" class="divide-y divide-slate-50 text-sm text-slate-600"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="ad-ranking-view" class="view-hidden">
+             <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex justify-between items-center">
+                <h1 class="text-xl font-bold text-slate-800">Ad Ranking</h1>
+                <div class="flex gap-3">
+                   <select id="ranking-date-preset-filter" class="filter-select"></select> 
+                </div>
+            </header>
+            <div class="p-8 max-w-7xl mx-auto w-full">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                      <div class="lg:col-span-2 card p-6">
+                          <h2 class="text-lg font-bold text-slate-800 mb-2">Top 5 Ad Sets by ROAS</h2>
+                          <p class="text-sm text-slate-500 mb-6">Visual comparison of your best performers.</p>
+                          <div class="relative h-96"><canvas id="ad-ranking-chart"></canvas></div>
+                      </div>
+                      
+                      <div class="card p-6">
+                          <h2 class="text-lg font-bold text-slate-800 mb-6">Leaderboard</h2>
+                          <div id="ad-ranking-list" class="space-y-4">
+                              <p class="text-sm text-slate-500">Loading data...</p>
+                          </div>
+                      </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="adset-breakdown-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex justify-between items-center">
+                <h1 class="text-xl font-bold text-slate-800">Ad Set Breakdown</h1>
+                <div class="flex items-center gap-3 flex-wrap">
+                    <div class="flex items-center gap-2 bg-white border border-slate-200 rounded-full px-4 py-2 shadow-sm">
+                        <label class="text-xs font-bold text-slate-500 uppercase">Filter:</label>
+                        <select id="adset-date-filter-type" class="text-sm font-medium text-slate-700 bg-transparent border-none outline-none cursor-pointer">
+                            <option value="created_at" selected>Order Date</option>
+                            <option value="updated_at">Shipment Date</option>
+                        </select>
+                    </div>
+                    <select id="adset-date-preset-filter" class="filter-select"></select>
+                    <div id="adset-custom-date-container" class="hidden items-center gap-2">
+                        <input type="date" id="adset-start-date-filter" class="date-input">
+                        <input type="date" id="adset-end-date-filter" class="date-input">
+                    </div>
+                    <button id="download-adset-excel" class="btn-pill bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg> Excel
+                    </button>
+                    <button id="download-adset-pdf" class="btn-pill bg-indigo-600 hover:bg-indigo-700 text-white flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 12v8m0 0l-4-4m4 4l4-4M12 4v8" /></svg> PDF
+                    </button>
+                </div>
+            </header>
+            <div class="p-8 max-w-7xl mx-auto w-full">
+                <div id="adsetSummaryCard" class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-4 mb-6 bg-[#1e293b] text-white rounded-2xl p-6 shadow-lg hidden">
+                    <div class="text-center"><p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Spend</p><p id="totalSpend" class="text-lg font-bold">0</p></div>
+                    <div class="text-center"><p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Del. Rev</p><p id="totalRevenue" class="text-lg font-bold">0</p></div>
+                    <div class="text-center"><p class="text-xs text-slate-400 uppercase tracking-wider mb-1">ROAS</p><p id="totalRoas" class="text-lg font-bold text-emerald-400">0.00x</p></div>
+                    <div class="text-center"><p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Eff. ROAS</p><p id="totalEffRoas" class="text-lg font-bold text-indigo-400">0.00x</p></div>
+                    <div class="text-center"><p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Orders</p><p id="totalOrders" class="text-lg font-bold">0</p></div>
+                    <div class="text-center"><p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Delivered</p><p id="totalDelivered" class="text-lg font-bold">0</p></div>
+                    <div class="text-center"><p class="text-xs text-slate-400 uppercase tracking-wider mb-1">RTO</p><p id="totalRTO" class="text-lg font-bold">0</p></div>
+                    <div class="text-center"><p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Cancelled</p><p id="totalCancelled" class="text-lg font-bold">0</p></div>
+                </div>
+                
+                <div class="card overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table id="adsetPerformanceTable" class="min-w-full text-sm text-slate-700">
+                            <thead class="table-header">
+                                <tr>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-left hover:text-slate-900" data-key="name">Ad Set / Source ⬍</th>
+                                    <th class="px-4 py-3 text-left">Sub-Terms</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="spend">Spend ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="totalOrders">Orders ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="deliveredOrders">Del ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="deliveredRevenue">Del. Rev ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="rtoOrders">RTO ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="cancelledOrders">Cncl ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="inTransitOrders">Transit ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="processingOrders">Proc ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="rtoPercent">RTO % ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="cpo">CPO ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900" data-key="roas">ROAS ⬍</th>
+                                    <th class="sortable cursor-pointer px-4 py-3 text-right hover:text-slate-900 text-indigo-600" data-key="effectiveRoas">Eff. ROAS ⬍</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adset-performance-table-body" class="divide-y divide-slate-50"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="ad-analysis-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex justify-between items-center">
+                <h1 class="text-xl font-bold text-slate-800">Ad Conversion & Payment Analysis</h1>
+                <div class="flex items-center gap-3">
+                    <label class="text-xs font-bold text-slate-500 uppercase">Payment:</label>
+                    <select id="ad-analysis-payment-filter" class="filter-select">
+                        <option value="All">All</option>
+                        <option value="COD">COD</option>
+                        <option value="PREPAID">Prepaid</option>
+                    </select>
+                </div>
+            </header>
+            <div class="p-8 max-w-7xl mx-auto w-full">
+                <div class="card overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left">
+                            <thead class="table-header">
+                                <tr>
+                                    <th class="py-4 px-6">Ad Name / Source</th>
+                                    <th class="py-4 px-6">Clicks (Est.)</th>
+                                    <th class="py-4 px-6 text-indigo-700">Conversions</th>
+                                    <th class="py-4 px-6 text-rose-600">COD Orders</th>
+                                    <th class="py-4 px-6 text-emerald-600">Prepaid Orders</th>
+                                    <th class="py-4 px-6">Conv. Rate %</th>
+                                </tr>
+                            </thead>
+                            <tbody id="ad-analysis-table-body" class="divide-y divide-slate-50 text-sm text-slate-600"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="reports-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm">
+                <h1 class="text-xl font-bold text-slate-800">Reports</h1>
+            </header>
+            <div class="p-8 max-w-4xl mx-auto w-full">
+                <div class="card p-8">
+                    <h2 class="text-lg font-bold text-slate-800 mb-6 flex items-center gap-2">
+                        <svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                        Amazon MTR Tax Invoice Report
+                    </h2>
+                    <div class="flex flex-col sm:flex-row items-end gap-4 bg-slate-50 p-6 rounded-2xl border border-slate-100">
+                        <div class="w-full">
+                            <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Start Date</label>
+                            <input id="amazon-report-start-date" type="date" class="w-full bg-white border border-slate-200 text-slate-800 text-sm rounded-xl p-2.5 focus:ring-amber-500 focus:border-amber-500">
+                        </div>
+                        <div class="w-full">
+                            <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">End Date</label>
+                            <input id="amazon-report-end-date" type="date" class="w-full bg-white border border-slate-200 text-slate-800 text-sm rounded-xl p-2.5 focus:ring-amber-500 focus:border-amber-500">
+                        </div>
+                        <button id="btn-download-amazon-report" class="btn-pill bg-amber-500 hover:bg-amber-600 text-white w-full sm:w-auto shadow-sm">Download</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="settings-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm">
+                <h1 class="text-xl font-bold text-slate-800">Settings</h1>
+            </header>
+            <div class="p-8 max-w-4xl mx-auto w-full">
+                <div class="card p-8">
+                    <h2 class="text-lg font-bold text-slate-800 mb-6">Connected Accounts</h2>
+                    <div id="seller-connections" class="space-y-4"></div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+</div>
+
+<div id="order-modal" class="hidden modal-hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div id="modal-backdrop" class="modal-backdrop fixed inset-0 bg-slate-900/50 backdrop-blur-sm"></div>
+    <div id="modal-panel" class="modal-panel relative bg-white rounded-2xl shadow-2xl w-full max-w-lg border border-slate-100 overflow-hidden">
+        <div class="p-6 max-h-[85vh] overflow-y-auto custom-scrollbar" id="modal-content"></div>
+        <button id="modal-close-btn" class="absolute top-4 right-4 p-2 bg-slate-100 hover:bg-slate-200 rounded-full text-slate-500 transition-colors">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+        </button>
+    </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

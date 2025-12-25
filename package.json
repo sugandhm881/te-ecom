@@ -1,0 +1,24 @@
+{
+  "name": "ecom-central-node",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "sync": "node data_fetcher.js"
+  },
+  "dependencies": {
+    "async-lock": "^1.4.1",
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "crypto-js": "^4.2.0",
+    "dotenv": "^16.3.0",
+    "exceljs": "^4.4.0",
+    "express": "^4.18.2",
+    "fs-extra": "^11.1.1",
+    "jsonwebtoken": "^9.0.3",
+    "moment-timezone": "^0.5.43",
+    "nodemailer": "^7.0.12",
+    "p-limit": "^3.1.0",
+    "pdfkit": "^0.17.2"
+  }
+}
