@@ -1,459 +1,459 @@
 {
   "30104013382621": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685947.91
+    "timestamp": 1766874135.281
   },
   "30104013382632": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685948.177
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874135.453
   },
   "30104013382750": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685948.308
+    "timestamp": 1766874136.048
   },
   "30104013382702": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685948.546
+    "timestamp": 1766874137.114
   },
   "RAPP0000113975": {
     "raw_status": "SHIPPED",
-    "timestamp": 1766685948.517
+    "timestamp": 1766874136.896
   },
   "30104013382735": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685948.675
+    "timestamp": 1766874137.262
   },
   "30104013382713": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685948.834
+    "timestamp": 1766874137.266
   },
   "30104013382654": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685948.876
+    "timestamp": 1766874137.455
   },
   "30104013382665": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685948.865
+    "timestamp": 1766874137.289
   },
   "30104013382691": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.095
+    "timestamp": 1766874137.502
   },
   "30104013382680": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.099
+    "timestamp": 1766874137.575
   },
   "30104013382746": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.209
+    "timestamp": 1766874137.728
   },
   "30104013382643": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.171
+    "timestamp": 1766874137.699
   },
   "30104013381991": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.292
+    "timestamp": 1766874137.769
   },
   "30104013381781": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.322
+    "timestamp": 1766874137.858
   },
   "30104013381965": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.3
+    "timestamp": 1766874137.825
   },
   "30104013381895": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.365
+    "timestamp": 1766874137.958
   },
   "30104013381873": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.326
+    "timestamp": 1766874137.911
   },
   "30104013381851": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.465
+    "timestamp": 1766874138.014
   },
   "30104013381803": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.592
+    "timestamp": 1766874138.19
   },
   "30104013381862": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.717
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874138.242
   },
   "30104013381932": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.817
+    "timestamp": 1766874138.345
   },
   "30104013381976": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.934
+    "timestamp": 1766874138.545
   },
   "30104013381814": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685949.9
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874138.412
   },
   "30104013381921": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685950.099
+    "timestamp": 1766874138.835
   },
   "30104013381770": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685950.085
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874138.774
   },
   "30104013381943": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685950.315
+    "timestamp": 1766874139.377
   },
   "30104013381836": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685950.525
+    "timestamp": 1766874139.405
   },
   "30104013382260": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685950.536
+    "timestamp": 1766874139.543
   },
   "30104013381884": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685950.534
+    "timestamp": 1766874139.466
   },
   "30104013381755": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685950.577
+    "timestamp": 1766874139.913
   },
   "30104013381954": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685950.958
+    "timestamp": 1766874140.1
   },
   "30104013381825": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685951
+    "timestamp": 1766874140.187
   },
   "30104013381840": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685950.998
+    "timestamp": 1766874140.126
   },
   "30104013381910": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685951.095
+    "timestamp": 1766874140.452
   },
   "30104013381766": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685951.034
+    "timestamp": 1766874140.251
   },
   "30104013381733": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685951.447
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874140.499
   },
   "30104013381906": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685951.509
+    "timestamp": 1766874140.831
   },
   "30104013381792": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685951.624
+    "timestamp": 1766874140.901
   },
   "RAPC0000337084": {
     "raw_status": "SHIPPED",
-    "timestamp": 1766685951.641
+    "timestamp": 1766874140.934
   },
   "30104013381486": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685951.675
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874141.156
   },
   "30104013381744": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685951.859
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874141.198
   },
   "30104013381490": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685952.1
+    "timestamp": 1766874141.557
   },
   "30104013381523": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685952.094
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874141.292
   },
   "30104013381383": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685952.227
+    "timestamp": 1766874141.773
   },
   "30104013381501": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685952.3
+    "timestamp": 1766874141.79
   },
   "30104013381372": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685952.536
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874142.094
   },
   "30104013381405": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685952.46
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874141.848
   },
   "30104013381431": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685952.636
+    "timestamp": 1766874142.362
   },
   "30104013381092": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685952.775
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874142.442
   },
   "30104013382724": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685952.796
+    "timestamp": 1766874142.453
   },
   "RAPP0000113889": {
     "raw_status": "DELIVERED",
     "timestamp": 1766685952.998
   },
   "30104013381394": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.129
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874142.782
   },
   "30104013381420": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.177
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874142.823
   },
   "RAPC0000337002": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.258
+    "timestamp": 1766874143.01
   },
   "30104013381350": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.309
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874143.031
   },
   "30104013381361": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.489
+    "timestamp": 1766874143.25
   },
   "RAPP0000113888": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.486
+    "timestamp": 1766874143.132
   },
   "76761787266": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.626
+    "timestamp": 1766874143.573
   },
   "30104013380591": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.735
+    "timestamp": 1766874143.622
   },
   "RAPC0000337003": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.622
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874143.564
   },
   "30104013380602": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.707
+    "timestamp": 1766874143.611
   },
   "30104013382282": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.828
+    "timestamp": 1766874143.63
   },
   "30104013382271": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685953.84
+    "timestamp": 1766874143.666
   },
   "30104013380414": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.009
+    "timestamp": 1766874143.989
   },
   "30104013380381": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.023
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874144.101
   },
   "77633499790": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.167
+    "timestamp": 1766874144.244
   },
   "30104013380580": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.213
+    "timestamp": 1766874144.291
   },
   "30104013381114": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.184
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874144.272
   },
   "30104013380484": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.308
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874144.356
   },
   "30104013380576": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.537
+    "timestamp": 1766874144.846
   },
   "30104013380392": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.645
+    "timestamp": 1766874144.874
   },
   "30104013380462": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.696
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874144.948
   },
   "30104013381416": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.953
+    "timestamp": 1766874145.325
   },
   "30104013380495": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685955.146
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874145.575
   },
   "30104013380436": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685955.223
+    "timestamp": 1766874145.594
   },
   "30104013380624": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685955.276
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874145.679
   },
   "30104013380521": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685955.341
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874145.831
   },
   "30104013380543": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.461
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874144.527
   },
   "30104013380510": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685954.496
+    "timestamp": 1766874144.747
   },
   "30104013380370": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685955.681
+    "timestamp": 1766874146.214
   },
   "30104013380554": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685955.769
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874146.467
   },
   "30104013382293": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685955.764
+    "timestamp": 1766874146.257
   },
   "30104013380565": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685955.827
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874146.688
   },
   "30104013380451": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685955.909
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874146.794
   },
   "30104013380403": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685956.005
+    "timestamp": 1766874146.815
   },
   "30104013380613": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685956.084
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874146.899
   },
   "30104013380532": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685956.046
+    "timestamp": 1766874146.849
   },
   "30104013380440": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685956.352
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874147.293
   },
   "30104013380506": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685956.351
+    "timestamp": 1766874147.288
   },
   "RAPC0000337380": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685956.632
+    "timestamp": 1766874147.711
   },
   "30104013380473": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685956.833
+    "timestamp": 1766874147.785
   },
   "30104013379924": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685956.976
+    "timestamp": 1766874148.035
   },
   "30104013379972": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685957.179
+    "timestamp": 1766874148.373
   },
   "30104013379961": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685957.303
+    "timestamp": 1766874148.631
   },
   "30104013381560": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685957.208
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874148.519
   },
   "30104013379946": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685957.328
+    "timestamp": 1766874148.772
   },
   "30104013379935": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685957.599
+    "timestamp": 1766874149.035
   },
   "30104013380425": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685956.499
+    "timestamp": 1766874147.437
   },
   "30104013379983": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685957.705
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874149.059
   },
   "30104013379913": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685957.708
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874149.082
   },
   "30104013380005": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685957.776
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874149.185
   },
   "30104013379950": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685957.846
+    "timestamp": 1766874149.219
   },
   "30104013380020": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685958.069
+    "timestamp": 1766874149.476
   },
   "30104013379994": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685958.052
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874149.374
   },
   "77633499801": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685958.178
+    "timestamp": 1766874149.578
   },
   "30104013379552": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685958.188
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874149.674
   },
   "30104013379445": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685958.506
+    "timestamp": 1766874150.135
   },
   "77632415501": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685958.629
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874150.22
   },
   "30104013379294": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685958.772
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874150.228
   },
   "30104013379073": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959.057
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874150.767
   },
   "30104013379563": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959.086
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874150.814
   },
   "30104013379202": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874150.69
   },
   "30104013379084": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959.156
+    "timestamp": 1766874151.352
   },
   "30104013379213": {
     "raw_status": "DELIVERED",
@@ -461,31 +461,31 @@
   },
   "RAPC0000337290": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685958.498
+    "timestamp": 1766874150.013
   },
   "30104013379154": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959.556
+    "timestamp": 1766874151.49
   },
   "30104013379095": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959.485
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874151.486
   },
   "30104013379224": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959.631
+    "timestamp": 1766874151.626
   },
   "30104013379062": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959.678
+    "timestamp": 1766874152.071
   },
   "30104013379143": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959.799
+    "timestamp": 1766874152.108
   },
   "30104013381556": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959.717
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874152.077
   },
   "30104013379180": {
     "raw_status": "DELIVERED",
@@ -493,43 +493,43 @@
   },
   "30104013379106": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685959.986
+    "timestamp": 1766874152.194
   },
   "77634252452": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685960.032
+    "timestamp": 1766874152.471
   },
   "30104013379165": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685960.148
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874152.724
   },
   "30104013379176": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685960.216
+    "timestamp": 1766874152.821
   },
   "30104013379110": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685960.684
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874153.333
   },
   "30104013379040": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685960.936
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874153.491
   },
   "30104013379132": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685961.333
+    "timestamp": 1766874154.039
   },
   "30104013379191": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685961.429
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874154.08
   },
   "30104013379051": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685960.489
+    "timestamp": 1766874152.997
   },
   "30104013378852": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685961.933
+    "timestamp": 1766874154.342
   },
   "30104013378896": {
     "raw_status": "DELIVERED",
@@ -541,19 +541,19 @@
   },
   "30104013378874": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685962.17
+    "timestamp": 1766874154.605
   },
   "30104013379305": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685962.346
+    "timestamp": 1766874154.633
   },
   "30104013378885": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685962.42
+    "timestamp": 1766874154.756
   },
   "30104013379585": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685962.413
+    "timestamp": 1766874154.637
   },
   "30104013378863": {
     "raw_status": "DELIVERED",
@@ -561,27 +561,27 @@
   },
   "30104013378550": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685962.493
+    "timestamp": 1766874154.928
   },
   "30104013378594": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685962.512
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874155.046
   },
   "77633498692": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685962.751
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874155.095
   },
   "30104013377555": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685962.899
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874155.2
   },
   "30104013378561": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685962.978
+    "timestamp": 1766874155.239
   },
   "30104013378535": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685963.012
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874155.372
   },
   "30104013377441": {
     "raw_status": "DELIVERED",
@@ -589,11 +589,11 @@
   },
   "30104013377581": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685963.539
+    "timestamp": 1766874156.137
   },
   "30104013377603": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685963.506
+    "timestamp": 1766874155.856
   },
   "30104013377592": {
     "raw_status": "DELIVERED",
@@ -601,7 +601,7 @@
   },
   "30104013377570": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685963.884
+    "timestamp": 1766874156.355
   },
   "30104013377566": {
     "raw_status": "RTO_INITIATED",
@@ -609,35 +609,35 @@
   },
   "30104013377625": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685964.001
+    "timestamp": 1766874156.484
   },
   "30104013379272": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685964.046
+    "timestamp": 1766874156.602
   },
   "30104013379121": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685964.243
+    "timestamp": 1766874156.643
   },
   "30104013376321": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685964.338
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874156.974
   },
   "30104013381545": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685964.368
+    "timestamp": 1766874157.006
   },
   "30104013381534": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685964.492
+    "timestamp": 1766874157.031
   },
   "30104013376310": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685964.621
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874157.264
   },
   "30104013376284": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685964.712
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874157.338
   },
   "30104013376332": {
     "raw_status": "DELIVERED",
@@ -645,23 +645,23 @@
   },
   "30104013376343": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685964.825
+    "timestamp": 1766874157.65
   },
   "30104013376306": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685964.953
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874157.666
   },
   "30104013376262": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.079
+    "timestamp": 1766874157.907
   },
   "77630860790": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.148
+    "timestamp": 1766874158.025
   },
   "30104013382676": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.068
+    "timestamp": 1766874157.873
   },
   "30104013376273": {
     "raw_status": "DELIVERED",
@@ -673,75 +673,75 @@
   },
   "30104013376295": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.313
+    "timestamp": 1766874158.341
   },
   "30104013376170": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.462
+    "timestamp": 1766874158.37
   },
   "30104013376181": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.627
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874158.606
   },
   "30104013376133": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.655
+    "timestamp": 1766874158.639
   },
   "30104013376225": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.754
+    "timestamp": 1766874158.692
   },
   "77630846414": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.809
+    "timestamp": 1766874158.756
   },
   "30104013376144": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.908
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874159.073
   },
   "RAPP0000113489": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685965.866
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874158.876
   },
   "30104013376155": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685966.209
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874159.234
   },
   "30104013376166": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685966.326
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874159.351
   },
   "30104013375842": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685966.44
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874159.435
   },
   "30104013375746": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685966.454
+    "timestamp": 1766874159.674
   },
   "30104013376063": {
     "raw_status": "DELIVERED",
     "timestamp": 1766685966.508
   },
   "30104013375761": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685966.465
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874159.763
   },
   "30104013375805": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685966.69
+    "timestamp": 1766874159.947
   },
   "30104013376085": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685966.885
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874160.091
   },
   "30104013375713": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685966.796
+    "timestamp": 1766874159.984
   },
   "30104013379574": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.058
+    "timestamp": 1766874160.544
   },
   "30104013375794": {
     "raw_status": "DELIVERED",
@@ -749,71 +749,71 @@
   },
   "30104013375691": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.14
+    "timestamp": 1766874160.632
   },
   "30104013376192": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.13
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874160.605
   },
   "30104013375702": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.04
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874160.402
   },
   "30104013375783": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.488
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874161.006
   },
   "30104013375816": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.627
+    "timestamp": 1766874161.259
   },
   "30104013375820": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.595
+    "timestamp": 1766874161.211
   },
   "30104013375772": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.713
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874161.375
   },
   "30104013375724": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.688
+    "timestamp": 1766874161.272
   },
   "30104013375750": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.692
+    "timestamp": 1766874161.274
   },
   "30104013375853": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685967.972
+    "timestamp": 1766874161.595
   },
   "30104013375831": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685968.061
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874161.703
   },
   "30104013376041": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685968.232
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874161.811
   },
   "30104013381475": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685968.292
+    "timestamp": 1766874161.965
   },
   "30104013375960": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685968.237
+    "timestamp": 1766874161.847
   },
   "30104013375982": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685968.436
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874162.178
   },
   "30104013375864": {
     "raw_status": "DELIVERED",
     "timestamp": 1766685968.79
   },
   "30104013376015": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685969.246
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874163.496
   },
   "30104013375956": {
     "raw_status": "RTO_INITIATED",
@@ -824,68 +824,68 @@
     "timestamp": 1766685969.327
   },
   "30104013375945": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685969.636
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874163.834
   },
   "30104013375993": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685969.786
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874163.943
   },
   "30104013375886": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685970.183
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874164.43
   },
   "30104013376030": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685970.26
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874164.593
   },
   "30104013375890": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685970.317
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874164.664
   },
   "30104013377614": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685970.57
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874164.667
   },
   "30104013375971": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685970.769
+    "timestamp": 1766874165.315
   },
   "30104013376074": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685970.713
+    "timestamp": 1766874165.138
   },
   "30104013376052": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685970.747
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874165.204
   },
   "30104013375934": {
     "raw_status": "DELIVERED",
     "timestamp": 1766685971.077
   },
   "30104013375912": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685971.157
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874165.431
   },
   "30104013376004": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685971.163
+    "timestamp": 1766874165.486
   },
   "30104013381442": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685971.339
+    "timestamp": 1766874165.793
   },
   "30104013381453": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685971.396
+    "timestamp": 1766874165.897
   },
   "30104013375923": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685971.41
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874166.017
   },
   "30104013375024": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685971.597
+    "timestamp": 1766874166.12
   },
   "30104013374932": {
     "raw_status": "DELIVERED",
@@ -908,8 +908,8 @@
     "timestamp": 1766685971.897
   },
   "30104013374825": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685971.988
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874166.483
   },
   "30104013374840": {
     "raw_status": "DELIVERED",
@@ -920,8 +920,8 @@
     "timestamp": 1766685972.442
   },
   "30104013374744": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685972.437
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874166.876
   },
   "30104013374814": {
     "raw_status": "RTO_INITIATED",
@@ -936,28 +936,28 @@
     "timestamp": 1766685972.821
   },
   "30104013374980": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685972.888
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874167.584
   },
   "30104013374884": {
     "raw_status": "DELIVERED",
     "timestamp": 1766685972.979
   },
   "30104013376026": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685973.046
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874167.818
   },
   "30104013374781": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685972.958
+    "timestamp": 1766874167.603
   },
   "30104013374722": {
     "raw_status": "DELIVERED",
     "timestamp": 1766685973.08
   },
   "30104013374803": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685973.082
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874167.89
   },
   "30104013374685": {
     "raw_status": "DELIVERED",
@@ -980,12 +980,12 @@
     "timestamp": 1766685973.496
   },
   "30104013374921": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685973.388
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874168.232
   },
   "30104013374851": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685973.46
+    "timestamp": 1766874168.266
   },
   "30104013374991": {
     "raw_status": "RTO_INITIATED",
@@ -1013,7 +1013,7 @@
   },
   "30104013374792": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685973.981
+    "timestamp": 1766874168.628
   },
   "30104013374711": {
     "raw_status": "RTO_INITIATED",
@@ -1024,8 +1024,8 @@
     "timestamp": 1766685974.059
   },
   "30104013374943": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685974.062
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874168.856
   },
   "30104013373871": {
     "raw_status": "DELIVERED",
@@ -1037,11 +1037,11 @@
   },
   "30104013374976": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685974.594
+    "timestamp": 1766874169.182
   },
   "30104013373580": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685974.728
+    "timestamp": 1766874169.327
   },
   "30104013373591": {
     "raw_status": "RTO_INITIATED",
@@ -1057,7 +1057,7 @@
   },
   "30104013373613": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685975.186
+    "timestamp": 1766874169.577
   },
   "30104013373624": {
     "raw_status": "DELIVERED",
@@ -1065,7 +1065,7 @@
   },
   "30104013374954": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685975.29
+    "timestamp": 1766874169.908
   },
   "30104013373650": {
     "raw_status": "RTO_DELIVERED",
@@ -1104,8 +1104,8 @@
     "timestamp": 1766685976.032
   },
   "30104013373226": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685975.99
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874170.736
   },
   "30104013373241": {
     "raw_status": "DELIVERED",
@@ -1124,12 +1124,12 @@
     "timestamp": 1766685976.53
   },
   "30104013372681": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685976.708
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874171.431
   },
   "30104013372725": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685976.91
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874171.499
   },
   "30104013372633": {
     "raw_status": "DELIVERED",
@@ -1144,8 +1144,8 @@
     "timestamp": 1766685977.223
   },
   "30104013372670": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685976.498
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874171.322
   },
   "30104013372585": {
     "raw_status": "DELIVERED",
@@ -1156,8 +1156,8 @@
     "timestamp": 1766685976.484
   },
   "30104013372655": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685976.492
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874171.282
   },
   "30104013372644": {
     "raw_status": "DELIVERED",
@@ -1172,16 +1172,16 @@
     "timestamp": 1766685977.948
   },
   "30104013372773": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685978.028
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874172.621
   },
   "30104013372806": {
     "raw_status": "DELIVERED",
     "timestamp": 1766685978.119
   },
   "30104013372692": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685978.088
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874172.724
   },
   "30104013372762": {
     "raw_status": "DELIVERED",
@@ -1196,8 +1196,8 @@
     "timestamp": 1766685978.312
   },
   "30104013372703": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685978.3
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874173.118
   },
   "30104013372622": {
     "raw_status": "DELIVERED",
@@ -1221,11 +1221,11 @@
   },
   "77628110641": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685979.129
+    "timestamp": 1766874174.294
   },
   "30104013372423": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685979.11
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874173.769
   },
   "30104013372250": {
     "raw_status": "DELIVERED",
@@ -1245,11 +1245,11 @@
   },
   "77627960546": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685980.088
+    "timestamp": 1766874175.613
   },
   "77627959920": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685980.094
+    "timestamp": 1766874175.645
   },
   "30104013372003": {
     "raw_status": "RTO_INITIATED",
@@ -1281,11 +1281,11 @@
   },
   "30104013372014": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685980.641
+    "timestamp": 1766874176.108
   },
   "30104013372095": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685980.6
+    "timestamp": 1766874176.061
   },
   "30104013371955": {
     "raw_status": "RTO_INITIATED",
@@ -1364,8 +1364,8 @@
     "timestamp": 1766685982.491
   },
   "30104013372106": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685982.495
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874177.608
   },
   "30104013371933": {
     "raw_status": "DELIVERED",
@@ -1376,8 +1376,8 @@
     "timestamp": 1766685982.718
   },
   "30104013372445": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685982.902
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874178.033
   },
   "30104013371874": {
     "raw_status": "RTO_DELIVERED",
@@ -1385,7 +1385,7 @@
   },
   "30104013372084": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685983.109
+    "timestamp": 1766874178.208
   },
   "30104013371830": {
     "raw_status": "RTO_INITIATED",
@@ -1429,15 +1429,15 @@
   },
   "RAPC0000336251": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685984.137
+    "timestamp": 1766874179.27
   },
   "30104013370964": {
     "raw_status": "DELIVERED",
     "timestamp": 1766685984.183
   },
   "30104013371104": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685984.368
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874179.375
   },
   "30104013372051": {
     "raw_status": "DELIVERED",
@@ -1449,7 +1449,7 @@
   },
   "30104013370894": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685984.613
+    "timestamp": 1766874179.706
   },
   "30104013370883": {
     "raw_status": "RTO_INITIATED",
@@ -1461,7 +1461,7 @@
   },
   "30104013370872": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685984.855
+    "timestamp": 1766874179.971
   },
   "30104013370802": {
     "raw_status": "DELIVERED",
@@ -1496,8 +1496,8 @@
     "timestamp": 1766685985.507
   },
   "30104013370404": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685985.613
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874180.769
   },
   "30104013370430": {
     "raw_status": "RTO_INITIATED",
@@ -1512,24 +1512,24 @@
     "timestamp": 1766685986.058
   },
   "30104013370393": {
-    "raw_status": "OUT_FOR_DELIVERY",
-    "timestamp": 1766685986.012
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874181.389
   },
   "30104013370452": {
     "raw_status": "RTO_INITIATED",
     "timestamp": 1766685985.98
   },
   "30104013370345": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685986.11
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874181.592
   },
   "30104013370172": {
     "raw_status": "DELIVERED",
     "timestamp": 1766685986.348
   },
   "30104013370522": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685986.549
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874181.908
   },
   "30104013370220": {
     "raw_status": "RTO_INITIATED",
@@ -1540,8 +1540,8 @@
     "timestamp": 1766685986.627
   },
   "30104013370205": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685986.639
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874182.245
   },
   "30104013370334": {
     "raw_status": "RTO_INITIATED",
@@ -1553,11 +1553,11 @@
   },
   "77626602340": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685987.16
+    "timestamp": 1766874182.924
   },
   "30104013370323": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685987.194
+    "timestamp": 1766874182.978
   },
   "30104013370275": {
     "raw_status": "RTO_INITIATED",
@@ -1708,8 +1708,8 @@
     "timestamp": 1766685992.469
   },
   "77625418242": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685992.564
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874189.677
   },
   "30104013368713": {
     "raw_status": "DELIVERED",
@@ -1737,7 +1737,7 @@
   },
   "77625419546": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685993.576
+    "timestamp": 1766874190.581
   },
   "30104013368783": {
     "raw_status": "DELIVERED",
@@ -1753,7 +1753,7 @@
   },
   "I77423632": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685993.972
+    "timestamp": 1766874191.214
   },
   "30104013368794": {
     "raw_status": "DELIVERED",
@@ -1765,7 +1765,7 @@
   },
   "77625419734": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685994.227
+    "timestamp": 1766874191.562
   },
   "RAPC0000336141": {
     "raw_status": "RTO_INITIATED",
@@ -1797,11 +1797,11 @@
   },
   "77625419900": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685995.005
+    "timestamp": 1766874192.277
   },
   "77625423886": {
-    "raw_status": "OUT_FOR_DELIVERY",
-    "timestamp": 1766685995.007
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874192.427
   },
   "30104013368735": {
     "raw_status": "DELIVERED",
@@ -1837,7 +1837,7 @@
   },
   "30104013367862": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685997.31
+    "timestamp": 1766874195.425
   },
   "30104013367840": {
     "raw_status": "RTO_INITIATED",
@@ -1861,7 +1861,7 @@
   },
   "30104013367663": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766685999.424
+    "timestamp": 1766874197.853
   },
   "30104013367626": {
     "raw_status": "DELIVERED",
@@ -1901,7 +1901,7 @@
   },
   "30104013366436": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686000.425
+    "timestamp": 1766874199.08
   },
   "30104013366462": {
     "raw_status": "RTO_DELIVERED",
@@ -1941,7 +1941,7 @@
   },
   "77623248500": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686001.255
+    "timestamp": 1766874199.912
   },
   "30104013366285": {
     "raw_status": "DELIVERED",
@@ -1949,7 +1949,7 @@
   },
   "77623236563": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686001.3
+    "timestamp": 1766874199.948
   },
   "30104013366311": {
     "raw_status": "RTO_DELIVERED",
@@ -1976,8 +1976,8 @@
     "timestamp": 1766686001.76
   },
   "30104013366193": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686001.84
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874200.311
   },
   "30104013368035": {
     "raw_status": "DELIVERED",
@@ -2036,8 +2036,8 @@
     "timestamp": 1766686002.614
   },
   "30104013365946": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686002.855
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874201.2
   },
   "153321542085005": {
     "raw_status": "DELIVERED",
@@ -2068,8 +2068,8 @@
     "timestamp": 1766686003.363
   },
   "30104013368691": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686003.338
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874201.496
   },
   "30104013368702": {
     "raw_status": "RTO_INITIATED",
@@ -2108,8 +2108,8 @@
     "timestamp": 1766686004.106
   },
   "30104013369321": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686004.086
+    "raw_status": "OUT_FOR_DELIVERY",
+    "timestamp": 1766874202.076
   },
   "30104013365935": {
     "raw_status": "DELIVERED",
@@ -2236,8 +2236,8 @@
     "timestamp": 1766686006.402
   },
   "77621777870": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686006.702
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874203.891
   },
   "30104013360700": {
     "raw_status": "RTO_INITIATED",
@@ -2248,8 +2248,8 @@
     "timestamp": 1766686006.693
   },
   "30104013360405": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686006.893
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874204.02
   },
   "30104013360313": {
     "raw_status": "DELIVERED",
@@ -2316,8 +2316,8 @@
     "timestamp": 1766686008.514
   },
   "30104013364222": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686008.465
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874205.539
   },
   "30104013360571": {
     "raw_status": "DELIVERED",
@@ -2421,11 +2421,11 @@
   },
   "77621092636": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686010.664
+    "timestamp": 1766874207.788
   },
   "77621093023": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686010.577
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874207.595
   },
   "30104013364502": {
     "raw_status": "DELIVERED",
@@ -2484,8 +2484,8 @@
     "timestamp": 1766686011.701
   },
   "77621093524": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686011.98
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874208.689
   },
   "76744547762": {
     "raw_status": "DELIVERED",
@@ -2493,7 +2493,7 @@
   },
   "77621089976": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686012.199
+    "timestamp": 1766874208.878
   },
   "30104013364045": {
     "raw_status": "RTO_DELIVERED",
@@ -2585,7 +2585,7 @@
   },
   "77620144722": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686013.798
+    "timestamp": 1766874210.128
   },
   "30104013363894": {
     "raw_status": "RTO_DELIVERED",
@@ -2789,7 +2789,7 @@
   },
   "77619141655": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686018.113
+    "timestamp": 1766874213.56
   },
   "30104013362870": {
     "raw_status": "DELIVERED",
@@ -2833,7 +2833,7 @@
   },
   "30104013359226": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686019.484
+    "timestamp": 1766874214.918
   },
   "30104013358935": {
     "raw_status": "DELIVERED",
@@ -2949,7 +2949,7 @@
   },
   "30104013359963": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686022.167
+    "timestamp": 1766874217.817
   },
   "30104013359941": {
     "raw_status": "RTO_DELIVERED",
@@ -3125,7 +3125,7 @@
   },
   "77617604046": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686025.576
+    "timestamp": 1766874220.434
   },
   "30104013357734": {
     "raw_status": "DELIVERED",
@@ -3169,7 +3169,7 @@
   },
   "77617614712": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686025.424
+    "timestamp": 1766874220.268
   },
   "30104013355553": {
     "raw_status": "RTO_DELIVERED",
@@ -3369,7 +3369,7 @@
   },
   "77615719311": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686030.803
+    "timestamp": 1766874223.859
   },
   "30104013352705": {
     "raw_status": "DELIVERED",
@@ -3428,8 +3428,8 @@
     "timestamp": 1766686031.743
   },
   "77615487795": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686031.791
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874224.612
   },
   "30104013352156": {
     "raw_status": "DELIVERED",
@@ -3528,8 +3528,8 @@
     "timestamp": 1766686033.853
   },
   "77615523543": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686033.913
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874226.945
   },
   "30104013355144": {
     "raw_status": "DELIVERED",
@@ -3596,8 +3596,8 @@
     "timestamp": 1766686034.877
   },
   "30104013358876": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686035.031
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874228.077
   },
   "30104013358725": {
     "raw_status": "RTO_DELIVERED",
@@ -3625,7 +3625,7 @@
   },
   "77616478063": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686035.585
+    "timestamp": 1766874228.428
   },
   "30104013355774": {
     "raw_status": "RTO_INITIATED",
@@ -3644,8 +3644,8 @@
     "timestamp": 1766686036.063
   },
   "30104013371686": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686036.024
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874228.612
   },
   "30104013355866": {
     "raw_status": "DELIVERED",
@@ -3709,7 +3709,7 @@
   },
   "77614532925": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686037.098
+    "timestamp": 1766874229.185
   },
   "7D119612656": {
     "raw_status": "DELIVERED",
@@ -3997,11 +3997,11 @@
   },
   "77612869526": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686042.617
+    "timestamp": 1766874232.186
   },
   "77613220716": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686041.468
+    "timestamp": 1766874231.911
   },
   "30104013352591": {
     "raw_status": "DELIVERED",
@@ -4316,8 +4316,8 @@
     "timestamp": 1766686048.949
   },
   "77611267996": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686048.884
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874234.428
   },
   "30104013346954": {
     "raw_status": "RTO_DELIVERED",
@@ -4768,8 +4768,8 @@
     "timestamp": 1766686058.564
   },
   "77608717955": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686058.659
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874239.92
   },
   "30104013344552": {
     "raw_status": "RTO_DELIVERED",
@@ -5121,7 +5121,7 @@
   },
   "30104013344504": {
     "raw_status": "EXCEPTION",
-    "timestamp": 1766686066.625
+    "timestamp": 1766874246.418
   },
   "30104013346910": {
     "raw_status": "RTO_DELIVERED",
@@ -5288,8 +5288,8 @@
     "timestamp": 1766686070.071
   },
   "77605616093": {
-    "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686070.093
+    "raw_status": "RTO_INITIATED",
+    "timestamp": 1766874249.292
   },
   "30104013341752": {
     "raw_status": "RTO_DELIVERED",
@@ -6417,7 +6417,7 @@
   },
   "78097894206": {
     "raw_status": "IN_TRANSIT",
-    "timestamp": 1766686092.095
+    "timestamp": 1766874262.086
   },
   "30104013328360": {
     "raw_status": "DELIVERED",
@@ -8277,7 +8277,7 @@
   },
   "30104013308992": {
     "raw_status": "EXCEPTION",
-    "timestamp": 1766686125.605
+    "timestamp": 1766874272.372
   },
   "30104013308896": {
     "raw_status": "RTO_DELIVERED",
@@ -15737,7 +15737,7 @@
   },
   "30104013133480": {
     "raw_status": "EXCEPTION",
-    "timestamp": 1766686264.36
+    "timestamp": 1766874315.333
   },
   "RAPC0000317747": {
     "raw_status": "DELIVERED",
@@ -16565,7 +16565,7 @@
   },
   "RAPC0000316032": {
     "raw_status": "EXCEPTION",
-    "timestamp": 1766686281.133
+    "timestamp": 1766874320.433
   },
   "78010294110": {
     "raw_status": "DELIVERED",
@@ -17389,7 +17389,7 @@
   },
   "77998532054": {
     "raw_status": "EXCEPTION",
-    "timestamp": 1766686297.043
+    "timestamp": 1766874325.094
   },
   "30104012739564": {
     "raw_status": "DELIVERED",
@@ -18253,7 +18253,7 @@
   },
   "RAPC0000302929": {
     "raw_status": "EXCEPTION",
-    "timestamp": 1766686314.845
+    "timestamp": 1766874329.382
   },
   "RAPC0000302159": {
     "raw_status": "RTO_DELIVERED",
@@ -18569,7 +18569,7 @@
   },
   "77974907161": {
     "raw_status": "EXCEPTION",
-    "timestamp": 1766686321.011
+    "timestamp": 1766874331.345
   },
   "77974907780": {
     "raw_status": "DELIVERED",
@@ -19421,7 +19421,7 @@
   },
   "362553272700": {
     "raw_status": "EXCEPTION",
-    "timestamp": 1766686337.986
+    "timestamp": 1766874336.427
   },
   "30104012589705": {
     "raw_status": "RTO_DELIVERED",
@@ -20729,7 +20729,7 @@
   },
   "I74269248": {
     "raw_status": "EXCEPTION",
-    "timestamp": 1766686363.813
+    "timestamp": 1766874342.16
   },
   "I74269516": {
     "raw_status": "RTO_DELIVERED",
@@ -21102,5 +21102,277 @@
   "361283228308": {
     "raw_status": "RTO_DELIVERED",
     "timestamp": 1766686371.522
+  },
+  "30104013383225": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.004
+  },
+  "30104013383800": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.03
+  },
+  "30104013383192": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.025
+  },
+  "30104013383822": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.033
+  },
+  "30104013383214": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.032
+  },
+  "RPBP0000020020": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.375
+  },
+  "30104013383181": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.518
+  },
+  "77635981010": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.789
+  },
+  "30104013383203": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.791
+  },
+  "30104013383155": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.849
+  },
+  "30104013383785": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874133.839
+  },
+  "30104013383730": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874134.182
+  },
+  "77635229593": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874134.169
+  },
+  "30104013383811": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874134.487
+  },
+  "30104013383170": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874134.501
+  },
+  "30104013383726": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874134.714
+  },
+  "RPBC0000033959": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874134.58
+  },
+  "30104013383052": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874134.73
+  },
+  "30104013383074": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874135.155
+  },
+  "RPBC0000033917": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874135.208
+  },
+  "7D119614812": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874136.613
+  },
+  "RPBP0000019976": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874136.787
+  },
+  "30104013383704": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874138.547
+  },
+  "30104013385620": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874143.765
+  },
+  "30104013383085": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874146.073
+  },
+  "30104013383063": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874148.774
+  },
+  "30104013385631": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874344.823
+  },
+  "30104013385642": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874345.193
+  },
+  "RAPC0000337911": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874345.788
+  },
+  "30104013385653": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874346.297
+  },
+  "30104013385664": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874346.424
+  },
+  "30104013385056": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874346.79
+  },
+  "RAPC0000337903": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874347.234
+  },
+  "30104013384242": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874347.672
+  },
+  "30104013384264": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874347.721
+  },
+  "RPBC0000034283": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874348.267
+  },
+  "RAPC0000337952": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874348.461
+  },
+  "30104013384636": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874348.39
+  },
+  "30104013384275": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874348.855
+  },
+  "30104013384253": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874348.813
+  },
+  "RPBC0000034284": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874349.013
+  },
+  "30104013384743": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874349.279
+  },
+  "RAPC0000337970": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874349.29
+  },
+  "RAPC0000337989": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874349.442
+  },
+  "30104013384765": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874349.529
+  },
+  "RPBC0000034286": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874349.959
+  },
+  "RAPC0000337501": {
+    "raw_status": "SHIPPED",
+    "timestamp": 1766874350.032
+  },
+  "30104013384721": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874349.991
+  },
+  "RPBC0000034285": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874350.536
+  },
+  "30104013384732": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874350.564
+  },
+  "RPBC0000034282": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874350.734
+  },
+  "30104013384290": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874351.137
+  },
+  "30104013384706": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874351.333
+  },
+  "30104013383855": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874351.425
+  },
+  "30104013384286": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874351.854
+  },
+  "30104013383844": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874352.022
+  },
+  "30104013383774": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874352.009
+  },
+  "30104013383741": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874352.366
+  },
+  "30104013383752": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874352.385
+  },
+  "77635493106": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874352.622
+  },
+  "30104013383380": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874352.906
+  },
+  "30104013383391": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874353.164
+  },
+  "30104013383402": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874353.402
+  },
+  "30104013383833": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874353.569
+  },
+  "30104013383715": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874353.653
+  },
+  "30104013383763": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874353.954
+  },
+  "30104013383796": {
+    "raw_status": "IN_TRANSIT",
+    "timestamp": 1766874354.018
+  },
+  "30104013383144": {
+    "raw_status": "DELIVERED",
+    "timestamp": 1766874354.048
   }
 }

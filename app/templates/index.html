@@ -309,11 +309,16 @@
                 <h1 class="text-xl font-bold text-slate-800">Orders Dashboard</h1>
             </header>
             <div class="p-8 max-w-7xl mx-auto w-full">
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-                    <div id="kpi-dashboard-new" class="card p-6 border-l-4 border-l-blue-500"></div>
-                    <div id="kpi-dashboard-processing" class="card p-6 border-l-4 border-l-amber-500"></div>
-                    <div id="kpi-dashboard-shipped" class="card p-6 border-l-4 border-l-indigo-500"></div>
-                    <div id="kpi-dashboard-cancelled" class="card p-6 border-l-4 border-l-rose-500"></div>
+                <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
+                    <div id="kpi-dashboard-all" class="card p-5 border-l-4 border-l-slate-600 shadow-sm"></div>
+                    
+                    <div id="kpi-dashboard-new" class="card p-5 border-l-4 border-l-blue-500 shadow-sm"></div>
+                    
+                    <div id="kpi-dashboard-shipped" class="card p-5 border-l-4 border-l-indigo-500 shadow-sm"></div>
+                    
+                    <div id="kpi-dashboard-delivered" class="card p-5 border-l-4 border-l-emerald-500 shadow-sm"></div>
+                    
+                    <div id="kpi-dashboard-cancelled" class="card p-5 border-l-4 border-l-rose-500 shadow-sm"></div>
                 </div>
 
                 <div class="card overflow-hidden">
@@ -371,6 +376,7 @@
                     <div id="kpi-insights-all-orders" class="card p-4"></div>
                     <div id="kpi-insights-new" class="card p-4"></div>
                     <div id="kpi-insights-shipped" class="card p-4"></div>
+                    <div id="kpi-insights-delivered" class="card p-4"></div>
                     <div id="kpi-insights-rto" class="card p-4"></div>
                     <div id="kpi-insights-cancelled" class="card p-4"></div>
                 </div>
@@ -428,17 +434,47 @@
             </div>
         </div>
 
-        <div id="customer-segments-view" class="view-hidden">
-            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex justify-between items-center">
-                <h1 class="text-xl font-bold text-slate-800">Customer Segments</h1>
-                <div class="flex items-center gap-3">
-                    <select id="customer-limit-filter" class="filter-select">
-                        <option value="5">Top 5</option>
-                        <option value="10" selected>Top 10</option>
-                        <option value="50">Top 50</option>
-                        <option value="all">All</option>
-                    </select>
+                        <div id="customer-segments-view" class="view-hidden hidden p-8">
+    
+    <div class="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 mb-8">
+        <div>
+            <h2 class="text-2xl font-bold text-slate-800">Customer Segments</h2>
+            <p class="text-slate-500 text-sm mt-1">Identify VIPs and purchasing patterns</p>
+        </div>
+
+        <div class="flex flex-col items-end gap-3">
+            <div class="flex items-center gap-2 bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
+                <div class="relative">
+                    <select id="customer-date-preset-filter" class="appearance-none bg-transparent pl-3 pr-8 py-1.5 text-sm font-semibold text-slate-700 focus:outline-none cursor-pointer hover:text-indigo-600 transition-colors">
+                        </select>
+                    <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-500">
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
                 </div>
+
+                <div class="w-px h-5 bg-slate-200"></div>
+
+                <div class="relative">
+                    <select id="customer-limit-filter" class="appearance-none bg-transparent pl-3 pr-8 py-1.5 text-sm font-medium text-slate-600 focus:outline-none cursor-pointer">
+                        <option value="10">Top 10 Customers</option>
+                        <option value="50">Top 50 Customers</option>
+                        <option value="100">Top 100 Customers</option>
+                        <option value="all">View All</option>
+                    </select>
+                    <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-400">
+                         <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
+                </div>
+            </div>
+
+            <div id="customer-custom-date-container" class="hidden flex items-center gap-2 bg-slate-50 border border-slate-200 p-2 rounded-md transition-all">
+                <input type="date" id="customer-start-date-filter" class="text-xs border-slate-300 rounded focus:ring-indigo-500 focus:border-indigo-500 text-slate-600">
+                <span class="text-slate-400 text-xs">to</span>
+                <input type="date" id="customer-end-date-filter" class="text-xs border-slate-300 rounded focus:ring-indigo-500 focus:border-indigo-500 text-slate-600">
+            </div>
+        </div>
+    </div>
+
             </header>
             <div class="p-8 max-w-7xl mx-auto w-full">
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -615,17 +651,47 @@
             </div>
         </div>
         
-        <div id="ad-analysis-view" class="view-hidden">
-            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex justify-between items-center">
-                <h1 class="text-xl font-bold text-slate-800">Ad Conversion & Payment Analysis</h1>
-                <div class="flex items-center gap-3">
-                    <label class="text-xs font-bold text-slate-500 uppercase">Payment:</label>
-                    <select id="ad-analysis-payment-filter" class="filter-select">
-                        <option value="All">All</option>
-                        <option value="COD">COD</option>
-                        <option value="PREPAID">Prepaid</option>
-                    </select>
+                    <div id="ad-analysis-view" class="view-hidden hidden p-8">
+    
+    <div class="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 mb-8">
+        <div>
+            <h2 class="text-2xl font-bold text-slate-800">Ad Analysis</h2>
+            <p class="text-slate-500 text-sm mt-1">Campaign performance vs Real conversion</p>
+        </div>
+
+        <div class="flex flex-col items-end gap-3">
+             <div class="flex items-center gap-2 bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
+                
+                <div class="relative">
+                    <select id="ad-analysis-date-preset-filter" class="appearance-none bg-transparent pl-3 pr-8 py-1.5 text-sm font-semibold text-slate-700 focus:outline-none cursor-pointer hover:text-indigo-600 transition-colors">
+                        </select>
+                    <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-500">
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
                 </div>
+
+                <div class="w-px h-5 bg-slate-200"></div>
+
+                <div class="relative">
+                    <select id="ad-analysis-payment-filter" class="appearance-none bg-transparent pl-3 pr-8 py-1.5 text-sm font-medium text-slate-600 focus:outline-none cursor-pointer">
+                        <option value="All">All Payments</option>
+                        <option value="COD">COD Only</option>
+                        <option value="Prepaid">Prepaid Only</option>
+                    </select>
+                    <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-400">
+                         <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
+                </div>
+            </div>
+
+            <div id="ad-analysis-custom-date-container" class="hidden flex items-center gap-2 bg-slate-50 border border-slate-200 p-2 rounded-md transition-all">
+                <input type="date" id="ad-analysis-start-date-filter" class="text-xs border-slate-300 rounded focus:ring-indigo-500 focus:border-indigo-500 text-slate-600">
+                <span class="text-slate-400 text-xs">to</span>
+                <input type="date" id="ad-analysis-end-date-filter" class="text-xs border-slate-300 rounded focus:ring-indigo-500 focus:border-indigo-500 text-slate-600">
+            </div>
+        </div>
+    </div>
+    
             </header>
             <div class="p-8 max-w-7xl mx-auto w-full">
                 <div class="card overflow-hidden">
