@@ -3,3 +3,10 @@
 master_order_data.json
 master_api_log.json
 .DS_Store
+awb_assignment_cache.json
+rapidshyp_cache.json
+!package.json
+!package-lock.json
+service_account.json
+COD_Confirmation.json
+order_shipment_cache.json

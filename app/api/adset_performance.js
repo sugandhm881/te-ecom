@@ -62,7 +62,7 @@ async function getFacebookAds(since, until) {
     const url = `https://graph.facebook.com/v18.0/act_${config.FACEBOOK_AD_ACCOUNT_ID}/insights`;
     const params = {
         'level': 'ad',
-        'fields': 'ad_id,ad_name,adset_id,adset_name,spend,campaign_name',
+        'fields': 'ad_id,ad_name,adset_id,adset_name,spend,clicks,campaign_name',
         'time_range': JSON.stringify({ since, until }),
         'limit': 1000,
         'access_token': config.FACEBOOK_ACCESS_TOKEN

@@ -8,7 +8,7 @@ let activePlatformFilter = 'All';
 let activeSourceFilter = 'All';
 let insightsPlatformFilter = 'All';
 let activeStatusFilter = 'All';
-let activeDatePreset = 'today';
+let activeDatePreset = 'last_7_days';
 let insightsDatePreset = 'last_7_days';
 let adPerformanceDatePreset = 'last_7_days';
 let adsetDatePreset = 'last_7_days';
@@ -23,6 +23,9 @@ let customerSegmentChartInstance = null;
 let rtoProductChartInstance = null;
 let customerDatePreset = 'last_30_days';   // Default for Customers
 let adAnalysisDatePreset = 'last_7_days';  // Default for Ad Analysis
+let codConfirmations = [];
+let currentSearchTerm = '';
+let activeCodFilter = 'All';
 
 // --- NEW STATE FOR BULK ACTIONS ---
 let selectedOrders = new Set(); 
@@ -94,11 +97,12 @@ function getStatusBadge(status) {
     switch (status) {
         case 'New': return 'bg-blue-50 text-blue-700 border border-blue-200';
         case 'Processing': return 'bg-purple-50 text-purple-700 border border-purple-200';
-        case 'Ready To Ship': return 'bg-amber-50 text-amber-700 border border-amber-200';
+        // FIXED: Darker Orange for better visibility
+        case 'Ready To Ship': return 'bg-orange-100 text-orange-800 border border-orange-200';
         
         case 'Shipped': return 'bg-indigo-50 text-indigo-700 border border-indigo-200';
         case 'In Transit': return 'bg-cyan-50 text-cyan-700 border border-cyan-200';
-        case 'Out For Delivery': return 'bg-teal-50 text-teal-700 border border-teal-200'; // New Color
+        case 'Out For Delivery': return 'bg-teal-50 text-teal-700 border border-teal-200';
         
         case 'Delivered': return 'bg-emerald-50 text-emerald-700 border border-emerald-200';
         case 'Cancelled': return 'bg-slate-100 text-slate-500 border border-slate-200';
@@ -337,12 +341,14 @@ async function checkAndUpdateWorkflow(originalOrderId, uniqueId) {
     } catch (e) { msgEl.textContent = ""; }
 }
 
-// --- DASHBOARD FILTERS RENDERING ---
+// --- DASHBOARD FILTERS RENDERING (Added COD Filter) ---
 function renderDashboardFilters() {
+    // 1. Platform Buttons
     platformFiltersEl.innerHTML = ['All', 'Amazon', 'Shopify'].map(p => 
         `<button data-filter="${p}" class="filter-btn px-3 py-1 text-sm rounded-md ${activePlatformFilter===p ? 'active' : ''}">${p}</button>`
     ).join('');
     
+    // 2. Source Buttons (RapidShyp/DocPharma)
     let sourceContainer = document.getElementById('source-filters');
     if (!sourceContainer) {
         sourceContainer = document.createElement('div');
@@ -350,19 +356,34 @@ function renderDashboardFilters() {
         sourceContainer.className = 'flex bg-slate-100 rounded-lg p-1 gap-1 ml-4';
         platformFiltersEl.parentNode.insertBefore(sourceContainer, platformFiltersEl.nextSibling);
     }
-    
     sourceContainer.innerHTML = ['All', 'RapidShyp', 'DocPharma'].map(s => 
         `<button data-source="${s}" class="source-btn px-3 py-1 text-sm font-medium rounded-md transition-all ${activeSourceFilter===s ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}">${s}</button>`
     ).join('');
 
-    let locationContainer = document.getElementById('location-filter-container');
-    if (!locationContainer) {
-        locationContainer = document.createElement('div');
-        locationContainer.id = 'location-filter-container';
-        locationContainer.className = 'ml-4';
-        platformFiltersEl.parentNode.appendChild(locationContainer);
+    // 3. NEW: COD Status Filter Dropdown
+    let codFilterContainer = document.getElementById('cod-filter-container');
+    if (!codFilterContainer) {
+        codFilterContainer = document.createElement('div');
+        codFilterContainer.id = 'cod-filter-container';
+        codFilterContainer.className = 'ml-4 relative';
+        // Insert it right after the Status Filter (status-filter is usually before date preset)
+        const statusEl = document.getElementById('status-filter');
+        if(statusEl && statusEl.parentNode) {
+            statusEl.parentNode.insertBefore(codFilterContainer, statusEl.nextSibling);
+        }
     }
 
+    codFilterContainer.innerHTML = `
+        <select id="cod-filter-select" class="filter-select pl-3 pr-8 py-1.5 text-sm font-medium text-slate-600 focus:outline-none cursor-pointer bg-white border border-slate-200 rounded-full shadow-sm hover:border-indigo-300 transition-colors">
+            <option value="All">All COD Status</option>
+            <option value="Confirmed">✓ Confirmed</option>
+            <option value="Waiting">Waiting...</option>
+            <option value="Cancelled">Cancelled</option>
+            <option value="No Data">No Data</option>
+        </select>
+    `;
+
+    // 4. Attach Listeners
     platformFiltersEl.querySelectorAll('.filter-btn').forEach(b => {
         b.addEventListener('click', () => { activePlatformFilter = b.dataset.filter; renderAllDashboard(); });
     });
@@ -370,35 +391,54 @@ function renderDashboardFilters() {
     sourceContainer.querySelectorAll('.source-btn').forEach(b => {
         b.addEventListener('click', () => { activeSourceFilter = b.dataset.source; renderAllDashboard(); });
     });
+
+    const codSelect = document.getElementById('cod-filter-select');
+    if(codSelect) {
+        codSelect.value = activeCodFilter;
+        codSelect.addEventListener('change', (e) => {
+            activeCodFilter = e.target.value;
+            renderAllDashboard();
+        });
+    }
 }
 
+// --- UPDATED RENDER DASHBOARD (With COD Filter Logic) ---
 function renderAllDashboard() {
     const [s, e] = calculateDateRange(activeDatePreset, startDateFilterEl.value, endDateFilterEl.value);
     let o = [...allOrders];
 
+    // Helper to extract numeric ID for matching
+    const extractNum = (str) => {
+        if (!str) return '';
+        const s = String(str);
+        const match = s.match(/(\d+)$/); 
+        return match ? match[0] : s.replace(/\D/g, ''); 
+    };
+
+    // 1. Date Filter
     if (s && e) {
         o = o.filter(t => { 
-            // Parse DD-MM-YYYY string to Date Object
-            const parts = t.date.split('-'); // [28, 12, 2025]
-            const d = new Date(parts[2], parts[1] - 1, parts[0]); // Year, Month-1, Day
+            const parts = t.date.split('-'); 
+            const d = new Date(parts[2], parts[1] - 1, parts[0]); 
             return d >= s && d <= e; 
         });
     }
 
+    // 2. Platform Filter
     if (activePlatformFilter !== 'All') {
         o = o.filter(t => t.platform === activePlatformFilter);
     }
 
+    // 3. Status Filter
     if (activeStatusFilter !== 'All') {
         if (activeStatusFilter === 'In Transit') {
-            // Group Logic: Show Shipped, In Transit, and Out For Delivery together
             o = o.filter(t => ['Shipped', 'In Transit', 'Out For Delivery'].includes(t.status));
         } else {
-            // Standard exact match for others (New, RTO, Delivered, etc.)
             o = o.filter(t => t.status === activeStatusFilter);
         }
     }
 
+    // 4. Source Filter
     if (activeSourceFilter !== 'All') {
         o = o.filter(order => {
             const tags = (order.tags || '').toLowerCase();
@@ -409,42 +449,202 @@ function renderAllDashboard() {
         });
     }
 
+    // 5. [NEW] COD Status Filter
+    if (activeCodFilter !== 'All') {
+        o = o.filter(order => {
+            const dashNum = extractNum(order.id);
+            const codData = codConfirmations?.find(c => {
+                const sheetNum1 = extractNum(c['Order Number']);
+                const sheetNum2 = extractNum(c['Order Name']);
+                return (sheetNum1 === dashNum) || (sheetNum2 === dashNum);
+            });
+
+            if (!codData) return activeCodFilter === 'No Data';
+
+            const rawResponse = String(codData['Confirmation received'] || '').toUpperCase().trim();
+            const status = String(codData['status'] || '').toLowerCase().trim();
+
+            if (activeCodFilter === 'Confirmed') {
+                return ['CONFIRM', 'YES', 'CONFIRMED', 'OK'].includes(rawResponse);
+            }
+            if (activeCodFilter === 'Cancelled') {
+                return ['CANCEL', 'NO', 'REJECT'].includes(rawResponse);
+            }
+            if (activeCodFilter === 'Waiting') {
+                // It is waiting if it's NOT confirmed AND NOT cancelled, but exists
+                const isConfirmed = ['CONFIRM', 'YES', 'CONFIRMED', 'OK'].includes(rawResponse);
+                const isCancelled = ['CANCEL', 'NO', 'REJECT'].includes(rawResponse);
+                return !isConfirmed && !isCancelled;
+            }
+            return false;
+        });
+    }
+
+    // 6. Search Filter
+    if (currentSearchTerm) {
+        o = o.filter(item => 
+            (item.id && item.id.toLowerCase().includes(currentSearchTerm)) ||
+            (item.name && item.name.toLowerCase().includes(currentSearchTerm)) ||
+            (item.email && item.email.toLowerCase().includes(currentSearchTerm)) ||
+            (item.phone && String(item.phone).includes(currentSearchTerm)) ||
+            (item.shipping_address && item.shipping_address.phone && String(item.shipping_address.phone).includes(currentSearchTerm)) ||
+            (item.awb && String(item.awb).toLowerCase().includes(currentSearchTerm)) ||
+            (item.total && String(item.total).includes(currentSearchTerm))
+        );
+    }
+
     const t = [...o].sort((a, b) => new Date(b.date) - new Date(a.date));
     
     renderDashboardFilters(); 
+    renderSearchInput(); 
     
     renderOrders(t);
     updateDashboardKpis(o);
 }
 
-// --- ORDER LIST RENDERING (UPDATED FOR BULK) ---
+// --- FIXED SEARCH INPUT (Responsive Width) ---
+function renderSearchInput() {
+    // Prevent duplicate creation
+    if (document.getElementById('search-container-custom')) return;
+
+    const searchContainer = document.createElement('div');
+    searchContainer.id = 'search-container-custom';
+    // Changed: Reduced left margin (ml-2) and added right margin (mr-2)
+    // Added 'flex-shrink-0' so it doesn't get squashed weirdly
+    searchContainer.className = 'relative ml-2 md:ml-4 mr-2 flex items-center flex-shrink-0'; 
+    
+    // Search Icon & Input HTML
+    searchContainer.innerHTML = `
+        <div class="relative group">
+            <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400 group-focus-within:text-indigo-500 transition-colors">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+            </span>
+            <input type="text" id="global-order-search" 
+                placeholder="Search..." 
+                class="pl-10 pr-4 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition-all duration-300 w-32 md:w-48 lg:w-64 focus:w-64"
+                autocomplete="off">
+        </div>
+    `;
+
+    // Append next to other filters (Ensure platformFiltersEl exists)
+    if (platformFiltersEl && platformFiltersEl.parentNode) {
+        // Ensure the parent container allows wrapping if screen is too small
+        platformFiltersEl.parentNode.classList.add('flex-wrap'); 
+        platformFiltersEl.parentNode.appendChild(searchContainer);
+    }
+
+    // Add Event Listener
+    const inputEl = document.getElementById('global-order-search');
+    if (inputEl) {
+        // Restore focus/value if re-rendering
+        if (typeof currentSearchTerm !== 'undefined') inputEl.value = currentSearchTerm;
+        
+        inputEl.addEventListener('input', (e) => {
+            currentSearchTerm = e.target.value.toLowerCase().trim();
+            renderAllDashboard(); // Re-render table on type
+            
+            // Keep focus after re-render (trick)
+            setTimeout(() => {
+                const newInput = document.getElementById('global-order-search');
+                if (newInput) {
+                    newInput.focus();
+                    newInput.setSelectionRange(newInput.value.length, newInput.value.length);
+                }
+            }, 0);
+        });
+    }
+}
+
+// --- ORDER LIST RENDERING (Full Version: Mobile, Address & Colors) ---
 function renderOrders(o) {
     ordersListEl.innerHTML = '';
-    
-    // Inject Bulk Action Bar if missing
     updateBulkActionBar(); 
 
     if (o.length === 0) {
-        ordersListEl.innerHTML = `<tr><td colspan="8" class="p-8 text-center text-slate-400">No orders found.</td></tr>`;
+        ordersListEl.innerHTML = `<tr><td colspan="10" class="p-8 text-center text-slate-400">No orders found.</td></tr>`;
         return;
     }
+
+    // --- HELPER: Extract Number (Turns "#TE25-8052" -> "8052") ---
+    const extractNum = (str) => {
+        if (!str) return '';
+        const s = String(str);
+        const match = s.match(/(\d+)$/); 
+        return match ? match[0] : s.replace(/\D/g, ''); 
+    };
 
     o.forEach(order => {
         const displayName = (order.name === 'N/A' && order.buyerName) ? order.buyerName : order.name;
         const uniqueId = order.id.replace(/\W/g, ''); 
         const isSelected = selectedOrders.has(order.originalId);
         
-        // Customer Badge
         const custBadge = getCustomerBadge(order.email, null, order.id);
 
         const mainRow = document.createElement('tr');
         mainRow.className = `order-row border-b border-slate-100 hover:bg-slate-50 transition-colors ${isSelected ? 'bg-indigo-50/50' : ''}`;
         mainRow.dataset.orderId = order.id;
         
-        // Prepare Hover Text for Tooltip
         const tagsDisplay = (order.tags || 'None');
-        const locDisplay = (order.locationId || 'N/A');
-        const hoverText = `Location ID: ${locDisplay}\nTags: ${tagsDisplay}`;
+        // Hover shows tags only (Removed Location ID)
+        const hoverText = tagsDisplay !== 'None' ? `Tags: ${tagsDisplay}` : '';
+
+        // --- TAGS LOGIC ---
+        const history = allOrders.filter(x => 
+            (order.phone && x.phone === order.phone) || 
+            (order.name === x.name)
+        );
+
+        let tagsHtml = '';
+        if (history.length > 1) {
+            tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-indigo-600 bg-indigo-50 rounded border border-indigo-100 uppercase tracking-wide mr-1 mb-1">Repeat</span>`;
+            if (history.some(h => h.status === 'Delivered' && h.id !== order.id)) {
+                tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-emerald-600 bg-emerald-50 rounded border border-emerald-100 uppercase tracking-wide mr-1 mb-1">Delivered</span>`;
+            }
+        } else {
+             tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-slate-500 bg-slate-100 rounded border border-slate-200 uppercase tracking-wide mr-1 mb-1">New</span>`;
+        }
+        if (history.length > 5 || parseFloat(order.total) > 5000) {
+             tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-amber-600 bg-amber-50 rounded border border-amber-100 uppercase tracking-wide mr-1 mb-1">VIP</span>`;
+        }
+
+        // --- COD LOGIC & PHONE EXTRACTION ---
+        let codBadge = '<span class="text-[10px] text-slate-300">-</span>'; 
+        const dashNum = extractNum(order.id);
+        
+        // 1. GET PHONE FROM ORDER DATA (No JSON dependency for number)
+        // We check order.phone, then fallback to shipping_address.phone
+        let rawPhone = order.phone || (order.shipping_address ? order.shipping_address.phone : '') || '';
+        let displayPhone = String(rawPhone).replace(/^(\+91|91)/, ''); 
+
+        const codData = codConfirmations?.find(c => {
+            const sheetNum1 = extractNum(c['Order Number']);
+            const sheetNum2 = extractNum(c['Order Name']);
+            return (sheetNum1 === dashNum) || (sheetNum2 === dashNum);
+        });
+
+        if (codData) {
+            // Note: I removed the "Override with Phone from Sheet" block here.
+            
+            const rawResponse = String(codData['Confirmation received'] || '').toUpperCase().trim();
+            const status = String(codData['status'] || '').toLowerCase().trim();
+
+            if (['CONFIRM', 'YES', 'CONFIRMED', 'OK'].includes(rawResponse)) {
+                codBadge = `<span class="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-bold text-emerald-700 bg-emerald-100 rounded border border-emerald-200 uppercase tracking-wide">✓ Confirmed</span>`;
+            } else if (['CANCEL', 'NO', 'REJECT'].includes(rawResponse)) {
+                codBadge = `<span class="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-bold text-rose-700 bg-rose-100 rounded border border-rose-200 uppercase tracking-wide">Cancelled</span>`;
+            } else if (status === 'success' || status === 'read') {
+                 codBadge = `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-amber-600 bg-amber-50 rounded border border-amber-200">Waiting...</span>`;
+            }
+        }
+
+        // --- ADDRESS CONSTRUCTION ---
+        let detailedAddress = order.address || 'No address provided';
+        // Try to build a structured address
+        if (order.shipping_address && typeof order.shipping_address === 'object') {
+            const { address1, address2, city, province, zip } = order.shipping_address;
+            // Filter out undefined/null/empty strings and join with comma
+            detailedAddress = [address1, address2, city, province, zip ? `(${zip})` : ''].filter(Boolean).join(', ');
+        }
 
         mainRow.innerHTML = `
             <td class="p-4 w-10">
@@ -467,15 +667,27 @@ function renderOrders(o) {
                     </div>
                     <div class="text-[11px] text-slate-500 mt-1 flex items-center gap-2">
                         <span class="font-semibold text-slate-600 uppercase text-[10px] tracking-wide">${order.paymentMethod || 'Unknown'}</span>
-                        ${ (order.tags && order.tags.includes('Repeat')) 
-                            ? '<span class="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">REPEAT</span>' 
-                            : '' 
-                        }
+                        <span class="text-slate-300">|</span>
+                        <span class="font-mono text-slate-600 flex items-center gap-1">
+                            <svg class="w-3 h-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path></svg>
+                            ${displayPhone}
+                        </span>
                     </div>
                 </div>
             </td>
+
+            <td class="p-4">
+                <div class="flex flex-wrap w-24">
+                    ${tagsHtml}
+                </div>
+            </td>
+
+            <td class="p-4">
+                ${codBadge}
+            </td>
+
             <td class="p-4 font-medium text-slate-900">${formatCurrency(order.total)}</td>
-            <td class="p-4"><span class="px-3 py-1 text-xs font-semibold rounded-full ${getStatusBadge(order.status)}">${order.status}</span></td>
+            <td class="p-4"><span class="px-3 py-1 text-xs font-semibold rounded-full whitespace-nowrap ${getStatusBadge(order.status)}">${order.status}</span></td>
             <td class="p-4 text-right">
                  <button class="text-slate-400 hover:text-indigo-600 focus:outline-none" onclick="toggleDetails('${order.id}')">
                     <svg class="w-5 h-5 transform transition-transform duration-200" id="arrow-${order.id}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
@@ -500,26 +712,23 @@ function renderOrders(o) {
                 </div>`;
         }).join('');
 
-        const customerAddress = order.address || 'No address';
-        
         let workflowHtml = '';
+        
         const tags = (order.tags || '').toLowerCase();
         const hasInProgress = tags.includes('docpharma: in-progress');
-// ... (This is inside renderOrders loop)
+        // Only show for Shopify and non-DocPharma
         const shouldShow = (order.platform === 'Shopify') && (!hasInProgress);
-
-        // 1. DEFINE THE CHECK (Paste this right after shouldShow)
-        // This checks if we have the ID from the server cache OR if we just approved it locally
-        const isApprovedLocally = order.shipmentId || order.localStatus === 'Approved';
 
         if (shouldShow) {
              const status = order.status;
-             // Define states based on our new Granular Status
-             const isApproved = status !== 'New';
-             const isAssigned = status === 'Ready To Ship' || status === 'Shipped' || status === 'In Transit' || status === 'Delivered' || status === 'RTO';
-             const isScheduled = status === 'Shipped' || status === 'In Transit' || status === 'Delivered' || status === 'RTO';
+             
+             // --- FIXED STATUS CHECKS ---
+             const hasShipmentId = !!order.shipmentId;
+             const hasAwb = !!order.awb;
 
-             // Get Label URL from backend data if available
+             const isApproved = (status !== 'New') || hasShipmentId;
+             const isAssigned = ['Ready To Ship', 'Shipped', 'In Transit', 'Delivered', 'RTO'].includes(status) || hasAwb;
+             const isScheduled = ['Shipped', 'In Transit', 'Delivered', 'RTO'].includes(status);
              const labelUrl = order.awbData?.label || '';
 
              if (status !== 'Cancelled') {
@@ -538,7 +747,7 @@ function renderOrders(o) {
                                     <div><p class="text-sm font-semibold text-slate-800">Approve Order</p></div>
                                     ${ isApproved ? 
                                         `<span class="text-xs font-bold text-emerald-600">✓ Done</span>` : 
-                                        `<button onclick="handleManualStep1('${order.originalId}', '${uniqueId}')" id="btn-step1-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700">Approve</button>`
+                                        `<button onclick="handleManualStep1('${order.originalId}', '${uniqueId}')" id="btn-step1-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm">Approve</button>`
                                     }
                                 </div>
                             </div>
@@ -550,9 +759,9 @@ function renderOrders(o) {
                                     ${ isAssigned ? 
                                         `<div class="text-right">
                                             <span class="text-xs font-bold text-emerald-600 block">✓ ${order.awbData?.courier || 'Assigned'}</span>
-                                            <span class="text-[10px] text-slate-400 font-mono">${order.awbData?.awb || ''}</span>
+                                            <span class="text-[10px] text-slate-400 font-mono">${order.awbData?.awb || order.awb || ''}</span>
                                          </div>` : 
-                                        `<button onclick="handleManualStep2('${uniqueId}')" id="btn-step2-${uniqueId}" data-original-id="${order.originalId}" class="px-3 py-1 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded hover:bg-slate-50" ${!isApproved ? 'disabled' : ''}>Assign</button>`
+                                        `<button onclick="handleManualStep2('${uniqueId}')" id="btn-step2-${uniqueId}" data-original-id="${order.originalId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm transition-colors" ${!isApproved ? 'disabled' : ''}>Assign</button>`
                                     }
                                 </div>
                             </div>
@@ -564,23 +773,18 @@ function renderOrders(o) {
                                     <div class="flex gap-2">
                                         ${ labelUrl ? 
                                             `<a href="${labelUrl}" target="_blank" class="px-3 py-1 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded hover:bg-slate-50 flex items-center gap-1">
-                                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                                                Label
+                                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg> Label
                                             </a>` : 
-                                            `<button onclick="handleManualStep3('${uniqueId}')" id="btn-step3-${uniqueId}" class="px-3 py-1 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded" ${!isAssigned ? 'disabled' : ''}>Get Label</button>`
+                                            `<button onclick="handleManualStep3('${uniqueId}')" id="btn-step3-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm" ${!isAssigned ? 'disabled' : ''}>Get Label</button>`
                                         }
-                                        
                                         ${ !isScheduled && isAssigned ? 
-                                            `<button onclick="handleSchedulePickup('${order.originalId}', '${uniqueId}')" id="btn-pickup-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700">Schedule Pickup</button>` 
-                                            : ''
+                                            `<button onclick="handleSchedulePickup('${order.originalId}', '${uniqueId}')" id="btn-pickup-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm">Schedule Pickup</button>` : ''
                                         }
                                         ${ isScheduled ? `<span class="text-xs font-bold text-emerald-600 self-center">✓ Pickup Scheduled</span>` : '' }
                                     </div>
                                 </div>
                             </div>
-
                         </div>
-                        
                         <input type="hidden" id="shipment-id-${uniqueId}" value="${order.shipmentId || ''}">
                     </div>
                 `;
@@ -600,15 +804,15 @@ function renderOrders(o) {
         }
 
         detailsRow.innerHTML = `
-            <td colspan="8" class="p-0">
+            <td colspan="10" class="p-0">
                 <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-8 border-t border-slate-100">
                     <div class="space-y-4">
                         <div>
                             <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Customer Details</h4>
                             <div class="bg-white p-3 rounded border border-slate-200 text-sm">
                                 <p class="font-bold text-slate-800">${displayName}</p>
-                                <p class="text-slate-500 mt-1">${customerAddress}</p>
-                                <p class="text-slate-400 text-xs mt-1">${order.email || ''}</p>
+                                <p class="text-slate-500 mt-1 leading-relaxed">${detailedAddress}</p>
+                                <p class="text-slate-400 text-xs mt-1 border-t border-slate-100 pt-1">${order.email || ''}</p>
                             </div>
                         </div>
                         <div>
@@ -666,17 +870,16 @@ function toggleSelectAll(checkbox) {
     updateBulkActionBar();
 }
 
+// --- FIXED BULK ACTION BAR (ID TYPE FIX) ---
 function updateBulkActionBar() {
     let bar = document.getElementById('bulk-action-bar');
     
-    // --- THIS WAS MISSING: Create the bar if it doesn't exist ---
     if (!bar) {
         bar = document.createElement('div');
         bar.id = 'bulk-action-bar';
         bar.className = 'fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-[#1e293b] text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-6 z-50 transition-all duration-300 translate-y-24 opacity-0';
         document.body.appendChild(bar);
     }
-    // ------------------------------------------------------------
 
     const selectedIds = Array.from(selectedOrders);
     const count = selectedIds.length;
@@ -684,46 +887,57 @@ function updateBulkActionBar() {
     if (count > 0) {
         bar.classList.remove('translate-y-24', 'opacity-0');
         
-        // Check statuses of selected orders
-        const selectedObjs = allOrders.filter(o => selectedOrders.has(o.originalId));
-        const hasNew = selectedObjs.some(o => o.status === 'New');
-        const hasProcessing = selectedObjs.some(o => o.status === 'Processing'); // Approved
-        const hasReady = selectedObjs.some(o => o.status === 'Ready To Ship'); // Assigned
+        // --- FIX: Convert ID to String to ensure match with Set ---
+        const selectedObjs = allOrders.filter(o => selectedOrders.has(String(o.originalId)));
+        
+        // 1. Approve: If Status is New/Unfulfilled AND No Shipment ID
+        const canApprove = selectedObjs.filter(o => 
+            (o.status === 'New' || o.status === 'Unfulfilled') && !o.shipmentId
+        );
+        
+        // 2. Assign: If Status is Processing OR Has Shipment ID (but no AWB)
+        const canAssign = selectedObjs.filter(o => 
+            (o.status === 'Processing' || o.shipmentId) && !o.awb
+        );
+        
+        // 3. Label: If Status is Ready/Shipped OR Has AWB
+        const canLabel = selectedObjs.filter(o => 
+            ['Ready To Ship', 'Shipped', 'In Transit', 'Out For Delivery'].includes(o.status) || o.awb
+        );
 
         let buttonsHtml = '';
 
-        // Only show Approve if there are New orders
-        if (hasNew) {
+        if (canApprove.length > 0) {
             buttonsHtml += `
-                <button onclick="handleBulkApprove()" class="text-sm font-medium hover:text-emerald-400 flex items-center gap-2">
+                <button onclick="handleBulkApprove()" class="text-sm font-bold text-emerald-400 hover:text-emerald-300 flex items-center gap-2 transition-colors">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
-                    Approve (${selectedObjs.filter(o=>o.status==='New').length})
+                    Approve (${canApprove.length})
                 </button>`;
         }
 
-        // Only show Assign if there are Processing orders
-        if (hasProcessing) {
+        if (canAssign.length > 0) {
             buttonsHtml += `
-                <button onclick="handleBulkAssign()" class="text-sm font-medium hover:text-amber-400 flex items-center gap-2 ml-4">
+                <button onclick="handleBulkAssign()" class="text-sm font-bold text-amber-400 hover:text-amber-300 flex items-center gap-2 ml-4 transition-colors">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path></svg>
-                    Assign (${selectedObjs.filter(o=>o.status==='Processing').length})
+                    Assign (${canAssign.length})
                 </button>`;
         }
 
-        // Show Label/Pickup for Ready orders
-        if (hasReady) {
+        if (canLabel.length > 0) {
             buttonsHtml += `
-                <button onclick="handleBulkLabel()" class="text-sm font-medium hover:text-indigo-400 flex items-center gap-2 ml-4">
+                <button onclick="handleBulkLabel()" class="text-sm font-bold text-indigo-400 hover:text-indigo-300 flex items-center gap-2 ml-4 transition-colors">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2.4-9h6m-1.2 13h-3.6a2.4 2.4 0 01-2.4-2.4V8a2.4 2.4 0 012.4-2.4h3.6a2.4 2.4 0 012.4 2.4v9.6a2.4 2.4 0 01-2.4 2.4z"></path></svg>
-                    Get Labels (${selectedObjs.filter(o=>o.status==='Ready To Ship').length})
+                    Get Labels (${canLabel.length})
                 </button>`;
         }
+
+        const hasActions = buttonsHtml.trim() !== '';
 
         bar.innerHTML = `
-            <span class="font-bold text-sm bg-slate-700 px-2 py-1 rounded-full">${count} Selected</span>
-            <div class="h-4 w-px bg-slate-600 mx-4"></div>
-            ${buttonsHtml || '<span class="text-sm text-slate-400">No actions available</span>'}
-            <button onclick="clearSelection()" class="text-slate-400 hover:text-white ml-auto">
+            <span class="font-bold text-sm bg-slate-700 px-3 py-1 rounded-full shadow-inner">${count} Selected</span>
+            <div class="h-6 w-px bg-slate-600 mx-2"></div>
+            ${hasActions ? buttonsHtml : '<span class="text-sm text-slate-400 italic">No actions available</span>'}
+            <button onclick="clearSelection()" class="text-slate-400 hover:text-white ml-auto transition-colors p-2 hover:bg-slate-700 rounded-full">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
             </button>
         `;
@@ -851,8 +1065,15 @@ async function handleBulkLabel() {
 
 // --- MANUAL WORKFLOW HANDLERS ---
 
+// --- UPDATED WORKFLOW HANDLERS (Direct DOM Updates) ---
+
+// --- UPDATED WORKFLOW HANDLERS (With Visual Dashboard Updates) ---
+
 async function handleManualStep1(originalOrderId, uniqueId) {
     const btn = document.getElementById(`btn-step1-${uniqueId}`);
+    const originalText = btn ? btn.textContent : "Approve";
+    
+    // 1. Visual Feedback: Set button to loading
     if(btn) { btn.textContent = "Processing..."; btn.disabled = true; }
 
     try {
@@ -862,38 +1083,72 @@ async function handleManualStep1(originalOrderId, uniqueId) {
         });
 
         if (res.success) {
-            showNotification("Approved successfully");
+            showNotification("Order Approved ✅");
             
-            // --- STATE UPDATE ---
+            // 2. Update Local Data State
             const orderIndex = allOrders.findIndex(o => String(o.originalId) === String(originalOrderId));
             if (orderIndex > -1) {
-                allOrders[orderIndex].status = 'Processing'; // Update status to move to next step
-                allOrders[orderIndex].shipmentId = res.shipmentId; // Save ID for next step
+                allOrders[orderIndex].status = 'Processing'; 
+                allOrders[orderIndex].shipmentId = res.shipmentId;
+                allOrders[orderIndex].localStatus = 'Approved'; 
             }
-            
-            // --- REDRAW UI ---
-            renderAllDashboard(); 
+
+            // 3. UPDATE THE BUTTON (Inside the Dropdown)
+            if (btn) {
+                btn.textContent = "✓ Approved";
+                btn.className = "px-3 py-1 bg-emerald-100 text-emerald-700 text-xs font-bold rounded cursor-default border border-emerald-200";
+            }
+
+            // 4. UNLOCK STEP 2 (Inside the Dropdown)
+            const step2Btn = document.getElementById(`btn-step2-${uniqueId}`);
+            if (step2Btn) {
+                step2Btn.disabled = false;
+                step2Btn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+            // Ensure the hidden input has the ID for Step 2
+            const hiddenInput = document.getElementById(`shipment-id-${uniqueId}`);
+            if(hiddenInput && res.shipmentId) hiddenInput.value = res.shipmentId;
+
+            // 5. [NEW] UPDATE MAIN DASHBOARD STATUS BADGE VISUALLY
+            // Find the row using the order ID associated with this uniqueId
+            const order = allOrders.find(o => String(o.originalId) === String(originalOrderId));
+            if (order) {
+                const row = document.querySelector(`tr[data-order-id="${order.id}"]`);
+                if (row) {
+                    // The status badge is usually in the 9th column (index 8), or we search for the span
+                    const badge = row.querySelector('.rounded-full'); 
+                    if (badge) {
+                        badge.textContent = 'Processing';
+                        badge.className = `px-3 py-1 text-xs font-semibold rounded-full ${getStatusBadge('Processing')}`;
+                    }
+                }
+                // Update the small badge inside the details view header too
+                const detailsContainer = document.getElementById(`details-${order.id}`);
+                if (detailsContainer) {
+                    const internalBadge = detailsContainer.querySelector('.rounded'); // The one next to "Fulfillment Workflow"
+                    if (internalBadge) {
+                        internalBadge.textContent = 'Processing';
+                        internalBadge.className = `px-2 py-1 rounded text-[10px] font-bold uppercase ${getStatusBadge('Processing')}`;
+                    }
+                }
+            }
         }
     } catch (e) {
-        if(btn) { btn.textContent = "Approve"; btn.disabled = false; }
+        console.error(e);
+        if(btn) { btn.textContent = originalText; btn.disabled = false; }
         showNotification(e.message, true);
     }
 }
 
 async function handleManualStep2(uniqueId) {
-    // Get shipment ID from the hidden input or state
+    // Try getting ID from state or DOM
     let shipmentId = document.getElementById(`shipment-id-${uniqueId}`)?.value;
-    
-    // Fallback: find it in state if hidden input is empty
     if (!shipmentId) {
-        // We need to find the order to get the ID
-        // Note: uniqueId in renderOrders was created via order.id.replace(/\W/g, '')
-        // It's safer to use the button's dataset if we added it, but let's try to find the order by matching the UI ID
-        const order = allOrders.find(o => o.id.replace(/\W/g, '') === uniqueId);
-        if (order) shipmentId = order.shipmentId;
+         const order = allOrders.find(o => o.id.replace(/\W/g, '') === uniqueId);
+         if (order) shipmentId = order.shipmentId;
     }
 
-    if (!shipmentId) { showNotification("Shipment ID missing. Try refreshing.", true); return; }
+    if (!shipmentId) { showNotification("Shipment ID missing. Please approve first.", true); return; }
 
     const btn = document.getElementById(`btn-step2-${uniqueId}`);
     if(btn) { btn.textContent = "Assigning..."; btn.disabled = true; }
@@ -907,22 +1162,57 @@ async function handleManualStep2(uniqueId) {
         if (res.success) {
             showNotification(`Assigned: ${res.courier} (${res.awb})`);
 
-            // --- STATE UPDATE ---
-            const order = allOrders.find(o => o.id.replace(/\W/g, '') === uniqueId);
-            if (order) {
-                order.status = 'Ready To Ship'; // Update status
-                order.awb = res.awb;
-                order.awbData = { 
-                    awb: res.awb, 
-                    courier: res.courier, 
-                    label: res.label 
-                };
+            // 1. Update Local Data State
+            // Note: We need to find the order based on uniqueId matching since we don't have originalOrderId passed explicitly here
+            const orderIndex = allOrders.findIndex(o => o.id.replace(/\W/g, '') === uniqueId);
+            if (orderIndex > -1) {
+                allOrders[orderIndex].status = 'Ready To Ship';
+                allOrders[orderIndex].awb = res.awb;
+                allOrders[orderIndex].awbData = { awb: res.awb, courier: res.courier, label: res.label };
             }
 
-            // --- REDRAW UI ---
-            renderAllDashboard();
+            // 2. Update Button to Success Message
+            if (btn) {
+                const parent = btn.parentElement;
+                parent.innerHTML = `
+                    <div class="text-right">
+                        <span class="text-xs font-bold text-emerald-600 block">✓ ${res.courier}</span>
+                        <span class="text-[10px] text-slate-400 font-mono">${res.awb}</span>
+                    </div>`;
+            }
+
+            // 3. Unlock Step 3
+            const step3Btn = document.getElementById(`btn-step3-${uniqueId}`);
+            if (step3Btn) step3Btn.disabled = false;
+
+            // 4. [NEW] UPDATE MAIN DASHBOARD STATUS BADGE VISUALLY
+            if (orderIndex > -1) {
+                const order = allOrders[orderIndex];
+                const row = document.querySelector(`tr[data-order-id="${order.id}"]`);
+                if (row) {
+                    const badge = row.querySelector('.rounded-full');
+                    if (badge) {
+                        badge.textContent = 'Ready To Ship';
+                        badge.className = `px-3 py-1 text-xs font-semibold rounded-full ${getStatusBadge('Ready To Ship')}`;
+                    }
+                    // Also update the AWB text in the main row
+                    const idCell = row.querySelector('td:nth-child(4) div'); // The small text under ID
+                    if (idCell) idCell.textContent = `AWB: ${res.awb}`;
+                }
+                
+                // Update internal badge
+                const detailsContainer = document.getElementById(`details-${order.id}`);
+                if (detailsContainer) {
+                    const internalBadge = detailsContainer.querySelector('.rounded');
+                    if (internalBadge) {
+                        internalBadge.textContent = 'Ready To Ship';
+                        internalBadge.className = `px-2 py-1 rounded text-[10px] font-bold uppercase ${getStatusBadge('Ready To Ship')}`;
+                    }
+                }
+            }
         }
     } catch (e) {
+        console.error(e);
         if(btn) { btn.textContent = "Assign"; btn.disabled = false; }
         showNotification(e.message, true);
     }
@@ -1017,6 +1307,16 @@ async function handleSchedulePickup(orderId, uniqueId) {
         showNotification(e.message, true);
     }
 }
+
+async function fetchCodConfirmations() {
+    try {
+        const res = await fetch('/api/cod-confirmations');
+        codConfirmations = await res.json();
+    } catch (e) {
+        console.error("Failed to load COD confirmations", e);
+    }
+}
+
 
 // --- DATA HANDLERS ---
 async function handleAdsetDateChange(isRankingView = false) {
@@ -1362,15 +1662,14 @@ function renderProfitabilityDashboard(adData, startDate, endDate) {
     }
 }
 
+// --- UPDATED AD ANALYSIS (Deep Search Matching) ---
 function renderAdAnalysis(startDate, endDate) {
-    // If called without dates (e.g. initial load), determine them from preset
     if (!startDate || !endDate) {
         [startDate, endDate] = calculateDateRange(adAnalysisDatePreset, adAnalysisStartDateFilterEl?.value, adAnalysisEndDateFilterEl?.value);
     }
 
     const paymentFilter = adAnalysisPaymentFilter ? adAnalysisPaymentFilter.value : 'All';
 
-    // 1. Filter Orders by Date First (DD-MM-YYYY Fix)
     let filteredOrders = allOrders;
     if (startDate && endDate) {
         filteredOrders = allOrders.filter(o => {
@@ -1382,15 +1681,23 @@ function renderAdAnalysis(startDate, endDate) {
     }
 
     const analysisData = adsetPerformanceData.map(ad => {
-        // 2. Match *Filtered* Orders to Ads
-        const matchedOrders = filteredOrders.filter(o => 
-            (o.tags && o.tags.includes(ad.name)) || 
-            (ad.name.toLowerCase().includes(o.platform.toLowerCase()))
-        );
+        // --- THE FIX: DEEP SEARCH MATCHING ---
+        // We look for the Ad Name inside Tags, Landing Site, Referring Site, or Note Attributes
+        const matchedOrders = filteredOrders.filter(o => {
+            // Create a giant string of all tracking data available on the order
+            const orderMetadata = (
+                (o.tags || '') + " " +
+                (o.landing_site || '') + " " +
+                (o.referring_site || '') + " " +
+                (JSON.stringify(o.note_attributes || []))
+            ).toLowerCase();
+
+            // Check if the Ad Name exists anywhere in that data
+            return orderMetadata.includes(ad.name.toLowerCase());
+        });
         
         let relatedOrders = matchedOrders.length > 0 ? matchedOrders : [];
 
-        // Apply Payment Filter
         if (paymentFilter !== 'All') {
             relatedOrders = relatedOrders.filter(o => {
                 const pm = (o.paymentMethod || '').toUpperCase();
@@ -1402,29 +1709,52 @@ function renderAdAnalysis(startDate, endDate) {
         const prepaidCount = relatedOrders.filter(o => !(o.paymentMethod || '').toLowerCase().includes('cod')).length;
         const totalConversions = codCount + prepaidCount;
         
-        // Estimate clicks if not provided (fallback)
-        const clicks = ad.clicks || Math.floor(ad.spend / 15) || totalConversions * 10;
+        // Clicks: Use backend data if available, else fallback estimate
+        const clicks = ad.clicks || (ad.spend ? Math.floor(ad.spend / 15) : 0) || 0;
+        
         const convRate = clicks > 0 ? (totalConversions / clicks) * 100 : 0;
+        const codShare = totalConversions > 0 ? (codCount / totalConversions) * 100 : 0;
+        const prepaidShare = totalConversions > 0 ? (prepaidCount / totalConversions) * 100 : 0;
 
         return {
             name: ad.name,
             clicks: clicks,
             conversions: totalConversions,
+            convRate: convRate,
             cod: codCount,
+            codShare: codShare,
             prepaid: prepaidCount,
-            convRate: convRate
+            prepaidShare: prepaidShare
         };
     }).sort((a,b) => b.conversions - a.conversions);
 
     if(adAnalysisTableBody) {
         adAnalysisTableBody.innerHTML = analysisData.map(d => `
-            <tr class="border-b border-slate-50 hover:bg-slate-50">
-                <td class="p-4 font-semibold text-slate-800">${d.name}</td>
-                <td class="p-4 text-slate-500">${formatNumber(d.clicks)}</td>
-                <td class="p-4 font-bold text-indigo-700">${formatNumber(d.conversions)}</td>
-                <td class="p-4 font-bold text-rose-500">${formatNumber(d.cod)}</td>
-                <td class="p-4 font-bold text-emerald-600">${formatNumber(d.prepaid)}</td>
-                <td class="p-4 font-mono text-slate-600">${d.convRate.toFixed(2)}%</td>
+            <tr class="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+                <td class="p-4 font-semibold text-slate-800 text-xs md:text-sm">
+                    ${d.name}
+                </td>
+                <td class="p-4 text-slate-500 font-mono text-sm">
+                    ${formatNumber(d.clicks)}
+                </td>
+                <td class="p-4">
+                    <div class="flex flex-col">
+                        <span class="font-bold text-indigo-700 text-sm">${formatNumber(d.conversions)}</span>
+                        <span class="text-[10px] text-slate-400">CVR: ${d.convRate.toFixed(2)}%</span>
+                    </div>
+                </td>
+                <td class="p-4">
+                    <div class="flex flex-col">
+                        <span class="font-bold text-rose-600 text-sm">${formatNumber(d.cod)}</span>
+                        <span class="text-[10px] text-slate-400">${d.codShare.toFixed(1)}%</span>
+                    </div>
+                </td>
+                <td class="p-4">
+                    <div class="flex flex-col">
+                        <span class="font-bold text-emerald-600 text-sm">${formatNumber(d.prepaid)}</span>
+                        <span class="text-[10px] text-slate-400">${d.prepaidShare.toFixed(1)}%</span>
+                    </div>
+                </td>
             </tr>
         `).join('');
     }
@@ -2101,7 +2431,46 @@ function renderInsightCharts(o, s, e) {
 }
 function renderSettings(){const c=document.getElementById('seller-connections');c.innerHTML=connections.map(e=>`<div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between"><div class="flex items-center"><img src="${platformLogos[e.name]}" class="w-10 h-10 mr-4 rounded-lg bg-slate-50 p-1"><div><p class="font-bold text-slate-900">${e.name}</p><p class="text-sm text-slate-500">${e.status==='Connected'?e.user:'Click to connect'}</p></div></div><button data-platform="${e.name}" data-action="${e.status==='Connected'?'disconnect':'connect'}" class="connection-btn ${e.status==='Connected'?'text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100':'text-white bg-indigo-600 hover:bg-indigo-700'} px-4 py-2 rounded-lg text-sm font-medium transition-colors">${e.status==='Connected'?'Disconnect':'Connect'}</button></div>`).join('');document.querySelectorAll('.connection-btn').forEach(b=>b.addEventListener('click',e=>handleConnection(e.currentTarget.dataset.platform,e.currentTarget.dataset.action)))}
 function handleConnection(p,a){if(a==='connect'){showNotification(`Simulating connection to ${p}...`);setTimeout(()=>{showNotification(`Successfully connected to ${p}.`)},1500)}else if(a==='disconnect'){if(confirm(`Are you sure you want to disconnect from ${p}?`)){showNotification(`Disconnected from ${p}.`)}}}
-async function loadInitialData(){try{allOrders=await fetchOrdersFromServer();initializeAllFilters();navigate('orders-dashboard');setInterval(async()=>{if(['orders-dashboard','order-insights'].includes(currentView)){try{allOrders=await fetchOrdersFromServer();if(currentView==='orders-dashboard')renderAllDashboard();else renderAllInsights()}catch(e){console.error("Periodic refresh failed.")}}},600000)}catch(error){}}
+async function loadInitialData() {
+    try {
+        // Show loader while fetching both
+        if(document.getElementById('loading-overlay')) document.getElementById('loading-overlay').classList.remove('hidden');
+
+        // Fetch Orders AND COD Data in parallel
+        const [ordersData, _] = await Promise.all([
+            fetchOrdersFromServer(),
+            fetchCodConfirmations()
+        ]);
+        
+        allOrders = ordersData;
+        
+        initializeAllFilters();
+        navigate('orders-dashboard');
+
+        // --- Periodic Refresh (Every 10 mins) ---
+        setInterval(async () => {
+            if (['orders-dashboard', 'order-insights'].includes(currentView)) {
+                try {
+                    // Refresh both data sources
+                    await Promise.all([
+                        fetchOrdersFromServer().then(data => allOrders = data),
+                        fetchCodConfirmations()
+                    ]);
+
+                    if (currentView === 'orders-dashboard') renderAllDashboard();
+                    else renderAllInsights();
+                } catch (e) {
+                    console.error("Periodic refresh failed.");
+                }
+            }
+        }, 600000);
+
+    } catch (error) {
+        console.error("Critical Error loading initial data:", error);
+    } finally {
+        if(document.getElementById('loading-overlay')) document.getElementById('loading-overlay').classList.add('hidden');
+    }
+}
 function initializeAllFilters() {
     // 1. Status Filters
     const statusOptions = ['All Statuses', 'New', 'Processing', 'Ready To Ship', 'Shipped', 'In Transit', 'Delivered', 'RTO', 'Cancelled'];

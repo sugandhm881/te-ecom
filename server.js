@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs'); // <--- ADDED THIS IMPORT
 const config = require('./config');
 
 const app = express();
@@ -26,7 +27,7 @@ const pdfRoutes = require('./app/api/pdf_generator').router;
 const webhookRoutes = require('./app/api/webhook_handler');
 
 // --- Register Routes ---
-app.use('/api', authRoutes);        // Fixed typo here (was pp.use)
+app.use('/api', authRoutes);
 app.use('/api', ordersRoutes);
 app.use('/api', adsetRoutes);
 app.use('/api', adRoutes);
@@ -34,6 +35,26 @@ app.use('/api', shippingRoutes);
 app.use('/api', excelRoutes);
 app.use('/api', pdfRoutes);
 app.use('/api/webhook', webhookRoutes);
+
+// --- NEW ROUTE: COD Confirmation Data ---
+app.get('/api/cod-confirmations', (req, res) => {
+    // Looks for 'COD_Confirmation.json' in the root project directory
+    const filePath = path.join(__dirname, 'COD_Confirmation.json');
+    
+    if (fs.existsSync(filePath)) {
+        // Read the file freshly every time
+        const data = fs.readFileSync(filePath, 'utf8');
+        try {
+            res.json(JSON.parse(data));
+        } catch (e) {
+            console.error("Error parsing COD JSON:", e);
+            res.json([]); // Return empty if JSON is corrupt
+        }
+    } else {
+        res.json([]); // Return empty if file doesn't exist yet
+    }
+});
+// ----------------------------------------
 
 // --- Serve Frontend ---
 app.get('/', (req, res) => {
