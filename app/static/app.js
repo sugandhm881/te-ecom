@@ -429,10 +429,20 @@ function renderAllDashboard() {
         o = o.filter(t => t.platform === activePlatformFilter);
     }
 
-    // 3. Status Filter
+    // 3. Status Filter (UPDATED)
     if (activeStatusFilter !== 'All') {
         if (activeStatusFilter === 'In Transit') {
-            o = o.filter(t => ['Shipped', 'In Transit', 'Out For Delivery'].includes(t.status));
+            o = o.filter(t => {
+                // Must be one of the moving statuses
+                const isForwardMoving = ['Shipped', 'In Transit', 'Out For Delivery'].includes(t.status);
+                
+                // Check if it is actually RTO (by Tag or Status Text)
+                const isRto = t.status.toUpperCase().includes('RTO') || 
+                              (t.tags && t.tags.toLowerCase().includes('rto'));
+
+                // Show only if moving forward AND NOT RTO
+                return isForwardMoving && !isRto;
+            });
         } else {
             o = o.filter(t => t.status === activeStatusFilter);
         }
@@ -2144,6 +2154,7 @@ function calculateComparisonMetrics(currentPeriodOrders, allData, preset, curren
         ordersTrend: formatTrend(currentPeriodOrders.length, prevOrders.length)
     };
 }
+// --- UPDATED KPI LOGIC (Fixing RTO vs In Transit) ---
 function updateDashboardKpis(o) {
     // 1. Initialize Counters
     const k = { all: 0, newGroup: 0, shippedGroup: 0, delivered: 0, failedGroup: 0 };
@@ -2151,21 +2162,33 @@ function updateDashboardKpis(o) {
     o.forEach(s => {
         k.all++; // Total Count
         
+        // Normalize status for easier checking
+        const status = s.status; 
+        const statusUpper = (status || '').toUpperCase();
+
         // Group 1: New + Processing (Pending Action)
-        if (s.status === 'New' || s.status === 'Processing') {
+        if (status === 'New' || status === 'Processing') {
             k.newGroup++;
         }
-        // Group 2: Moving (Ready To Ship + Shipped + In Transit + Out For Delivery)
-        else if (['Ready To Ship', 'Shipped', 'In Transit', 'Out For Delivery'].includes(s.status)) {
-            k.shippedGroup++;
+        
+        // Group 4: Failed (Cancelled + ANY RTO Status)
+        // Checks if status is 'Cancelled' OR contains 'RTO' (e.g., "RTO Initiated", "RTO In Transit")
+        else if (status === 'Cancelled' || statusUpper.includes('RTO')) {
+            k.failedGroup++;
         }
+
         // Group 3: Completed
-        else if (s.status === 'Delivered') {
+        else if (status === 'Delivered') {
             k.delivered++;
         }
-        // Group 4: Failed (Cancelled + RTO)
-        else if (s.status === 'Cancelled' || s.status === 'RTO') {
-            k.failedGroup++;
+
+        // Group 2: Moving (Ready To Ship + Shipped + In Transit + Out For Delivery)
+        // MUST EXCLUDE RTO here to prevent double counting
+        else if (['Ready To Ship', 'Shipped', 'In Transit', 'Out For Delivery'].includes(status)) {
+            // Extra safety: only count if it does NOT have RTO in the name
+            if (!statusUpper.includes('RTO')) {
+                k.shippedGroup++;
+            }
         }
     });
 
@@ -2195,7 +2218,7 @@ function updateDashboardKpis(o) {
         "Action Required"
     );
 
-    // Card 3: In Transit (Shipped / Ready)
+    // Card 3: In Transit (Shipped / Ready - EXCLUDES RTO)
     renderKpi(dashboardKpiElements.shipped, 'In Transit', k.shippedGroup, 
         `<svg class="w-6 h-6 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 17H6V6h11v4l4 4v2h-3zM6 6l6-4l6 4"></path></svg>`,
         "On the way"
@@ -2207,7 +2230,7 @@ function updateDashboardKpis(o) {
         "Completed"
     );
 
-    // Card 5: Failed (Cancelled / RTO)
+    // Card 5: Failed (Cancelled / RTO - INCLUDES ALL RTO TYPES)
     renderKpi(dashboardKpiElements.cancelled, 'Cancelled / RTO', k.failedGroup, 
         `<svg class="w-6 h-6 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`,
         "Attention Needed"
