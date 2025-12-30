@@ -1,14 +1,19 @@
+require('dotenv').config(); // Load the .env file
 const mongoose = require('mongoose');
 
-// Use a local database named 'TE_live'
-const MONGO_URI = 'mongodb://127.0.0.1:27017/TE_live';
+const mongoURI = process.env.MONGO_URI;
+
+if (!mongoURI) {
+    console.error('❌ FATAL ERROR: MONGO_URI is not defined in .env file');
+    process.exit(1); // Stop the app if no DB connection string
+}
 
 const connectDB = async () => {
     try {
-        await mongoose.connect(MONGO_URI);
+        await mongoose.connect(mongoURI); // No options needed for Mongoose 6+
         console.log('✅ MongoDB Connected Successfully');
     } catch (err) {
-        console.error('❌ MongoDB Connection Error:', err);
+        console.error('❌ MongoDB Connection Error:', err.message);
         process.exit(1);
     }
 };
