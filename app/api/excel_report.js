@@ -1,31 +1,28 @@
 const express = require('express');
 const router = express.Router();
 const ExcelJS = require('exceljs');
-const fs = require('fs-extra');
 const moment = require('moment');
 const config = require('../../config');
-const helpers = require('./helpers'); // helpers must export normalizeStatus, getOrderSourceTerm, getFacebookAds
+const helpers = require('./helpers');
 const { tokenRequired } = require('../auth');
+const { Order } = require('../../models/Schemas'); // Import DB
 
 router.get('/download-excel-report', tokenRequired, async (req, res) => {
     const { since, until, date_filter_type = 'order_date' } = req.query;
-    const startDate = moment(since);
-    const endDate = moment(until);
+    const startDate = moment(since).startOf('day').toISOString();
+    const endDate = moment(until).endOf('day').toISOString();
 
     try {
-        if (!fs.existsSync(config.MASTER_DATA_FILE)) return res.status(500).send("Master data missing.");
-        
-        const allOrders = fs.readJsonSync(config.MASTER_DATA_FILE);
-        const filteredOrders = allOrders.filter(o => {
-            // Simplified logic matching picking date
-            let d = o.created_at;
-            if (date_filter_type === 'shipped_date') d = o.shipped_at || d;
-            if (date_filter_type === 'delivered_date') d = o.delivered_at;
-            
-            return d && moment(d).isBetween(startDate, endDate, 'day', '[]');
-        });
+        // 1. Build Query
+        let query = {};
+        if (date_filter_type === 'shipped_date') query.shipped_at = { $gte: startDate, $lte: endDate };
+        else if (date_filter_type === 'delivered_date') query.delivered_at = { $gte: startDate, $lte: endDate };
+        else query.created_at = { $gte: startDate, $lte: endDate };
 
-        const fbAds = await helpers.getFacebookAds(since, until); // Ensure this is exported in helpers.js or adset_performance
+        // 2. Fetch from DB
+        const filteredOrders = await Order.find(query).lean();
+
+        const fbAds = await helpers.getFacebookAds(since, until);
         const fbAdMap = {};
         fbAds.forEach(ad => fbAdMap[ad.ad_id] = ad);
 
@@ -48,16 +45,12 @@ router.get('/download-excel-report', tokenRequired, async (req, res) => {
         });
 
         filteredOrders.forEach(order => {
-            // Logic ported from helpers
-            // const [source, term] = helpers.getOrderSourceTerm(order); 
-            // NOTE: You need to ensure getOrderSourceTerm is accessible. 
-            // Copying getOrderSourceTerm logic here if not exported:
             const noteAttrs = {};
             (order.note_attributes || []).forEach(attr => noteAttrs[attr.name] = attr.value);
+            
             let source = 'direct', term = 'direct';
-            if (noteAttrs.utm_content && !isNaN(noteAttrs.utm_content)) { source='facebook_ad'; term=noteAttrs.utm_content; }
-            else if (noteAttrs.utm_term) { source=noteAttrs.utm_source||'unknown'; term=noteAttrs.utm_term; }
-            // ... (rest of logic same as adset_performance.js) ...
+            const [s, t] = helpers.getOrderSourceTerm(order);
+            source = s; term = t;
 
             const rawStatus = order.raw_rapidshyp_status || order.fulfillment_status || 'Unfulfilled';
             const status = helpers.normalizeStatus ? helpers.normalizeStatus(order, rawStatus) : 'Processing';
@@ -90,7 +83,7 @@ router.get('/download-excel-report', tokenRequired, async (req, res) => {
             ]);
         });
 
-        sheet.columns.forEach(col => { col.width = 20; }); // Simple auto-width
+        sheet.columns.forEach(col => { col.width = 20; });
 
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename=detailed_report_${since}_to_${until}.xlsx`);

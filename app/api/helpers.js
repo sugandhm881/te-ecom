@@ -1,10 +1,11 @@
 const axios = require('axios');
 const crypto = require('crypto');
-const fs = require('fs-extra');
 const moment = require('moment-timezone');
 const config = require('../../config');
+// IMPORT DB MODEL
+const { RapidShyp } = require('../../models/Schemas');
 
-// --- Global Cache ---
+// --- Global Cache (Memory only for tokens) ---
 let lwaTokenCache = { token: null, expiresAt: 0 };
 const TZ_INDIA = 'Asia/Kolkata';
 
@@ -13,12 +14,55 @@ const rapidshypSession = axios.create({ timeout: 10000 });
 
 // --- UTILS ---
 function log(message) {
-    const timestamp = moment().tz(TZ_INDIA).format("[YYYY-MM-DD HH:mm:ss]");
+    const timestamp = moment().tz(TZ_INDIA).format("YYYY-MM-DD HH:mm:ss");
     console.log(`${timestamp} ${message}`);
 }
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// --- SHOPIFY FUNCTIONS (FIXED RATE LIMITING) ---
+async function getAllShopifyOrdersPaginated(params) {
+    let allOrders = [];
+    let url = `https://${config.SHOPIFY_SHOP_URL}/admin/api/2024-07/orders.json`;
+    let pageNum = 1;
+
+    while (url) {
+        try {
+            const res = await axios.get(url, {
+                headers: { 'X-Shopify-Access-Token': config.SHOPIFY_TOKEN },
+                params: params
+            });
+            
+            const orders = res.data.orders || [];
+            allOrders = allOrders.concat(orders);
+            console.log(`[Shopify] Fetched page ${pageNum} (${orders.length} orders)...`);
+
+            const linkHeader = res.headers['link'];
+            url = null;
+            if (linkHeader) {
+                const matches = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+                if (matches) {
+                    url = matches[1];
+                    params = {}; // Params are encoded in the next link
+                    pageNum++;
+                }
+            }
+        } catch (e) {
+            // FIX: Handle Rate Limit (429) by waiting and retrying
+            if (e.response && e.response.status === 429) {
+                console.log(`[Shopify Rate Limit] Hitting limits. Pausing for 3 seconds...`);
+                await sleep(3000); // Wait 3 seconds
+                continue; // Retry the same URL
+            }
+            
+            console.error(`Shopify API Error page ${pageNum}: ${e.message}`);
+            break; // Stop for other errors
+        }
+    }
+    console.log(`[Shopify] Total fetched: ${allOrders.length}`);
+    return allOrders;
 }
 
 // --- DOCPHARMA FUNCTIONS ---
@@ -81,32 +125,26 @@ function signRequest(config, options, accessToken) {
     const pathUrl = options.path;
     const queryParams = options.queryParams || {};
     
-    // Dates
     const now = new Date();
-    const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, ''); // YYYYMMDDTHHmmSSZ
-    const dateStamp = amzDate.substr(0, 8); // YYYYMMDD
+    const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, '');
+    const dateStamp = amzDate.substr(0, 8);
 
-    // Canonical Headers
     const host = config.BASE_URL.replace('https://', '');
     const canonicalHeaders = `host:${host}\nx-amz-access-token:${accessToken}\nx-amz-date:${amzDate}\n`;
     const signedHeaders = 'host;x-amz-access-token;x-amz-date';
 
-    // Canonical Query String (Sorted)
     const sortedKeys = Object.keys(queryParams).sort();
     const canonicalQuerystring = sortedKeys.map(key => 
         `${encodeURIComponent(key)}=${encodeURIComponent(queryParams[key])}`
     ).join('&');
 
-    // Canonical Request
     const payloadHash = crypto.createHash('sha256').update('').digest('hex');
     const canonicalRequest = `${method}\n${pathUrl}\n${canonicalQuerystring}\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
 
-    // String to Sign
     const algorithm = 'AWS4-HMAC-SHA256';
     const credentialScope = `${dateStamp}/${config.AWS_REGION}/execute-api/aws4_request`;
     const stringToSign = `${algorithm}\n${amzDate}\n${credentialScope}\n${crypto.createHash('sha256').update(canonicalRequest).digest('hex')}`;
 
-    // Signing Key Calculation
     const kSecret = 'AWS4' + config.AWS_SECRET_KEY;
     const kDate = crypto.createHmac('sha256', kSecret).update(dateStamp).digest();
     const kRegion = crypto.createHmac('sha256', kDate).update(config.AWS_REGION).digest();
@@ -150,71 +188,26 @@ async function makeSignedApiRequest(options, maxRetries = 5) {
     }
 }
 
-// --- CACHING UTILS ---
-function loadCache(filePath) {
-    try {
-        if (fs.existsSync(filePath)) {
-            return fs.readJsonSync(filePath);
-        }
-    } catch (e) { }
-    return {};
-}
-
-function saveCache(filePath, data) {
-    try {
-        fs.outputJsonSync(filePath, data, { spaces: 2 });
-    } catch (e) { console.error("Error saving cache:", e); }
-}
-
-// --- SHOPIFY FUNCTIONS ---
-async function getAllShopifyOrdersPaginated(params) {
-    let allOrders = [];
-    let url = `https://${config.SHOPIFY_SHOP_URL}/admin/api/2024-07/orders.json`;
-    let pageNum = 1;
-
-    while (url) {
-        try {
-            const res = await axios.get(url, {
-                headers: { 'X-Shopify-Access-Token': config.SHOPIFY_TOKEN },
-                params: params
-            });
-            
-            const orders = res.data.orders || [];
-            allOrders = allOrders.concat(orders);
-            console.log(`[Shopify] Fetched page ${pageNum} (${orders.length} orders)...`);
-
-            const linkHeader = res.headers['link'];
-            url = null;
-            if (linkHeader) {
-                const matches = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
-                if (matches) {
-                    url = matches[1];
-                    params = {}; 
-                    pageNum++;
-                }
-            }
-        } catch (e) {
-            console.error(`Shopify API Error page ${pageNum}: ${e.message}`);
-            break;
-        }
-    }
-    console.log(`[Shopify] Total fetched: ${allOrders.length}`);
-    return allOrders;
-}
-
-// --- RAPIDSHYP FUNCTIONS ---
-async function getRawRapidshypStatus(awb, cache) {
+// --- RAPIDSHYP FUNCTIONS (UPDATED TO DB) ---
+// Now checks DB instead of passed-in 'cache' object
+async function getRawRapidshypStatus(awb, unusedCacheVar) {
     const now = Date.now() / 1000;
-    if (cache[awb]) {
-        const entry = cache[awb];
-        const cachedStatus = (entry.raw_status || entry.status || '').toUpperCase();
-        const lastChecked = entry.timestamp || 0;
-        
-        if (['DELIVERED', 'RTO', 'RTO_DELIVERED'].some(s => cachedStatus.includes(s)) || (now - lastChecked) < 3600) {
-            return entry.raw_status;
+    
+    // 1. CHECK DATABASE
+    try {
+        const entry = await RapidShyp.findOne({ _id_key: awb }).lean();
+        if (entry) {
+            const cachedStatus = (entry.raw_status || entry.status || '').toUpperCase();
+            const lastChecked = entry.timestamp || 0;
+            
+            // Return cached if Delivered/RTO or fresh (<1 hour)
+            if (['DELIVERED', 'RTO', 'RTO_DELIVERED'].some(s => cachedStatus.includes(s)) || (now - lastChecked) < 3600) {
+                return entry.raw_status;
+            }
         }
-    }
+    } catch(e) {}
 
+    // 2. FETCH FROM API
     const url = "https://api.rapidshyp.com/rapidshyp/apis/v1/track_order";
     const headers = { "rapidshyp-token": config.RAPIDSHYP_API_KEY, "Content-Type": "application/json" };
 
@@ -227,7 +220,13 @@ async function getRawRapidshypStatus(awb, cache) {
                 const shipment = data.records[0].shipment_details ? data.records[0].shipment_details[0] : {};
                 const rawStatus = shipment.shipment_status || shipment.current_tracking_status_desc || shipment.current_tracking_status || 'Status Not Available';
                 
-                cache[awb] = { raw_status: rawStatus, timestamp: now };
+                // 3. SAVE TO DATABASE
+                await RapidShyp.updateOne(
+                    { _id_key: awb }, 
+                    { $set: { raw_status: rawStatus, timestamp: now } },
+                    { upsert: true }
+                );
+
                 return rawStatus;
             }
         } catch (e) {
@@ -258,9 +257,8 @@ async function getRapidshypTimeline(awb) {
     return [];
 }
 
-// --- MISSING FUNCTIONS ADDED BELOW ---
+// --- FACEBOOK & ATTRIBUTION & NORMALIZATION ---
 
-// 1. Get Facebook Ads
 async function getFacebookAds(since, until) {
     const url = `https://graph.facebook.com/v18.0/act_${config.FACEBOOK_AD_ACCOUNT_ID}/insights`;
     const params = {
@@ -280,7 +278,6 @@ async function getFacebookAds(since, until) {
     }
 }
 
-// 2. Attribution Logic
 function getOrderSourceTerm(order) {
     const noteAttrs = {};
     (order.note_attributes || []).forEach(attr => noteAttrs[attr.name] = attr.value);
@@ -309,11 +306,9 @@ function getOrderSourceTerm(order) {
     return ['direct', 'direct'];
 }
 
-// 3. Status Normalization (Required for Reports)
 function normalizeStatus(order, rawStatus, docpharmaData = null) {
     const statusUpper = (rawStatus || '').toUpperCase();
 
-    // 1. Check DocPharma (Highest Priority)
     if (docpharmaData) {
         const ds = extractDocpharmaStatusString(docpharmaData);
         if (ds) {
@@ -329,10 +324,8 @@ function normalizeStatus(order, rawStatus, docpharmaData = null) {
 
     if (order.cancelled_at) return 'Cancelled';
 
-    // 2. Check Fresh API "DELIVERED"
     if (statusUpper.includes('DELIVERED') && !statusUpper.includes('RTO') && !statusUpper.includes('UNDELIVERED')) return 'Delivered';
 
-    // 3. Check Webhook Status
     const webhookStatus = (order.rapidshyp_webhook_status || '').toUpperCase();
     if (webhookStatus) {
         if (webhookStatus.includes('RTO_DELIVERED') || webhookStatus.includes('RTO')) return 'RTO';
@@ -341,7 +334,6 @@ function normalizeStatus(order, rawStatus, docpharmaData = null) {
         if (webhookStatus.includes('CANCELLED')) return 'Cancelled';
     }
 
-    // 4. Fallback Logic
     if (!rawStatus || ['API ERROR OR TIMEOUT', 'STATUS NOT AVAILABLE'].includes(statusUpper)) {
         if (order.fulfillment_status === 'fulfilled') return 'Delivered';
         if (order.fulfillments && order.fulfillments.length > 0) return 'Processing';
@@ -387,11 +379,9 @@ module.exports = {
     getRapidshypTimeline,
     fetchDocpharmaDetails,
     extractDocpharmaStatusString,
-    loadCache,
-    saveCache,
-    getFacebookAds,       // New
-    getOrderSourceTerm,   // New
-    normalizeStatus,      // New
+    getFacebookAds,
+    getOrderSourceTerm,
+    normalizeStatus,
     inferShippedDatetime,
     inferDeliveredDatetime
 };

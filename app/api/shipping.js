@@ -1,43 +1,19 @@
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
-const fs = require('fs-extra');
 const path = require('path');
 const pLimit = require('p-limit');
-const AsyncLock = require('async-lock');
 const config = require('../../config');
 const { tokenRequired } = require('../auth');
 
-// --- CONSTANTS ---
-const ORDER_CACHE_FILE = path.resolve(config.CACHE_DIR, 'order_shipment_cache.json');
-const AWB_CACHE_FILE = path.resolve(config.CACHE_DIR, 'awb_assignment_cache.json');
-const MASTER_LOG_FILE = path.resolve(config.CACHE_DIR, 'master_api_log.json');
+// --- IMPORT DB MODELS ---
+const { Shipment, AWB, APILog } = require('../../models/Schemas');
 
-// --- CONCURRENCY & LOCKING ---
-const limit = pLimit(5); // Process 5 API calls at a time
-const lock = new AsyncLock(); // Prevents file corruption during bulk writes
+// --- CONCURRENCY ---
+const limit = pLimit(5); 
 
-// --- JSON UTILS ---
-function loadJsonFile(filepath) {
-    if (!fs.existsSync(filepath)) return {};
-    try {
-        return fs.readJsonSync(filepath);
-    } catch (e) {
-        console.error(`[JSON Load Error] ${filepath}: ${e.message}`);
-        return {};
-    }
-}
-
-function saveJsonFile(filepath, data) {
-    try {
-        fs.outputJsonSync(filepath, data, { spaces: 4 });
-    } catch (e) {
-        console.error(`[Cache Save Failed] (${filepath}): ${e.message}`);
-    }
-}
-
-// --- MASTER LOGGER ---
-function logToMaster(action, payload, responseData, statusCode = 200) {
+// --- DATABASE LOGGING ---
+async function logToMaster(action, payload, responseData, statusCode = 200) {
     const entry = {
         timestamp: new Date().toISOString(),
         action: action,
@@ -47,69 +23,62 @@ function logToMaster(action, payload, responseData, statusCode = 200) {
     };
 
     try {
-        let logs = [];
-        if (fs.existsSync(MASTER_LOG_FILE)) {
-            try {
-                logs = fs.readJsonSync(MASTER_LOG_FILE);
-                if (!Array.isArray(logs)) logs = [];
-                // Optional: Keep log file size manageable
-                if (logs.length > 2000) logs = logs.slice(-2000);
-            } catch (e) { logs = []; }
-        }
-        
-        logs.push(entry);
-        fs.outputJsonSync(MASTER_LOG_FILE, logs, { spaces: 4 });
+        await APILog.create(entry);
     } catch (e) {
-        console.error(`[Master Log] Failed to save: ${e.message}`);
+        console.error(`[DB Log] Failed to save log: ${e.message}`);
     }
 }
 
-// --- THREAD-SAFE CACHE FUNCTIONS ---
+// --- ASYNC DATABASE CACHE FUNCTIONS ---
 
 // 1. Get Cache
-function getCachedShipmentId(orderId) {
-    const cache = loadJsonFile(ORDER_CACHE_FILE);
-    return cache[String(orderId)];
+async function getCachedShipmentId(orderId) {
+    try {
+        const doc = await Shipment.findOne({ _id_key: String(orderId) }).lean();
+        // Check both 'value' (simple string) and 'shipmentId' (if object)
+        return doc ? (doc.value || doc.shipmentId) : null;
+    } catch (e) { return null; }
 }
 
-function getCachedAwbData(shipmentId) {
-    const cache = loadJsonFile(AWB_CACHE_FILE);
-    return cache[String(shipmentId)];
+async function getCachedAwbData(shipmentId) {
+    try {
+        const doc = await AWB.findOne({ _id_key: String(shipmentId) }).lean();
+        return doc || null;
+    } catch (e) { return null; }
 }
 
-// 2. Save Shipment ID (Strict Format: "orderId": "shipmentId")
+// 2. Save Shipment ID (Format: { _id_key: "orderId", value: "shipmentId" })
 async function saveCachedShipmentId(orderId, shipmentId) {
     if (!orderId || !shipmentId) return;
-    await lock.acquire('order_cache', () => {
-        const cache = loadJsonFile(ORDER_CACHE_FILE);
-        // Only save if new or changed
-        if (cache[String(orderId)] !== shipmentId) {
-            cache[String(orderId)] = shipmentId;
-            saveJsonFile(ORDER_CACHE_FILE, cache);
-            console.log(`[Cache Saved] Order ${orderId} -> Shipment ${shipmentId}`);
-        }
-    });
+    try {
+        await Shipment.updateOne(
+            { _id_key: String(orderId) },
+            { $set: { value: shipmentId } },
+            { upsert: true }
+        );
+        console.log(`[DB Saved] Order ${orderId} -> Shipment ${shipmentId}`);
+    } catch (e) { console.error("DB Save Error:", e); }
 }
 
-// 3. Save AWB Data (Strict Format: "shipmentId": { ...data })
-async function saveCachedAwbData(shipmentId, responseData) {
-    if (!shipmentId || !responseData) return;
-    await lock.acquire('awb_cache', () => {
-        const cache = loadJsonFile(AWB_CACHE_FILE);
-        cache[String(shipmentId)] = responseData;
-        saveJsonFile(AWB_CACHE_FILE, cache);
-        console.log(`[Cache Saved] AWB Data for ${shipmentId}`);
-    });
+// 3. Save AWB Data
+async function saveCachedAwbData(shipmentId, data) {
+    if (!shipmentId || !data) return;
+    try {
+        await AWB.updateOne(
+            { _id_key: String(shipmentId) },
+            { $set: data },
+            { upsert: true }
+        );
+        console.log(`[DB Saved] AWB Data for ${shipmentId}`);
+    } catch (e) { console.error("DB Save Error:", e); }
 }
 
 // --- HELPER: Scan Shipments List ---
 function scanShipments(sList, idsToCheck) {
     if (!sList || !Array.isArray(sList)) return null;
-    
     for (const s of sList) {
         const oid = String(s.order_id || s.orderId || '');
         const sid = String(s.seller_order_id || '');
-        
         if (idsToCheck.includes(oid) || idsToCheck.includes(sid)) {
             return s.shipment_id || s.shipmentId;
         }
@@ -123,16 +92,13 @@ async function sleep(ms) {
 
 // --- ROBUST SHIPMENT ID FINDER ---
 async function findShipmentIdRobust(config, orderId) {
-    // 1. Check Cache
-    const cachedId = getCachedShipmentId(orderId);
+    // 1. Check DB Cache
+    const cachedId = await getCachedShipmentId(orderId);
     if (cachedId) return cachedId;
 
     if (!orderId) return null;
 
-    const headers = {
-        'rapidshyp-token': config.RAPIDSHYP_API_KEY,
-        'Content-Type': 'application/json'
-    };
+    const headers = { 'rapidshyp-token': config.RAPIDSHYP_API_KEY, 'Content-Type': 'application/json' };
     
     const inputId = String(orderId);
     let idsToCheck = [inputId, inputId.replace('#', '')];
@@ -154,13 +120,10 @@ async function findShipmentIdRobust(config, orderId) {
     } catch (e) { /* pass */ }
 
     idsToCheck = [...new Set(idsToCheck.filter(i => i))];
-
     const shipmentsUrl = "https://api.rapidshyp.com/rapidshyp/apis/v1/shipments";
     const trackUrl = "https://api.rapidshyp.com/rapidshyp/apis/v1/track_order";
 
-    // 3. Retry Loop (3 Attempts)
     for (let attempt = 0; attempt < 3; attempt++) {
-        
         // A. Try 'shipments' endpoint
         try {
             const filterVal = idsToCheck.length > 1 ? idsToCheck[1] : idsToCheck[0];
@@ -170,7 +133,7 @@ async function findShipmentIdRobust(config, orderId) {
                 const dataList = sRes.data.data || [];
                 const sid = scanShipments(dataList, idsToCheck);
                 if (sid) {
-                    await saveCachedShipmentId(orderId, sid); // Async Lock Save
+                    await saveCachedShipmentId(orderId, sid);
                     return sid;
                 }
             }
@@ -190,7 +153,7 @@ async function findShipmentIdRobust(config, orderId) {
                             const details = rec[0].shipment_details[0];
                             const sid = details.shipment_id;
                             if (sid) {
-                                await saveCachedShipmentId(orderId, sid); // Async Lock Save
+                                await saveCachedShipmentId(orderId, sid);
                                 return sid;
                             }
                         }
@@ -205,14 +168,14 @@ async function findShipmentIdRobust(config, orderId) {
 }
 
 // =============================================================================
-// SINGLE ORDER ROUTES
+// SINGLE ORDER ROUTES (Updated to use Await)
 // =============================================================================
 
 router.post('/get-shipment-status', tokenRequired, async (req, res) => {
     const { orderId } = req.body;
     
     const shipmentId = await findShipmentIdRobust(config, orderId);
-    const awbData = shipmentId ? getCachedAwbData(shipmentId) : null;
+    const awbData = shipmentId ? await getCachedAwbData(shipmentId) : null;
 
     const responsePayload = {
         shipmentId: shipmentId,
@@ -230,13 +193,12 @@ router.post('/approve-order', tokenRequired, async (req, res) => {
 
     if (!shopifyNumericId) return res.status(400).json({ error: 'Order ID is required.' });
 
-    const cachedId = getCachedShipmentId(shopifyNumericId);
+    const cachedId = await getCachedShipmentId(shopifyNumericId);
     if (cachedId) {
         return res.json({ success: true, message: 'Cached.', shipmentId: cachedId });
     }
 
     try {
-        // Wake up Shopify
         try {
             const shopifyUrl = `https://${config.SHOPIFY_SHOP_URL}/admin/api/2024-07/orders/${shopifyNumericId}.json`;
             const shopifyHeaders = { 'X-Shopify-Access-Token': config.SHOPIFY_TOKEN };
@@ -250,30 +212,25 @@ router.post('/approve-order', tokenRequired, async (req, res) => {
         const response = await axios.post(approveUrl, payload, { headers, validateStatus: () => true });
         const rj = response.data || {};
 
-        logToMaster("approve_order", payload, rj, response.status);
+        await logToMaster("approve_order", payload, rj, response.status);
 
         let shipmentId = "";
         let isSuccess = false;
         
-        // Use the exact parsing logic as bulk approve for consistency
         if (response.status === 200) {
             const msg = (rj.message || rj.remark || "").toLowerCase();
-            
             if (rj.status === true || rj.status === 'success') {
                 isSuccess = true;
-                // Parse Logic similar to your logs
                 if (rj.order_list && Array.isArray(rj.order_list) && rj.order_list.length > 0) {
                     const orderItem = rj.order_list[0];
                     if (orderItem.shipment && Array.isArray(orderItem.shipment) && orderItem.shipment.length > 0) {
                         shipmentId = orderItem.shipment[0].shipment_id;
                     }
                 }
-                // Fallback direct checks
                 if (!shipmentId && rj.shipment_id) shipmentId = rj.shipment_id;
             } 
             else if (msg.includes('already approved')) {
                 isSuccess = true;
-                // Must fetch robustly if already approved (log usually empty)
                 shipmentId = await findShipmentIdRobust(config, shopifyNumericId);
             }
         }
@@ -286,7 +243,7 @@ router.post('/approve-order', tokenRequired, async (req, res) => {
         return res.status(response.status).json({ error: `Failed: ${rj.message || rj.remark || "Unknown"}` });
 
     } catch (e) {
-        logToMaster("approve_order_error", data, { error: String(e) }, 500);
+        await logToMaster("approve_order_error", data, { error: String(e) }, 500);
         return res.status(500).json({ error: e.message });
     }
 });
@@ -306,8 +263,8 @@ router.post('/assign-awb', tokenRequired, async (req, res) => {
         return res.status(400).json({ error: 'Shipment ID not found.' });
     }
 
-    // 1. CHECK AWB CACHE
-    const cachedAwb = getCachedAwbData(shipmentId);
+    // 1. CHECK DB CACHE
+    const cachedAwb = await getCachedAwbData(shipmentId);
     if (cachedAwb) {
         return res.json(cachedAwb);
     }
@@ -321,7 +278,7 @@ router.post('/assign-awb', tokenRequired, async (req, res) => {
         const response = await axios.post(url, payload, { headers, validateStatus: () => true });
         const rj = response.data || {};
 
-        logToMaster("assign_awb", payload, rj, response.status);
+        await logToMaster("assign_awb", payload, rj, response.status);
 
         if (response.status === 200) {
             if (rj.status === 'SUCCESS' || rj.awb) {
@@ -345,7 +302,7 @@ router.post('/assign-awb', tokenRequired, async (req, res) => {
         return res.status(response.status).json({ error: `API Error: ${JSON.stringify(rj)}` });
 
     } catch (e) {
-        logToMaster("assign_awb_error", data, { error: String(e) }, 500);
+        await logToMaster("assign_awb_error", data, { error: String(e) }, 500);
         return res.status(500).json({ error: e.message });
     }
 });
@@ -364,7 +321,7 @@ router.post('/cancel-order', tokenRequired, async (req, res) => {
         const response = await axios.post(url, payload, { headers, validateStatus: () => true });
         const rj = response.data || {};
 
-        logToMaster("cancel_order", payload, rj, response.status);
+        await logToMaster("cancel_order", payload, rj, response.status);
 
         if (response.status === 200 && rj.status === true) {
             return res.json({
@@ -376,7 +333,7 @@ router.post('/cancel-order', tokenRequired, async (req, res) => {
         return res.status(response.status).json({ error: rj.remarks || 'Cancel failed' });
 
     } catch (e) {
-        logToMaster("cancel_order_error", data, { error: String(e) }, 500);
+        await logToMaster("cancel_order_error", data, { error: String(e) }, 500);
         return res.status(500).json({ error: e.message });
     }
 });
@@ -387,8 +344,7 @@ router.post('/generate-label', tokenRequired, async (req, res) => {
 
     if (!shipmentId) return res.status(400).json({ error: 'Shipment ID required.' });
 
-    // Check AWB Cache first
-    const cached = getCachedAwbData(shipmentId);
+    const cached = await getCachedAwbData(shipmentId);
     if (cached && cached.label) {
         return res.json({ success: true, labelUrl: cached.label });
     }
@@ -401,7 +357,7 @@ router.post('/generate-label', tokenRequired, async (req, res) => {
         const response = await axios.post(url, payload, { headers, validateStatus: () => true });
         const rj = response.data || {};
 
-        logToMaster("generate_label", payload, rj, response.status);
+        await logToMaster("generate_label", payload, rj, response.status);
 
         let labelUrl = null;
 
@@ -412,7 +368,6 @@ router.post('/generate-label', tokenRequired, async (req, res) => {
         }
 
         if (labelUrl) {
-            // Update cache
             if (cached) {
                 cached.label = labelUrl;
                 await saveCachedAwbData(shipmentId, cached);
@@ -425,7 +380,7 @@ router.post('/generate-label', tokenRequired, async (req, res) => {
         return res.status(400).json({ error: 'Label URL missing in response.' });
 
     } catch (e) {
-        logToMaster("generate_label_error", data, { error: String(e) }, 500);
+        await logToMaster("generate_label_error", data, { error: String(e) }, 500);
         return res.status(500).json({ error: e.message });
     }
 });
@@ -459,7 +414,7 @@ router.get('/get-shipping-label', tokenRequired, async (req, res) => {
             const genRes = await axios.post(genUrl, payload, { headers, validateStatus: () => true });
             const genJson = genRes.data || {};
 
-            logToMaster("get_shipping_label_fallback", payload, genJson, genRes.status);
+            await logToMaster("get_shipping_label_fallback", payload, genJson, genRes.status);
 
             if (genRes.status === 200) {
                 if (genJson.label_url) labelUrl = genJson.label_url;
@@ -507,20 +462,17 @@ router.get('/get-shipping-invoice', tokenRequired, async (req, res) => {
     }
 });
 
-// 10. SCHEDULE PICKUP (Updates Cache to mark as "Shipped")
 router.post('/schedule-pickup', tokenRequired, async (req, res) => {
     const data = req.body;
     const orderId = data.orderId;
     let shipmentId = data.shipmentId;
 
-    // 1. Resolve Shipment ID
     if (!shipmentId && orderId) {
         shipmentId = await findShipmentIdRobust(config, orderId);
     }
     if (!shipmentId) return res.status(400).json({ error: 'shipmentId not found' });
 
-    // 2. Get AWB Data
-    const cachedAwb = getCachedAwbData(shipmentId);
+    const cachedAwb = await getCachedAwbData(shipmentId);
     if (!cachedAwb || !cachedAwb.awb) {
         return res.status(400).json({ error: 'AWB not found. Assign AWB first.' });
     }
@@ -533,17 +485,15 @@ router.post('/schedule-pickup', tokenRequired, async (req, res) => {
         const response = await axios.post(url, payload, { headers, validateStatus: () => true });
         const rj = response.data || {};
         
-        logToMaster("schedule_pickup", payload, rj, response.status);
+        await logToMaster("schedule_pickup", payload, rj, response.status);
 
         if (response.status === 200 && rj.status === "SUCCESS") {
-            // --- THE FIX: Update Cache to track "Shipped" status ---
             const updatedData = { 
                 ...cachedAwb, 
                 pickupScheduled: true, 
                 pickupToken: rj.pickup_token 
             };
             await saveCachedAwbData(shipmentId, updatedData);
-            // -------------------------------------------------------
 
             return res.json({
                 success: true,
@@ -555,56 +505,48 @@ router.post('/schedule-pickup', tokenRequired, async (req, res) => {
         return res.status(response.status).json({ error: rj.remarks || 'Pickup scheduling failed' });
 
     } catch (e) {
-        logToMaster("schedule_pickup_error", data, { error: String(e) }, 500);
+        await logToMaster("schedule_pickup_error", data, { error: String(e) }, 500);
         return res.status(500).json({ error: e.message });
     }
 });
 
 // =============================================================================
-// BULK OPERATIONS (FIXED EXTRACTION LOGIC)
+// BULK OPERATIONS
 // =============================================================================
 
-// 1. BULK APPROVE (Saves to order_shipment_cache.json based on LOG Structure)
 router.post('/bulk-approve', tokenRequired, async (req, res) => {
     const { orderIds } = req.body;
     if (!orderIds || !Array.isArray(orderIds)) return res.status(400).json({ error: 'Invalid orderIds array' });
 
     const results = { success: [], failed: [] };
 
-    // Create array of promises
     const tasks = orderIds.map(id => limit(async () => {
         const idStr = String(id);
         try {
-            // 1. Check Cache first
-            const cachedId = getCachedShipmentId(idStr);
+            const cachedId = await getCachedShipmentId(idStr);
             if (cachedId) {
                 results.success.push({ id: idStr, shipmentId: cachedId, msg: 'Cached' });
                 return;
             }
 
-            // 2. Call API
             const headers = { 'rapidshyp-token': config.RAPIDSHYP_API_KEY, 'Content-Type': 'application/json' };
             const payload = { "order_id": [idStr], "store_name": "The Element" };
             
             const apiRes = await axios.post("https://api.rapidshyp.com/rapidshyp/apis/v1/approve_orders", payload, { headers, validateStatus: () => true });
             const rj = apiRes.data || {};
             
-            // LOGGING: Write to master log
-            logToMaster("bulk_approve_attempt", payload, rj, apiRes.status);
+            await logToMaster("bulk_approve_attempt", payload, rj, apiRes.status);
 
             let shipmentId = null;
             let isApproved = false;
 
-            // 3. ANALYZE RESPONSE (Based on your Log Examples)
             if (apiRes.status === 200) {
                  const msg = (rj.remark || rj.message || "").toLowerCase();
                  
-                 // CASE A: Success -> ID is in order_list
                  if (rj.status === 'success' || rj.status === true) {
                     isApproved = true;
                     if (rj.order_list && Array.isArray(rj.order_list) && rj.order_list.length > 0) {
                         const item = rj.order_list[0];
-                        // Structure: order_list[0].shipment[0].shipment_id
                         if (item.shipment && Array.isArray(item.shipment) && item.shipment.length > 0) {
                             shipmentId = item.shipment[0].shipment_id;
                         } else if (item.shipment_id) {
@@ -612,18 +554,14 @@ router.post('/bulk-approve', tokenRequired, async (req, res) => {
                         }
                     }
                  }
-                 
-                 // CASE B: "Already Approved" -> ID is MISSING in log -> Use Fallback
                  else if (msg.includes('already approved')) {
                     isApproved = true;
-                    // The log shows "order_list": [] in this case, so we MUST fetch it.
                     shipmentId = await findShipmentIdRobust(config, idStr);
                  }
             }
 
-            // 4. Save to order_shipment_cache.json
             if (shipmentId) {
-                await saveCachedShipmentId(idStr, shipmentId); // Writes {"123": "S456"}
+                await saveCachedShipmentId(idStr, shipmentId);
                 results.success.push({ id: idStr, shipmentId });
             } else if (isApproved) {
                 results.failed.push({ id: idStr, error: 'Approved, but shipment ID retrieval failed.' });
@@ -640,7 +578,6 @@ router.post('/bulk-approve', tokenRequired, async (req, res) => {
     res.json(results);
 });
 
-// 2. BULK ASSIGN AWB (Saves to awb_assignment_cache.json)
 router.post('/bulk-assign-awb', tokenRequired, async (req, res) => {
     const { orderIds } = req.body;
     if (!orderIds || !Array.isArray(orderIds)) return res.status(400).json({ error: 'Invalid orderIds' });
@@ -650,10 +587,8 @@ router.post('/bulk-assign-awb', tokenRequired, async (req, res) => {
     const tasks = orderIds.map(oid => limit(async () => {
         const oidStr = String(oid);
         try {
-            // A. Get Shipment ID from Order Cache (The Strict Map)
-            let shipmentId = getCachedShipmentId(oidStr);
+            let shipmentId = await getCachedShipmentId(oidStr);
             
-            // Fallback: If map missing, try fetch
             if (!shipmentId) shipmentId = await findShipmentIdRobust(config, oidStr);
             
             if (!shipmentId) {
@@ -661,23 +596,20 @@ router.post('/bulk-assign-awb', tokenRequired, async (req, res) => {
                 return;
             }
 
-            // B. Check AWB Cache
-            const cachedAwb = getCachedAwbData(shipmentId);
+            const cachedAwb = await getCachedAwbData(shipmentId);
             if (cachedAwb && cachedAwb.awb) {
                 results.success.push({ id: oidStr, awb: cachedAwb.awb, msg: 'Already Assigned' });
                 return;
             }
 
-            // C. Call API
             const headers = { 'rapidshyp-token': config.RAPIDSHYP_API_KEY };
-            const payload = { "shipment_id": shipmentId, "courier_code": "" }; // Auto
+            const payload = { "shipment_id": shipmentId, "courier_code": "" }; 
             
             const apiRes = await axios.post("https://api.rapidshyp.com/rapidshyp/apis/v1/assign_awb", payload, { headers, validateStatus: () => true });
             const rj = apiRes.data || {};
             
-            logToMaster("bulk_assign_awb", payload, rj, apiRes.status);
+            await logToMaster("bulk_assign_awb", payload, rj, apiRes.status);
 
-            // D. Save to AWB Cache
             if (apiRes.status === 200 && (rj.status === 'SUCCESS' || rj.awb)) {
                  const dataToCache = {
                     success: true,
@@ -689,7 +621,6 @@ router.post('/bulk-assign-awb', tokenRequired, async (req, res) => {
                  };
                  
                  await saveCachedAwbData(shipmentId, dataToCache);
-                 
                  results.success.push({ id: oidStr, awb: rj.awb });
             } else {
                 results.failed.push({ id: oidStr, error: rj.remarks || rj.message || 'Assign failed' });
@@ -703,7 +634,6 @@ router.post('/bulk-assign-awb', tokenRequired, async (req, res) => {
     res.json(results);
 });
 
-// 3. BULK GENERATE LABELS
 router.post('/bulk-generate-labels', tokenRequired, async (req, res) => {
     const { shipmentIds } = req.body; 
     if (!shipmentIds || !Array.isArray(shipmentIds)) return res.status(400).json({ error: 'Invalid shipmentIds' });
@@ -712,7 +642,7 @@ router.post('/bulk-generate-labels', tokenRequired, async (req, res) => {
 
     const tasks = shipmentIds.map(sid => limit(async () => {
         try {
-            const cached = getCachedAwbData(sid);
+            const cached = await getCachedAwbData(sid);
             if (cached && cached.label) {
                 results.success.push({ shipmentId: sid, label: cached.label });
                 return;
@@ -723,7 +653,7 @@ router.post('/bulk-generate-labels', tokenRequired, async (req, res) => {
             const apiRes = await axios.post("https://api.rapidshyp.com/rapidshyp/apis/v1/generate_label", payload, { headers });
             const rj = apiRes.data || {};
             
-            logToMaster("bulk_generate_label", payload, rj, apiRes.status);
+            await logToMaster("bulk_generate_label", payload, rj, apiRes.status);
             
             const url = rj.label_url || rj.labelData?.[0]?.labelURL;
             

@@ -1,10 +1,13 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const fs = require('fs'); // <--- ADDED THIS IMPORT
+// const fs = require('fs'); // <--- You can remove this now if no other files are used
 const config = require('./config');
 
 const app = express();
+const connectDB = require('./db');
+// 1. UPDATE IMPORTS (Added CODConfirmation)
+const { Order, Shipment, RapidShyp, AWB, APILog, CODConfirmation } = require('./models/Schemas');
 
 // Middleware
 app.use(cors());
@@ -18,7 +21,6 @@ app.use('/templates', express.static(path.join(__dirname, 'app/templates')));
 // --- Import Routes ---
 const authRoutes = require('./app/api/auth_routes');
 const ordersRoutes = require('./app/api/orders');
-// Note: Some files export an object { router, ... }, so we extract .router
 const adsetRoutes = require('./app/api/adset_performance').router; 
 const adRoutes = require('./app/api/ad_performance');
 const shippingRoutes = require('./app/api/shipping');
@@ -36,22 +38,15 @@ app.use('/api', excelRoutes);
 app.use('/api', pdfRoutes);
 app.use('/api/webhook', webhookRoutes);
 
-// --- NEW ROUTE: COD Confirmation Data ---
-app.get('/api/cod-confirmations', (req, res) => {
-    // Looks for 'COD_Confirmation.json' in the root project directory
-    const filePath = path.join(__dirname, 'COD_Confirmation.json');
-    
-    if (fs.existsSync(filePath)) {
-        // Read the file freshly every time
-        const data = fs.readFileSync(filePath, 'utf8');
-        try {
-            res.json(JSON.parse(data));
-        } catch (e) {
-            console.error("Error parsing COD JSON:", e);
-            res.json([]); // Return empty if JSON is corrupt
-        }
-    } else {
-        res.json([]); // Return empty if file doesn't exist yet
+// --- UPDATED ROUTE: COD Confirmation Data (FROM DB) ---
+app.get('/api/cod-confirmations', async (req, res) => {
+    try {
+        // Fetch all COD confirmations from MongoDB
+        const data = await CODConfirmation.find().lean();
+        res.json(data);
+    } catch (e) {
+        console.error("Database Error fetching COD data:", e);
+        res.status(500).json([]); 
     }
 });
 // ----------------------------------------
@@ -62,6 +57,9 @@ app.get('/', (req, res) => {
 });
 
 // --- Start Server ---
+// 2. CONNECT TO DATABASE
+connectDB(); 
+
 app.listen(config.PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${config.PORT}`);
 });

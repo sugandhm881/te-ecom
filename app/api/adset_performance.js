@@ -1,22 +1,15 @@
 const express = require('express');
 const router = express.Router();
-const fs = require('fs-extra');
 const axios = require('axios');
 const moment = require('moment-timezone');
 const config = require('../../config');
 const helpers = require('./helpers');
 const { tokenRequired } = require('../auth');
 
-const UNATTRIBUTED_ID = 'unattributed';
+// IMPORT DB MODEL
+const { Order } = require('../../models/Schemas');
 
-function loadMasterOrdersUtf8Safe(path) {
-    try {
-        return fs.readJsonSync(path);
-    } catch (e) {
-        console.warn(`[WARN] JSON load failed for ${path}: ${e.message}`);
-        return [];
-    }
-}
+const UNATTRIBUTED_ID = 'unattributed';
 
 function createEmptyBucket(bucketId, name, spend = 0) {
     return {
@@ -58,7 +51,6 @@ function processOrderIntoBucket(order, bucket, status, adsetId = null, adsetReve
 }
 
 async function getFacebookAds(since, until) {
-    // Ported from helpers.py
     const url = `https://graph.facebook.com/v18.0/act_${config.FACEBOOK_AD_ACCOUNT_ID}/insights`;
     const params = {
         'level': 'ad',
@@ -77,65 +69,26 @@ async function getFacebookAds(since, until) {
     }
 }
 
-// Ported get_order_source_term logic from helpers
-function getOrderSourceTerm(order) {
-    const noteAttrs = {};
-    (order.note_attributes || []).forEach(attr => noteAttrs[attr.name] = attr.value);
-    
-    if (noteAttrs.utm_content && !isNaN(noteAttrs.utm_content)) return ['facebook_ad', noteAttrs.utm_content];
-    
-    const utmTerm = noteAttrs.utm_term;
-    const utmSource = noteAttrs.utm_source;
-
-    if (utmTerm) return [utmSource || 'unknown_utm', utmTerm];
-    if (utmSource) return [utmSource, utmSource];
-
-    const sourceName = order.source_name;
-    if (sourceName && !['shopify_draft_order', 'pos', 'other'].includes(sourceName)) return [sourceName, sourceName];
-
-    const refSite = order.referring_site;
-    if (refSite) {
-        try {
-            const domain = new URL(refSite).hostname.replace('www.', '');
-            if (domain.includes('google')) return ['google', 'organic'];
-            if (domain.includes('facebook')) return ['facebook.com', 'referral'];
-            if (domain.includes('instagram')) return ['instagram.com', 'referral'];
-            return [domain, 'referral'];
-        } catch (e) { return ['other_link', 'referral']; }
-    }
-    return ['direct', 'direct'];
-}
-
 // CORE FUNCTION exported for Router and Cron Job
 async function getAdsetPerformanceData(since, until, dateFilterType = 'created_at') {
-    const startDate = moment(since);
-    const endDate = moment(until);
+    const startDate = moment(since).startOf('day').toISOString();
+    const endDate = moment(until).endOf('day').toISOString();
 
-    if (!fs.existsSync(config.MASTER_DATA_FILE)) {
-        throw new Error("Master data file not found.");
+    // 1. BUILD MONGODB QUERY
+    let query = {};
+    
+    // Adjust query based on filter type
+    if (dateFilterType === 'shipped_date') {
+        query.shipped_at = { $gte: startDate, $lte: endDate };
+    } else if (dateFilterType === 'delivered_date') {
+        query.delivered_at = { $gte: startDate, $lte: endDate };
+    } else {
+        // Default to created_at
+        query.created_at = { $gte: startDate, $lte: endDate };
     }
 
-    const allOrders = loadMasterOrdersUtf8Safe(config.MASTER_DATA_FILE);
-    const shopifyOrdersInRange = [];
-    
-    // Using pick_date_for_filter ported logic in helpers (assumed existing in helpers.js or defined here)
-    // If not in helpers, implement simple date check here:
-    allOrders.forEach(o => {
-        // Simple logic for date filtering matching python's pick_date_for_filter
-        let d = o.created_at; 
-        // (Full logic should be in helpers.js, calling it here implies usage)
-        // For standalone safety:
-        if (dateFilterType === 'shipped_date' && o.shipped_at) d = o.shipped_at;
-        if (dateFilterType === 'delivered_date' && o.delivered_at) d = o.delivered_at;
-        
-        if (d) {
-            const dt = moment(d);
-            // Check day inclusivity
-            if (dt.isBetween(startDate, endDate, 'day', '[]')) {
-                shopifyOrdersInRange.push(o);
-            }
-        }
-    });
+    // 2. FETCH FROM DB
+    const shopifyOrdersInRange = await Order.find(query).lean();
 
     const fbAds = await getFacebookAds(since, until);
     
@@ -155,13 +108,12 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
     const adsetDeliveredRevenueTotals = {};
 
     shopifyOrdersInRange.forEach(order => {
-        const [source, term] = getOrderSourceTerm(order);
+        // Use helper logic for attribution
+        const [source, term] = helpers.getOrderSourceTerm(order);
         const rawStatus = order.raw_rapidshyp_status;
         const docpharmaData = order.docpharma_data;
         
-        // Use helper status normalizer
         const status = helpers.normalizeStatus ? helpers.normalizeStatus(order, rawStatus, docpharmaData) : 'Processing'; 
-        // NOTE: Make sure normalizeStatus is exported in helpers.js. If not, add it.
 
         let adsetBucket = null;
         let termBucket = null;
@@ -201,7 +153,7 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
         if ((adset.totalOrders || 0) > 0 || adset.spend > 0) {
             const termsArray = Object.values(adset.terms).filter(t => (t.totalOrders || 0) > 0 || (t.spend || 0) > 0);
             termsArray.sort((a, b) => (b.totalOrders || 0) - (a.totalOrders || 0));
-            adset.terms = termsArray; // Replace dict with sorted array
+            adset.terms = termsArray; 
             result.push(adset);
         }
     });
@@ -225,5 +177,4 @@ router.get('/get-adset-performance', tokenRequired, async (req, res) => {
     }
 });
 
-module.exports = { router, getAdsetPerformanceData }; 
-// Note: We export getAdsetPerformanceData for the Cron Job
+module.exports = { router, getAdsetPerformanceData };

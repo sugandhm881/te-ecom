@@ -1,13 +1,15 @@
-const fs = require('fs-extra');
 const moment = require('moment-timezone');
 const pLimit = require('p-limit').default || require('p-limit');
 const helpers = require('./app/api/helpers');
 const config = require('./config');
+const mongoose = require('mongoose');
+const connectDB = require('./db'); 
+const { Order } = require('./models/Schemas'); 
 
-const limit = pLimit(10); // Equivalent to max_workers=10
+const limit = pLimit(10); 
 
 async function enrichOrder(order, statusCache) {
-    // Extract AWB
+    // Standard enrichment logic...
     const fulfillments = order.fulfillments || [];
     const awb = fulfillments.find(f => f.tracking_number)?.tracking_number;
     order.awb = awb;
@@ -47,7 +49,6 @@ async function enrichOrder(order, statusCache) {
     order.raw_rapidshyp_status = rawStatus;
     order.rapidshyp_events = timeline;
 
-    // Infer dates
     const shippedDt = helpers.inferShippedDatetime(order);
     const deliveredDt = helpers.inferDeliveredDatetime(order);
     
@@ -58,17 +59,11 @@ async function enrichOrder(order, statusCache) {
 }
 
 async function runDataSync() {
-    helpers.log("=" .repeat(70));
-    helpers.log("Starting Data Sync Job");
+    helpers.log("=".repeat(70));
+    helpers.log("Starting Data Sync Job (Duplicate Protected)");
 
-    // Load Existing Data
-    let existingOrdersDict = {};
-    if (fs.existsSync(config.MASTER_DATA_FILE)) {
-        try {
-            const data = fs.readJsonSync(config.MASTER_DATA_FILE);
-            data.forEach(o => existingOrdersDict[String(o.id)] = o);
-            helpers.log(`✓ Loaded ${data.length} existing orders.`);
-        } catch (e) { helpers.log("Starting fresh (no valid master file)."); }
+    if (mongoose.connection.readyState === 0) {
+        await connectDB();
     }
 
     const fetchSince = moment().subtract(180, 'days').toISOString();
@@ -76,63 +71,83 @@ async function runDataSync() {
 
     const fields = 'id,name,created_at,total_price,fulfillments,note_attributes,source_name,referring_site,cancelled_at,fulfillment_status,line_items,email,shipping_address,updated_at';
     
-    // Step 1 & 2: Fetch Created & Updated
+    // Step 1: Fetch
     const [createdOrders, updatedOrders] = await Promise.all([
         helpers.getAllShopifyOrdersPaginated({ status: 'any', limit: 250, created_at_min: fetchSince, fields }),
         helpers.getAllShopifyOrdersPaginated({ status: 'any', limit: 250, updated_at_min: fetchSince, fields })
     ]);
 
-    // Step 3: Merge
+    // Step 2: Merge locally (LAYER 1 DEDUPLICATION)
+    // We use an Object where Key = Order ID. Objects cannot have duplicate keys.
+    // This automatically removes any duplicates returned by Shopify.
     const allRecentOrders = {};
     createdOrders.forEach(o => allRecentOrders[String(o.id)] = o);
     updatedOrders.forEach(o => allRecentOrders[String(o.id)] = o);
 
-    Object.entries(allRecentOrders).forEach(([id, newOrder]) => {
-        if (existingOrdersDict[id]) {
-            // Update existing but preserve specific fields
-            const existing = existingOrdersDict[id];
-            existingOrdersDict[id] = { ...existing, ...newOrder };
-            if (existing.docpharma_data && !newOrder.docpharma_data) {
-                existingOrdersDict[id].docpharma_data = existing.docpharma_data;
-            }
-        } else {
-            existingOrdersDict[id] = newOrder;
-        }
-    });
+    const allOrdersList = Object.values(allRecentOrders);
+    helpers.log(`✓ Fetched ${allOrdersList.length} unique orders`);
 
-    const allOrdersList = Object.values(existingOrdersDict);
-    helpers.log(`✓ Combined to ${allOrdersList.length} total unique orders`);
-
-    // Step 4: Load Cache
-    const statusCache = helpers.loadCache(config.RAPIDSHYP_CACHE_FILE);
-
-    // Step 5: Enrich Concurrently
-    helpers.log(`Step 5: Enriching orders (Concurrency: 10)...`);
-    
+    // Step 3: Enrich
+    helpers.log(`Step 3: Enriching orders (Concurrency: 10)...`);
+    let statusCache = {}; 
     let completedCount = 0;
+    
     const enrichPromises = allOrdersList.map(order => 
         limit(() => enrichOrder(order, statusCache).then(res => {
             completedCount++;
-            if (completedCount % 50 === 0) helpers.log(`→ Enriched ${completedCount}/${allOrdersList.length}`);
+            if (completedCount % 100 === 0) process.stdout.write(`\rEnriched ${completedCount}/${allOrdersList.length}`);
             return res;
         }))
     );
 
     const enrichedOrders = await Promise.all(enrichPromises);
-    helpers.log(`✓ Enriched all orders`);
+    helpers.log(`\n✓ Enriched all orders`);
 
-    // Step 6: Save Cache
-    helpers.saveCache(config.RAPIDSHYP_CACHE_FILE, statusCache);
-    helpers.log("✓ Cache saved");
+    // Step 4: Bulk Save (LAYER 2 & 3 DEDUPLICATION)
+    helpers.log("Step 4: Saving to Database...");
+    
+    if (enrichedOrders.length > 0) {
+        
+        // Final Safety Check: Ensure enrichedOrders has unique IDs before creating bulkOps
+        const uniqueOrdersMap = new Map();
+        enrichedOrders.forEach(o => uniqueOrdersMap.set(String(o.id), o));
+        const finalUniqueOrders = Array.from(uniqueOrdersMap.values());
 
-    // Step 7: Atomic Write
-    const tempFile = `${config.MASTER_DATA_FILE}.tmp`;
-    fs.outputJsonSync(tempFile, enrichedOrders, { spaces: 2 });
-    fs.renameSync(tempFile, config.MASTER_DATA_FILE);
-    helpers.log(`✓ Saved ${enrichedOrders.length} orders to ${config.MASTER_DATA_FILE}`);
+        const bulkOps = finalUniqueOrders.map(order => ({
+            updateOne: {
+                // FILTER: This ensures we match the exact order ID in the DB
+                filter: { id: order.id },
+                // UPDATE: Updates the existing record
+                update: { $set: order },
+                // UPSERT: Create only if it doesn't exist
+                upsert: true
+            }
+        }));
+
+        // Batch processing to prevent freeze
+        const BATCH_SIZE = 500;
+        let savedCount = 0;
+
+        for (let i = 0; i < bulkOps.length; i += BATCH_SIZE) {
+            const chunk = bulkOps.slice(i, i + BATCH_SIZE);
+            try {
+                // This command tells MongoDB to update-or-insert, preventing duplicates
+                await Order.bulkWrite(chunk);
+                savedCount += chunk.length;
+                process.stdout.write(`\rSaving (Upserting)... ${savedCount}/${bulkOps.length}`);
+            } catch (e) {
+                console.error(`\n❌ Error saving batch ${i}: ${e.message}`);
+            }
+        }
+        helpers.log(`\n✓ Database sync complete.`);
+    } else {
+        helpers.log("No orders to update.");
+    }
 
     helpers.log("Data Sync Job Finished Successfully");
     helpers.log("=" .repeat(70));
+    
+    process.exit(0);
 }
 
 if (require.main === module) {

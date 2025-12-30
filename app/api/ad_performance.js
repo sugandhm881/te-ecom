@@ -3,6 +3,7 @@ const router = express.Router();
 const axios = require('axios');
 const moment = require('moment-timezone');
 const config = require('../../config');
+const { Order } = require('../../models/Schemas'); // Import DB
 
 async function getFacebookDailySpend(since, until) {
     const url = `https://graph.facebook.com/v18.0/act_${config.FACEBOOK_AD_ACCOUNT_ID}/insights`;
@@ -27,41 +28,35 @@ async function getFacebookDailySpend(since, until) {
     }
 }
 
+// REPLACED: Fetch from DB instead of Shopify API
 async function getShopifyOrdersForAds(since) {
-    let url = `https://${config.SHOPIFY_SHOP_URL}/admin/api/2024-07/orders.json`;
-    const headers = { 'X-Shopify-Access-Token': config.SHOPIFY_TOKEN };
-    let params = { status: 'any', limit: 250, created_at_min: since };
-    let allOrders = [];
-
     try {
-        while (url) {
-            const response = await axios.get(url, { headers, params });
-            allOrders = allOrders.concat(response.data.orders || []);
-            
-            const linkHeader = response.headers['link'];
-            url = null;
-            if (linkHeader && linkHeader.includes('rel="next"')) {
-                const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
-                if (match) {
-                    url = match[1];
-                    params = {};
-                }
-            }
-        }
+        // Query DB for all orders created after 'since'
+        const orders = await Order.find({
+            created_at: { $gte: moment(since).toISOString() }
+        }).lean();
+        return orders;
     } catch (e) {
-        console.error(`Shopify API Error in ad performance: ${e.message}`);
+        console.error("DB Fetch Error in ad performance:", e);
+        return [];
     }
-    return allOrders;
 }
 
 function getSimulatedLogisticsStatus(order) {
     if (order.cancelled_at) return 'Cancelled';
     const tags = (order.tags || '').toLowerCase();
     if (tags.includes('rto')) return 'RTO';
+    
+    // Use our new enriched status if available
+    if (order.raw_rapidshyp_status) {
+        const s = order.raw_rapidshyp_status.toUpperCase();
+        if (s.includes('DELIVERED')) return 'Delivered';
+        if (s.includes('RTO')) return 'RTO';
+        if (s.includes('TRANSIT') || s.includes('SHIPPED')) return 'In-Transit';
+    }
+
     if (order.fulfillment_status === 'fulfilled') {
-        const idStr = String(order.id);
-        // Simulate based on last 2 digits
-        return parseInt(idStr.slice(-2)) < 80 ? 'Delivered' : 'In-Transit';
+        return 'In-Transit'; // Default if fulfilled but no detailed status
     }
     return 'Processing';
 }
@@ -96,7 +91,7 @@ router.get('/get-ad-performance', async (req, res) => {
             if (dailyData[date]) dailyData[date].spend = facebookSpend[date];
         });
 
-        // Merge Shopify
+        // Merge Shopify (From DB)
         shopifyOrders.forEach(order => {
             const orderDate = moment(order.created_at).format('YYYY-MM-DD');
             if (dailyData[orderDate]) {

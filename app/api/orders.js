@@ -4,11 +4,9 @@ const moment = require('moment-timezone');
 const helpers = require('./helpers');
 const { fetchAmazonOrders } = require('./amazon');
 const config = require('../../config');
-const fs = require('fs-extra');
-const path = require('path');
-const ORDER_CACHE_FILE = path.resolve(config.CACHE_DIR, 'order_shipment_cache.json');
-const AWB_CACHE_FILE = path.resolve(config.CACHE_DIR, 'awb_assignment_cache.json');
-const TRACKING_CACHE_FILE = path.resolve(config.CACHE_DIR, 'rapidshyp_cache.json');
+
+// --- 1. IMPORT DATABASE MODELS ---
+const { Shipment, AWB, RapidShyp } = require('../../models/Schemas');
 
 function normalizeShopifyOrder(order) {
     let status = (!order.fulfillment_status) ? "New" : (order.fulfillment_status === 'fulfilled' ? "Shipped" : "Processing");
@@ -35,7 +33,6 @@ function normalizeShopifyOrder(order) {
         platform: "Shopify",
         id: order.name,
         originalId: order.id,
-        // Force conversion to IST (Asia/Kolkata)
         date: moment(order.created_at).tz('Asia/Kolkata').format('DD-MM-YYYY'),
         name: customerName,
         total: netTotal,
@@ -59,36 +56,63 @@ router.get('/get-orders', async (req, res) => {
             'fields': 'id,name,created_at,total_price,financial_status,fulfillment_status,cancelled_at,shipping_address,line_items,tags,refunds,fulfillments,location_id'
         };
 
-        const [shopifyRaw, amazonOrders] = await Promise.all([
+        // --- 2. FETCH ORDERS & DB CACHE IN PARALLEL ---
+        // We run all queries at once to make it faster
+        const [shopifyRaw, amazonOrders, shipmentDocs, awbDocs, trackingDocs] = await Promise.all([
             helpers.getAllShopifyOrdersPaginated(params),
-            fetchAmazonOrders()
+            fetchAmazonOrders(),
+            Shipment.find().lean(),    // Fetch all shipments
+            AWB.find().lean(),         // Fetch all assignments
+            RapidShyp.find().lean()    // Fetch all tracking logs
         ]);
 
-                    const shopifyOrders = shopifyRaw.map(o => {
-                const norm = normalizeShopifyOrder(o);
-                // --- FORCE ATTACH SHIPPING ADDRESS ---
-                norm.shipping_address = o.shipping_address; 
-                norm.line_items = o.line_items; // Ensure products are also attached
-                return norm;
-            });
-        let allOrders = [...shopifyOrders, ...amazonOrders].sort((a, b) => new Date(b.date) - new Date(a.date));
+        // --- 3. CONVERT DB ARRAYS TO OBJECT MAPS ---
+        // This rebuilds the "Cache Object" structure your code expects
+        // Format: { "ORDER_ID": { data } }
+        
+        const shipmentCache = {};
+        shipmentDocs.forEach(doc => {
+            // Use _id_key (from migration) as the lookup key
+            if(doc._id_key) shipmentCache[String(doc._id_key)] = doc;
+        });
 
-        // --- LOAD ALL CACHES ---
-        let shipmentCache = {};
-        let awbCache = {};
-        let trackingCache = {}; // New Cache
-        try {
-            if (fs.existsSync(ORDER_CACHE_FILE)) shipmentCache = fs.readJsonSync(ORDER_CACHE_FILE);
-            if (fs.existsSync(AWB_CACHE_FILE)) awbCache = fs.readJsonSync(AWB_CACHE_FILE);
-            if (fs.existsSync(TRACKING_CACHE_FILE)) trackingCache = fs.readJsonSync(TRACKING_CACHE_FILE);
-        } catch (e) {}
+        const awbCache = {};
+        awbDocs.forEach(doc => {
+            if(doc._id_key) awbCache[String(doc._id_key)] = doc;
+        });
+
+        const trackingCache = {};
+        trackingDocs.forEach(doc => {
+            if(doc._id_key) trackingCache[String(doc._id_key)] = doc;
+        });
+
+        // --- 4. PROCESS ORDERS (EXISTING LOGIC) ---
+        
+        const shopifyOrders = shopifyRaw.map(o => {
+            const norm = normalizeShopifyOrder(o);
+            norm.shipping_address = o.shipping_address; 
+            norm.line_items = o.line_items;
+            return norm;
+        });
+
+        let allOrders = [...shopifyOrders, ...amazonOrders].sort((a, b) => new Date(b.date) - new Date(a.date));
 
         // --- ENRICH STATUS ---
         allOrders = allOrders.map(order => {
             // 1. Basic IDs
-            const shipmentId = shipmentCache[String(order.originalId)];
+            // Note: If shipmentCache[id] is an object (from DB), we try to use it.
+            // If your original cache was Key->String, check if doc.shipmentId exists, else use doc itself or check your Compass data.
+            let shipmentData = shipmentCache[String(order.originalId)];
+            
+            // Adjust this based on your DB data structure:
+            // If shipmentData is an object, we use its ID. If it's the ID itself, we use it.
+            let shipmentId = shipmentData ? (shipmentData.shipmentId || shipmentData.value || shipmentData._id_key) : null; 
+            
+            // Fallback: If migration saved the string as the object key, it might just be the object itself.
+            // You might need to console.log(shipmentData) to see exactly how migration saved it.
+
             const awbData = shipmentId ? awbCache[String(shipmentId)] : null;
-            const awbNumber = awbData ? awbData.awb : order.awb; // Check cache first, then Shopify AWB
+            const awbNumber = awbData ? awbData.awb : order.awb; 
 
             order.shipmentId = shipmentId;
             order.awbData = awbData;
@@ -96,7 +120,7 @@ router.get('/get-orders', async (req, res) => {
             // 2. Base Status (Internal Workflow)
             if (order.status === 'New' || order.status === 'Processing') {
                 if (awbData && awbData.pickupScheduled) {
-                    order.status = 'Shipped'; // Default if pickup is scheduled
+                    order.status = 'Shipped'; 
                 } else if (awbData && awbData.awb) {
                     order.status = 'Ready To Ship';
                 } else if (shipmentId) {
@@ -106,8 +130,7 @@ router.get('/get-orders', async (req, res) => {
                 }
             }
 
-            // 3. TRACKING OVERRIDE (The New Layer)
-            // If we have live tracking data for this AWB, it takes priority
+            // 3. TRACKING OVERRIDE
             if (awbNumber && trackingCache[String(awbNumber)]) {
                 const track = trackingCache[String(awbNumber)];
                 const rawStatus = (track.raw_status || '').toUpperCase();
@@ -123,7 +146,7 @@ router.get('/get-orders', async (req, res) => {
                 } else if (rawStatus === 'SHIPPED') {
                     order.status = 'Shipped';
                 } else if (rawStatus === 'PICKUP_SCHEDULED' || rawStatus === 'PICKUP_GENERATED') {
-                    order.status = 'Shipped'; // Treat as shipped/ready for transit
+                    order.status = 'Shipped'; 
                 }
             }
 

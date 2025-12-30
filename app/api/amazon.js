@@ -1,28 +1,9 @@
-const fs = require('fs-extra');
 const moment = require('moment-timezone');
 const helpers = require('./helpers');
 const config = require('../../config');
+const { Order } = require('../../models/Schemas');
 
 const CACHE_DURATION_SECONDS = 30 * 60; // 30 mins
-
-function getFetchPeriod() {
-    const todayStr = moment.utc().format('YYYY-MM-DD');
-    let fullFetch = false;
-    let lastFetchDate = '';
-
-    try {
-        lastFetchDate = fs.readFileSync(config.AMAZON_CACHE_DATE_FILE, 'utf-8').trim();
-    } catch (e) { fullFetch = true; }
-
-    if (lastFetchDate !== todayStr) fullFetch = true;
-    fs.writeFileSync(config.AMAZON_CACHE_DATE_FILE, todayStr);
-
-    if (fullFetch) {
-        return moment.utc().subtract(45, 'days').toISOString();
-    } else {
-        return moment.utc().startOf('month').toISOString();
-    }
-}
 
 function normalizeAmazonOrder(order) {
     const address = order.ShippingAddress || {};
@@ -39,6 +20,7 @@ function normalizeAmazonOrder(order) {
         platform: "Amazon",
         id: order.AmazonOrderId || 'N/A',
         originalId: order.AmazonOrderId || 'N/A',
+        created_at: order.PurchaseDate || new Date().toISOString(),
         date: order.PurchaseDate ? order.PurchaseDate.substring(0, 10) : '',
         name: customerName,
         total: parseFloat((order.OrderTotal || {}).Amount || 0),
@@ -50,24 +32,27 @@ function normalizeAmazonOrder(order) {
 }
 
 async function fetchAmazonOrders() {
-    // Cache Check
-    if (fs.existsSync(config.AMAZON_CACHE_FILE)) {
-        const stats = fs.statSync(config.AMAZON_CACHE_FILE);
-        const age = (Date.now() - stats.mtimeMs) / 1000;
-        if (age < CACHE_DURATION_SECONDS) {
-            console.log(`\n--- [Amazon Cache] Using cached data. Age: ${age.toFixed(0)}s ---`);
-            return fs.readJsonSync(config.AMAZON_CACHE_FILE);
+    // 1. Check DB Cache logic...
+    try {
+        const lastAmazonOrder = await Order.findOne({ platform: 'Amazon' }).sort({ updated_at: -1 });
+        if (lastAmazonOrder) {
+            const lastUpdate = moment(lastAmazonOrder.updated_at);
+            const now = moment();
+            if (now.diff(lastUpdate, 'seconds') < CACHE_DURATION_SECONDS) {
+                console.log(`\n--- [Amazon DB] Using cached data (< 30m old) ---`);
+                return await Order.find({ platform: 'Amazon' }).lean();
+            }
         }
-    }
+    } catch (e) { /* ignore */ }
 
-    console.log("\n--- [Amazon Cache] Fetching fresh data from API ---");
+    console.log("\n--- [Amazon API] Fetching fresh data ---");
     const requiredKeys = ['AWS_ACCESS_KEY', 'AWS_SECRET_KEY', 'REFRESH_TOKEN'];
     if (!requiredKeys.every(k => config[k])) {
         console.log("[WARNING] Amazon keys missing.");
         return [];
     }
 
-    const createdAfter = getFetchPeriod();
+    const createdAfter = moment.utc().subtract(30, 'days').toISOString();
     let allOrders = [];
     let nextToken = null;
     let page = 1;
@@ -98,19 +83,39 @@ async function fetchAmazonOrders() {
             page++;
             if (!nextToken) break;
 
-            await new Promise(r => setTimeout(r, page <= 5 ? 2000 : 5000));
+            await helpers.sleep(page <= 5 ? 2000 : 5000);
         }
 
+        // Normalize
         const normalized = allOrders.map(normalizeAmazonOrder);
-        fs.outputJsonSync(config.AMAZON_CACHE_FILE, normalized);
+        
+        // --- BATCHED SAVING (Chunk Size 500) ---
+        if (normalized.length > 0) {
+            const bulkOps = normalized.map(order => ({
+                updateOne: {
+                    filter: { id: order.id }, // Deduplication Key: Amazon Order ID
+                    update: { 
+                        $set: { ...order, updated_at: new Date().toISOString() } 
+                    },
+                    upsert: true
+                }
+            }));
+
+            const BATCH_SIZE = 500;
+            for (let i = 0; i < bulkOps.length; i += BATCH_SIZE) {
+                const chunk = bulkOps.slice(i, i + BATCH_SIZE);
+                try {
+                    await Order.bulkWrite(chunk);
+                } catch (e) { console.error(`Amazon batch save error: ${e.message}`); }
+            }
+            console.log(`[Amazon] Saved/Updated ${normalized.length} orders in DB.`);
+        }
+
         return normalized;
 
     } catch (e) {
         console.error("Error fetching Amazon orders:", e.message);
-        if (fs.existsSync(config.AMAZON_CACHE_FILE)) {
-             return fs.readJsonSync(config.AMAZON_CACHE_FILE);
-        }
-        return [];
+        return await Order.find({ platform: 'Amazon' }).lean();
     }
 }
 

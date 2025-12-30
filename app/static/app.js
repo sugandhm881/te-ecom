@@ -565,7 +565,7 @@ function renderSearchInput() {
     }
 }
 
-// --- ORDER LIST RENDERING (Full Version: Mobile, Address & Colors) ---
+// --- ORDER LIST RENDERING (Trusts Shopify Tags + Local History) ---
 function renderOrders(o) {
     ordersListEl.innerHTML = '';
     updateBulkActionBar(); 
@@ -575,12 +575,18 @@ function renderOrders(o) {
         return;
     }
 
-    // --- HELPER: Extract Number (Turns "#TE25-8052" -> "8052") ---
+    // Helper: Extract Number from ID
     const extractNum = (str) => {
         if (!str) return '';
         const s = String(str);
         const match = s.match(/(\d+)$/); 
         return match ? match[0] : s.replace(/\D/g, ''); 
+    };
+
+    // Helper: Normalize Phone (Last 10 digits only)
+    const cleanPhone = (p) => {
+        if (!p) return '';
+        return String(p).replace(/\D/g, '').slice(-10);
     };
 
     o.forEach(order => {
@@ -593,36 +599,68 @@ function renderOrders(o) {
         const mainRow = document.createElement('tr');
         mainRow.className = `order-row border-b border-slate-100 hover:bg-slate-50 transition-colors ${isSelected ? 'bg-indigo-50/50' : ''}`;
         mainRow.dataset.orderId = order.id;
+
+        // =========================================================================
+        // 1. GATHER DATA (Shopify Tags & Local History)
+        // =========================================================================
         
-        const tagsDisplay = (order.tags || 'None');
-        // Hover shows tags only (Removed Location ID)
-        const hoverText = tagsDisplay !== 'None' ? `Tags: ${tagsDisplay}` : '';
+        // A. Get Shopify Tags (Lowercase for easy checking)
+        const shopifyTags = (order.tags || '').toLowerCase();
+        
+        // B. Calculate History (Strict Phone/Email Match)
+        const currentPhone = cleanPhone(order.phone);
+        const currentEmail = order.email ? order.email.toLowerCase().trim() : '';
 
-        // --- TAGS LOGIC ---
-        const history = allOrders.filter(x => 
-            (order.phone && x.phone === order.phone) || 
-            (order.name === x.name)
-        );
+        const history = allOrders.filter(x => {
+            const xPhone = cleanPhone(x.phone);
+            const phoneMatch = currentPhone && xPhone && (currentPhone === xPhone);
+            const xEmail = x.email ? x.email.toLowerCase().trim() : '';
+            const emailMatch = currentEmail && xEmail && (currentEmail === xEmail);
+            return phoneMatch || emailMatch;
+        });
 
+        // =========================================================================
+        // 2. DETERMINE STATUS FLAGS
+        // =========================================================================
+        
+        // IS REPEAT? -> (Shopify says 'repeat') OR (We found > 1 order)
+        const isRepeat = shopifyTags.includes('repeat') || history.length > 1;
+
+        // IS DELIVERED CUSTOMER? -> (Shopify says 'delivered') OR (History has 'Delivered' status)
+        const isDeliveredCustomer = shopifyTags.includes('delivered') || history.some(h => {
+             const s = String(h.status).toLowerCase();
+             // Check if any PAST order was delivered
+             return (s === 'delivered' || s === 'completed') && String(h.id) !== String(order.id);
+        });
+
+        // =========================================================================
+        // 3. GENERATE BADGE HTML
+        // =========================================================================
         let tagsHtml = '';
-        if (history.length > 1) {
+
+        if (isRepeat) {
             tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-indigo-600 bg-indigo-50 rounded border border-indigo-100 uppercase tracking-wide mr-1 mb-1">Repeat</span>`;
-            if (history.some(h => h.status === 'Delivered' && h.id !== order.id)) {
-                tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-emerald-600 bg-emerald-50 rounded border border-emerald-100 uppercase tracking-wide mr-1 mb-1">Delivered</span>`;
-            }
         } else {
-             tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-slate-500 bg-slate-100 rounded border border-slate-200 uppercase tracking-wide mr-1 mb-1">New</span>`;
+            tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-slate-500 bg-slate-100 rounded border border-slate-200 uppercase tracking-wide mr-1 mb-1">New</span>`;
         }
-        if (history.length > 5 || parseFloat(order.total) > 5000) {
+
+        // Show Delivered Badge (Independent check - fixes the missing badge issue)
+        if (isDeliveredCustomer) {
+            tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-emerald-600 bg-emerald-50 rounded border border-emerald-100 uppercase tracking-wide mr-1 mb-1">Delivered</span>`;
+        }
+
+        // VIP Check
+        if (history.length > 5 || parseFloat(order.total) > 5000 || shopifyTags.includes('vip')) {
              tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-amber-600 bg-amber-50 rounded border border-amber-100 uppercase tracking-wide mr-1 mb-1">VIP</span>`;
         }
 
-        // --- COD LOGIC & PHONE EXTRACTION ---
+        // --- PREPARE DISPLAY DATA ---
+        const tagsDisplay = (order.tags || 'None');
+        const hoverText = tagsDisplay !== 'None' ? `Tags: ${tagsDisplay}` : '';
+
+        // --- COD LOGIC ---
         let codBadge = '<span class="text-[10px] text-slate-300">-</span>'; 
         const dashNum = extractNum(order.id);
-        
-        // 1. GET PHONE FROM ORDER DATA (No JSON dependency for number)
-        // We check order.phone, then fallback to shipping_address.phone
         let rawPhone = order.phone || (order.shipping_address ? order.shipping_address.phone : '') || '';
         let displayPhone = String(rawPhone).replace(/^(\+91|91)/, ''); 
 
@@ -633,8 +671,6 @@ function renderOrders(o) {
         });
 
         if (codData) {
-            // Note: I removed the "Override with Phone from Sheet" block here.
-            
             const rawResponse = String(codData['Confirmation received'] || '').toUpperCase().trim();
             const status = String(codData['status'] || '').toLowerCase().trim();
 
@@ -647,12 +683,10 @@ function renderOrders(o) {
             }
         }
 
-        // --- ADDRESS CONSTRUCTION ---
+        // --- ADDRESS ---
         let detailedAddress = order.address || 'No address provided';
-        // Try to build a structured address
         if (order.shipping_address && typeof order.shipping_address === 'object') {
             const { address1, address2, city, province, zip } = order.shipping_address;
-            // Filter out undefined/null/empty strings and join with comma
             detailedAddress = [address1, address2, city, province, zip ? `(${zip})` : ''].filter(Boolean).join(', ');
         }
 
@@ -668,7 +702,6 @@ function renderOrders(o) {
                 <span title="${hoverText}" class="cursor-help border-b border-dotted border-slate-400">${order.id}</span>
                 <div class="text-[10px] text-slate-400 font-normal mt-0.5">${order.awb ? 'AWB: ' + order.awb : 'Unfulfilled'}</div>
             </td>
-            
             <td class="p-4 font-medium text-slate-800">
                 <div class="flex flex-col">
                     <div class="flex items-center">
@@ -685,17 +718,14 @@ function renderOrders(o) {
                     </div>
                 </div>
             </td>
-
             <td class="p-4">
                 <div class="flex flex-wrap w-24">
                     ${tagsHtml}
                 </div>
             </td>
-
             <td class="p-4">
                 ${codBadge}
             </td>
-
             <td class="p-4 font-medium text-slate-900">${formatCurrency(order.total)}</td>
             <td class="p-4"><span class="px-3 py-1 text-xs font-semibold rounded-full whitespace-nowrap ${getStatusBadge(order.status)}">${order.status}</span></td>
             <td class="p-4 text-right">
@@ -723,19 +753,14 @@ function renderOrders(o) {
         }).join('');
 
         let workflowHtml = '';
-        
         const tags = (order.tags || '').toLowerCase();
         const hasInProgress = tags.includes('docpharma: in-progress');
-        // Only show for Shopify and non-DocPharma
         const shouldShow = (order.platform === 'Shopify') && (!hasInProgress);
 
         if (shouldShow) {
              const status = order.status;
-             
-             // --- FIXED STATUS CHECKS ---
              const hasShipmentId = !!order.shipmentId;
              const hasAwb = !!order.awb;
-
              const isApproved = (status !== 'New') || hasShipmentId;
              const isAssigned = ['Ready To Ship', 'Shipped', 'In Transit', 'Delivered', 'RTO'].includes(status) || hasAwb;
              const isScheduled = ['Shipped', 'In Transit', 'Delivered', 'RTO'].includes(status);
@@ -748,9 +773,7 @@ function renderOrders(o) {
                             <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wide">Fulfillment Workflow</h4>
                             <span class="px-2 py-1 rounded text-[10px] font-bold uppercase ${getStatusBadge(status)}">${status}</span>
                         </div>
-                        
                         <div class="relative pl-4 border-l-2 border-slate-100 space-y-6">
-                            
                             <div class="relative">
                                 <div class="absolute -left-[21px] top-1 w-3 h-3 rounded-full ${isApproved ? 'bg-emerald-500' : 'bg-slate-300 ring-4 ring-white'}"></div>
                                 <div class="flex justify-between items-start">
@@ -761,7 +784,6 @@ function renderOrders(o) {
                                     }
                                 </div>
                             </div>
-
                             <div class="relative ${!isApproved ? 'opacity-50' : ''}">
                                 <div class="absolute -left-[21px] top-1 w-3 h-3 rounded-full ${isAssigned ? 'bg-emerald-500' : 'bg-slate-300 ring-4 ring-white'}"></div>
                                 <div class="flex justify-between items-start">
@@ -770,12 +792,11 @@ function renderOrders(o) {
                                         `<div class="text-right">
                                             <span class="text-xs font-bold text-emerald-600 block">✓ ${order.awbData?.courier || 'Assigned'}</span>
                                             <span class="text-[10px] text-slate-400 font-mono">${order.awbData?.awb || order.awb || ''}</span>
-                                         </div>` : 
+                                       </div>` : 
                                         `<button onclick="handleManualStep2('${uniqueId}')" id="btn-step2-${uniqueId}" data-original-id="${order.originalId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm transition-colors" ${!isApproved ? 'disabled' : ''}>Assign</button>`
                                     }
                                 </div>
                             </div>
-
                             <div class="relative ${!isAssigned ? 'opacity-50' : ''}">
                                 <div class="absolute -left-[21px] top-1 w-3 h-3 rounded-full ${isScheduled ? 'bg-emerald-500' : 'bg-slate-300 ring-4 ring-white'}"></div>
                                 <div class="flex justify-between items-start">
@@ -810,7 +831,7 @@ function renderOrders(o) {
                         </div>
                     </div>
                  `;
-            }
+             }
         }
 
         detailsRow.innerHTML = `
