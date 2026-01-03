@@ -1,6 +1,8 @@
 require('dotenv').config();
 const nodemailer = require('nodemailer');
 const moment = require('moment-timezone');
+const mongoose = require('mongoose'); // <--- 1. Import Mongoose
+const connectDB = require('./db');    // <--- 2. Import your DB connection file
 const { getAdsetPerformanceData } = require('./app/api/adset_performance');
 const { PDFReport } = require('./app/api/pdf_generator');
 const config = require('./config');
@@ -67,7 +69,7 @@ async function sendEmailWithAttachments(attachments, since, until) {
         const transporter = nodemailer.createTransport({
             host: emailHost,
             port: emailPort,
-            secure: emailPort === 465, // true for 465, false for other ports
+            secure: emailPort === 465, 
             auth: {
                 user: emailUser,
                 pass: emailPass
@@ -97,6 +99,16 @@ async function generateReport() {
     log("=".repeat(60));
     log("Cron job started");
     const startTime = Date.now();
+
+    // 3. CONNECT TO DATABASE HERE
+    // We wait for connection before proceeding
+    try {
+        await connectDB(); 
+        log("✅ Database connected for cron job");
+    } catch (err) {
+        log(`❌ Database connection failed: ${err.message}`);
+        process.exit(1); // Stop if no DB
+    }
 
     // Timezone Setup
     const tz = 'Asia/Kolkata';
@@ -141,9 +153,20 @@ async function generateReport() {
         log("⚠️ No PDFs generated — skipping email");
     }
 
+    // 4. DISCONNECT DATABASE (Good practice for scripts)
+    try {
+        await mongoose.connection.close();
+        log("Database connection closed");
+    } catch (e) {
+        console.error("Error closing DB:", e);
+    }
+
     const duration = (Date.now() - startTime) / 1000;
     log(`Cron job completed successfully in ${duration.toFixed(2)} seconds`);
     log("=".repeat(60));
+    
+    // Explicit exit to prevent PM2 from keeping it stuck if listeners remain
+    process.exit(0);
 }
 
 // Execute if run directly
