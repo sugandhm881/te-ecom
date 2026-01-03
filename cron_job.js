@@ -18,7 +18,7 @@ async function generatePdfBuffer(since, until, label) {
     
     try {
         // 1. Fetch Data
-        const data = await getAdsetPerformanceData(since, until, 'created_at');
+        const data = await getAdsetPerformanceData(since, until, 'order_date');
         const adsetData = data ? data.adsetPerformance : [];
 
         if (!adsetData || adsetData.length === 0) {
