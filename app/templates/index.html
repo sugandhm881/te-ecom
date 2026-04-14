@@ -315,6 +315,14 @@
                         <input type="date" id="end-date-filter" class="date-input">
                     </div>
                     <div id="platform-filters" class="flex items-center gap-2 bg-slate-100 p-1.5 rounded-full"></div>
+                    <button id="refresh-orders-btn" onclick="manualRefreshOrders()" title="Refresh Orders"
+                        class="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-slate-100 hover:bg-blue-50 hover:text-blue-600 text-slate-600 rounded-lg border border-slate-200 transition-all duration-150">
+                        <svg id="refresh-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        <span id="refresh-btn-label">Refresh</span>
+                    </button>
+                    <span id="last-synced-label" class="text-[11px] text-slate-400 hidden">Synced <span id="last-synced-time"></span></span>
                     </div>
             </header>
             

@@ -40,6 +40,18 @@ module.exports = {
     RAPIDSHYP_API_KEY: process.env.RAPIDSHYP_API_KEY,
     DOCPHARMA_API_KEY: process.env.DOCPHARMA_API_KEY,
 
+    // --- EasyEcom OMS ---
+    EASYECOM_BASE_URL: process.env.EASYECOM_BASE_URL || 'https://app.easyecom.io',
+    EASYECOM_API_KEY: process.env.EASYECOM_API_KEY,
+    EASYECOM_WH_KEY: process.env.EASYECOM_WH_KEY,
+    EASYECOM_JWT: process.env.EASYECOM_JWT,
+    EASYECOM_EMAIL: process.env.EASYECOM_EMAIL,
+    EASYECOM_PASSWORD: process.env.EASYECOM_PASSWORD,
+
+    // --- Supabase ---
+    SUPABASE_URL: process.env.SUPABASE_URL,
+    SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY,
+
     // --- Cache Files ---
     CACHE_DIR: CACHE_DIR,
     AMAZON_CACHE_FILE: path.join(CACHE_DIR, process.env.AMAZON_CACHE_FILE || 'amazon_cache.json'),

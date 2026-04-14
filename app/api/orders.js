@@ -1,153 +1,276 @@
 const express = require('express');
 const router = express.Router();
 const moment = require('moment-timezone');
-const helpers = require('./helpers');
-const { fetchAmazonOrders } = require('./amazon');
-const config = require('../../config');
+const { supabase } = require('../supabase');
+const { dbRowToDashboard } = require('./easyecom');
 
-// --- 1. IMPORT DATABASE MODELS ---
-const { Shipment, AWB, RapidShyp } = require('../../models/Schemas');
+// ─────────────────────────────────────────────────────
+// NORMALIZE: Supabase Shopify order → dashboard format
+// ─────────────────────────────────────────────────────
+function normalizeSupabaseOrder(order) {
+    const addrArr = order.order_shipping_addresses || [];
+    const addr = Array.isArray(addrArr) ? (addrArr[0] || {}) : addrArr;
+    const lineItems = order.order_line_items || [];
 
-function normalizeShopifyOrder(order) {
-    let status = (!order.fulfillment_status) ? "New" : (order.fulfillment_status === 'fulfilled' ? "Shipped" : "Processing");
-    if (order.cancelled_at) status = "Cancelled";
+    let status = (!order.fulfillment_status) ? 'New'
+        : (order.fulfillment_status === 'fulfilled' ? 'Shipped' : 'Processing');
+    if (order.cancelled_at) status = 'Cancelled';
 
-    const fulfillments = order.fulfillments || [];
-    const awb = fulfillments.find(f => f.tracking_number)?.tracking_number || null;
-    
-    if (awb && status === "New") status = "Processing";
+    const awb = order.awb_number || null;
+    if (awb && status === 'New') status = 'Processing';
 
-    const refunds = (order.refunds || []).reduce((acc, r) => {
-        return acc + (r.transactions || []).filter(t => t.kind === 'refund' && t.status === 'success')
-            .reduce((sum, t) => sum + parseFloat(t.amount || 0), 0);
-    }, 0);
+    const customerName = addr.name ||
+        `${addr.first_name || ''} ${addr.last_name || ''}`.trim() || 'N/A';
 
-    const netTotal = parseFloat(order.total_price || 0) - refunds;
-    const addr = order.shipping_address || {};
-    const customerName = `${addr.first_name || ''} ${addr.last_name || ''}`.trim() || 'N/A';
-    
     const tags = (order.tags || '').toLowerCase();
     const isRapidShyp = !tags.includes('docpharma: in-progress');
 
     return {
-        platform: "Shopify",
-        id: order.name,
-        originalId: order.id,
+        platform: 'Shopify',
+        id: order.name,                   // "#1234"
+        originalId: order.id,             // "5869437960411"
         date: moment(order.created_at).tz('Asia/Kolkata').format('DD-MM-YYYY'),
+        timestamp: moment(order.created_at).valueOf(), // <-- ADD THIS LINE
         name: customerName,
-        total: netTotal,
-        status: status,
-        items: (order.line_items || []).map(i => ({ name: i.name, sku: i.sku, qty: i.quantity })),
+        total: parseFloat(order.total_price || 0),
+        status,
+        items: lineItems.map(i => ({ name: i.title || i.name, sku: i.sku, qty: i.quantity })),
         address: `${addr.address1 || ''}, ${addr.city || ''}`.replace(/^, /, '') || 'No address',
         paymentMethod: order.financial_status === 'paid' ? 'Prepaid' : 'COD',
-        awb: awb,
-        isRapidShyp: isRapidShyp,
-        tags: order.tags
+        awb,
+        isRapidShyp,
+        tags: order.tags,
+        shipping_address: addr,
+        line_items: lineItems
     };
 }
 
+// ─────────────────────────────────────────────────────
+// NORMALIZE: Supabase Amazon order → dashboard format
+// ─────────────────────────────────────────────────────
+function normalizeSupabaseAmazonOrder(order) {
+    const addr = order.shipping_address || {};
+    const items = order.amazon_order_items || [];
+
+    let status = 'Processing';
+    const amzStatus = order.order_status || '';
+    if (['Pending', 'Unshipped'].includes(amzStatus)) status = 'New';
+    if (amzStatus === 'Shipped') status = 'Shipped';
+    if (amzStatus === 'Canceled') status = 'Cancelled';
+
+    const customerName = order.buyer_name ||
+        (addr.Name) || 'N/A';
+
+    return {
+        platform: 'Amazon',
+        id: order.amazon_order_id,
+        originalId: order.amazon_order_id,
+        date: order.purchase_date
+            ? moment(order.purchase_date).tz('Asia/Kolkata').format('DD-MM-YYYY')
+            : '',
+        timestamp: order.purchase_date ? moment(order.purchase_date).valueOf() : 0, // <-- ADD THIS LINE
+        name: customerName,
+        total: parseFloat(order.order_total_amount || 0),
+        status,
+        items: items.map(i => ({
+            name: i.title,
+            sku: i.seller_sku,
+            qty: i.quantity_ordered
+        })),
+        address: `${addr.AddressLine1 || ''}, ${addr.City || ''}`.replace(/^, /, '') || 'No address',
+        paymentMethod: order.payment_method || 'N/A',
+        awb: null
+    };
+}
+
+// ─────────────────────────────────────────────────────
+// ROUTE: GET /api/get-orders
+// Serves from Supabase (fast) — no MongoDB
+// ─────────────────────────────────────────────────────
 router.get('/get-orders', async (req, res) => {
     try {
         const thirtyDaysAgo = moment().subtract(30, 'days').toISOString();
-        const params = {
-            'status': 'any',
-            'limit': 250,
-            'created_at_min': thirtyDaysAgo,
-            'fields': 'id,name,created_at,total_price,financial_status,fulfillment_status,cancelled_at,shipping_address,line_items,tags,refunds,fulfillments,location_id'
-        };
 
-        // --- 2. FETCH ORDERS & DB CACHE IN PARALLEL ---
-        // We run all queries at once to make it faster
-        const [shopifyRaw, amazonOrders, shipmentDocs, awbDocs, trackingDocs] = await Promise.all([
-            helpers.getAllShopifyOrdersPaginated(params),
-            fetchAmazonOrders(),
-            Shipment.find().lean(),    // Fetch all shipments
-            AWB.find().lean(),         // Fetch all assignments
-            RapidShyp.find().lean()    // Fetch all tracking logs
+        // ── 1. FETCH ALL DATA IN PARALLEL ──────────────────
+        const [
+            shopifyRes,
+            amazonRes,
+            shipmentRows,
+            awbRows,
+            trackingRows,
+            easyecomRows
+        ] = await Promise.all([
+            // Shopify orders from Supabase with embedded line items + shipping address
+            supabase
+                .from('orders')
+                .select(`
+                    id, order_number, name, created_at, financial_status,
+                    fulfillment_status, total_price, cancelled_at, tags,
+                    awb_number, courier_name, tracking_status,
+                    order_line_items(id, title, name, sku, quantity, price, total_discount, tax_total),
+                    order_shipping_addresses(first_name, last_name, name, address1, address2, city, province, zip, phone)
+                `)
+                .gte('created_at', thirtyDaysAgo)
+                .order('created_at', { ascending: false })
+                .limit(500),
+
+            // Amazon orders from Supabase
+            supabase
+                .from('amazon_orders')
+                .select(`
+                    amazon_order_id, purchase_date, order_status, payment_method,
+                    buyer_name, buyer_email, order_total_amount, shipping_address,
+                    amazon_order_items(seller_sku, title, quantity_ordered)
+                `)
+                .gte('purchase_date', thirtyDaysAgo)
+                .order('purchase_date', { ascending: false })
+                .limit(200),
+
+            // Supabase workflow caches (replaces MongoDB)
+            supabase.from('shipment_cache_ecom').select('order_id, shipment_id'),
+            supabase.from('awb_cache_ecom').select('*'),
+            supabase.from('rapidshyp_tracking_ecom').select('awb, raw_status'),
+
+            // EasyEcom orders — full rows for dashboard + mapping
+            supabase
+                .from('b2c_order_easycom')
+                .select('*')
+                .gte('order_date', thirtyDaysAgo)
+                .order('order_date', { ascending: false })
+                .limit(1000)
         ]);
 
-        // --- 3. CONVERT DB ARRAYS TO OBJECT MAPS ---
-        // This rebuilds the "Cache Object" structure your code expects
-        // Format: { "ORDER_ID": { data } }
-        
+        if (shopifyRes.error) {
+            console.error('[Supabase] orders error:', shopifyRes.error.message);
+        }
+        if (amazonRes.error) {
+            console.error('[Supabase] amazon_orders error:', amazonRes.error.message);
+        }
+        if (easyecomRows.error) {
+            console.error('[Supabase] b2c_order_easycom error:', easyecomRows.error.message);
+        }
+
+        // ── 2. BUILD CACHE MAPS ────────────────────────────
+
+        // EasyEcom map: key by reference_code / store_order_id (= Shopify order name like "TE25-21532")
+        // value = { easyecom order_id (numeric), order_status }
+        const easyecomMap = {};
+        (easyecomRows.data || []).forEach(row => {
+            const keys = [row.reference_code, row.store_order_id, row.marketplace_order_id].filter(Boolean);
+            keys.forEach(k => {
+                easyecomMap[String(k).trim()] = {
+                    easyecomOrderId: String(row.order_id),
+                    easyecomStatus:  row.order_status || ''
+                };
+            });
+        });
+
         const shipmentCache = {};
-        shipmentDocs.forEach(doc => {
-            // Use _id_key (from migration) as the lookup key
-            if(doc._id_key) shipmentCache[String(doc._id_key)] = doc;
+        (shipmentRows.data || []).forEach(row => {
+            if (row.order_id) shipmentCache[String(row.order_id)] = row;
         });
 
         const awbCache = {};
-        awbDocs.forEach(doc => {
-            if(doc._id_key) awbCache[String(doc._id_key)] = doc;
+        (awbRows.data || []).forEach(row => {
+            if (row.shipment_id) awbCache[String(row.shipment_id)] = row;
         });
 
         const trackingCache = {};
-        trackingDocs.forEach(doc => {
-            if(doc._id_key) trackingCache[String(doc._id_key)] = doc;
+        (trackingRows.data || []).forEach(row => {
+            if (row.awb) trackingCache[String(row.awb)] = row;
         });
 
-        // --- 4. PROCESS ORDERS (EXISTING LOGIC) ---
-        
-        const shopifyOrders = shopifyRaw.map(o => {
-            const norm = normalizeShopifyOrder(o);
-            norm.shipping_address = o.shipping_address; 
-            norm.line_items = o.line_items;
-            return norm;
+        // ── 3. NORMALIZE ORDERS ─────────────────────────────
+        const shopifyOrders  = (shopifyRes.data || []).map(normalizeSupabaseOrder);
+        const amazonOrders   = (amazonRes.data  || []).map(normalizeSupabaseAmazonOrder);
+        const easyecomOrders = (easyecomRows.data || []).map(dbRowToDashboard);
+
+        // Merge: Start with Shopify + Amazon, then add EasyEcom-only orders
+        // (orders in EasyEcom that don't exist in Shopify by order name)
+        const shopifyNameSet = new Set(shopifyOrders.map(o => String(o.id).trim()));
+
+        // Also map EasyEcom ID onto matching Shopify orders
+        shopifyOrders.forEach(o => {
+            const ecMatch = easyecomMap[String(o.id)]
+                         || easyecomMap[String(o.id).replace('#', '')]
+                         || easyecomMap[String(o.originalId)]
+                         || null;
+            if (ecMatch) {
+                o.easyecomOrderId = ecMatch.easyecomOrderId;
+                o.easyecomStatus  = ecMatch.easyecomStatus;
+            }
         });
 
-        let allOrders = [...shopifyOrders, ...amazonOrders].sort((a, b) => new Date(b.date) - new Date(a.date));
+        // EasyEcom-only orders = those whose display ID is NOT in Shopify
+        // Shopify names have "#" prefix (e.g. "#TE25-22042"), EasyEcom reference_code doesn't
+        const easyecomOnly = easyecomOrders.filter(o => {
+            const ecId = String(o.id).trim();
+            return !shopifyNameSet.has(ecId) && !shopifyNameSet.has('#' + ecId);
+        });
 
-        // --- ENRICH STATUS ---
+        console.log(`[get-orders] Shopify: ${shopifyOrders.length}, Amazon: ${amazonOrders.length}, EasyEcom-only: ${easyecomOnly.length} (total EC: ${easyecomOrders.length})`);
+
+        let allOrders = [...shopifyOrders, ...amazonOrders, ...easyecomOnly]
+            .sort((a, b) => {
+                // Priority: Use the exact millisecond timestamp we added
+                if (a.timestamp && b.timestamp) {
+                    return b.timestamp - a.timestamp;
+                }
+
+                // Fallback: Parse DD-MM-YYYY format for sorting (if timestamp is missing)
+                const parseDate = d => {
+                    if (!d) return 0;
+                    const parts = d.split('-');
+                    if (parts.length === 3) return new Date(`${parts[2]}-${parts[1]}-${parts[0]}`).getTime();
+                    return new Date(d).getTime();
+                };
+                
+                return parseDate(b.date) - parseDate(a.date);
+            });
+
+        // ── 4. ENRICH WITH SUPABASE WORKFLOW CACHE ──────────
         allOrders = allOrders.map(order => {
-            // 1. Basic IDs
-            // Note: If shipmentCache[id] is an object (from DB), we try to use it.
-            // If your original cache was Key->String, check if doc.shipmentId exists, else use doc itself or check your Compass data.
-            let shipmentData = shipmentCache[String(order.originalId)];
-            
-            // Adjust this based on your DB data structure:
-            // If shipmentData is an object, we use its ID. If it's the ID itself, we use it.
-            let shipmentId = shipmentData ? (shipmentData.shipmentId || shipmentData.value || shipmentData._id_key) : null; 
-            
-            // Fallback: If migration saved the string as the object key, it might just be the object itself.
-            // You might need to console.log(shipmentData) to see exactly how migration saved it.
+            const shipmentData = shipmentCache[String(order.originalId)];
+            const shipmentId = shipmentData ? shipmentData.shipment_id : null;
 
-            const awbData = shipmentId ? awbCache[String(shipmentId)] : null;
-            const awbNumber = awbData ? awbData.awb : order.awb; 
+            const awbData  = shipmentId ? awbCache[String(shipmentId)] : null;
+            const awbNumber = awbData ? awbData.awb : order.awb;
 
             order.shipmentId = shipmentId;
-            order.awbData = awbData;
+            order.awbData    = awbData;
 
-            // 2. Base Status (Internal Workflow)
+            // Status from cache (overrides Supabase if more recent workflow state)
             if (order.status === 'New' || order.status === 'Processing') {
-                if (awbData && awbData.pickupScheduled) {
-                    order.status = 'Shipped'; 
+                if (awbData && awbData.pickup_scheduled) {
+                    order.status = 'Shipped';
                 } else if (awbData && awbData.awb) {
                     order.status = 'Ready To Ship';
                 } else if (shipmentId) {
                     order.status = 'Processing';
-                } else {
-                    order.status = 'New';
                 }
             }
 
-            // 3. TRACKING OVERRIDE
+            // Tracking status override from RapidShyp cache
             if (awbNumber && trackingCache[String(awbNumber)]) {
                 const track = trackingCache[String(awbNumber)];
                 const rawStatus = (track.raw_status || '').toUpperCase();
 
-                if (rawStatus.includes('RTO') || rawStatus.includes('RETURN')) {
-                    order.status = 'RTO';
-                } else if (rawStatus === 'DELIVERED') {
-                    order.status = 'Delivered';
-                } else if (rawStatus === 'OUT_FOR_DELIVERY') {
-                    order.status = 'Out For Delivery';
-                } else if (rawStatus === 'IN_TRANSIT') {
-                    order.status = 'In Transit';
-                } else if (rawStatus === 'SHIPPED') {
-                    order.status = 'Shipped';
-                } else if (rawStatus === 'PICKUP_SCHEDULED' || rawStatus === 'PICKUP_GENERATED') {
-                    order.status = 'Shipped'; 
-                }
+                if      (rawStatus.includes('RTO') || rawStatus.includes('RETURN')) order.status = 'RTO';
+                else if (rawStatus === 'DELIVERED')                                  order.status = 'Delivered';
+                else if (rawStatus === 'OUT_FOR_DELIVERY')                           order.status = 'Out For Delivery';
+                else if (rawStatus === 'IN_TRANSIT')                                 order.status = 'In Transit';
+                else if (rawStatus === 'SHIPPED')                                    order.status = 'Shipped';
+                else if (['PICKUP_SCHEDULED', 'PICKUP_GENERATED'].includes(rawStatus)) order.status = 'Shipped';
+            }
+
+            // Also use Supabase tracking_status if no cache entry
+            if (!awbNumber && order.tracking_status) {
+                const ts = (order.tracking_status || '').toUpperCase();
+                if      (ts.includes('RTO') || ts.includes('RETURN')) order.status = 'RTO';
+                else if (ts === 'DELIVERED')                           order.status = 'Delivered';
+                else if (ts === 'OUT_FOR_DELIVERY')                    order.status = 'Out For Delivery';
+                else if (ts === 'IN_TRANSIT')                          order.status = 'In Transit';
+                else if (ts === 'SHIPPED')                             order.status = 'Shipped';
             }
 
             return order;
@@ -156,7 +279,7 @@ router.get('/get-orders', async (req, res) => {
         res.json(allOrders);
 
     } catch (e) {
-        console.error("CRITICAL ERROR in get-orders:", e);
+        console.error('CRITICAL ERROR in get-orders:', e);
         res.status(500).json({ error: e.message });
     }
 });

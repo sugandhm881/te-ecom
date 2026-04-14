@@ -3,7 +3,7 @@ const router = express.Router();
 const axios = require('axios');
 const moment = require('moment-timezone');
 const config = require('../../config');
-const { Order } = require('../../models/Schemas'); // Import DB
+const { supabase } = require('../supabase');
 
 async function getFacebookDailySpend(since, until) {
     const url = `https://graph.facebook.com/v18.0/act_${config.FACEBOOK_AD_ACCOUNT_ID}/insights`;
@@ -28,16 +28,21 @@ async function getFacebookDailySpend(since, until) {
     }
 }
 
-// REPLACED: Fetch from DB instead of Shopify API
+// Fetch from Supabase enriched_orders_ecom
 async function getShopifyOrdersForAds(since) {
     try {
-        // Query DB for all orders created after 'since'
-        const orders = await Order.find({
-            created_at: { $gte: moment(since).toISOString() }
-        }).lean();
-        return orders;
+        const { data, error } = await supabase
+            .from('enriched_orders_ecom')
+            .select('shopify_id, name, created_at, total_price, fulfillment_status, cancelled_at, tags, raw_rapidshyp_status')
+            .gte('created_at', moment(since).toISOString());
+
+        if (error) {
+            console.error("Supabase Fetch Error in ad performance:", error.message);
+            return [];
+        }
+        return data || [];
     } catch (e) {
-        console.error("DB Fetch Error in ad performance:", e);
+        console.error("Supabase Fetch Error in ad performance:", e.message);
         return [];
     }
 }
@@ -46,8 +51,7 @@ function getSimulatedLogisticsStatus(order) {
     if (order.cancelled_at) return 'Cancelled';
     const tags = (order.tags || '').toLowerCase();
     if (tags.includes('rto')) return 'RTO';
-    
-    // Use our new enriched status if available
+
     if (order.raw_rapidshyp_status) {
         const s = order.raw_rapidshyp_status.toUpperCase();
         if (s.includes('DELIVERED')) return 'Delivered';
@@ -56,7 +60,7 @@ function getSimulatedLogisticsStatus(order) {
     }
 
     if (order.fulfillment_status === 'fulfilled') {
-        return 'In-Transit'; // Default if fulfilled but no detailed status
+        return 'In-Transit';
     }
     return 'Processing';
 }
@@ -76,7 +80,7 @@ router.get('/get-ad-performance', async (req, res) => {
         const dailyData = {};
         const startDate = moment(since);
         const endDate = moment(until);
-        
+
         for (let m = moment(startDate); m.isSameOrBefore(endDate); m.add(1, 'days')) {
             const dateStr = m.format('YYYY-MM-DD');
             dailyData[dateStr] = {
@@ -91,7 +95,7 @@ router.get('/get-ad-performance', async (req, res) => {
             if (dailyData[date]) dailyData[date].spend = facebookSpend[date];
         });
 
-        // Merge Shopify (From DB)
+        // Merge Shopify (From Supabase)
         shopifyOrders.forEach(order => {
             const orderDate = moment(order.created_at).format('YYYY-MM-DD');
             if (dailyData[orderDate]) {

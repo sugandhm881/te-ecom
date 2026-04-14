@@ -2,8 +2,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const moment = require('moment-timezone');
 const config = require('../../config');
-// IMPORT DB MODEL
-const { RapidShyp } = require('../../models/Schemas');
+const { supabase } = require('../supabase');
 
 // --- Global Cache (Memory only for tokens) ---
 let lwaTokenCache = { token: null, expiresAt: 0 };
@@ -188,18 +187,22 @@ async function makeSignedApiRequest(options, maxRetries = 5) {
     }
 }
 
-// --- RAPIDSHYP FUNCTIONS (UPDATED TO DB) ---
-// Now checks DB instead of passed-in 'cache' object
-async function getRawRapidshypStatus(awb, unusedCacheVar) {
+// --- RAPIDSHYP FUNCTIONS (SUPABASE) ---
+async function getRawRapidshypStatus(awb) {
     const now = Date.now() / 1000;
-    
-    // 1. CHECK DATABASE
+
+    // 1. CHECK SUPABASE CACHE
     try {
-        const entry = await RapidShyp.findOne({ _id_key: awb }).lean();
+        const { data: entry } = await supabase
+            .from('rapidshyp_tracking_ecom')
+            .select('raw_status, last_checked')
+            .eq('awb', awb)
+            .single();
+
         if (entry) {
-            const cachedStatus = (entry.raw_status || entry.status || '').toUpperCase();
-            const lastChecked = entry.timestamp || 0;
-            
+            const cachedStatus = (entry.raw_status || '').toUpperCase();
+            const lastChecked = entry.last_checked || 0;
+
             // Return cached if Delivered/RTO or fresh (<1 hour)
             if (['DELIVERED', 'RTO', 'RTO_DELIVERED'].some(s => cachedStatus.includes(s)) || (now - lastChecked) < 3600) {
                 return entry.raw_status;
@@ -215,22 +218,23 @@ async function getRawRapidshypStatus(awb, unusedCacheVar) {
         try {
             const res = await rapidshypSession.post(url, { awb }, { headers });
             const data = res.data;
-            
+
             if (data.success && data.records) {
                 const shipment = data.records[0].shipment_details ? data.records[0].shipment_details[0] : {};
                 const rawStatus = shipment.shipment_status || shipment.current_tracking_status_desc || shipment.current_tracking_status || 'Status Not Available';
-                
-                // 3. SAVE TO DATABASE
-                await RapidShyp.updateOne(
-                    { _id_key: awb }, 
-                    { $set: { raw_status: rawStatus, timestamp: now } },
-                    { upsert: true }
-                );
+
+                // 3. SAVE TO SUPABASE
+                await supabase.from('rapidshyp_tracking_ecom').upsert({
+                    awb,
+                    raw_status: rawStatus,
+                    last_checked: now,
+                    updated_at: new Date().toISOString()
+                }, { onConflict: 'awb' });
 
                 return rawStatus;
             }
         } catch (e) {
-            if (e.response && e.response.status === 400) return null; 
+            if (e.response && e.response.status === 400) return null;
             if (attempt >= 2) break;
             await sleep(1000 * (attempt + 1));
         }

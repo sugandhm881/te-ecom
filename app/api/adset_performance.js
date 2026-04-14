@@ -5,9 +5,7 @@ const moment = require('moment-timezone');
 const config = require('../../config');
 const helpers = require('./helpers');
 const { tokenRequired } = require('../auth');
-
-// IMPORT DB MODEL
-const { Order } = require('../../models/Schemas');
+const { supabase } = require('../supabase');
 
 const UNATTRIBUTED_ID = 'unattributed';
 
@@ -74,24 +72,36 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
     const startDate = moment(since).startOf('day').toISOString();
     const endDate = moment(until).endOf('day').toISOString();
 
-    // 1. BUILD MONGODB QUERY
-    let query = {};
-    
-    // Adjust query based on filter type
+    // 1. BUILD SUPABASE QUERY
+    let query = supabase.from('enriched_orders_ecom').select('*');
+
     if (dateFilterType === 'shipped_date') {
-        query.shipped_at = { $gte: startDate, $lte: endDate };
+        query = query.gte('shipped_at', startDate).lte('shipped_at', endDate);
     } else if (dateFilterType === 'delivered_date') {
-        query.delivered_at = { $gte: startDate, $lte: endDate };
+        query = query.gte('delivered_at', startDate).lte('delivered_at', endDate);
     } else {
-        // Default to created_at
-        query.created_at = { $gte: startDate, $lte: endDate };
+        query = query.gte('created_at', startDate).lte('created_at', endDate);
     }
 
-    // 2. FETCH FROM DB
-    const shopifyOrdersInRange = await Order.find(query).lean();
+    // 2. FETCH FROM SUPABASE
+    const { data: shopifyOrdersInRange, error } = await query;
+    if (error) {
+        console.error('[Supabase] enriched_orders_ecom fetch error:', error.message);
+    }
+
+    const orders = (shopifyOrdersInRange || []).map(row => ({
+        ...row.order_data,
+        ...row,
+        total_price: row.total_price,
+        raw_rapidshyp_status: row.raw_rapidshyp_status,
+        docpharma_data: row.docpharma_data,
+        note_attributes: row.note_attributes || [],
+        source_name: row.source_name,
+        referring_site: row.referring_site
+    }));
 
     const fbAds = await getFacebookAds(since, until);
-    
+
     const performanceData = {};
     const fbAdMap = {};
     fbAds.forEach(ad => fbAdMap[ad.ad_id] = ad);
@@ -107,13 +117,12 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
 
     const adsetDeliveredRevenueTotals = {};
 
-    shopifyOrdersInRange.forEach(order => {
-        // Use helper logic for attribution
+    orders.forEach(order => {
         const [source, term] = helpers.getOrderSourceTerm(order);
         const rawStatus = order.raw_rapidshyp_status;
         const docpharmaData = order.docpharma_data;
-        
-        const status = helpers.normalizeStatus ? helpers.normalizeStatus(order, rawStatus, docpharmaData) : 'Processing'; 
+
+        const status = helpers.normalizeStatus ? helpers.normalizeStatus(order, rawStatus, docpharmaData) : 'Processing';
 
         let adsetBucket = null;
         let termBucket = null;
@@ -153,7 +162,7 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
         if ((adset.totalOrders || 0) > 0 || adset.spend > 0) {
             const termsArray = Object.values(adset.terms).filter(t => (t.totalOrders || 0) > 0 || (t.spend || 0) > 0);
             termsArray.sort((a, b) => (b.totalOrders || 0) - (a.totalOrders || 0));
-            adset.terms = termsArray; 
+            adset.terms = termsArray;
             result.push(adset);
         }
     });

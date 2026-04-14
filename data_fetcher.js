@@ -1,15 +1,11 @@
 const moment = require('moment-timezone');
 const pLimit = require('p-limit').default || require('p-limit');
 const helpers = require('./app/api/helpers');
-const config = require('./config');
-const mongoose = require('mongoose');
-const connectDB = require('./db'); 
-const { Order } = require('./models/Schemas'); 
+const { supabase } = require('./app/supabase');
 
-const limit = pLimit(10); 
+const limit = pLimit(10);
 
-async function enrichOrder(order, statusCache) {
-    // Standard enrichment logic...
+async function enrichOrder(order) {
     const fulfillments = order.fulfillments || [];
     const awb = fulfillments.find(f => f.tracking_number)?.tracking_number;
     order.awb = awb;
@@ -19,7 +15,7 @@ async function enrichOrder(order, statusCache) {
 
     // 1. Try RapidShyp
     if (awb) {
-        rawStatus = await helpers.getRawRapidshypStatus(awb, statusCache);
+        rawStatus = await helpers.getRawRapidshypStatus(awb);
         if (rawStatus && rawStatus !== 'Status Not Available' && rawStatus !== 'API Error or Timeout') {
             timeline = await helpers.getRapidshypTimeline(awb);
         }
@@ -51,7 +47,7 @@ async function enrichOrder(order, statusCache) {
 
     const shippedDt = helpers.inferShippedDatetime(order);
     const deliveredDt = helpers.inferDeliveredDatetime(order);
-    
+
     if (shippedDt) order.shipped_at = shippedDt.toISOString();
     if (deliveredDt) order.delivered_at = deliveredDt.toISOString();
 
@@ -60,26 +56,20 @@ async function enrichOrder(order, statusCache) {
 
 async function runDataSync() {
     helpers.log("=".repeat(70));
-    helpers.log("Starting Data Sync Job (Duplicate Protected)");
-
-    if (mongoose.connection.readyState === 0) {
-        await connectDB();
-    }
+    helpers.log("Starting Data Sync Job (Supabase)");
 
     const fetchSince = moment().subtract(180, 'days').toISOString();
     helpers.log(`Fetching Shopify orders since ${fetchSince}`);
 
-    const fields = 'id,name,created_at,total_price,fulfillments,note_attributes,source_name,referring_site,cancelled_at,fulfillment_status,line_items,email,shipping_address,updated_at';
-    
+    const fields = 'id,name,created_at,total_price,fulfillments,note_attributes,source_name,referring_site,cancelled_at,fulfillment_status,line_items,email,shipping_address,updated_at,tags';
+
     // Step 1: Fetch
     const [createdOrders, updatedOrders] = await Promise.all([
         helpers.getAllShopifyOrdersPaginated({ status: 'any', limit: 250, created_at_min: fetchSince, fields }),
         helpers.getAllShopifyOrdersPaginated({ status: 'any', limit: 250, updated_at_min: fetchSince, fields })
     ]);
 
-    // Step 2: Merge locally (LAYER 1 DEDUPLICATION)
-    // We use an Object where Key = Order ID. Objects cannot have duplicate keys.
-    // This automatically removes any duplicates returned by Shopify.
+    // Step 2: Merge locally (deduplication)
     const allRecentOrders = {};
     createdOrders.forEach(o => allRecentOrders[String(o.id)] = o);
     updatedOrders.forEach(o => allRecentOrders[String(o.id)] = o);
@@ -89,11 +79,10 @@ async function runDataSync() {
 
     // Step 3: Enrich
     helpers.log(`Step 3: Enriching orders (Concurrency: 10)...`);
-    let statusCache = {}; 
     let completedCount = 0;
-    
-    const enrichPromises = allOrdersList.map(order => 
-        limit(() => enrichOrder(order, statusCache).then(res => {
+
+    const enrichPromises = allOrdersList.map(order =>
+        limit(() => enrichOrder(order).then(res => {
             completedCount++;
             if (completedCount % 100 === 0) process.stdout.write(`\rEnriched ${completedCount}/${allOrdersList.length}`);
             return res;
@@ -103,38 +92,60 @@ async function runDataSync() {
     const enrichedOrders = await Promise.all(enrichPromises);
     helpers.log(`\n✓ Enriched all orders`);
 
-    // Step 4: Bulk Save (LAYER 2 & 3 DEDUPLICATION)
-    helpers.log("Step 4: Saving to Database...");
-    
+    // Step 4: Bulk Save to Supabase enriched_orders_ecom
+    helpers.log("Step 4: Saving to Supabase...");
+
     if (enrichedOrders.length > 0) {
-        
-        // Final Safety Check: Ensure enrichedOrders has unique IDs before creating bulkOps
+        // Deduplicate by ID
         const uniqueOrdersMap = new Map();
         enrichedOrders.forEach(o => uniqueOrdersMap.set(String(o.id), o));
         const finalUniqueOrders = Array.from(uniqueOrdersMap.values());
 
-        const bulkOps = finalUniqueOrders.map(order => ({
-            updateOne: {
-                // FILTER: This ensures we match the exact order ID in the DB
-                filter: { id: order.id },
-                // UPDATE: Updates the existing record
-                update: { $set: order },
-                // UPSERT: Create only if it doesn't exist
-                upsert: true
-            }
+        // Transform to Supabase rows
+        const rows = finalUniqueOrders.map(order => ({
+            shopify_id: String(order.id),
+            name: order.name || null,
+            created_at: order.created_at || null,
+            total_price: parseFloat(order.total_price || 0),
+            fulfillment_status: order.fulfillment_status || null,
+            cancelled_at: order.cancelled_at || null,
+            tags: order.tags || null,
+            awb: order.awb || null,
+            raw_rapidshyp_status: order.raw_rapidshyp_status || null,
+            rapidshyp_webhook_status: order.rapidshyp_webhook_status || null,
+            rapidshyp_events: order.rapidshyp_events || [],
+            shipped_at: order.shipped_at || null,
+            delivered_at: order.delivered_at || null,
+            docpharma_data: order.docpharma_data || null,
+            email: order.email || null,
+            phone: (order.shipping_address || {}).phone || null,
+            source_name: order.source_name || null,
+            referring_site: order.referring_site || null,
+            note_attributes: order.note_attributes || [],
+            line_items: order.line_items || [],
+            shipping_address: order.shipping_address || null,
+            fulfillments: order.fulfillments || [],
+            order_data: order,
+            updated_at: new Date().toISOString()
         }));
 
-        // Batch processing to prevent freeze
+        // Batch upsert
         const BATCH_SIZE = 500;
         let savedCount = 0;
 
-        for (let i = 0; i < bulkOps.length; i += BATCH_SIZE) {
-            const chunk = bulkOps.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+            const chunk = rows.slice(i, i + BATCH_SIZE);
             try {
-                // This command tells MongoDB to update-or-insert, preventing duplicates
-                await Order.bulkWrite(chunk);
-                savedCount += chunk.length;
-                process.stdout.write(`\rSaving (Upserting)... ${savedCount}/${bulkOps.length}`);
+                const { error } = await supabase
+                    .from('enriched_orders_ecom')
+                    .upsert(chunk, { onConflict: 'shopify_id' });
+
+                if (error) {
+                    console.error(`\n❌ Error saving batch ${i}: ${error.message}`);
+                } else {
+                    savedCount += chunk.length;
+                    process.stdout.write(`\rSaving (Upserting)... ${savedCount}/${rows.length}`);
+                }
             } catch (e) {
                 console.error(`\n❌ Error saving batch ${i}: ${e.message}`);
             }
@@ -145,8 +156,8 @@ async function runDataSync() {
     }
 
     helpers.log("Data Sync Job Finished Successfully");
-    helpers.log("=" .repeat(70));
-    
+    helpers.log("=".repeat(70));
+
     process.exit(0);
 }
 

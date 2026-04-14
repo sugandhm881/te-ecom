@@ -1,7 +1,7 @@
 const moment = require('moment-timezone');
 const helpers = require('./helpers');
 const config = require('../../config');
-const { Order } = require('../../models/Schemas');
+const { supabase } = require('../supabase');
 
 const CACHE_DURATION_SECONDS = 30 * 60; // 30 mins
 
@@ -32,15 +32,21 @@ function normalizeAmazonOrder(order) {
 }
 
 async function fetchAmazonOrders() {
-    // 1. Check DB Cache logic...
+    // 1. Check Supabase cache
     try {
-        const lastAmazonOrder = await Order.findOne({ platform: 'Amazon' }).sort({ updated_at: -1 });
-        if (lastAmazonOrder) {
-            const lastUpdate = moment(lastAmazonOrder.updated_at);
+        const { data: cachedOrders } = await supabase
+            .from('amazon_orders')
+            .select('*')
+            .order('purchase_date', { ascending: false })
+            .limit(1);
+
+        if (cachedOrders && cachedOrders.length > 0) {
+            const lastUpdate = moment(cachedOrders[0].updated_at || cachedOrders[0].purchase_date);
             const now = moment();
             if (now.diff(lastUpdate, 'seconds') < CACHE_DURATION_SECONDS) {
                 console.log(`\n--- [Amazon DB] Using cached data (< 30m old) ---`);
-                return await Order.find({ platform: 'Amazon' }).lean();
+                const { data } = await supabase.from('amazon_orders').select('*');
+                return data || [];
             }
         }
     } catch (e) { /* ignore */ }
@@ -88,34 +94,11 @@ async function fetchAmazonOrders() {
 
         // Normalize
         const normalized = allOrders.map(normalizeAmazonOrder);
-        
-        // --- BATCHED SAVING (Chunk Size 500) ---
-        if (normalized.length > 0) {
-            const bulkOps = normalized.map(order => ({
-                updateOne: {
-                    filter: { id: order.id }, // Deduplication Key: Amazon Order ID
-                    update: { 
-                        $set: { ...order, updated_at: new Date().toISOString() } 
-                    },
-                    upsert: true
-                }
-            }));
-
-            const BATCH_SIZE = 500;
-            for (let i = 0; i < bulkOps.length; i += BATCH_SIZE) {
-                const chunk = bulkOps.slice(i, i + BATCH_SIZE);
-                try {
-                    await Order.bulkWrite(chunk);
-                } catch (e) { console.error(`Amazon batch save error: ${e.message}`); }
-            }
-            console.log(`[Amazon] Saved/Updated ${normalized.length} orders in DB.`);
-        }
-
         return normalized;
 
     } catch (e) {
         console.error("Error fetching Amazon orders:", e.message);
-        return await Order.find({ platform: 'Amazon' }).lean();
+        return [];
     }
 }
 

@@ -2,21 +2,14 @@
 require('dotenv').config();
 const { google } = require('googleapis');
 const path = require('path');
-const mongoose = require('mongoose');
-const connectDB = require('./db');
-const { CODConfirmation } = require('./models/Schemas');
+const { supabase } = require('./app/supabase');
 
 // --- CONFIGURATION ---
-const SPREADSHEET_ID = '1NEmtD6rWngYIXt9KcX7-tAjwxNZmmvf_3QLPBwmj2j8'; 
-const RANGE = 'Sheet1!A:Z'; 
+const SPREADSHEET_ID = '1NEmtD6rWngYIXt9KcX7-tAjwxNZmmvf_3QLPBwmj2j8';
+const RANGE = 'Sheet1!A:Z';
 
 async function fetchSheetData() {
     console.log(`[${new Date().toLocaleTimeString()}] 🔐 Authenticating with Google...`);
-
-    // Ensure DB Connection
-    if (mongoose.connection.readyState === 0) {
-        await connectDB();
-    }
 
     try {
         let authOptions;
@@ -53,58 +46,69 @@ async function fetchSheetData() {
         const headers = rows[0];
         const dataRows = rows.slice(1);
 
-        // Map rows to Operations
-        const bulkOps = dataRows.map((row) => {
-            let obj = {};
+        // Build records for Supabase upsert
+        const records = [];
+        for (const row of dataRows) {
+            const obj = {};
             headers.forEach((header, index) => {
                 let cleanHeader = header.trim();
                 let value = row[index] !== undefined ? row[index] : "";
-                
+
                 if (cleanHeader === "Shipping Phone Number") {
-                    value = String(value).replace(/[^0-9]/g, ''); 
+                    value = String(value).replace(/[^0-9]/g, '');
                 }
                 obj[cleanHeader] = value;
             });
 
             // DEFINE UNIQUE KEY: Use Order ID or Phone Number as the unique identifier
             const uniqueKey = obj["Order Name"] || obj["Order ID"] || obj["Shipping Phone Number"];
-            
-            if (uniqueKey) {
-                return {
-                    updateOne: {
-                        filter: { _id_key: uniqueKey }, // Database Unique Key
-                        update: { $set: { ...obj, _id_key: uniqueKey } },
-                        upsert: true // Insert if not exists, Update if exists
-                    }
-                };
-            }
-            return null;
-        }).filter(op => op !== null);
 
-        // --- BATCHED SAVING (Safe for Large Data) ---
-        if (bulkOps.length > 0) {
+            if (uniqueKey) {
+                records.push({
+                    id_key: uniqueKey,
+                    data: obj,
+                    updated_at: new Date().toISOString()
+                });
+            }
+        }
+
+        // --- DEDUPLICATE by id_key (keep last occurrence = latest row in sheet) ---
+        const deduped = new Map();
+        for (const rec of records) {
+            deduped.set(rec.id_key, rec);
+        }
+        const uniqueRecords = Array.from(deduped.values());
+        console.log(`📦 ${records.length} rows → ${uniqueRecords.length} unique records`);
+
+        // --- BATCHED SAVING TO SUPABASE ---
+        if (uniqueRecords.length > 0) {
             const BATCH_SIZE = 500;
             let savedCount = 0;
 
-            console.log(`📦 Processing ${bulkOps.length} records in batches...`);
-
-            for (let i = 0; i < bulkOps.length; i += BATCH_SIZE) {
-                const chunk = bulkOps.slice(i, i + BATCH_SIZE);
+            for (let i = 0; i < uniqueRecords.length; i += BATCH_SIZE) {
+                const chunk = uniqueRecords.slice(i, i + BATCH_SIZE);
                 try {
-                    await CODConfirmation.bulkWrite(chunk);
-                    savedCount += chunk.length;
-                    process.stdout.write(`\r   → Saved ${savedCount}/${bulkOps.length}`);
+                    const { error } = await supabase
+                        .from('cod_confirmations_ecom')
+                        .upsert(chunk, { onConflict: 'id_key' });
+
+                    if (error) {
+                        console.error(`\n❌ Error saving batch ${i}: ${error.message}`);
+                    } else {
+                        savedCount += chunk.length;
+                        process.stdout.write(`\r   → Saved ${savedCount}/${uniqueRecords.length}`);
+                    }
                 } catch (e) {
                     console.error(`\n❌ Error saving batch ${i}: ${e.message}`);
                 }
             }
-            console.log(`\n✅ Success! Updated DB with ${bulkOps.length} records.`);
+            console.log(`\n✅ Success! Updated Supabase with ${uniqueRecords.length} records.`);
         }
 
     } catch (error) {
         console.error("❌ Error:", error.message);
     }
-    
+
     // Close if run directly
     if (require.main === module) {
         process.exit(0);

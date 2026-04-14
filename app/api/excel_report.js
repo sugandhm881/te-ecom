@@ -2,10 +2,9 @@ const express = require('express');
 const router = express.Router();
 const ExcelJS = require('exceljs');
 const moment = require('moment');
-const config = require('../../config');
 const helpers = require('./helpers');
 const { tokenRequired } = require('../auth');
-const { Order } = require('../../models/Schemas'); // Import DB
+const { supabase } = require('../supabase');
 
 router.get('/download-excel-report', tokenRequired, async (req, res) => {
     const { since, until, date_filter_type = 'order_date' } = req.query;
@@ -13,14 +12,32 @@ router.get('/download-excel-report', tokenRequired, async (req, res) => {
     const endDate = moment(until).endOf('day').toISOString();
 
     try {
-        // 1. Build Query
-        let query = {};
-        if (date_filter_type === 'shipped_date') query.shipped_at = { $gte: startDate, $lte: endDate };
-        else if (date_filter_type === 'delivered_date') query.delivered_at = { $gte: startDate, $lte: endDate };
-        else query.created_at = { $gte: startDate, $lte: endDate };
+        // 1. Build Supabase query
+        let query = supabase.from('enriched_orders_ecom').select('*');
 
-        // 2. Fetch from DB
-        const filteredOrders = await Order.find(query).lean();
+        if (date_filter_type === 'shipped_date') {
+            query = query.gte('shipped_at', startDate).lte('shipped_at', endDate);
+        } else if (date_filter_type === 'delivered_date') {
+            query = query.gte('delivered_at', startDate).lte('delivered_at', endDate);
+        } else {
+            query = query.gte('created_at', startDate).lte('created_at', endDate);
+        }
+
+        // 2. Fetch from Supabase
+        const { data: rows, error } = await query;
+        if (error) {
+            console.error('[Supabase] enriched_orders_ecom fetch error:', error.message);
+        }
+
+        // Reconstruct order objects from enriched_orders_ecom
+        const filteredOrders = (rows || []).map(row => ({
+            ...row.order_data,
+            ...row,
+            note_attributes: row.note_attributes || [],
+            line_items: row.line_items || [],
+            shipping_address: row.shipping_address || {},
+            fulfillments: row.fulfillments || []
+        }));
 
         const fbAds = await helpers.getFacebookAds(since, until);
         const fbAdMap = {};
@@ -36,7 +53,7 @@ router.get('/download-excel-report', tokenRequired, async (req, res) => {
             "City", "State", "Pincode", "Products (SKU x Qty)",
             "Attribution Source", "UTM Term", "Ad Set Name", "Ad Name", "Campaign Name"
         ];
-        
+
         const headerRow = sheet.addRow(headers);
         headerRow.eachCell(cell => {
             cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -47,7 +64,7 @@ router.get('/download-excel-report', tokenRequired, async (req, res) => {
         filteredOrders.forEach(order => {
             const noteAttrs = {};
             (order.note_attributes || []).forEach(attr => noteAttrs[attr.name] = attr.value);
-            
+
             let source = 'direct', term = 'direct';
             const [s, t] = helpers.getOrderSourceTerm(order);
             source = s; term = t;

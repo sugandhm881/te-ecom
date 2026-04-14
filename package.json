@@ -7,6 +7,7 @@
     "sync": "node data_fetcher.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.101.1",
     "async-lock": "^1.4.1",
     "axios": "^1.13.2",
     "cors": "^2.8.5",
@@ -19,7 +20,6 @@
     "googleapis": "^169.0.0",
     "jsonwebtoken": "^9.0.3",
     "moment-timezone": "^0.5.43",
-    "mongoose": "^9.0.2",
     "nodemailer": "^7.0.12",
     "p-limit": "^3.1.0",
     "pdfkit": "^0.17.2"

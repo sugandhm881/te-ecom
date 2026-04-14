@@ -193,7 +193,63 @@ async function fetchApiData(endpoint, errorMessage, options = {}) {
     }
 }
 
+// Shopify order data enriched with EasyEcom order IDs for confirm/approve.
 const fetchOrdersFromServer = () => fetchApiData(`/get-orders`, 'Failed to fetch orders.');
+
+// --- Silent background refresh (auto every 1 min) ---
+async function silentRefreshOrders() {
+    if (!['orders-dashboard', 'order-insights'].includes(currentView)) return;
+    try {
+        // Sync EasyEcom orders first
+        await fetchApiData('/easyecom/get-orders?days=7', '').catch(() => {});
+        await Promise.all([
+            fetchOrdersFromServer().then(data => { allOrders = data; }),
+            fetchCodConfirmations()
+        ]);
+        if (currentView === 'orders-dashboard') renderAllDashboard();
+        else renderAllInsights();
+        updateLastSyncedLabel();
+    } catch (e) {
+        console.error('Auto-refresh failed:', e);
+    }
+}
+
+// --- Manual refresh (button click) ---
+async function manualRefreshOrders() {
+    const btn   = document.getElementById('refresh-orders-btn');
+    const icon  = document.getElementById('refresh-icon');
+    const label = document.getElementById('refresh-btn-label');
+    if (btn) btn.disabled = true;
+    if (icon) icon.classList.add('animate-spin');
+    if (label) label.textContent = 'Syncing...';
+    try {
+        // Sync EasyEcom orders first, then fetch all orders
+        await fetchApiData('/easyecom/get-orders?days=7', 'EasyEcom sync failed').catch(() => {});
+        await Promise.all([
+            fetchOrdersFromServer().then(data => { allOrders = data; }),
+            fetchCodConfirmations()
+        ]);
+        if (currentView === 'orders-dashboard') renderAllDashboard();
+        else renderAllInsights();
+        updateLastSyncedLabel();
+        showNotification('Orders refreshed.');
+    } catch (e) {
+        showNotification('Refresh failed.', true);
+    } finally {
+        if (btn) btn.disabled = false;
+        if (icon) icon.classList.remove('animate-spin');
+        if (label) label.textContent = 'Refresh';
+    }
+}
+
+function updateLastSyncedLabel() {
+    const wrap = document.getElementById('last-synced-label');
+    const time = document.getElementById('last-synced-time');
+    if (!wrap || !time) return;
+    const now = new Date();
+    time.textContent = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    wrap.classList.remove('hidden');
+}
 const fetchAdPerformanceData = (since, until) => fetchApiData(`/get-ad-performance?since=${since}&until=${until}`, 'Failed to fetch ad performance.');
 const fetchAdsetPerformanceData = (endpoint) => fetchApiData(endpoint, 'Failed to fetch ad set performance.');
 
@@ -300,51 +356,12 @@ function navigate(view) {
     }
 }
 
-// --- CHECK SHIPMENT STATUS ---
-async function checkAndUpdateWorkflow(originalOrderId, uniqueId) {
-    const step1 = document.getElementById(`step1-container-${uniqueId}`);
-    const step2 = document.getElementById(`step2-container-${uniqueId}`);
-    const input = document.getElementById(`shipment-id-${uniqueId}`);
-    const msgEl = document.getElementById(`msg-${uniqueId}`);
-
-    if (!step1 || !input || input.value) return; 
-
-    msgEl.textContent = "Checking status...";
-    try {
-        const res = await fetchApiData('/get-shipment-status', "Status Check Failed", {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ orderId: originalOrderId })
-        });
-
-        if (res.shipmentId) {
-            input.value = res.shipmentId;
-            if (res.awbAssigned) {
-                document.getElementById(`step1-container-${uniqueId}`).classList.add('hidden');
-                document.getElementById(`step2-container-${uniqueId}`).classList.add('hidden');
-                document.getElementById(`step3-container-${uniqueId}`).classList.remove('opacity-50', 'pointer-events-none');
-                msgEl.textContent = "Assigned. Ready to Download.";
-                msgEl.className = "mt-3 text-xs font-bold text-center text-emerald-600";
-            } else {
-                const btn1 = document.getElementById(`btn-step1-${uniqueId}`);
-                if(btn1) {
-                    btn1.textContent = "Approved";
-                    btn1.className = "px-3 py-1 bg-emerald-100 text-emerald-700 text-xs font-bold rounded cursor-default";
-                    btn1.disabled = true;
-                }
-                if(step2) step2.classList.remove('opacity-50', 'pointer-events-none');
-                const btn2 = document.getElementById(`btn-step2-${uniqueId}`);
-                if(btn2) btn2.dataset.originalId = originalOrderId;
-                msgEl.textContent = "Approved. Proceed to Assign.";
-                msgEl.className = "mt-3 text-xs font-medium text-center text-indigo-600";
-            }
-        } else { msgEl.textContent = ""; }
-    } catch (e) { msgEl.textContent = ""; }
-}
+// checkAndUpdateWorkflow removed — EasyEcom handles order processing now
 
 // --- DASHBOARD FILTERS RENDERING (Added COD Filter) ---
 function renderDashboardFilters() {
     // 1. Platform Buttons
-    platformFiltersEl.innerHTML = ['All', 'Amazon', 'Shopify'].map(p => 
+    platformFiltersEl.innerHTML = ['All', 'Shopify', 'Amazon'].map(p =>
         `<button data-filter="${p}" class="filter-btn px-3 py-1 text-sm rounded-md ${activePlatformFilter===p ? 'active' : ''}">${p}</button>`
     ).join('');
     
@@ -671,15 +688,19 @@ function renderOrders(o) {
         });
 
         if (codData) {
-            const rawResponse = String(codData['Confirmation received'] || '').toUpperCase().trim();
-            const status = String(codData['status'] || '').toLowerCase().trim();
+            // Try multiple possible column names for confirmation field (match sheet header exactly)
+            const confirmVal = codData['Confirmation received'] || codData['Confirmation Received']
+                || codData['COD Confirmation'] || codData['Confirmation'] || codData['Response']
+                || codData['COD Status'] || codData['Status'] || '';
+            const rawResponse = String(confirmVal).toUpperCase().trim();
 
-            if (['CONFIRM', 'YES', 'CONFIRMED', 'OK'].includes(rawResponse)) {
+            if (['CONFIRM', 'YES', 'CONFIRMED', 'OK', 'Y'].includes(rawResponse)) {
                 codBadge = `<span class="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-bold text-emerald-700 bg-emerald-100 rounded border border-emerald-200 uppercase tracking-wide">✓ Confirmed</span>`;
-            } else if (['CANCEL', 'NO', 'REJECT'].includes(rawResponse)) {
+            } else if (['CANCEL', 'NO', 'REJECT', 'REJECTED', 'N'].includes(rawResponse)) {
                 codBadge = `<span class="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-bold text-rose-700 bg-rose-100 rounded border border-rose-200 uppercase tracking-wide">Cancelled</span>`;
-            } else if (status === 'success' || status === 'read') {
-                 codBadge = `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-amber-600 bg-amber-50 rounded border border-amber-200">Waiting...</span>`;
+            } else {
+                // Order found in sheet but confirmation pending / unknown value
+                codBadge = `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-amber-600 bg-amber-50 rounded border border-amber-200">Waiting...</span>`;
             }
         }
 
@@ -759,78 +780,42 @@ function renderOrders(o) {
 
         if (shouldShow) {
              const status = order.status;
-             const hasShipmentId = !!order.shipmentId;
-             const hasAwb = !!order.awb;
-             const isApproved = (status !== 'New') || hasShipmentId;
-             const isAssigned = ['Ready To Ship', 'Shipped', 'In Transit', 'Delivered', 'RTO'].includes(status) || hasAwb;
-             const isScheduled = ['Shipped', 'In Transit', 'Delivered', 'RTO'].includes(status);
-             const labelUrl = order.awbData?.label || '';
+
+             const isConfirmed = order.easyecomStatus && !['new', 'unconfirmed', 'open', ''].includes((order.easyecomStatus || '').toLowerCase());
+             const hasEasyecomId = !!order.easyecomOrderId;
 
              if (status !== 'Cancelled') {
                 workflowHtml = `
                     <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mt-2">
                         <div class="flex justify-between items-center mb-4">
-                            <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wide">Fulfillment Workflow</h4>
+                            <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wide">EasyEcom Order Processing</h4>
                             <span class="px-2 py-1 rounded text-[10px] font-bold uppercase ${getStatusBadge(status)}">${status}</span>
                         </div>
-                        <div class="relative pl-4 border-l-2 border-slate-100 space-y-6">
-                            <div class="relative">
-                                <div class="absolute -left-[21px] top-1 w-3 h-3 rounded-full ${isApproved ? 'bg-emerald-500' : 'bg-slate-300 ring-4 ring-white'}"></div>
-                                <div class="flex justify-between items-start">
-                                    <div><p class="text-sm font-semibold text-slate-800">Approve Order</p></div>
-                                    ${ isApproved ? 
-                                        `<span class="text-xs font-bold text-emerald-600">✓ Done</span>` : 
-                                        `<button onclick="handleManualStep1('${order.originalId}', '${uniqueId}')" id="btn-step1-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm">Approve</button>`
-                                    }
+                        <div class="space-y-3">
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <p class="text-sm font-semibold text-slate-800">Confirm Order</p>
+                                    <p class="text-[10px] text-slate-400 mt-0.5">${hasEasyecomId ? 'EasyEcom ID: ' + order.easyecomOrderId : 'EasyEcom ID not mapped yet'}</p>
+                                    ${order.easyecomStatus ? `<p class="text-[10px] text-slate-500 mt-0.5">EasyEcom Status: <span class="font-semibold">${order.easyecomStatus}</span></p>` : ''}
                                 </div>
+                                ${ isConfirmed ?
+                                    `<span class="px-3 py-1 bg-emerald-100 text-emerald-700 text-xs font-bold rounded border border-emerald-200">Confirmed</span>` :
+                                    hasEasyecomId ?
+                                        `<button onclick="handleManualStep1('${order.originalId}', '${uniqueId}')" id="btn-step1-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm">Approve</button>` :
+                                        `<span class="px-3 py-1 bg-amber-50 text-amber-600 text-xs font-medium rounded border border-amber-200">Syncing...</span>`
+                                }
                             </div>
-                            <div class="relative ${!isApproved ? 'opacity-50' : ''}">
-                                <div class="absolute -left-[21px] top-1 w-3 h-3 rounded-full ${isAssigned ? 'bg-emerald-500' : 'bg-slate-300 ring-4 ring-white'}"></div>
-                                <div class="flex justify-between items-start">
-                                    <div><p class="text-sm font-semibold text-slate-800">Assign Courier</p></div>
-                                    ${ isAssigned ? 
-                                        `<div class="text-right">
-                                            <span class="text-xs font-bold text-emerald-600 block">✓ ${order.awbData?.courier || 'Assigned'}</span>
-                                            <span class="text-[10px] text-slate-400 font-mono">${order.awbData?.awb || order.awb || ''}</span>
-                                       </div>` : 
-                                        `<button onclick="handleManualStep2('${uniqueId}')" id="btn-step2-${uniqueId}" data-original-id="${order.originalId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm transition-colors" ${!isApproved ? 'disabled' : ''}>Assign</button>`
-                                    }
+                            ${order.awb ? `
+                            <div class="flex justify-between items-center pt-2 border-t border-slate-100">
+                                <div>
+                                    <p class="text-sm font-semibold text-slate-800">Shipping</p>
+                                    <p class="text-[10px] text-slate-400 font-mono">${order.courier || ''} ${order.awb}</p>
                                 </div>
-                            </div>
-                            <div class="relative ${!isAssigned ? 'opacity-50' : ''}">
-                                <div class="absolute -left-[21px] top-1 w-3 h-3 rounded-full ${isScheduled ? 'bg-emerald-500' : 'bg-slate-300 ring-4 ring-white'}"></div>
-                                <div class="flex justify-between items-start">
-                                    <div><p class="text-sm font-semibold text-slate-800">Label & Pickup</p></div>
-                                    <div class="flex gap-2">
-                                        ${ labelUrl ? 
-                                            `<a href="${labelUrl}" target="_blank" class="px-3 py-1 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded hover:bg-slate-50 flex items-center gap-1">
-                                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg> Label
-                                            </a>` : 
-                                            `<button onclick="handleManualStep3('${uniqueId}')" id="btn-step3-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm" ${!isAssigned ? 'disabled' : ''}>Get Label</button>`
-                                        }
-                                        ${ !isScheduled && isAssigned ? 
-                                            `<button onclick="handleSchedulePickup('${order.originalId}', '${uniqueId}')" id="btn-pickup-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm">Schedule Pickup</button>` : ''
-                                        }
-                                        ${ isScheduled ? `<span class="text-xs font-bold text-emerald-600 self-center">✓ Pickup Scheduled</span>` : '' }
-                                    </div>
-                                </div>
-                            </div>
+                                <span class="text-xs font-bold text-emerald-600">Assigned</span>
+                            </div>` : ''}
                         </div>
-                        <input type="hidden" id="shipment-id-${uniqueId}" value="${order.shipmentId || ''}">
                     </div>
                 `;
-             } else if (order.awb) {
-                 workflowHtml = `
-                    <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mt-2">
-                        <div class="flex items-center justify-between mb-2">
-                            <span class="text-xs font-bold text-emerald-600 uppercase">Order Shipped</span>
-                            <span class="text-xs font-mono text-slate-500">${order.awb}</span>
-                        </div>
-                        <div class="grid grid-cols-1 gap-2">
-                            <button onclick="downloadShipmentLabel('${order.awb}')" class="px-3 py-2 bg-indigo-50 text-indigo-700 text-sm font-medium rounded hover:bg-indigo-100 border border-indigo-100 transition">Label</button>
-                        </div>
-                    </div>
-                 `;
              }
         }
 
@@ -866,12 +851,6 @@ function toggleDetails(id) {
     const arrow = document.getElementById(`arrow-${id}`);
     if(details) details.classList.toggle('hidden');
     if(arrow) arrow.classList.toggle('rotate-180');
-    // Check status if expanding for the first time
-    const order = allOrders.find(o => o.id === id);
-    if(order && !details.classList.contains('hidden') && (order.status === 'New' || order.status === 'Processing')) {
-        const uniqueId = id.replace(/\W/g, '');
-        checkAndUpdateWorkflow(order.originalId, uniqueId);
-    }
 }
 
 // --- BULK ACTION HANDLERS ---
@@ -961,6 +940,13 @@ function updateBulkActionBar() {
                     Get Labels (${canLabel.length})
                 </button>`;
         }
+
+        // EasyEcom Batch: Always available when orders are selected
+        buttonsHtml += `
+            <button onclick="handleCreateEasyecomBatch()" class="text-sm font-bold text-cyan-400 hover:text-cyan-300 flex items-center gap-2 ml-4 transition-colors">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
+                EasyEcom Batch (${count})
+            </button>`;
 
         const hasActions = buttonsHtml.trim() !== '';
 
@@ -1089,9 +1075,66 @@ async function handleBulkLabel() {
     // Let's implement a bulk-generate-labels-by-order-id endpoint or just warn the user.
     
     showNotification("This feature requires orders to be Approved first.", true);
-    // Placeholder logic for future:
-    // 1. Get Shipment IDs
-    // 2. Call /bulk-generate-labels
+}
+
+// --- EASYECOM BATCH HANDLER ---
+async function handleCreateEasyecomBatch() {
+    const ids = Array.from(selectedOrders);
+    if (ids.length === 0) return;
+
+    // Get order names for confirmation
+    const selectedObjs = allOrders.filter(o => selectedOrders.has(String(o.originalId)));
+    const orderNames = selectedObjs.map(o => o.id).join(', ');
+
+    if (!confirm(`Create EasyEcom batch with ${ids.length} order(s)?\n\n${orderNames}`)) return;
+
+    // Update the bar button
+    const batchBtn = document.querySelector('#bulk-action-bar button[onclick*="EasyecomBatch"]');
+    const origText = batchBtn ? batchBtn.innerHTML : '';
+    if (batchBtn) {
+        batchBtn.innerHTML = `<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2" stroke-dasharray="31.4 31.4" stroke-dashoffset="10"></circle></svg> Creating...`;
+        batchBtn.disabled = true;
+    }
+
+    try {
+        // fetchApiData automatically adds '/api', so this perfectly hits your Express router!
+        const res = await fetchApiData('/easyecom/create-batch', "EasyEcom Batch Failed", {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ orderIds: ids })
+        });
+
+        if (res.success) {
+            let msg = `EasyEcom batch created: ${res.created} order(s) sent`;
+            if (res.skipped && res.skipped.length > 0) {
+                msg += ` (${res.skipped.length} skipped)`;
+            }
+            showNotification(msg);
+            
+            // 1. Clear the checkboxes
+            clearSelection();
+            
+            // 2. Immediately trigger a background refresh so the UI updates
+            // This will pull the fresh order data from Supabase and redraw the table 
+            // so batched orders drop out of the "Pending" view.
+            setTimeout(() => {
+                silentRefreshOrders();
+            }, 500); 
+
+        } else {
+            // fetchApiData usually throws errors to the catch block, but this handles edge cases
+            showNotification(res.error || 'EasyEcom batch creation failed', true);
+        }
+    } catch (e) {
+        // Strip out object notation if error is passed weirdly
+        const errMessage = typeof e === 'object' ? e.message : e;
+        showNotification(`Error: ${errMessage}`, true);
+    } finally {
+        if (batchBtn) {
+            batchBtn.innerHTML = origText;
+            batchBtn.disabled = false;
+        }
+    }
 }
 
 // --- MANUAL WORKFLOW HANDLERS ---
@@ -1103,65 +1146,56 @@ async function handleBulkLabel() {
 async function handleManualStep1(originalOrderId, uniqueId) {
     const btn = document.getElementById(`btn-step1-${uniqueId}`);
     const originalText = btn ? btn.textContent : "Approve";
-    
+
     // 1. Visual Feedback: Set button to loading
     if(btn) { btn.textContent = "Processing..."; btn.disabled = true; }
 
+    // Resolve the EasyEcom order ID from the local order data
+    const order = allOrders.find(o => String(o.originalId) === String(originalOrderId));
+    const easyecomOrderId = order && order.easyecomOrderId;
+
+    if (!easyecomOrderId) {
+        if(btn) { btn.textContent = originalText; btn.disabled = false; }
+        showNotification("EasyEcom Order ID not found. Sync may still be running — try refreshing.", true);
+        return;
+    }
+
     try {
-        const res = await fetchApiData('/approve-order', "Approval Failed", {
+        // Approve = confirm order on EasyEcom using the EasyEcom order ID
+        const res = await fetchApiData('/easyecom/confirm-order', "Approval Failed", {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ orderId: originalOrderId })
+            body: JSON.stringify({ orderId: easyecomOrderId })
         });
 
         if (res.success) {
-            showNotification("Order Approved ✅");
-            
-            // 2. Update Local Data State
+            showNotification("Order Confirmed on EasyEcom");
+
+            // Update Local Data State
             const orderIndex = allOrders.findIndex(o => String(o.originalId) === String(originalOrderId));
             if (orderIndex > -1) {
-                allOrders[orderIndex].status = 'Processing'; 
-                allOrders[orderIndex].shipmentId = res.shipmentId;
-                allOrders[orderIndex].localStatus = 'Approved'; 
+                allOrders[orderIndex].status = 'Processing';
+                allOrders[orderIndex].easyecomStatus = 'confirmed';
             }
 
-            // 3. UPDATE THE BUTTON (Inside the Dropdown)
+            // Update button to confirmed state — disable and remove click
             if (btn) {
-                btn.textContent = "✓ Approved";
+                btn.textContent = "Confirmed";
                 btn.className = "px-3 py-1 bg-emerald-100 text-emerald-700 text-xs font-bold rounded cursor-default border border-emerald-200";
+                btn.disabled = true;
+                btn.onclick = null;
+                btn.removeAttribute('onclick');
             }
 
-            // 4. UNLOCK STEP 2 (Inside the Dropdown)
-            const step2Btn = document.getElementById(`btn-step2-${uniqueId}`);
-            if (step2Btn) {
-                step2Btn.disabled = false;
-                step2Btn.classList.remove('opacity-50', 'cursor-not-allowed');
-            }
-            // Ensure the hidden input has the ID for Step 2
-            const hiddenInput = document.getElementById(`shipment-id-${uniqueId}`);
-            if(hiddenInput && res.shipmentId) hiddenInput.value = res.shipmentId;
-
-            // 5. [NEW] UPDATE MAIN DASHBOARD STATUS BADGE VISUALLY
-            // Find the row using the order ID associated with this uniqueId
-            const order = allOrders.find(o => String(o.originalId) === String(originalOrderId));
+            // Update dashboard status badge
             if (order) {
                 const row = document.querySelector(`tr[data-order-id="${order.id}"]`);
                 if (row) {
-                    // The status badge is usually in the 9th column (index 8), or we search for the span
-                    const badge = row.querySelector('.rounded-full'); 
+                    const badge = row.querySelector('.rounded-full');
                     if (badge) {
                         badge.textContent = 'Processing';
                         badge.className = `px-3 py-1 text-xs font-semibold rounded-full ${getStatusBadge('Processing')}`;
                     }
                 }
-                // Update the small badge inside the details view header too
-                const detailsContainer = document.getElementById(`details-${order.id}`);
-                if (detailsContainer) {
-                    const internalBadge = detailsContainer.querySelector('.rounded'); // The one next to "Fulfillment Workflow"
-                    if (internalBadge) {
-                        internalBadge.textContent = 'Processing';
-                        internalBadge.className = `px-2 py-1 rounded text-[10px] font-bold uppercase ${getStatusBadge('Processing')}`;
-                    }
-                }
             }
         }
     } catch (e) {
@@ -1171,178 +1205,19 @@ async function handleManualStep1(originalOrderId, uniqueId) {
     }
 }
 
-async function handleManualStep2(uniqueId) {
-    // Try getting ID from state or DOM
-    let shipmentId = document.getElementById(`shipment-id-${uniqueId}`)?.value;
-    if (!shipmentId) {
-         const order = allOrders.find(o => o.id.replace(/\W/g, '') === uniqueId);
-         if (order) shipmentId = order.shipmentId;
-    }
-
-    if (!shipmentId) { showNotification("Shipment ID missing. Please approve first.", true); return; }
-
-    const btn = document.getElementById(`btn-step2-${uniqueId}`);
-    if(btn) { btn.textContent = "Assigning..."; btn.disabled = true; }
-
-    try {
-        const res = await fetchApiData('/assign-awb', "Assignment Failed", {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ shipmentId: shipmentId }) 
-        });
-
-        if (res.success) {
-            showNotification(`Assigned: ${res.courier} (${res.awb})`);
-
-            // 1. Update Local Data State
-            // Note: We need to find the order based on uniqueId matching since we don't have originalOrderId passed explicitly here
-            const orderIndex = allOrders.findIndex(o => o.id.replace(/\W/g, '') === uniqueId);
-            if (orderIndex > -1) {
-                allOrders[orderIndex].status = 'Ready To Ship';
-                allOrders[orderIndex].awb = res.awb;
-                allOrders[orderIndex].awbData = { awb: res.awb, courier: res.courier, label: res.label };
-            }
-
-            // 2. Update Button to Success Message
-            if (btn) {
-                const parent = btn.parentElement;
-                parent.innerHTML = `
-                    <div class="text-right">
-                        <span class="text-xs font-bold text-emerald-600 block">✓ ${res.courier}</span>
-                        <span class="text-[10px] text-slate-400 font-mono">${res.awb}</span>
-                    </div>`;
-            }
-
-            // 3. Unlock Step 3
-            const step3Btn = document.getElementById(`btn-step3-${uniqueId}`);
-            if (step3Btn) step3Btn.disabled = false;
-
-            // 4. [NEW] UPDATE MAIN DASHBOARD STATUS BADGE VISUALLY
-            if (orderIndex > -1) {
-                const order = allOrders[orderIndex];
-                const row = document.querySelector(`tr[data-order-id="${order.id}"]`);
-                if (row) {
-                    const badge = row.querySelector('.rounded-full');
-                    if (badge) {
-                        badge.textContent = 'Ready To Ship';
-                        badge.className = `px-3 py-1 text-xs font-semibold rounded-full ${getStatusBadge('Ready To Ship')}`;
-                    }
-                    // Also update the AWB text in the main row
-                    const idCell = row.querySelector('td:nth-child(4) div'); // The small text under ID
-                    if (idCell) idCell.textContent = `AWB: ${res.awb}`;
-                }
-                
-                // Update internal badge
-                const detailsContainer = document.getElementById(`details-${order.id}`);
-                if (detailsContainer) {
-                    const internalBadge = detailsContainer.querySelector('.rounded');
-                    if (internalBadge) {
-                        internalBadge.textContent = 'Ready To Ship';
-                        internalBadge.className = `px-2 py-1 rounded text-[10px] font-bold uppercase ${getStatusBadge('Ready To Ship')}`;
-                    }
-                }
-            }
-        }
-    } catch (e) {
-        console.error(e);
-        if(btn) { btn.textContent = "Assign"; btn.disabled = false; }
-        showNotification(e.message, true);
-    }
-}
-
-async function handleManualStep3(uniqueId) {
-    let shipmentId = document.getElementById(`shipment-id-${uniqueId}`)?.value;
-    if (!shipmentId) {
-         const order = allOrders.find(o => o.id.replace(/\W/g, '') === uniqueId);
-         if (order) shipmentId = order.shipmentId;
-    }
-
-    if (!shipmentId) { showNotification("Shipment ID missing.", true); return; }
-
-    const btn = document.getElementById(`btn-step3-${uniqueId}`);
-    const originalText = btn ? btn.textContent : "Get Label";
-    if(btn) { btn.textContent = "Loading..."; btn.disabled = true; }
-
-    try {
-        const res = await fetchApiData('/generate-label', "Label Failed", {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ shipmentId: shipmentId })
-        });
-
-        if (res.success && res.labelUrl) {
-            window.open(res.labelUrl, '_blank');
-            showNotification("Label opened.");
-            
-            // Optional: Save label to state so page refresh isn't needed
-            const order = allOrders.find(o => o.id.replace(/\W/g, '') === uniqueId);
-            if (order) {
-                if(!order.awbData) order.awbData = {};
-                order.awbData.label = res.labelUrl;
-            }
-            renderAllDashboard();
-        }
-    } catch (e) {
-        if(btn) { btn.textContent = originalText; btn.disabled = false; }
-        showNotification(e.message, true);
-    }
-}
-
-async function handleCancelOrder(originalOrderId, uniqueId) {
-    if(!confirm("Are you sure you want to cancel this order in RapidShyp?")) return;
-    const msgEl = document.getElementById(`msg-${uniqueId}`);
-    msgEl.textContent = "Cancelling...";
-    try {
-        const res = await fetchApiData('/cancel-order', "Cancel Failed", {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ orderId: originalOrderId })
-        });
-        if (res.success) {
-            msgEl.textContent = "Order Cancelled.";
-            msgEl.className = "mt-3 text-xs font-medium text-center text-rose-600";
-            setTimeout(() => { renderAllDashboard(); }, 2000);
-        }
-    } catch (e) {
-        msgEl.textContent = "Error: " + e;
-        msgEl.className = "mt-3 text-xs font-medium text-center text-rose-500";
-    }
-}
-
-async function handleSchedulePickup(orderId, uniqueId) {
-    const shipmentId = document.getElementById(`shipment-id-${uniqueId}`).value;
-    const btn = document.getElementById(`btn-pickup-${uniqueId}`);
-    
-    if(!shipmentId) { showNotification("Shipment ID missing", true); return; }
-    
-    btn.textContent = "Scheduling...";
-    btn.disabled = true;
-
-    try {
-        const res = await fetchApiData('/schedule-pickup', "Pickup Failed", {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ orderId: orderId, shipmentId: shipmentId })
-        });
-
-        if (res.success) {
-            showNotification(`Pickup Scheduled! Token: ${res.pickupToken || 'OK'}`);
-            // Refresh dashboard to show "Shipped" status
-            setTimeout(() => { 
-                allOrders = allOrders.map(o => {
-                    if (o.originalId === orderId) o.status = 'Shipped';
-                    return o; 
-                });
-                renderAllDashboard(); 
-            }, 1000);
-        }
-    } catch (e) {
-        btn.textContent = "Retry";
-        btn.disabled = false;
-        showNotification(e.message, true);
-    }
-}
+// RapidShyp step handlers removed — EasyEcom handles all order processing
 
 async function fetchCodConfirmations() {
     try {
         const res = await fetch('/api/cod-confirmations');
         codConfirmations = await res.json();
+        if (codConfirmations.length > 0) {
+            const sample = codConfirmations[0];
+            const keys = Object.keys(sample).filter(k => !k.startsWith('_') && k !== '__v');
+            console.log('[COD] Loaded', codConfirmations.length, 'records. Fields:', keys.join(', '));
+        } else {
+            console.warn('[COD] No confirmations loaded from DB — ensure cod_confirmation.js sync has run.');
+        }
     } catch (e) {
         console.error("Failed to load COD confirmations", e);
     }
@@ -2491,23 +2366,17 @@ async function loadInitialData() {
         initializeAllFilters();
         navigate('orders-dashboard');
 
-        // --- Periodic Refresh (Every 10 mins) ---
+        // --- COD status refresh every 1 minute ---
         setInterval(async () => {
-            if (['orders-dashboard', 'order-insights'].includes(currentView)) {
-                try {
-                    // Refresh both data sources
-                    await Promise.all([
-                        fetchOrdersFromServer().then(data => allOrders = data),
-                        fetchCodConfirmations()
-                    ]);
+            try {
+                await fetchCodConfirmations();
+                if (currentView === 'orders-dashboard') renderAllDashboard();
+                else if (currentView === 'order-insights') renderAllInsights();
+            } catch (e) { console.error('COD refresh failed:', e); }
+        }, 60000);
 
-                    if (currentView === 'orders-dashboard') renderAllDashboard();
-                    else renderAllInsights();
-                } catch (e) {
-                    console.error("Periodic refresh failed.");
-                }
-            }
-        }, 600000);
+        // --- Full orders + COD refresh every 1 minute ---
+        setInterval(() => silentRefreshOrders(), 60000);
 
     } catch (error) {
         console.error("Critical Error loading initial data:", error);

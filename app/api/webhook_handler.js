@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const config = require('../../config');
-const { Order } = require('../../models/Schemas'); // Import DB Model
+const { supabase } = require('../supabase');
 
 router.post('/rapidshyp', async (req, res) => {
     console.log("\n--- [Webhook Received] ---");
@@ -26,25 +25,33 @@ router.post('/rapidshyp', async (req, res) => {
             // Normalize ID for searching: Remove #
             const cleanId = String(orderId).replace('#', '');
 
-            // Construct Query: Find order where name matches "1001" or "#1001"
-            const query = {
-                $or: [
-                    { name: cleanId },
-                    { name: `#${cleanId}` },
-                    { id: parseInt(cleanId) } // sometimes it matches the numeric ID
-                ]
-            };
-
+            // Update enriched_orders_ecom where name matches
             const updateFields = {
-                rapidshyp_webhook_status: status
+                rapidshyp_webhook_status: status,
+                updated_at: new Date().toISOString()
             };
             if (awb) updateFields.awb = awb;
 
-            const result = await Order.updateOne(query, { $set: updateFields });
-            
-            if (result.modifiedCount > 0) {
+            // Try matching by name (e.g. "#1001" or "1001")
+            const { data: updated, error } = await supabase
+                .from('enriched_orders_ecom')
+                .update(updateFields)
+                .or(`name.eq.${cleanId},name.eq.#${cleanId}`)
+                .select('shopify_id');
+
+            if (!error && updated && updated.length > 0) {
                 console.log(`[Webhook] Updated Order ${orderId} to ${status}`);
-                updatedCount++;
+                updatedCount += updated.length;
+            }
+
+            // Also update rapidshyp_tracking_ecom if AWB is present
+            if (awb) {
+                await supabase.from('rapidshyp_tracking_ecom').upsert({
+                    awb,
+                    raw_status: status,
+                    last_checked: Date.now() / 1000,
+                    updated_at: new Date().toISOString()
+                }, { onConflict: 'awb' });
             }
         }
 
