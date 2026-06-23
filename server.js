@@ -85,25 +85,38 @@ setInterval(async () => {
     }
 }, 5 * 60 * 1000); // every 5 minutes
 
-// --- Auto-sync EasyEcom orders (last 7 days) ---
+// --- EasyEcom Sync Strategy (250 API calls/month limit) ---
+// PRIMARY: Webhook receives real-time order updates (0 API calls).
+// STARTUP:  One sync on server start, but only if last sync was 6+ hours ago
+//           to avoid burning calls on frequent restarts.
+// NO automatic polling — every API call counts.
+
 setTimeout(async () => {
     try {
-        console.log('[EasyEcom Sync] Running initial sync...');
-        const result = await syncEasyecomOrders(7);
-        console.log(`[EasyEcom Sync] Initial sync complete: ${result.fetched} fetched, ${result.saved} saved`);
+        // Check when last sync ran via api_logs_ecom
+        const { data: lastLog } = await supabase
+            .from('api_logs_ecom')
+            .select('created_at')
+            .eq('action', 'easyecom_sync')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single();
+
+        const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
+        const lastSyncTime = lastLog ? new Date(lastLog.created_at).getTime() : 0;
+
+        if (lastSyncTime > sixHoursAgo) {
+            console.log(`[EasyEcom Sync] Skipping startup sync — last ran ${Math.round((Date.now() - lastSyncTime) / 60000)} min ago (saving API call)`);
+            return;
+        }
+
+        console.log('[EasyEcom Sync] Running startup sync (1 of ~250 monthly API calls)...');
+        const result = await syncEasyecomOrders(3); // only last 3 days on startup
+        console.log(`[EasyEcom Sync] Startup sync complete: ${result.fetched} fetched, ${result.saved} saved`);
     } catch (e) {
-        console.error('[EasyEcom Sync] Initial sync failed:', e.message);
+        console.error('[EasyEcom Sync] Startup sync failed:', e.message);
     }
 }, 8000);
-
-setInterval(async () => {
-    try {
-        console.log('[EasyEcom Sync] Running scheduled sync...');
-        await syncEasyecomOrders(7);
-    } catch (e) {
-        console.error('[EasyEcom Sync] Scheduled sync failed:', e.message);
-    }
-}, 10 * 60 * 1000); // Changed to every 10 minutes
 
 // --- Start Server ---
 app.listen(config.PORT, '0.0.0.0', () => {

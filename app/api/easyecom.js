@@ -249,21 +249,36 @@ router.post('/create-batch', tokenRequired, async (req, res) => {
 });
 
 // ─── Map a raw EasyEcom order → `b2c_order_easycom` row ────────────────────
+// Handles both polling API responses and V1/V2 webhook payloads.
+// Webhook sends address fields flat on the order (address_line_1, city, pin_code,
+// contact_num) while the polling API nests them inside shipping_address object.
 function rawToDbRow(o) {
-    const items = Array.isArray(o.suborders) ? o.suborders
-                : Array.isArray(o.order_items) ? o.order_items
-                : Array.isArray(o.items) ? o.items
+    const items = Array.isArray(o.suborders)    ? o.suborders
+                : Array.isArray(o.order_items)  ? o.order_items
+                : Array.isArray(o.items)        ? o.items
                 : [];
 
+    // Webhook items use productName / suborder_quantity / selling_price
     const lineItems = items.map(i => ({
-        name:  i.product_name || i.item_name || i.name || i.title || '',
+        name:  i.productName || i.product_name || i.item_name || i.name || i.title || '',
         sku:   i.sku || i.seller_sku || i.item_sku || '',
-        qty:   i.quantity || i.qty || 1,
-        price: parseFloat(i.unit_price || i.price || 0)
+        qty:   i.suborder_quantity || i.item_quantity || i.quantity || i.qty || 1,
+        price: parseFloat(i.selling_price || i.unit_price || i.price || 0)
     }));
 
+    // Polling API nests address; webhook sends flat fields at order level
     const addr = o.shipping_address || o.shippingAddress || {};
-    const customerName = o.customer_name || o.buyer_name || addr.name
+    const shippingAddress = Object.keys(addr).length > 0 ? addr : {
+        address_line_1: o.address_line_1 || '',
+        address_line_2: o.address_line_2 || '',
+        city:           o.city || '',
+        state:          o.state || '',
+        pincode:        o.pin_code || '',
+        country:        o.country || 'India',
+        phone:          o.contact_num || ''
+    };
+
+    const customerName = o.customer_name || o.buyer_name || o.shipping_name || addr.name
         || `${addr.first_name || ''} ${addr.last_name || ''}`.trim() || 'N/A';
 
     const createdRaw = o.order_date || o.created_at || o.invoice_date || o.orderDate;
@@ -274,23 +289,27 @@ function rawToDbRow(o) {
 
     return {
         order_id:             easyecomId,
-        reference_code:       o.reference_code || null,
+        // marketplace_invoice_num echoes the store_order_id (Shopify order name) we sent
+        reference_code:       o.reference_code || o.marketplace_invoice_num || null,
         marketplace_order_id: o.marketplace_order_id || null,
-        store_order_id:       o.store_order_id || null,
+        store_order_id:       o.store_order_id || o.marketplace_invoice_num || null,
         order_status:         o.order_status || o.status || 'New',
         order_date:           orderDateIso,
         customer_name:        customerName,
         customer_email:       o.customer_email || o.email || null,
-        customer_phone:       String(o.customer_phone || o.phone || addr.phone || '').replace(/\D/g, '').slice(-10) || null,
+        // webhook uses contact_num instead of customer_phone
+        customer_phone:       String(o.customer_phone || o.contact_num || o.phone || addr.phone || '').replace(/\D/g, '').slice(-10) || null,
         payment_mode:         o.payment_mode || o.payment_type || null,
-        order_total:          parseFloat(o.order_total || o.total_price || 0) || null,
-        cod_amount:           parseFloat(o.cod_amount || 0) || null,
+        // webhook uses total_amount; polling uses order_total / total_price
+        order_total:          parseFloat(o.order_total || o.total_price || o.total_amount || 0) || null,
+        // webhook uses collectable_amount; polling uses cod_amount
+        cod_amount:           parseFloat(o.cod_amount || o.collectable_amount || 0) || null,
         awb_number:           o.awb_number || o.awb || null,
         courier_name:         o.courier_name || o.courier || null,
-        shipping_city:        addr.city || null,
-        shipping_state:       addr.state || addr.province || null,
-        shipping_pincode:     addr.pincode || addr.zip || null,
-        shipping_address:     addr,
+        shipping_city:        o.city || addr.city || null,
+        shipping_state:       o.state || addr.state || addr.province || null,
+        shipping_pincode:     o.pin_code || addr.pincode || addr.zip || null,
+        shipping_address:     shippingAddress,
         line_items:           lineItems,
         tags:                 o.tags || null,
         raw_data:             o,
@@ -404,7 +423,7 @@ async function fetchEasyecomWindow(firstUrl, headers, startDate, endDate) {
                 continue; // retry this same page
             }
 
-            console.error(`[EasyEcom GetOrders] ${startDate}→${endDate} error:`,
+            console.error(`[EasyEcom GetOrders] ${moment().tz('Asia/Kolkata').format('DD-MM-YYYY hh:mm:ss A')} | ${startDate}→${endDate} error:`,
                 JSON.stringify(body).slice(0, 500));
             break;
         }
@@ -531,7 +550,15 @@ router.post('/confirm-order', tokenRequired, async (req, res) => {
     console.log(`[EasyEcom Confirm] Confirming order ${orderId} (${length}x${width}x${height}, ${weight}kg)`);
 
     try {
-        const apiRes = await axios.post(url, {}, { headers, validateStatus: () => true });
+        let apiRes = await axios.post(url, {}, { headers, validateStatus: () => true });
+
+        // Auto-retry once after 6s if rate limited
+        if (apiRes.status === 429) {
+            console.warn(`[EasyEcom Confirm] Rate limited — waiting 6s then retrying...`);
+            await new Promise(r => setTimeout(r, 6000));
+            apiRes = await axios.post(url, {}, { headers, validateStatus: () => true });
+        }
+
         const body = apiRes.data || {};
 
         console.log(`[EasyEcom Confirm] Response ${apiRes.status}:`, JSON.stringify(body).slice(0, 300));
@@ -542,6 +569,15 @@ router.post('/confirm-order', tokenRequired, async (req, res) => {
             payload: { order_id: orderId },
             response: body
         });
+
+        if (apiRes.status === 429) {
+            console.warn(`[EasyEcom Confirm] Still rate limited after retry for order ${orderId}`);
+            return res.status(429).json({
+                success: false,
+                error: 'EasyEcom is rate limited. Please try again in a minute.',
+                retryAfter: 60
+            });
+        }
 
         const isSuccess = apiRes.status === 200 && (
             body.status === true ||
@@ -581,3 +617,4 @@ router.post('/confirm-order', tokenRequired, async (req, res) => {
 module.exports = router;
 module.exports.syncEasyecomOrders = syncEasyecomOrders;
 module.exports.dbRowToDashboard = dbRowToDashboard;
+module.exports.rawToDbRow = rawToDbRow;

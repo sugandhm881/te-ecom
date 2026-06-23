@@ -47,6 +47,7 @@ module.exports = {
     EASYECOM_JWT: process.env.EASYECOM_JWT,
     EASYECOM_EMAIL: process.env.EASYECOM_EMAIL,
     EASYECOM_PASSWORD: process.env.EASYECOM_PASSWORD,
+    EASYECOM_WEBHOOK_TOKEN: process.env.EASYECOM_WEBHOOK_TOKEN,
 
     // --- Supabase ---
     SUPABASE_URL: process.env.SUPABASE_URL,

@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../supabase');
+const { rawToDbRow } = require('./easyecom');
+const config = require('../../config');
 
 router.post('/rapidshyp', async (req, res) => {
     console.log("\n--- [Webhook Received] ---");
@@ -62,6 +64,55 @@ router.post('/rapidshyp', async (req, res) => {
     }
 
     res.json({ status: 'success' });
+});
+
+// ─── EasyEcom Webhook ────────────────────────────────────────────────────────
+// Registered in EasyEcom dashboard under Settings → Webhooks
+// Events: "Get All Orders" (V1/V2) and "Confirm Order"
+// EasyEcom sends Access-Token header for verification
+router.post('/easyecom', async (req, res) => {
+    // Validate token if configured in .env as EASYECOM_WEBHOOK_TOKEN
+    if (config.EASYECOM_WEBHOOK_TOKEN) {
+        const incoming = req.headers['access-token'] || req.headers['authorization'];
+        if (incoming !== config.EASYECOM_WEBHOOK_TOKEN) {
+            console.warn('[Webhook EasyEcom] Rejected — invalid Access-Token');
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+    }
+
+    // Respond immediately so EasyEcom doesn't timeout and retry
+    res.json({ status: 'received' });
+
+    try {
+        const payload = req.body;
+        if (!payload) return;
+
+        // V1 wraps in { orders: [...] }, V2 sends array directly
+        let orders = [];
+        if (Array.isArray(payload))                           orders = payload;
+        else if (Array.isArray(payload.orders))               orders = payload.orders;
+        else if (payload.data && Array.isArray(payload.data)) orders = payload.data;
+        else if (payload.order)                               orders = [payload.order];
+        else                                                  orders = [payload];
+
+        const rows = orders.map(rawToDbRow).filter(Boolean);
+        if (rows.length === 0) {
+            console.warn('[Webhook EasyEcom] No valid orders in payload');
+            return;
+        }
+
+        const { error } = await supabase
+            .from('b2c_order_easycom')
+            .upsert(rows, { onConflict: 'order_id' });
+
+        if (error) {
+            console.error('[Webhook EasyEcom] Upsert error:', error.message);
+        } else {
+            console.log(`[Webhook EasyEcom] Saved ${rows.length} order(s): ${rows.map(r => r.store_order_id || r.order_id).join(', ')}`);
+        }
+    } catch (e) {
+        console.error('[Webhook EasyEcom] Critical error:', e.message);
+    }
 });
 
 module.exports = router;

@@ -81,8 +81,26 @@ function showNotification(message, isError = false) {
     }
 }
 
-function showLoader() { if(globalLoader) globalLoader.classList.add('active'); }
-function hideLoader() { if(globalLoader) globalLoader.classList.remove('active'); }
+// Count-based loader — multiple concurrent callers handled gracefully
+let _loaderCount = 0, _loaderHideTimer = null;
+function showLoader() {
+  _loaderCount++;
+  clearTimeout(_loaderHideTimer);
+  if (globalLoader) {
+    globalLoader.classList.add('active');
+    requestAnimationFrame(() => globalLoader.classList.add('visible'));
+  }
+}
+function hideLoader(force) {
+  if (force) _loaderCount = 0; else _loaderCount = Math.max(0, _loaderCount - 1);
+  if (_loaderCount === 0) {
+    _loaderHideTimer = setTimeout(() => {
+      if (_loaderCount > 0 || !globalLoader) return;
+      globalLoader.classList.remove('visible');
+      setTimeout(() => { if (_loaderCount === 0) globalLoader.classList.remove('active'); }, 200);
+    }, 260);
+  }
+}
 
 const formatCurrency = (amount) => {
   const value = Math.round(parseFloat(amount) || 0);
@@ -176,8 +194,9 @@ function showApp() {
 function getAuthHeaders() { return authToken ? { "Authorization": `Bearer ${authToken}` } : {}; }
 
 async function fetchApiData(endpoint, errorMessage, options = {}) {
+    showLoader();
     const headers = { ...getAuthHeaders(), ...options.headers };
-    if (!headers.Authorization) { logout(); return Promise.reject("Unauthorized"); }
+    if (!headers.Authorization) { hideLoader(); logout(); return Promise.reject("Unauthorized"); }
 
     try {
         const response = await fetch(`/api${endpoint}`, { ...options, headers });
@@ -190,6 +209,8 @@ async function fetchApiData(endpoint, errorMessage, options = {}) {
     } catch (error) {
         showNotification(error.message || errorMessage, true);
         return Promise.reject(error.message);
+    } finally {
+        hideLoader();
     }
 }
 
@@ -200,8 +221,6 @@ const fetchOrdersFromServer = () => fetchApiData(`/get-orders`, 'Failed to fetch
 async function silentRefreshOrders() {
     if (!['orders-dashboard', 'order-insights'].includes(currentView)) return;
     try {
-        // Sync EasyEcom orders first
-        await fetchApiData('/easyecom/get-orders?days=7', '').catch(() => {});
         await Promise.all([
             fetchOrdersFromServer().then(data => { allOrders = data; }),
             fetchCodConfirmations()
@@ -259,6 +278,7 @@ async function downloadShipmentLabel(awb) {
     const btn = document.activeElement;
     const originalText = btn ? btn.textContent : 'Label';
     if(btn) btn.textContent = "Opening...";
+    showLoader();
     try {
         const response = await fetch(`/api/get-shipping-label?awb=${awb}`, { headers: { 'Authorization': `Bearer ${authToken}` } });
         const data = await response.json();
@@ -266,11 +286,12 @@ async function downloadShipmentLabel(awb) {
             window.open(data.url, '_blank');
             showNotification("Label opened in new tab.");
         } else { throw new Error(data.error || "Label URL not found"); }
-    } catch (err) { showNotification("Failed: " + err.message, true); } finally { if(btn) btn.textContent = originalText; }
+    } catch (err) { showNotification("Failed: " + err.message, true); } finally { if(btn) btn.textContent = originalText; hideLoader(); }
 }
 
 // --- UI RENDERING ---
 function navigate(view) {
+    showLoader();
     console.log("Navigating to:", view);
     currentView = view;
     
@@ -337,9 +358,14 @@ function navigate(view) {
             activeViewElement = document.getElementById('settings-view'); 
             if(typeof renderSettings === 'function') renderSettings(); 
             break;
-        case 'reports-view': 
-            activeLinkElement = document.getElementById('nav-reports'); 
-            activeViewElement = document.getElementById('reports-view'); 
+        case 'reports-view':
+            activeLinkElement = document.getElementById('nav-reports');
+            activeViewElement = document.getElementById('reports-view');
+            break;
+        case 'amazon-review':
+            activeLinkElement = document.getElementById('nav-amazon-review');
+            activeViewElement = document.getElementById('amazon-review-view');
+            if (!amzReviewLoaded) { amzReviewLoaded = true; amzRevLoadOrders(); }
             break;
     }
 
@@ -348,12 +374,13 @@ function navigate(view) {
     }
     
     if (activeViewElement) {
-        activeViewElement.style.display = 'block'; 
+        activeViewElement.style.display = 'block';
         activeViewElement.classList.remove('view-hidden');
         activeViewElement.classList.remove('hidden');
         window.scrollTo(0, 0);
         if (mainContainer) mainContainer.scrollTop = 0;
     }
+    hideLoader(); // balance the showLoader() at the top; async fetches re-show independently
 }
 
 // checkAndUpdateWorkflow removed — EasyEcom handles order processing now
@@ -1200,8 +1227,28 @@ async function handleManualStep1(originalOrderId, uniqueId) {
         }
     } catch (e) {
         console.error(e);
-        if(btn) { btn.textContent = originalText; btn.disabled = false; }
-        showNotification(e.message, true);
+        const msg = typeof e === 'string' ? e : e.message || 'Approval failed';
+        if (msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('limit exceeded') || msg.includes('429')) {
+            showNotification('EasyEcom rate limit hit — retrying in 30s...', true);
+            if (btn) {
+                btn.disabled = true;
+                let secs = 30;
+                btn.textContent = `Wait ${secs}s`;
+                const interval = setInterval(() => {
+                    secs--;
+                    if (secs <= 0) {
+                        clearInterval(interval);
+                        btn.textContent = originalText;
+                        btn.disabled = false;
+                    } else {
+                        btn.textContent = `Wait ${secs}s`;
+                    }
+                }, 1000);
+            }
+        } else {
+            if (btn) { btn.textContent = originalText; btn.disabled = false; }
+            showNotification(msg, true);
+        }
     }
 }
 
@@ -2479,7 +2526,332 @@ async function handleExcelDownload() {
     } catch(e) { }
 }
 
+// ── Amazon Review Requests ────────────────────────────────────────
+const AMZ_SB        = 'https://urtwdqmiypjhnduspmwk.supabase.co';
+const AMZ_DATA_FN   = AMZ_SB + '/functions/v1/amazon-review-data';
+const AMZ_SINGLE_FN = AMZ_SB + '/functions/v1/amazon-review-single';
+const AMZ_ANON      = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVydHdkcW1peXBqaG5kdXNwbXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA4Nzk0MzcsImV4cCI6MjA4NjQ1NTQzN30.R3BmRpkn1C_uq5Wd3pyDUts5GA9xYdNLnuztTZ9Uszw';
+const AMZ_HDR       = { 'apikey': AMZ_ANON, 'Authorization': 'Bearer ' + AMZ_ANON, 'Content-Type': 'application/json' };
+const AMZ_DELAY_MS  = 1200;
+
+let amzOrders = [], amzReqStatus = {}, amzSelected = new Set();
+let amzCurrentPreset = '7d', amzDateFrom = null, amzDateTo = null;
+let amzOpenOrderId = null, amzReviewLoaded = false;
+
+function amzRevStartOfDay(d){ const x=new Date(d); x.setHours(0,0,0,0); return x; }
+function amzRevEndOfDay(d)  { const x=new Date(d); x.setHours(23,59,59,999); return x; }
+
+function amzRevGetDateRange(){
+  const now=new Date();
+  if(amzCurrentPreset==='7d'){ const f=new Date(now); f.setDate(f.getDate()-6); return{from:amzRevStartOfDay(f).toISOString(),to:amzRevEndOfDay(now).toISOString()}; }
+  if(amzCurrentPreset==='mtd'){ const f=new Date(now); f.setDate(1); return{from:amzRevStartOfDay(f).toISOString(),to:amzRevEndOfDay(now).toISOString()}; }
+  if(amzCurrentPreset==='lm'){ const f=new Date(now); f.setDate(1); f.setMonth(f.getMonth()-1); const t=new Date(now); t.setDate(0); return{from:amzRevStartOfDay(f).toISOString(),to:amzRevEndOfDay(t).toISOString()}; }
+  if(amzCurrentPreset==='custom'&&amzDateFrom&&amzDateTo) return{from:amzRevStartOfDay(new Date(amzDateFrom)).toISOString(),to:amzRevEndOfDay(new Date(amzDateTo)).toISOString()};
+  const f=new Date(now); f.setDate(f.getDate()-6); return{from:amzRevStartOfDay(f).toISOString(),to:amzRevEndOfDay(now).toISOString()};
+}
+
+function amzRevGetRangeLabel(){
+  const{from,to}=amzRevGetDateRange();
+  return new Date(from).toLocaleDateString('en-IN',{day:'2-digit',month:'short'})+' – '+new Date(to).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'2-digit'});
+}
+
+function amzRevSetPreset(preset,btn){
+  amzCurrentPreset=preset;
+  document.querySelectorAll('#amazon-review-view .amzrev-preset').forEach(b=>{
+    b.classList.remove('active','bg-indigo-500','border-indigo-500','text-white');
+    b.classList.add('border-slate-200','bg-white','text-slate-600');
+  });
+  btn.classList.add('active','bg-indigo-500','border-indigo-500','text-white');
+  btn.classList.remove('border-slate-200','bg-white','text-slate-600');
+  const cd=document.getElementById('amzrev-custom-dates');
+  if(preset==='custom'){
+    cd.classList.remove('hidden'); cd.classList.add('flex');
+    if(!document.getElementById('amzrev-date-from').value){
+      const t=new Date(),f=new Date(t); f.setDate(f.getDate()-6);
+      document.getElementById('amzrev-date-from').value=f.toISOString().split('T')[0];
+      document.getElementById('amzrev-date-to').value=t.toISOString().split('T')[0];
+    }
+    amzDateFrom=document.getElementById('amzrev-date-from').value;
+    amzDateTo=document.getElementById('amzrev-date-to').value;
+  } else { cd.classList.add('hidden'); cd.classList.remove('flex'); }
+  amzRevLoadOrders();
+}
+
+function amzRevOnCustomDate(){
+  amzDateFrom=document.getElementById('amzrev-date-from').value;
+  amzDateTo=document.getElementById('amzrev-date-to').value;
+  if(amzDateFrom&&amzDateTo) amzRevLoadOrders();
+}
+
+function amzRevToast(msg,isErr){
+  if(typeof showNotification==='function') showNotification(msg, isErr||false);
+}
+
+function amzRevDaysSince(ds){ if(!ds)return null; return Math.floor((Date.now()-new Date(ds).getTime())/86400000); }
+function amzRevGetDD(o){ return o.latest_delivery_date||o.earliest_delivery_date||null; }
+function amzRevWindowTag(d){
+  if(d===null) return{label:'No date', cls:'ar-p-nodate', filter:'nodate'};
+  if(d<5)      return{label:'Too fresh',cls:'ar-p-fresh',  filter:'fresh'};
+  if(d>30)     return{label:'Too old',  cls:'ar-p-old',    filter:'old'};
+  return              {label:'Eligible', cls:'ar-p-eligible',filter:'eligible'};
+}
+function amzRevDaysCls(d){ return d===null?'ar-days-old':d<5?'ar-days-fresh':d>30?'ar-days-old':'ar-days-ok'; }
+function amzRevFmtDate(ds){ return ds?new Date(ds).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'2-digit'}):'—'; }
+function amzRevFmtDT(ds){ return ds?new Date(ds).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—'; }
+function amzRevIsEligible(o){ const d=amzRevDaysSince(amzRevGetDD(o)); return d!==null&&d>=5&&d<=30&&amzReqStatus[o.amazon_order_id]?.solicitation_status!=='sent'; }
+
+function amzRevUpdateBulkBar(){
+  document.getElementById('amzrev-bulk-info').textContent=amzSelected.size+' order'+(amzSelected.size>1?'s':'')+' selected';
+  const bb=document.getElementById('amzrev-bulk-bar');
+  if(amzSelected.size>0){ bb.classList.remove('hidden'); bb.classList.add('flex'); }
+  else { bb.classList.add('hidden'); bb.classList.remove('flex'); }
+}
+function amzRevToggleSelect(id,checked){ if(checked)amzSelected.add(id); else amzSelected.delete(id); amzRevUpdateBulkBar(); }
+function amzRevToggleAll(cb){
+  document.querySelectorAll('#amzrev-tbody .amzrev-row-cb:not(:disabled)').forEach(c=>{c.checked=cb.checked;if(cb.checked)amzSelected.add(c.dataset.id);else amzSelected.delete(c.dataset.id);});
+  amzRevUpdateBulkBar();
+}
+function amzRevSelectAllEligible(){ amzOrders.forEach(o=>{if(amzRevIsEligible(o))amzSelected.add(o.amazon_order_id);}); amzRevRender(); amzRevUpdateBulkBar(); }
+function amzRevClearSelection(){ amzSelected.clear(); amzRevRender(); amzRevUpdateBulkBar(); }
+
+async function amzRevLoadOrders(){
+  if(amzCurrentPreset==='custom'){
+    amzDateFrom=document.getElementById('amzrev-date-from').value;
+    amzDateTo=document.getElementById('amzrev-date-to').value;
+    if(!amzDateFrom||!amzDateTo)return;
+  }
+  showLoader();
+  document.getElementById('amzrev-ts').textContent='Loading…';
+  document.getElementById('amzrev-date-range-lbl').textContent=amzRevGetRangeLabel();
+  const{from,to}=amzRevGetDateRange();
+  try{
+    const res=await fetch(AMZ_DATA_FN,{method:'POST',headers:AMZ_HDR,body:JSON.stringify({date_from:from,date_to:to})});
+    const d=await res.json();
+    if(!d.success)throw new Error(d.error||'Unknown error');
+    amzOrders=d.orders||[];
+    amzReqStatus={};
+    (d.requests||[]).forEach(r=>amzReqStatus[r.order_id]=r);
+    amzRevRender(); amzRevUpdateStats();
+    document.getElementById('amzrev-ts').textContent='Updated '+new Date().toLocaleTimeString('en-IN',{hour12:false})+' · '+amzOrders.length+' orders';
+  }catch(e){
+    document.getElementById('amzrev-ts').textContent='Error: '+e.message;
+    amzRevToast('Load error: '+e.message,false);
+  }finally{
+    hideLoader();
+  }
+}
+
+function amzRevUpdateStats(){
+  const m=amzOrders.map(o=>({...o,ddays:amzRevDaysSince(amzRevGetDD(o))}));
+  // Only count sent orders that are within the current date-filtered amzOrders set
+  const orderIds=new Set(amzOrders.map(o=>o.amazon_order_id));
+  const sentIds=new Set(Object.keys(amzReqStatus).filter(k=>amzReqStatus[k].solicitation_status==='sent'&&orderIds.has(k)));
+  document.getElementById('amzrev-s-total').textContent=amzOrders.length||'0';
+  // Eligible = in 5-30d window AND not yet sent (truly actionable)
+  document.getElementById('amzrev-s-elig').textContent=m.filter(o=>o.ddays>=5&&o.ddays<=30&&!sentIds.has(o.amazon_order_id)).length||'0';
+  document.getElementById('amzrev-s-sent').textContent=sentIds.size||'0';
+  // Awaiting = too fresh (<5d), not yet in window
+  document.getElementById('amzrev-s-fresh').textContent=m.filter(o=>o.ddays!==null&&o.ddays<5&&!sentIds.has(o.amazon_order_id)).length||'0';
+}
+
+function amzRevBuildDetailHTML(orderId){
+  const order=amzOrders.find(o=>o.amazon_order_id===orderId);
+  const req=amzReqStatus[orderId];
+  const ddays=order?amzRevDaysSince(amzRevGetDD(order)):null;
+  const ddColor=ddays!==null&&ddays>=5&&ddays<=30?'text-emerald-600':ddays!==null&&ddays<5?'text-amber-600':'text-slate-400';
+  const stBadge=req
+    ?`<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${req.solicitation_status==='sent'?'bg-emerald-100 text-emerald-700':'bg-rose-100 text-rose-700'}">${req.solicitation_status.toUpperCase()}</span>`
+    :`<span class="text-slate-400 text-sm">Not attempted</span>`;
+  let responseHTML=`<p class="text-xs text-slate-400 italic">No API call made for this order yet.</p>`;
+  if(req&&req.response_code){
+    const isOk=req.response_code===200||req.response_code===201;
+    let body=req.response_body||'{}';
+    try{body=JSON.stringify(JSON.parse(body),null,2);}catch(e){}
+    responseHTML=`
+      <span class="inline-block mb-2 px-2 py-0.5 rounded text-xs font-bold font-mono ${isOk?'bg-emerald-100 text-emerald-700':'bg-rose-100 text-rose-700'}">HTTP ${req.response_code} ${isOk?'✓ Success':'✗ Error'}</span>
+      <pre class="text-xs text-slate-500 bg-slate-50 rounded-lg p-3 mt-1 overflow-auto max-h-24 leading-relaxed font-mono whitespace-pre-wrap break-all">${body.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>
+      <p class="text-xs text-slate-400 mt-2">${isOk?'Amazon accepted — buyer receives review email within 24–48 hrs.':'Amazon rejected — see body for reason.'}</p>`;
+  }
+  return`<div class="amzrev-detail-inner px-8 py-5">
+    <div class="grid grid-cols-3 gap-3 mb-4">
+      <div class="bg-white rounded-xl border border-slate-200 p-3">
+        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Purchase date</p>
+        <p class="text-sm font-semibold text-slate-700">${amzRevFmtDate(order?.purchase_date)}</p>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3">
+        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Delivery date</p>
+        <p class="text-sm font-semibold text-slate-700">${amzRevFmtDate(amzRevGetDD(order))}</p>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3">
+        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Days since delivery</p>
+        <p class="text-sm font-semibold ${ddColor}">${ddays!==null?ddays+' days':'—'}</p>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3">
+        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Amount</p>
+        <p class="text-sm font-semibold text-slate-700">${order?.order_total_amount?'₹'+Number(order.order_total_amount).toLocaleString('en-IN'):'—'}</p>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3">
+        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Solicitation status</p>
+        <div class="mt-0.5">${stBadge}</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3">
+        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Attempted at</p>
+        <p class="text-sm font-semibold text-slate-700">${req?.attempted_at?amzRevFmtDT(req.attempted_at):'—'}</p>
+      </div>
+    </div>
+    <div class="bg-white rounded-xl border border-slate-200 p-4">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Amazon API response</p>
+      ${responseHTML}
+    </div>
+  </div>`;
+}
+
+function amzRevToggleDetail(orderId){
+  if(amzOpenOrderId===orderId){
+    const dr=document.getElementById('amzrev-dr-'+orderId); if(dr)dr.remove();
+    const mr=document.getElementById('amzrev-row-'+orderId); if(mr)mr.classList.remove('amzrev-row-active');
+    amzOpenOrderId=null; return;
+  }
+  if(amzOpenOrderId){
+    const pdr=document.getElementById('amzrev-dr-'+amzOpenOrderId); if(pdr)pdr.remove();
+    const pmr=document.getElementById('amzrev-row-'+amzOpenOrderId); if(pmr)pmr.classList.remove('amzrev-row-active');
+  }
+  amzOpenOrderId=orderId;
+  const mainRow=document.getElementById('amzrev-row-'+orderId); if(!mainRow)return;
+  mainRow.classList.add('amzrev-row-active');
+  const detailTr=document.createElement('tr'); detailTr.className='amzrev-detail-row'; detailTr.id='amzrev-dr-'+orderId;
+  const detailTd=document.createElement('td'); detailTd.colSpan=9; detailTd.innerHTML=amzRevBuildDetailHTML(orderId);
+  detailTr.appendChild(detailTd); mainRow.insertAdjacentElement('afterend',detailTr);
+}
+
+// Window tag returns Tailwind badge classes
+function amzRevWindowTag(d){
+  if(d===null) return{label:'No date',   badge:'bg-slate-100 text-slate-500',  filter:'nodate'};
+  if(d<5)      return{label:'Too fresh', badge:'bg-amber-100 text-amber-700',   filter:'fresh'};
+  if(d>30)     return{label:'Too old',   badge:'bg-slate-100 text-slate-400',   filter:'old'};
+  return              {label:'Eligible', badge:'bg-emerald-100 text-emerald-700',filter:'eligible'};
+}
+function amzRevDaysCls(d){ return d===null?'text-slate-400':d<5?'text-amber-600 font-semibold':d>30?'text-slate-400':'text-emerald-600 font-semibold'; }
+
+function amzRevSetStatusFilter(value){
+  // Update pill button active state
+  document.querySelectorAll('#amazon-review-view .amzrev-sf').forEach(b=>{
+    b.classList.toggle('active', b.dataset.filter===value);
+  });
+  // Highlight active KPI card with outline; clear others
+  const kpiMap={'':'amzrev-kpi-all','eligible':'amzrev-kpi-eligible','sent':'amzrev-kpi-sent','fresh':'amzrev-kpi-fresh'};
+  const colorMap={'':'kpi-active','eligible':'kpi-active-emerald','sent':'kpi-active-indigo','fresh':'kpi-active-amber'};
+  Object.entries(kpiMap).forEach(([k,id])=>{
+    const el=document.getElementById(id); if(!el) return;
+    el.classList.remove('kpi-active','kpi-active-emerald','kpi-active-indigo','kpi-active-amber');
+    if(k===value && colorMap[k]) el.classList.add(colorMap[k]);
+  });
+  amzRevRender();
+}
+
+function amzRevRender(){
+  const srch=(document.getElementById('amzrev-srch').value||'').toLowerCase();
+  const activeBtn=document.querySelector('#amazon-review-view .amzrev-sf.active');
+  const fw=activeBtn?activeBtn.dataset.filter:'';
+  let f=amzOrders.map(o=>({...o,deliveryDate:amzRevGetDD(o),ddays:amzRevDaysSince(amzRevGetDD(o))}));
+  if(srch)f=f.filter(o=>o.amazon_order_id.toLowerCase().includes(srch));
+  if(fw){f=f.filter(o=>{
+    const tag=amzRevWindowTag(o.ddays),st=amzReqStatus[o.amazon_order_id]?.solicitation_status;
+    if(fw==='sent')return st==='sent'; if(fw==='failed')return st==='failed'; return tag.filter===fw;
+  });}
+  const tb=document.getElementById('amzrev-tbody'),em=document.getElementById('amzrev-empty');
+  amzOpenOrderId=null;
+  if(!f.length){tb.innerHTML=''; em.classList.remove('hidden'); return;}
+  em.classList.add('hidden');
+  tb.innerHTML=f.map(o=>{
+    const d=o.ddays,tag=amzRevWindowTag(d),st=amzReqStatus[o.amazon_order_id]?.solicitation_status;
+    const elig=amzRevIsEligible(o),isSel=amzSelected.has(o.amazon_order_id);
+    const amt=o.order_total_amount?'₹'+Number(o.order_total_amount).toLocaleString('en-IN'):'—';
+    let actionBtn;
+    const btnBase='px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all';
+    if(st==='sent')
+      actionBtn=`<button class="${btnBase} bg-emerald-50 text-emerald-600 border-emerald-200 cursor-default" disabled onclick="event.stopPropagation()">✓ Sent</button>`;
+    else if(d===null)
+      actionBtn=`<button class="${btnBase} text-slate-400 border-slate-200 cursor-not-allowed" disabled onclick="event.stopPropagation()">No date</button>`;
+    else if(d<5)
+      actionBtn=`<button class="${btnBase} text-amber-600 border-amber-200 bg-amber-50 cursor-not-allowed" disabled onclick="event.stopPropagation()">Wait ${5-d}d</button>`;
+    else if(d>30)
+      actionBtn=`<button class="${btnBase} text-slate-400 border-slate-200 cursor-not-allowed" disabled onclick="event.stopPropagation()">Expired</button>`;
+    else
+      actionBtn=`<button class="${btnBase} bg-indigo-600 hover:bg-indigo-700 text-white border-transparent shadow-sm" id="amzrev-btn-${o.amazon_order_id}" onclick="event.stopPropagation();amzRevSendSingle('${o.amazon_order_id}')">Request review</button>`;
+    const stPill=st==='sent'
+      ?`<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">Sent</span>`
+      :st==='failed'
+      ?`<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-100 text-rose-700">Failed</span>`
+      :`<span class="text-slate-300 text-xs">—</span>`;
+    return`<tr class="hover:bg-slate-50 cursor-pointer transition-colors" id="amzrev-row-${o.amazon_order_id}" onclick="amzRevToggleDetail('${o.amazon_order_id}')">
+      <td class="py-4 px-4" onclick="event.stopPropagation()"><input type="checkbox" class="w-4 h-4 text-indigo-600 rounded border-slate-300 cursor-pointer amzrev-row-cb" data-id="${o.amazon_order_id}" ${!elig?'disabled':''} ${isSel?'checked':''} onchange="amzRevToggleSelect('${o.amazon_order_id}',this.checked)"></td>
+      <td class="py-4 px-4 font-mono text-xs text-slate-600">${o.amazon_order_id}</td>
+      <td class="py-4 px-4 text-xs text-slate-500">${amzRevFmtDate(o.purchase_date)}</td>
+      <td class="py-4 px-4 text-xs text-slate-500">${o.deliveryDate?amzRevFmtDate(o.deliveryDate):'—'}</td>
+      <td class="py-4 px-4"><span class="${amzRevDaysCls(d)} text-xs">${d!==null?d+'d':'—'}</span></td>
+      <td class="py-4 px-4 text-xs text-slate-700">${amt}</td>
+      <td class="py-4 px-4"><span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${tag.badge}">${tag.label}</span></td>
+      <td class="py-4 px-4">${stPill}</td>
+      <td class="py-4 px-4 text-right pr-6">${actionBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function amzRevSendSingle(orderId){
+  const btn=document.getElementById('amzrev-btn-'+orderId);
+  const btnBase='px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all';
+  if(btn){btn.disabled=true;btn.innerHTML='↻ Sending…';btn.className=btnBase+' bg-amber-50 text-amber-700 border-amber-200 cursor-wait';}
+  showLoader();
+  try{
+    const r=await fetch(AMZ_SINGLE_FN,{method:'POST',headers:AMZ_HDR,body:JSON.stringify({order_id:orderId})});
+    const d=await r.json();
+    amzReqStatus[orderId]={solicitation_status:d.success?'sent':'failed',attempted_at:new Date().toISOString(),response_code:d.status,response_body:d.body};
+    if(d.success) amzRevToast('✓ Review request sent for '+orderId, false);
+    else{ const msg=(()=>{try{return JSON.parse(d.body)?.errors?.[0]?.message||d.body;}catch(e){return d.body||d.error||'Unknown';}})(); amzRevToast('Failed: '+msg, true); }
+    amzSelected.delete(orderId);
+    amzRevRender(); amzRevUpdateStats(); amzRevUpdateBulkBar();
+    amzRevToggleDetail(orderId);
+  }catch(e){
+    if(btn){btn.disabled=false;btn.innerHTML='Request review';btn.className=btnBase+' bg-indigo-600 hover:bg-indigo-700 text-white border-transparent shadow-sm';}
+    amzRevToast('Error: '+e.message, true);
+  }finally{
+    hideLoader();
+  }
+}
+
+async function amzRevSendBulk(){
+  const ids=[...amzSelected]; if(!ids.length)return;
+  const btn=document.getElementById('amzrev-bulk-send-btn');
+  btn.disabled=true; btn.textContent='↻ Sending…';
+  const pw=document.getElementById('amzrev-progress-wrap'),pf=document.getElementById('amzrev-pfill'),pl=document.getElementById('amzrev-progress-lbl');
+  pw.classList.remove('hidden'); pf.style.width='0%';
+  pf.className='h-full rounded-full transition-all duration-300 bg-indigo-500';
+  let done=0,sent=0,failed=0;
+  for(const orderId of ids){
+    pl.textContent=`Sending ${done+1} of ${ids.length} — ${orderId}`;
+    pf.style.width=Math.round((done/ids.length)*100)+'%';
+    try{
+      const r=await fetch(AMZ_SINGLE_FN,{method:'POST',headers:AMZ_HDR,body:JSON.stringify({order_id:orderId})});
+      const d=await r.json();
+      amzReqStatus[orderId]={solicitation_status:d.success?'sent':'failed',attempted_at:new Date().toISOString(),response_code:d.status,response_body:d.body};
+      if(d.success)sent++;else failed++;
+    }catch(e){ amzReqStatus[orderId]={solicitation_status:'failed',attempted_at:new Date().toISOString()}; failed++; }
+    done++; amzSelected.delete(orderId);
+    if(done<ids.length) await new Promise(r=>setTimeout(r,AMZ_DELAY_MS));
+  }
+  pf.style.width='100%';
+  pf.className='h-full rounded-full transition-all duration-300 '+(failed===0?'bg-emerald-500':sent>0?'bg-amber-500':'bg-rose-500');
+  pl.textContent=`Done — ${sent} sent, ${failed} failed`;
+  amzRevToast(`Bulk complete: ${sent} sent, ${failed} failed`, failed>0);
+  setTimeout(()=>pw.classList.add('hidden'),5000);
+  btn.disabled=false; btn.textContent='⬆ Send all selected';
+  amzRevRender(); amzRevUpdateStats(); amzRevUpdateBulkBar();
+}
+// ── End Amazon Review Requests ────────────────────────────────────
+
 document.getElementById('nav-reports')?.addEventListener('click', (e) => { e.preventDefault(); navigate('reports-view'); });
+document.getElementById('nav-amazon-review')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-review'); });
 
 document.getElementById('btn-download-amazon-report')?.addEventListener('click', async () => {
     const startDate = document.getElementById('amazon-report-start-date').value;
