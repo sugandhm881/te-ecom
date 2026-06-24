@@ -27,6 +27,8 @@ const pdfRoutes = require('./app/api/pdf_generator').router;
 const webhookRoutes = require('./app/api/webhook_handler');
 const easyecomRoutes = require('./app/api/easyecom');
 const { syncEasyecomOrders } = require('./app/api/easyecom');
+const amazonReviewRoutes = require('./app/api/amazon_review');
+const { router: amazonAutoReviewRoutes, initAutoReviewCron } = require('./app/api/amazon_auto_review');
 
 // --- Register Routes ---
 app.use('/api', authRoutes);
@@ -38,6 +40,9 @@ app.use('/api', excelRoutes);
 app.use('/api', pdfRoutes);
 app.use('/api/webhook', webhookRoutes);
 app.use('/api/easyecom', easyecomRoutes);
+app.use('/api/amazon', amazonReviewRoutes);
+app.use('/api/amazon', amazonAutoReviewRoutes);
+initAutoReviewCron();
 
 // --- COD Confirmation Data (FROM SUPABASE) ---
 app.get('/api/cod-confirmations', async (req, res) => {

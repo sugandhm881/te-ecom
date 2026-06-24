@@ -2527,16 +2527,14 @@ async function handleExcelDownload() {
 }
 
 // ── Amazon Review Requests ────────────────────────────────────────
-const AMZ_SB        = 'https://urtwdqmiypjhnduspmwk.supabase.co';
-const AMZ_DATA_FN   = AMZ_SB + '/functions/v1/amazon-review-data';
-const AMZ_SINGLE_FN = AMZ_SB + '/functions/v1/amazon-review-single';
-const AMZ_ANON      = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVydHdkcW1peXBqaG5kdXNwbXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA4Nzk0MzcsImV4cCI6MjA4NjQ1NTQzN30.R3BmRpkn1C_uq5Wd3pyDUts5GA9xYdNLnuztTZ9Uszw';
-const AMZ_HDR       = { 'apikey': AMZ_ANON, 'Authorization': 'Bearer ' + AMZ_ANON, 'Content-Type': 'application/json' };
+const AMZ_DATA_FN   = '/api/amazon/review-data';
+const AMZ_SINGLE_FN = '/api/amazon/review-send';
 const AMZ_DELAY_MS  = 1200;
 
 let amzOrders = [], amzReqStatus = {}, amzSelected = new Set();
 let amzCurrentPreset = '7d', amzDateFrom = null, amzDateTo = null;
 let amzOpenOrderId = null, amzReviewLoaded = false;
+let amzPaymentFilter = '', amzSkuFilter = '';
 
 function amzRevStartOfDay(d){ const x=new Date(d); x.setHours(0,0,0,0); return x; }
 function amzRevEndOfDay(d)  { const x=new Date(d); x.setHours(23,59,59,999); return x; }
@@ -2598,7 +2596,7 @@ function amzRevWindowTag(d){
 function amzRevDaysCls(d){ return d===null?'ar-days-old':d<5?'ar-days-fresh':d>30?'ar-days-old':'ar-days-ok'; }
 function amzRevFmtDate(ds){ return ds?new Date(ds).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'2-digit'}):'—'; }
 function amzRevFmtDT(ds){ return ds?new Date(ds).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—'; }
-function amzRevIsEligible(o){ const d=amzRevDaysSince(amzRevGetDD(o)); return d!==null&&d>=5&&d<=30&&amzReqStatus[o.amazon_order_id]?.solicitation_status!=='sent'; }
+function amzRevIsEligible(o){ const d=amzRevDaysSince(amzRevGetDD(o)); return d!==null&&d>=5&&d<=30&&!amzRevIsCancelled(o)&&amzReqStatus[o.amazon_order_id]?.solicitation_status!=='sent'; }
 
 function amzRevUpdateBulkBar(){
   document.getElementById('amzrev-bulk-info').textContent=amzSelected.size+' order'+(amzSelected.size>1?'s':'')+' selected';
@@ -2625,7 +2623,7 @@ async function amzRevLoadOrders(){
   document.getElementById('amzrev-date-range-lbl').textContent=amzRevGetRangeLabel();
   const{from,to}=amzRevGetDateRange();
   try{
-    const res=await fetch(AMZ_DATA_FN,{method:'POST',headers:AMZ_HDR,body:JSON.stringify({date_from:from,date_to:to})});
+    const res=await fetch(AMZ_DATA_FN,{method:'POST',headers:{ 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },body:JSON.stringify({date_from:from,date_to:to})});
     const d=await res.json();
     if(!d.success)throw new Error(d.error||'Unknown error');
     amzOrders=d.orders||[];
@@ -2647,8 +2645,8 @@ function amzRevUpdateStats(){
   const orderIds=new Set(amzOrders.map(o=>o.amazon_order_id));
   const sentIds=new Set(Object.keys(amzReqStatus).filter(k=>amzReqStatus[k].solicitation_status==='sent'&&orderIds.has(k)));
   document.getElementById('amzrev-s-total').textContent=amzOrders.length||'0';
-  // Eligible = in 5-30d window AND not yet sent (truly actionable)
-  document.getElementById('amzrev-s-elig').textContent=m.filter(o=>o.ddays>=5&&o.ddays<=30&&!sentIds.has(o.amazon_order_id)).length||'0';
+  // Eligible = in 5-30d window AND not sent AND not RTO/Cancelled
+  document.getElementById('amzrev-s-elig').textContent=m.filter(o=>o.ddays>=5&&o.ddays<=30&&!sentIds.has(o.amazon_order_id)&&!amzRevIsCancelled(o)).length||'0';
   document.getElementById('amzrev-s-sent').textContent=sentIds.size||'0';
   // Awaiting = too fresh (<5d), not yet in window
   document.getElementById('amzrev-s-fresh').textContent=m.filter(o=>o.ddays!==null&&o.ddays<5&&!sentIds.has(o.amazon_order_id)).length||'0';
@@ -2672,8 +2670,35 @@ function amzRevBuildDetailHTML(orderId){
       <pre class="text-xs text-slate-500 bg-slate-50 rounded-lg p-3 mt-1 overflow-auto max-h-24 leading-relaxed font-mono whitespace-pre-wrap break-all">${body.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>
       <p class="text-xs text-slate-400 mt-2">${isOk?'Amazon accepted — buyer receives review email within 24–48 hrs.':'Amazon rejected — see body for reason.'}</p>`;
   }
+  // Payment info
+  const payMethod=order?.payment_method||order?.payment_method_detail||order?.payment_type||order?.paymentMethod||null;
+  const isCOD=order?amzRevIsCOD(order):false;
+  const hasPayData=order?amzRevHasPaymentData(order):false;
+  const payLabel=!hasPayData?'Not available in sync data'
+    :isCOD?'COD (Cash on Delivery)'
+    :payMethod==='Other'?'Prepaid / Card'
+    :payMethod;
+  const payColor=!hasPayData?'text-slate-400 italic':isCOD?'text-amber-600':'text-indigo-600';
+  // SKU info
+  let skuHTML='—';
+  if(order){
+    if(Array.isArray(order.order_items)&&order.order_items.length){
+      skuHTML=order.order_items.map(i=>{
+        const sku=i.seller_sku||i.sku||i.asin||'?';
+        const name=i.product_name;
+        const master=i.master_sku&&i.master_sku!==sku?` <span class="text-slate-400">(${i.master_sku})</span>`:'';
+        return name
+          ?`<div class="mb-1"><span class="inline-block px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 text-xs font-medium mr-1">${name}</span><span class="font-mono text-[11px] text-slate-400">${sku}</span>${master}</div>`
+          :`<div class="mb-1"><span class="inline-block px-1.5 py-0 rounded bg-slate-100 text-slate-600 font-mono text-xs">${sku}</span></div>`;
+      }).join('');
+    } else if(order.seller_sku||order.sku||order.asin){
+      skuHTML=`<span class="inline-block px-1.5 py-0 rounded bg-slate-100 text-slate-600 font-mono text-xs">${order.seller_sku||order.sku||order.asin}</span>`;
+    }
+  }
+  // Order status
+  const ordStatusBadge=order?amzRevOrderStatusBadge(order):'—';
   return`<div class="amzrev-detail-inner px-8 py-5">
-    <div class="grid grid-cols-3 gap-3 mb-4">
+    <div class="grid grid-cols-3 gap-3 mb-3">
       <div class="bg-white rounded-xl border border-slate-200 p-3">
         <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Purchase date</p>
         <p class="text-sm font-semibold text-slate-700">${amzRevFmtDate(order?.purchase_date)}</p>
@@ -2691,13 +2716,25 @@ function amzRevBuildDetailHTML(orderId){
         <p class="text-sm font-semibold text-slate-700">${order?.order_total_amount?'₹'+Number(order.order_total_amount).toLocaleString('en-IN'):'—'}</p>
       </div>
       <div class="bg-white rounded-xl border border-slate-200 p-3">
+        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Payment mode</p>
+        <p class="text-sm font-semibold ${payColor}">${payLabel}</p>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3">
+        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Order status</p>
+        <div class="mt-0.5">${ordStatusBadge}</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3 col-span-2">
+        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">SKU(s)</p>
+        <div class="mt-0.5">${skuHTML}</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3">
         <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Solicitation status</p>
         <div class="mt-0.5">${stBadge}</div>
       </div>
-      <div class="bg-white rounded-xl border border-slate-200 p-3">
-        <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Attempted at</p>
-        <p class="text-sm font-semibold text-slate-700">${req?.attempted_at?amzRevFmtDT(req.attempted_at):'—'}</p>
-      </div>
+    </div>
+    <div class="bg-white rounded-xl border border-slate-200 p-3 mb-3">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Attempted at</p>
+      <p class="text-sm font-semibold text-slate-700">${req?.attempted_at?amzRevFmtDT(req.attempted_at):'—'}</p>
     </div>
     <div class="bg-white rounded-xl border border-slate-200 p-4">
       <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Amazon API response</p>
@@ -2720,7 +2757,7 @@ function amzRevToggleDetail(orderId){
   const mainRow=document.getElementById('amzrev-row-'+orderId); if(!mainRow)return;
   mainRow.classList.add('amzrev-row-active');
   const detailTr=document.createElement('tr'); detailTr.className='amzrev-detail-row'; detailTr.id='amzrev-dr-'+orderId;
-  const detailTd=document.createElement('td'); detailTd.colSpan=9; detailTd.innerHTML=amzRevBuildDetailHTML(orderId);
+  const detailTd=document.createElement('td'); detailTd.colSpan=11; detailTd.innerHTML=amzRevBuildDetailHTML(orderId);
   detailTr.appendChild(detailTd); mainRow.insertAdjacentElement('afterend',detailTr);
 }
 
@@ -2733,9 +2770,79 @@ function amzRevWindowTag(d){
 }
 function amzRevDaysCls(d){ return d===null?'text-slate-400':d<5?'text-amber-600 font-semibold':d>30?'text-slate-400':'text-emerald-600 font-semibold'; }
 
+// ── Order status helpers ──────────────────────────────────────────────────
+function amzRevGetOrderStatus(o){
+  return (o.order_status||o.status||o.fulfillment_status||'').toLowerCase();
+}
+function amzRevIsCancelled(o){
+  const s=amzRevGetOrderStatus(o);
+  return s.includes('cancel')||s.includes('rto')||s.includes('return')||s==='returned';
+}
+function amzRevHasPaymentData(o){
+  return !!(o.payment_method||o.payment_method_detail||o.payment_type||o.paymentMethod);
+}
+function amzRevIsCOD(o){
+  const p=(o.payment_method||o.payment_method_detail||o.payment_type||o.paymentMethod||'').toLowerCase();
+  return p.includes('cod')||p.includes('cash')||p==='cod';
+}
+function amzRevGetSkus(o){
+  if(Array.isArray(o.order_items)) return o.order_items.map(i=>[(i.product_name||'').toLowerCase(),(i.seller_sku||i.sku||i.asin||'').toLowerCase()].join(' ')).join(' ');
+  return (o.seller_sku||o.sku||o.asin||'').toLowerCase();
+}
+function amzRevProductTags(o){
+  if(!Array.isArray(o.order_items)||!o.order_items.length){
+    const s=o.seller_sku||o.sku||o.asin||'';
+    if(!s) return '<span class="text-slate-300 text-xs">—</span>';
+    return `<span class="block truncate px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-mono text-[11px]" title="${s}">${s}</span>`;
+  }
+  // Show first item name; if multiple items stack compactly
+  return o.order_items.map(i=>{
+    const name=i.product_name;
+    const sku=i.seller_sku||i.sku||i.asin||'';
+    const tip=name?`${name} (${sku})`:sku;
+    if(name) return `<div class="truncate max-w-full"><span class="inline-block max-w-full truncate px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 text-[11px] font-medium leading-tight" title="${tip}">${name}</span></div>`;
+    return `<div class="truncate max-w-full"><span class="inline-block max-w-full truncate px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-mono text-[11px] leading-tight" title="${tip}">${sku}</span></div>`;
+  }).join('');
+}
+function amzRevOrderStatusBadge(o){
+  const s=amzRevGetOrderStatus(o);
+  // Amazon SP-API keeps status "Shipped" even after delivery — infer Delivered from delivery date
+  const dd=amzRevGetDD(o);
+  const ddays=amzRevDaysSince(dd);
+  if(s.includes('cancel')||s==='canceled'||s==='cancelled')
+    return '<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-100 text-rose-700">Cancelled</span>';
+  if(s.includes('rto'))
+    return '<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">RTO</span>';
+  if(s.includes('return')||s==='returned'||s==='unfulfillable')
+    return '<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700">Returned</span>';
+  // "Shipped" + has a past delivery date → Delivered
+  if((s.includes('ship')||s==='shipped')&&dd&&ddays!==null&&ddays>=0)
+    return '<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">Delivered</span>';
+  if(s.includes('ship'))
+    return '<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">Shipped</span>';
+  if(s.includes('deliver'))
+    return '<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">Delivered</span>';
+  if(!s) return '<span class="text-slate-300 text-xs">—</span>';
+  return `<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600">${s.charAt(0).toUpperCase()+s.slice(1)}</span>`;
+}
+
+function amzRevSetPaymentFilter(value){
+  amzPaymentFilter=value;
+  document.querySelectorAll('#amazon-review-view .amzrev-pf').forEach(b=>{
+    b.classList.toggle('active', b.dataset.pf===value);
+  });
+  amzRevRender();
+  // Show warning if payment data is missing
+  const note=document.getElementById('amzrev-pay-note');
+  if(note){
+    const hasAnyPayData=amzOrders.some(o=>amzRevHasPaymentData(o));
+    note.classList.toggle('hidden', value===''||hasAnyPayData);
+  }
+}
+
 function amzRevSetStatusFilter(value){
-  // Update pill button active state
-  document.querySelectorAll('#amazon-review-view .amzrev-sf').forEach(b=>{
+  // Update pill button active state — exclude payment filter buttons
+  document.querySelectorAll('#amazon-review-view .amzrev-sf:not(.amzrev-pf)').forEach(b=>{
     b.classList.toggle('active', b.dataset.filter===value);
   });
   // Highlight active KPI card with outline; clear others
@@ -2751,25 +2858,44 @@ function amzRevSetStatusFilter(value){
 
 function amzRevRender(){
   const srch=(document.getElementById('amzrev-srch').value||'').toLowerCase();
-  const activeBtn=document.querySelector('#amazon-review-view .amzrev-sf.active');
+  const skuSrch=(document.getElementById('amzrev-sku-srch')?.value||'').toLowerCase();
+  // Status filter — exclude payment pills
+  const activeBtn=document.querySelector('#amazon-review-view .amzrev-sf:not(.amzrev-pf).active');
   const fw=activeBtn?activeBtn.dataset.filter:'';
   let f=amzOrders.map(o=>({...o,deliveryDate:amzRevGetDD(o),ddays:amzRevDaysSince(amzRevGetDD(o))}));
-  if(srch)f=f.filter(o=>o.amazon_order_id.toLowerCase().includes(srch));
-  if(fw){f=f.filter(o=>{
-    const tag=amzRevWindowTag(o.ddays),st=amzReqStatus[o.amazon_order_id]?.solicitation_status;
-    if(fw==='sent')return st==='sent'; if(fw==='failed')return st==='failed'; return tag.filter===fw;
+  // Order ID search
+  if(srch) f=f.filter(o=>o.amazon_order_id.toLowerCase().includes(srch));
+  // SKU search
+  if(skuSrch) f=f.filter(o=>amzRevGetSkus(o).includes(skuSrch));
+  // Payment mode filter — only filter if payment data actually exists in order
+  if(amzPaymentFilter==='cod')     f=f.filter(o=>amzRevHasPaymentData(o)&&amzRevIsCOD(o));
+  if(amzPaymentFilter==='prepaid') f=f.filter(o=>amzRevHasPaymentData(o)&&!amzRevIsCOD(o));
+  // Window/status filter
+  if(fw){ f=f.filter(o=>{
+    const tag=amzRevWindowTag(o.ddays), st=amzReqStatus[o.amazon_order_id]?.solicitation_status;
+    if(fw==='sent')     return st==='sent';
+    if(fw==='failed')   return st==='failed';
+    if(fw==='eligible') return tag.filter==='eligible'&&!amzRevIsCancelled(o);
+    return tag.filter===fw;
   });}
   const tb=document.getElementById('amzrev-tbody'),em=document.getElementById('amzrev-empty');
   amzOpenOrderId=null;
   if(!f.length){tb.innerHTML=''; em.classList.remove('hidden'); return;}
   em.classList.add('hidden');
   tb.innerHTML=f.map(o=>{
-    const d=o.ddays,tag=amzRevWindowTag(d),st=amzReqStatus[o.amazon_order_id]?.solicitation_status;
-    const elig=amzRevIsEligible(o),isSel=amzSelected.has(o.amazon_order_id);
+    const d=o.ddays, tag=amzRevWindowTag(d), st=amzReqStatus[o.amazon_order_id]?.solicitation_status;
+    const cancelled=amzRevIsCancelled(o);
+    const isCOD=amzRevIsCOD(o);
+    const elig=amzRevIsEligible(o), isSel=amzSelected.has(o.amazon_order_id);
+    const payBadge=!amzRevHasPaymentData(o)?''
+      :isCOD?'<span class="inline-block ml-1 px-1.5 py-0 rounded text-[10px] font-bold bg-amber-100 text-amber-700">COD</span>'
+      :'<span class="inline-block ml-1 px-1.5 py-0 rounded text-[10px] font-bold bg-slate-100 text-slate-500">Prepaid</span>';
     const amt=o.order_total_amount?'₹'+Number(o.order_total_amount).toLocaleString('en-IN'):'—';
-    let actionBtn;
     const btnBase='px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all';
-    if(st==='sent')
+    let actionBtn;
+    if(cancelled)
+      actionBtn=`<button class="${btnBase} text-rose-400 border-rose-200 bg-rose-50 cursor-not-allowed" disabled onclick="event.stopPropagation()">Not eligible</button>`;
+    else if(st==='sent')
       actionBtn=`<button class="${btnBase} bg-emerald-50 text-emerald-600 border-emerald-200 cursor-default" disabled onclick="event.stopPropagation()">✓ Sent</button>`;
     else if(d===null)
       actionBtn=`<button class="${btnBase} text-slate-400 border-slate-200 cursor-not-allowed" disabled onclick="event.stopPropagation()">No date</button>`;
@@ -2785,15 +2911,17 @@ function amzRevRender(){
       ?`<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-100 text-rose-700">Failed</span>`
       :`<span class="text-slate-300 text-xs">—</span>`;
     return`<tr class="hover:bg-slate-50 cursor-pointer transition-colors" id="amzrev-row-${o.amazon_order_id}" onclick="amzRevToggleDetail('${o.amazon_order_id}')">
-      <td class="py-4 px-4" onclick="event.stopPropagation()"><input type="checkbox" class="w-4 h-4 text-indigo-600 rounded border-slate-300 cursor-pointer amzrev-row-cb" data-id="${o.amazon_order_id}" ${!elig?'disabled':''} ${isSel?'checked':''} onchange="amzRevToggleSelect('${o.amazon_order_id}',this.checked)"></td>
-      <td class="py-4 px-4 font-mono text-xs text-slate-600">${o.amazon_order_id}</td>
-      <td class="py-4 px-4 text-xs text-slate-500">${amzRevFmtDate(o.purchase_date)}</td>
-      <td class="py-4 px-4 text-xs text-slate-500">${o.deliveryDate?amzRevFmtDate(o.deliveryDate):'—'}</td>
-      <td class="py-4 px-4"><span class="${amzRevDaysCls(d)} text-xs">${d!==null?d+'d':'—'}</span></td>
-      <td class="py-4 px-4 text-xs text-slate-700">${amt}</td>
-      <td class="py-4 px-4"><span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${tag.badge}">${tag.label}</span></td>
-      <td class="py-4 px-4">${stPill}</td>
-      <td class="py-4 px-4 text-right pr-6">${actionBtn}</td>
+      <td class="py-3 px-3" onclick="event.stopPropagation()"><input type="checkbox" class="w-4 h-4 text-indigo-600 rounded border-slate-300 cursor-pointer amzrev-row-cb" data-id="${o.amazon_order_id}" ${!elig?'disabled':''} ${isSel?'checked':''} onchange="amzRevToggleSelect('${o.amazon_order_id}',this.checked)"></td>
+      <td class="py-3 px-3 font-mono text-[11px] text-slate-600 whitespace-nowrap">${o.amazon_order_id}</td>
+      <td class="py-3 px-3 overflow-hidden">${amzRevProductTags(o)}</td>
+      <td class="py-3 px-3 text-xs text-slate-500 whitespace-nowrap">${amzRevFmtDate(o.purchase_date)}</td>
+      <td class="py-3 px-3 text-xs text-slate-500 whitespace-nowrap">${o.deliveryDate?amzRevFmtDate(o.deliveryDate):'—'}</td>
+      <td class="py-3 px-3 whitespace-nowrap"><span class="${amzRevDaysCls(d)} text-xs">${d!==null?d+'d':'—'}</span></td>
+      <td class="py-3 px-3 text-xs text-slate-700 whitespace-nowrap">${amt}${payBadge}</td>
+      <td class="py-3 px-3">${amzRevOrderStatusBadge(o)}</td>
+      <td class="py-3 px-3"><span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${tag.badge}">${tag.label}</span></td>
+      <td class="py-3 px-3">${stPill}</td>
+      <td class="py-3 px-3 text-right pr-5">${actionBtn}</td>
     </tr>`;
   }).join('');
 }
@@ -2804,7 +2932,7 @@ async function amzRevSendSingle(orderId){
   if(btn){btn.disabled=true;btn.innerHTML='↻ Sending…';btn.className=btnBase+' bg-amber-50 text-amber-700 border-amber-200 cursor-wait';}
   showLoader();
   try{
-    const r=await fetch(AMZ_SINGLE_FN,{method:'POST',headers:AMZ_HDR,body:JSON.stringify({order_id:orderId})});
+    const r=await fetch(AMZ_SINGLE_FN,{method:'POST',headers:{ 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },body:JSON.stringify({order_id:orderId})});
     const d=await r.json();
     amzReqStatus[orderId]={solicitation_status:d.success?'sent':'failed',attempted_at:new Date().toISOString(),response_code:d.status,response_body:d.body};
     if(d.success) amzRevToast('✓ Review request sent for '+orderId, false);
@@ -2831,12 +2959,14 @@ async function amzRevSendBulk(){
   for(const orderId of ids){
     pl.textContent=`Sending ${done+1} of ${ids.length} — ${orderId}`;
     pf.style.width=Math.round((done/ids.length)*100)+'%';
+    showLoader();
     try{
-      const r=await fetch(AMZ_SINGLE_FN,{method:'POST',headers:AMZ_HDR,body:JSON.stringify({order_id:orderId})});
+      const r=await fetch(AMZ_SINGLE_FN,{method:'POST',headers:{ 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },body:JSON.stringify({order_id:orderId})});
       const d=await r.json();
       amzReqStatus[orderId]={solicitation_status:d.success?'sent':'failed',attempted_at:new Date().toISOString(),response_code:d.status,response_body:d.body};
       if(d.success)sent++;else failed++;
     }catch(e){ amzReqStatus[orderId]={solicitation_status:'failed',attempted_at:new Date().toISOString()}; failed++; }
+    finally{ hideLoader(); }
     done++; amzSelected.delete(orderId);
     if(done<ids.length) await new Promise(r=>setTimeout(r,AMZ_DELAY_MS));
   }

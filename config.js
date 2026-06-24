@@ -53,6 +53,12 @@ module.exports = {
     SUPABASE_URL: process.env.SUPABASE_URL,
     SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY,
 
+    // --- Amazon Auto Review ---
+    SLACK_BOT_TOKEN:   process.env.SLACK_BOT_TOKEN,
+    SLACK_CHANNEL_ID:  process.env.SLACK_CHANNEL_ID || 'C0BDDKPE3PS',
+    DASHBOARD_URL:     process.env.DASHBOARD_URL || 'http://72.60.97.42:5002',
+    AUTO_REVIEW_CRON:  process.env.AUTO_REVIEW_CRON || '0 10 * * *',
+
     // --- Cache Files ---
     CACHE_DIR: CACHE_DIR,
     AMAZON_CACHE_FILE: path.join(CACHE_DIR, process.env.AMAZON_CACHE_FILE || 'amazon_cache.json'),

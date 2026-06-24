@@ -840,6 +840,8 @@
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
             Refresh
           </button>
+        </div>
+
         </header>
 
         <div class="p-8 max-w-7xl mx-auto w-full">
@@ -881,7 +883,7 @@
           </div>
 
           <!-- Date Filter Bar -->
-          <div class="flex items-center gap-2 mb-6 flex-wrap">
+          <div class="flex items-center gap-2 mb-3 flex-wrap">
             <button class="amzrev-preset active px-4 py-2 text-xs font-semibold rounded-full border transition-all" onclick="amzRevSetPreset('7d',this)">Last 7 days</button>
             <button class="amzrev-preset px-4 py-2 text-xs font-semibold rounded-full border border-slate-200 bg-white text-slate-600 transition-all" onclick="amzRevSetPreset('mtd',this)">MTD</button>
             <button class="amzrev-preset px-4 py-2 text-xs font-semibold rounded-full border border-slate-200 bg-white text-slate-600 transition-all" onclick="amzRevSetPreset('lm',this)">Last month</button>
@@ -892,6 +894,23 @@
               <input type="date" id="amzrev-date-to" onchange="amzRevOnCustomDate()" class="date-input">
             </div>
             <span id="amzrev-date-range-lbl" class="text-xs text-slate-400 ml-1"></span>
+          </div>
+
+          <!-- Secondary Filters: Payment Mode + SKU -->
+          <div class="flex items-center gap-3 mb-6 flex-wrap">
+            <div class="flex items-center gap-1.5">
+              <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Payment:</span>
+              <button class="amzrev-pf amzrev-sf sf-all active" data-pf=""        onclick="amzRevSetPaymentFilter('')">All</button>
+              <button class="amzrev-pf amzrev-sf"               data-pf="cod"     onclick="amzRevSetPaymentFilter('cod')">COD</button>
+              <button class="amzrev-pf amzrev-sf"               data-pf="prepaid" onclick="amzRevSetPaymentFilter('prepaid')">Prepaid</button>
+              <span id="amzrev-pay-note" class="hidden text-[11px] text-amber-600 font-medium">⚠ Payment data not in sync — update Edge Function</span>
+            </div>
+            <div class="h-4 w-px bg-slate-200"></div>
+            <div class="flex items-center gap-1.5">
+              <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">SKU:</span>
+              <input type="text" id="amzrev-sku-srch" placeholder="Filter by SKU…" oninput="amzRevRender()"
+                class="px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 text-slate-700 w-36">
+            </div>
           </div>
 
           <!-- Bulk Action Bar -->
@@ -937,20 +956,35 @@
               </div>
             </div>
             <div class="overflow-x-auto">
-              <table class="w-full text-left border-collapse">
+              <table class="text-left border-collapse" style="min-width:1120px;width:100%;table-layout:fixed;">
+                <colgroup>
+                  <col style="width:44px">
+                  <col style="width:148px">
+                  <col style="width:180px">
+                  <col style="width:100px">
+                  <col style="width:100px">
+                  <col style="width:64px">
+                  <col style="width:110px">
+                  <col style="width:96px">
+                  <col style="width:100px">
+                  <col style="width:88px">
+                  <col style="width:140px">
+                </colgroup>
                 <thead class="table-header">
                   <tr>
-                    <th class="py-4 px-4 w-10">
+                    <th class="py-3 px-3">
                       <input type="checkbox" id="amzrev-chk-all" onchange="amzRevToggleAll(this)" class="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer">
                     </th>
-                    <th class="py-4 px-4">Order ID</th>
-                    <th class="py-4 px-4">Purchase Date</th>
-                    <th class="py-4 px-4">Delivery Date</th>
-                    <th class="py-4 px-4">Days</th>
-                    <th class="py-4 px-4">Amount</th>
-                    <th class="py-4 px-4">Window</th>
-                    <th class="py-4 px-4">Status</th>
-                    <th class="py-4 px-4 text-right pr-6">Action</th>
+                    <th class="py-3 px-3">Order ID</th>
+                    <th class="py-3 px-3">Product</th>
+                    <th class="py-3 px-3">Purchase</th>
+                    <th class="py-3 px-3">Delivery</th>
+                    <th class="py-3 px-3">Days</th>
+                    <th class="py-3 px-3">Amount</th>
+                    <th class="py-3 px-3">Order Status</th>
+                    <th class="py-3 px-3">Window</th>
+                    <th class="py-3 px-3">Review</th>
+                    <th class="py-3 px-3 text-right pr-5">Action</th>
                   </tr>
                 </thead>
                 <tbody id="amzrev-tbody" class="divide-y divide-slate-50 text-sm text-slate-600"></tbody>

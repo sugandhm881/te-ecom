@@ -161,7 +161,10 @@ function signRequest(config, options, accessToken) {
 
 async function makeSignedApiRequest(options, maxRetries = 5) {
     const accessToken = await getLwaAccessToken();
-    const headers = signRequest(config, options, accessToken);
+    const headers = {
+        ...signRequest(config, options, accessToken),
+        ...(options.headers || {})
+    };
     const url = `${config.BASE_URL}${options.path}`;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
