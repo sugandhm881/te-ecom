@@ -5,6 +5,20 @@ const { supabase } = require('./app/supabase');
 
 const limit = pLimit(10);
 
+// DocPharma rate limiter — 1 call at a time, 1 second between calls
+const docpharmaLimit = pLimit(1);
+let lastDocPharmaTs = 0;
+const DOCPHARMA_DELAY_MS = 1000;
+
+async function throttledDocPharma(orderName) {
+    return docpharmaLimit(async () => {
+        const wait = DOCPHARMA_DELAY_MS - (Date.now() - lastDocPharmaTs);
+        if (wait > 0) await new Promise(r => setTimeout(r, wait));
+        lastDocPharmaTs = Date.now();
+        return helpers.fetchDocpharmaDetails(orderName);
+    });
+}
+
 async function enrichOrder(order) {
     const fulfillments = order.fulfillments || [];
     const awb = fulfillments.find(f => f.tracking_number)?.tracking_number;
@@ -25,7 +39,7 @@ async function enrichOrder(order) {
     if (!rawStatus || rawStatus === 'Status Not Available' || rawStatus === 'API Error or Timeout') {
         const orderName = (order.name || '').replace('#', '');
         if (orderName) {
-            const docData = await helpers.fetchDocpharmaDetails(orderName);
+            const docData = await throttledDocPharma(orderName);
             if (docData) {
                 order.docpharma_data = docData;
                 const extracted = helpers.extractDocpharmaStatusString(docData);
