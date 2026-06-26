@@ -1,14 +1,29 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 
+// Refuse to operate with a missing or weak/guessable signing secret.
+// A weak secret lets anyone forge valid tokens, which is equivalent to no auth.
+const WEAK_SECRETS = new Set(['you-should-really-change-this', 'secret', 'changeme', '']);
+
+function assertStrongSecret() {
+    const s = config.SECRET_KEY;
+    if (!s || WEAK_SECRETS.has(s) || s.length < 32) {
+        throw new Error(
+            'JWT_SECRET is missing or weak. Set a strong, random JWT_SECRET (>=32 chars) in .env.'
+        );
+    }
+    return s;
+}
+
 function generateToken(email) {
     try {
         return jwt.sign(
             { sub: email },
-            config.SECRET_KEY,
+            assertStrongSecret(),
             { expiresIn: '1d' }
         );
     } catch (e) {
+        console.error('[Auth] Cannot generate token:', e.message);
         return null;
     }
 }
@@ -28,7 +43,7 @@ function tokenRequired(req, res, next) {
     }
 
     try {
-        const decoded = jwt.verify(token, config.SECRET_KEY);
+        const decoded = jwt.verify(token, assertStrongSecret());
         req.user = decoded; // Attach user to request
         next();
     } catch (err) {

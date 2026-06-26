@@ -27,16 +27,4 @@ router.post('/login', (req, res) => {
     return res.status(401).json({ message: 'Invalid credentials!' });
 });
 
-router.get('/get-login-details', (req, res) => {
-    // In Express, check NODE_ENV for debug mode equivalent
-    if (process.env.NODE_ENV !== 'production') {
-        return res.json({
-            email: config.APP_USER_EMAIL || '',
-            password: config.APP_USER_PASSWORD || ''
-        });
-    } else {
-        return res.status(404).json({ error: 'This endpoint is not available in production.' });
-    }
-});
-
 module.exports = router;

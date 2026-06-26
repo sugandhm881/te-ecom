@@ -367,6 +367,16 @@ function navigate(view) {
             activeViewElement = document.getElementById('amazon-review-view');
             if (!amzReviewLoaded) { amzReviewLoaded = true; amzRevLoadOrders(); }
             break;
+        case 'fulfillment-ops':
+            activeLinkElement = document.getElementById('nav-fulfillment-ops');
+            activeViewElement = document.getElementById('fulfillment-ops-view');
+            fopsInit();
+            break;
+        case 'serviceability':
+            activeLinkElement = document.getElementById('nav-serviceability');
+            activeViewElement = document.getElementById('serviceability-view');
+            if (typeof srvInit === 'function') srvInit();
+            break;
     }
 
     if (activeLinkElement) {
@@ -615,7 +625,7 @@ function renderOrders(o) {
     updateBulkActionBar(); 
 
     if (o.length === 0) {
-        ordersListEl.innerHTML = `<tr><td colspan="10" class="p-8 text-center text-slate-400">No orders found.</td></tr>`;
+        ordersListEl.innerHTML = `<tr><td colspan="11" class="p-8 text-center text-slate-400">No orders found.</td></tr>`;
         return;
     }
 
@@ -738,6 +748,14 @@ function renderOrders(o) {
             detailedAddress = [address1, address2, city, province, zip ? `(${zip})` : ''].filter(Boolean).join(', ');
         }
 
+        // --- EDD (estimated delivery) ---
+        // Only meaningful for orders awaiting dispatch; shipped/closed orders show "—".
+        const eddPin = getOrderPincode(order);
+        const eddApplies = EDD_PENDING_STATUSES.has(order.status) && /^\d{6}$/.test(eddPin || '');
+        const eddCell = eddApplies
+            ? `<span class="edd-cell text-xs text-slate-400" data-pin="${eddPin}" data-wt="0.5" title="Estimated delivery if dispatched today">…</span>`
+            : `<span class="text-[11px] text-slate-300">—</span>`;
+
         mainRow.innerHTML = `
             <td class="p-4 w-10">
                 <input type="checkbox" class="order-checkbox w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer" 
@@ -776,6 +794,7 @@ function renderOrders(o) {
             </td>
             <td class="p-4 font-medium text-slate-900">${formatCurrency(order.total)}</td>
             <td class="p-4"><span class="px-3 py-1 text-xs font-semibold rounded-full whitespace-nowrap ${getStatusBadge(order.status)}">${order.status}</span></td>
+            <td class="p-4 text-center">${eddCell}</td>
             <td class="p-4 text-right">
                  <button class="text-slate-400 hover:text-indigo-600 focus:outline-none" onclick="toggleDetails('${order.id}')">
                     <svg class="w-5 h-5 transform transition-transform duration-200" id="arrow-${order.id}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
@@ -847,7 +866,7 @@ function renderOrders(o) {
         }
 
         detailsRow.innerHTML = `
-            <td colspan="10" class="p-0">
+            <td colspan="11" class="p-0">
                 <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-8 border-t border-slate-100">
                     <div class="space-y-4">
                         <div>
@@ -871,6 +890,107 @@ function renderOrders(o) {
         ordersListEl.appendChild(mainRow);
         ordersListEl.appendChild(detailsRow);
     });
+
+    eddEnrichVisible();
+}
+
+// ─── EDD (Estimated Delivery Date) column ──────────────────────────────────
+// Statuses still awaiting dispatch — EDD ("if dispatched today") is relevant here.
+const EDD_PENDING_STATUSES = new Set(['New', 'Processing', 'Ready To Ship', 'Confirmed']);
+// Client-side cache: "<pin>-<wt>" -> summary (mirrors server cache, avoids refetch on re-render)
+const eddClientCache = {};
+
+// Pull a 6-digit delivery pincode off whatever address shape the order has.
+function getOrderPincode(order) {
+    const a = order.shipping_address || {};
+    const raw = a.zip || a.pincode || a.postal_code || a.pin_code || a.Pincode || a.PostalCode || '';
+    const m = String(raw).match(/\d{6}/);
+    return m ? m[0] : '';
+}
+
+// Render one EDD summary into a cell: a fastest→slowest date range + cutoff note.
+function eddFormatCell(span, s) {
+    if (!s || s.serviceable === null || s.error) {
+        span.textContent = '—';
+        span.className = 'edd-cell text-[11px] text-slate-300';
+        return;
+    }
+    if (s.serviceable === false) {
+        span.textContent = 'Not serviceable';
+        span.className = 'edd-cell text-[11px] font-semibold text-rose-500';
+        span.title = 'No courier services this pincode';
+        return;
+    }
+    // "Dispatch missed" — if current IST time is past the earliest cutoff, today's
+    // dispatch slot is gone, so real EDD slips a day. Reflect that in the estimate.
+    let bump = 0;
+    if (s.earliest_cutoff && /^\d{2}:\d{2}$/.test(s.earliest_cutoff)) {
+        const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+        const [ch, cm] = s.earliest_cutoff.split(':').map(Number);
+        const cutoff = new Date(nowIST); cutoff.setHours(ch, cm, 0, 0);
+        if (nowIST > cutoff) bump = 1;
+    }
+    const fast = (s.fastest_days == null ? null : s.fastest_days + bump);
+    const slow = (s.slowest_days == null ? null : s.slowest_days + bump);
+    const fmt = (d) => {
+        if (d == null) return '—';
+        const dt = new Date(); dt.setHours(0, 0, 0, 0); dt.setDate(dt.getDate() + Math.max(0, d));
+        return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+    };
+    const range = (fast != null && slow != null && fast !== slow) ? `${fmt(fast)} – ${fmt(slow)}` : fmt(fast);
+    const fastLabel = fast == null ? '' : fast <= 0 ? 'Today' : fast === 1 ? '1 day' : `${fast} days`;
+    span.className = 'edd-cell leading-tight inline-block';
+    span.title = `${s.courier_count} courier(s)` +
+        (s.earliest_cutoff ? ` · dispatch before ${s.earliest_cutoff}${bump ? ' (missed today)' : ''}` : '') +
+        (s.cheapest_freight != null ? ` · from ₹${Number(s.cheapest_freight).toFixed(0)}` : '');
+    span.innerHTML =
+        `<span class="text-xs font-semibold text-slate-700">${range}</span>` +
+        (fastLabel ? `<br><span class="text-[10px] ${bump ? 'text-amber-500' : 'text-slate-400'}">${bump ? 'after cutoff' : fastLabel}</span>` : '');
+}
+
+let _eddFetchInFlight = false;
+// Gather all "…" EDD cells on screen, serve from cache, fetch the rest in one batch.
+async function eddEnrichVisible() {
+    const spans = Array.from(document.querySelectorAll('span.edd-cell'));
+    if (!spans.length) return;
+
+    const misses = new Map(); // "<pin>-<wt>" -> { pincode, weight }
+    spans.forEach(span => {
+        const pin = span.dataset.pin;
+        const wt = span.dataset.wt || '0.5';
+        if (!/^\d{6}$/.test(pin || '')) return;
+        const key = `${pin}-${wt}`;
+        if (eddClientCache[key]) {
+            eddFormatCell(span, eddClientCache[key]);
+        } else if (!misses.has(key)) {
+            misses.set(key, { pincode: pin, weight: Number(wt) });
+        }
+    });
+
+    if (!misses.size || _eddFetchInFlight) return;
+    _eddFetchInFlight = true;
+    try {
+        // Direct fetch (not fetchApiData) so the global loader doesn't flash on every render.
+        const headers = { 'Content-Type': 'application/json', ...getAuthHeaders() };
+        if (!headers.Authorization) return;
+        const r = await fetch('/api/serviceability/edd-batch', {
+            method: 'POST', headers,
+            body: JSON.stringify({ items: Array.from(misses.values()) })
+        });
+        if (!r.ok) return;
+        const resp = await r.json();
+        const results = (resp && resp.results) || {};
+        Object.keys(results).forEach(k => { eddClientCache[k] = results[k]; });
+        // Re-apply to all matching cells now on screen.
+        document.querySelectorAll('span.edd-cell').forEach(span => {
+            const key = `${span.dataset.pin}-${span.dataset.wt || '0.5'}`;
+            if (eddClientCache[key]) eddFormatCell(span, eddClientCache[key]);
+        });
+    } catch (e) {
+        // leave cells as "…"; a later render will retry
+    } finally {
+        _eddFetchInFlight = false;
+    }
 }
 
 function toggleDetails(id) {
@@ -2612,6 +2732,29 @@ function amzRevToggleAll(cb){
 function amzRevSelectAllEligible(){ amzOrders.forEach(o=>{if(amzRevIsEligible(o))amzSelected.add(o.amazon_order_id);}); amzRevRender(); amzRevUpdateBulkBar(); }
 function amzRevClearSelection(){ amzSelected.clear(); amzRevRender(); amzRevUpdateBulkBar(); }
 
+// Manual "Retry Failed": re-runs the review check for ONLY orders that previously
+// failed (same 10–30 day criteria). Posts the list to Slack and waits for yes/no —
+// nothing is sent until someone replies "yes". The daily 10 AM cron is unaffected.
+async function amzRevTriggerCron(){
+  if(!confirm('Retry review requests for previously-FAILED orders?\n\nThis posts the failed-orders list to Slack and waits for a yes/no reply there. No reviews are sent until you reply "yes". The daily 10 AM auto-run is unaffected.'))return;
+  const btn=document.getElementById('amzrev-run-cron-btn');
+  const original=btn?btn.innerHTML:'';
+  if(btn){btn.disabled=true;btn.innerHTML='<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path></svg>Triggering…';}
+  try{
+    const res=await fetch('/api/amazon/auto-review/trigger',{method:'POST',headers:{ 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' }});
+    const d=await res.json().catch(()=>({}));
+    if(res.ok && d.success!==false){
+      showNotification(d.message || 'Retry-failed check triggered — reply yes/no in Slack.');
+    }else{
+      showNotification(d.error || 'Failed to trigger retry-failed check.', true);
+    }
+  }catch(e){
+    showNotification('Failed to trigger: '+(e.message||e), true);
+  }finally{
+    if(btn){btn.disabled=false;btn.innerHTML=original;}
+  }
+}
+
 async function amzRevLoadOrders(){
   if(amzCurrentPreset==='custom'){
     amzDateFrom=document.getElementById('amzrev-date-from').value;
@@ -2650,6 +2793,11 @@ function amzRevUpdateStats(){
   document.getElementById('amzrev-s-sent').textContent=sentIds.size||'0';
   // Awaiting = too fresh (<5d), not yet in window
   document.getElementById('amzrev-s-fresh').textContent=m.filter(o=>o.ddays!==null&&o.ddays<5&&!sentIds.has(o.amazon_order_id)).length||'0';
+
+  // Show the "Retry Failed" button only when there are failed orders in the current view.
+  const failedCount=amzOrders.filter(o=>amzReqStatus[o.amazon_order_id]?.solicitation_status==='failed').length;
+  const cronBtn=document.getElementById('amzrev-run-cron-btn');
+  if(cronBtn)cronBtn.style.display=failedCount>0?'':'none';
 }
 
 function amzRevBuildDetailHTML(orderId){
@@ -2982,6 +3130,8 @@ async function amzRevSendBulk(){
 
 document.getElementById('nav-reports')?.addEventListener('click', (e) => { e.preventDefault(); navigate('reports-view'); });
 document.getElementById('nav-amazon-review')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-review'); });
+document.getElementById('nav-fulfillment-ops')?.addEventListener('click', (e) => { e.preventDefault(); navigate('fulfillment-ops'); });
+document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 
 document.getElementById('btn-download-amazon-report')?.addEventListener('click', async () => {
     const startDate = document.getElementById('amazon-report-start-date').value;
@@ -3197,3 +3347,712 @@ document.addEventListener('DOMContentLoaded', () => {
         showLogin();
     }
 });
+
+// ── Fulfillment Ops ───────────────────────────────────────────────────────────
+const FOPS_OPS_STATUSES = ['CONFIRMED','LABEL_PRINTED','LABEL_PURCHASED','FULFILLMENT_REQUESTED','READY_FOR_PICKUP'];
+const FOPS_ALL_STATUSES = ['CONFIRMED','READY_FOR_PICKUP','IN_TRANSIT','OUT_FOR_DELIVERY','ATTEMPTED_DELIVERY','DELIVERED','LABEL_PRINTED','LABEL_PURCHASED','FULFILLMENT_REQUESTED','SHOPIFY_CANCELLED'];
+const FOPS_DS_LABEL = {
+  CONFIRMED:'Confirmed', READY_FOR_PICKUP:'Ready for pickup',
+  IN_TRANSIT:'In transit', OUT_FOR_DELIVERY:'Out for delivery',
+  ATTEMPTED_DELIVERY:'Attempted', DELIVERED:'Delivered',
+  LABEL_PRINTED:'Label printed', LABEL_PURCHASED:'Label purchased',
+  FULFILLMENT_REQUESTED:'Requested',
+  SHIPPED:'Shipped', MANIFESTED:'Manifested',
+  RTO:'RTO', CANCELLED:'Cancelled',
+  SHOPIFY_CANCELLED:'Shopify Cancelled'
+};
+const FOPS_DS_BADGE = {
+  CONFIRMED:'bg-blue-100 text-blue-700',
+  READY_FOR_PICKUP:'bg-purple-100 text-purple-700',
+  IN_TRANSIT:'bg-amber-100 text-amber-800',
+  SHIPPED:'bg-amber-100 text-amber-800',
+  MANIFESTED:'bg-amber-100 text-amber-800',
+  OUT_FOR_DELIVERY:'bg-emerald-100 text-emerald-700',
+  ATTEMPTED_DELIVERY:'bg-rose-100 text-rose-700',
+  DELIVERED:'bg-slate-100 text-slate-600',
+  RTO:'bg-red-100 text-red-700',
+  CANCELLED:'bg-slate-200 text-slate-500',
+  SHOPIFY_CANCELLED:'bg-red-100 text-red-600',
+};
+const FOPS_PER_PAGE = 50;
+
+let fopsOrders  = [];
+let fopsMode    = 'ops';
+let fopsSortKey = 'date';
+let fopsSortDir = -1;
+let fopsPage    = 1;
+let fopsActiveDS = new Set(FOPS_OPS_STATUSES);
+let fopsInited  = false;
+
+function fopsMTD() {
+  const n = new Date();
+  const y = n.getFullYear(), mo = n.getMonth(), d = n.getDate();
+  const pad = x => String(x).padStart(2, '0');
+  const fmtLocal = dt => `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
+  const startDate = new Date(y, mo, 1);
+  const endDate   = new Date(y, mo, d - 2); // local date arithmetic — no UTC offset issue
+  return {
+    start: fmtLocal(startDate),
+    end:   fmtLocal(endDate < startDate ? startDate : endDate) // clamp to start of month
+  };
+}
+
+function fopsDateRange() {
+  const preset = document.getElementById('fops-date-preset')?.value || 'mtd';
+  const today  = new Date();
+  const y = today.getFullYear(), mo = today.getMonth(), d = today.getDate();
+  const pad = x => String(x).padStart(2, '0');
+  const fmtL = dt => `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
+  const ago  = n => new Date(y, mo, d - n);
+  if (preset === 'today')       return { start: fmtL(today), end: fmtL(today) };
+  if (preset === 'yesterday')   return { start: fmtL(ago(1)), end: fmtL(ago(1)) };
+  if (preset === 'last7')       return { start: fmtL(ago(6)), end: fmtL(today) };
+  if (preset === 'last15')      return { start: fmtL(ago(14)), end: fmtL(today) };
+  if (preset === 'mtd')         return fopsMTD();
+  if (preset === 'this-month')  return { start: fmtL(new Date(y, mo, 1)),   end: fmtL(new Date(y, mo+1, 0)) };
+  if (preset === 'last-month')  return { start: fmtL(new Date(y, mo-1, 1)), end: fmtL(new Date(y, mo, 0)) };
+  // custom — read from inputs
+  return { start: document.getElementById('fops-start')?.value || fmt(ago(29)), end: document.getElementById('fops-end')?.value || fmt(today) };
+}
+
+function fopsOnPresetChange() {
+  const isCustom = document.getElementById('fops-date-preset')?.value === 'custom';
+  document.getElementById('fops-custom-dates')?.classList.toggle('hidden', !isCustom);
+  if (!isCustom) fopsFetch();
+}
+
+function fopsInit() {
+  if (fopsInited) return;
+  fopsInited = true;
+  // build status chips for research mode
+  const chips = document.getElementById('fops-ds-chips');
+  if (chips && !chips.children.length) {
+    // Select All button
+    const btnAll = document.createElement('button');
+    btnAll.id = 'fops-chip-all';
+    btnAll.className = 'fops-chip';
+    btnAll.textContent = 'Select All';
+    btnAll.onclick = () => {
+      FOPS_ALL_STATUSES.forEach(s => fopsActiveDS.add(s));
+      document.querySelectorAll('#fops-ds-chips .fops-chip[data-s]').forEach(b => b.classList.add('active'));
+      fopsPage = 1; fopsRenderTable();
+    };
+    chips.appendChild(btnAll);
+
+    // Individual status chips
+    FOPS_ALL_STATUSES.forEach(s => {
+      const b = document.createElement('button');
+      b.className = 'fops-chip' + (FOPS_OPS_STATUSES.includes(s) ? ' active' : '');
+      b.dataset.s = s;
+      b.textContent = FOPS_DS_LABEL[s] || s;
+      b.onclick = () => {
+        if (fopsActiveDS.has(s)) fopsActiveDS.delete(s); else fopsActiveDS.add(s);
+        b.classList.toggle('active', fopsActiveDS.has(s));
+        fopsPage = 1; fopsRenderTable();
+      };
+      chips.appendChild(b);
+    });
+  }
+  // auto-load immediately
+  fopsFetch();
+  // auto-refresh every 10 minutes
+  if (window._fopsRefreshTimer) clearInterval(window._fopsRefreshTimer);
+  window._fopsRefreshTimer = setInterval(() => {
+    if (document.getElementById('fulfillment-ops-view') &&
+        !document.getElementById('fulfillment-ops-view').classList.contains('hidden')) {
+      fopsFetch();
+    }
+  }, 10 * 60 * 1000);
+}
+
+function fopsSetMode(m) {
+  fopsMode = m;
+  document.getElementById('fops-mode-ops').classList.toggle('active', m === 'ops');
+  document.getElementById('fops-mode-research').classList.toggle('active', m === 'research');
+  document.getElementById('fops-ops-bar').classList.toggle('hidden', m !== 'ops');
+  document.getElementById('fops-research-panel').classList.toggle('hidden', m !== 'research');
+  if (m === 'ops') {
+    fopsActiveDS = new Set(FOPS_OPS_STATUSES);
+    document.querySelectorAll('#fops-ds-chips .fops-chip').forEach(b => {
+      b.classList.toggle('active', FOPS_OPS_STATUSES.includes(b.dataset.s));
+    });
+  }
+  fopsPage = 1; fopsRenderTable();
+}
+
+async function fopsFetch() {
+  const btn = document.getElementById('fops-fetch-btn');
+  const tbody = document.getElementById('fops-tbody');
+  btn.disabled = true;
+  btn.innerHTML = `<span class="inline-flex items-center gap-2"><svg class="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>Fetching…</span>`;
+  fopsOrders = [];
+  if (tbody) tbody.innerHTML = `<tr><td colspan="9"><div class="flex flex-col items-center justify-center py-16 gap-4"><div style="position:relative;width:56px;height:56px;"><img src="/static/assets/ecom-logo.png" style="width:56px;height:56px;border-radius:14px;object-fit:contain;box-shadow:0 4px 16px rgba(79,70,229,0.18);animation:loader-logo-pulse 1.6s ease-in-out infinite;"><div class="loader-ring"></div></div><div class="text-xs text-slate-400 font-medium">Loading orders…</div></div></td></tr>`;
+  const { start, end } = fopsMode === 'ops' ? fopsMTD() : fopsDateRange();
+  fopsLog(`Fetching ${start} → ${end}…`);
+  try {
+    const res = await fetch('/api/fulfillment-ops/orders', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start, end, mode: fopsMode })
+    });
+    const d = await res.json();
+    if (!d.success) throw new Error(d.error || 'Unknown error');
+    fopsOrders = d.orders || [];
+    const filtered = fopsGetFiltered();
+    fopsLog(`Done — ${fopsOrders.length} total orders · ${filtered.length} match filters`);
+    document.getElementById('fops-ts').textContent = `Updated ${new Date().toLocaleTimeString('en-IN',{hour12:false})} · ${fopsOrders.length} orders`;
+    fopsPage = 1; fopsRenderTable();
+  } catch (e) {
+    fopsLog('Error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Fetch MTD';
+  }
+}
+
+function fopsGetDS(o) {
+  // RS status is checked first — RTO orders are marked as cancelled in Shopify but must show as RTO
+  if (o.rapidshypStatus) {
+    const s = o.rapidshypStatus.toLowerCase();
+    // Refused / cancelled-at-delivery → shipment returns to origin = RTO
+    if (s.includes('rto') || s.includes('refused') || s.includes('return')) return 'RTO';
+    if (s.includes('delivered') && !s.includes('out') && !s.includes('undeliver')) return 'DELIVERED';
+    if (s.includes('out for delivery'))                  return 'OUT_FOR_DELIVERY';
+    if (s.includes('pickup completed') || s.includes('picked up') || s.includes('in transit') || s.includes('transit') || s.includes('shipped')) return 'IN_TRANSIT';
+    if (s.includes('attempt') || s.includes('ndr') || s.includes('undeliver') || s.includes('delayed') || s.includes('not attempted')) return 'ATTEMPTED_DELIVERY';
+    if (s.includes('cancel')) return 'RTO';
+  }
+  // Only treat as Shopify Cancelled if RS has no status (no RS data = genuinely cancelled, not RTO)
+  if (o.cancelledAt) return 'SHOPIFY_CANCELLED';
+  const f = o.fulfillments || [];
+  return f.length ? (f[0].displayStatus || '').toUpperCase() : null;
+}
+function fopsGetAWB(o) {
+  const f = o.fulfillments || [];
+  if (!f.length) return '';
+  const ti = f[0].trackingInfo || [];
+  return ti.length ? (ti[0].number || '') : '';
+}
+function fopsGetCarrier(o) {
+  const f = o.fulfillments || [];
+  if (!f.length) return '';
+  const ti = f[0].trackingInfo || [];
+  if (!ti.length) return '';
+  const c = (ti[0].company || '').toLowerCase();
+  if (c.includes('delhivery')) return 'Delhivery';
+  if (c.includes('ekart')) return 'Ekart';
+  if (c.includes('amazon')) return 'Amazon';
+  return ti[0].company || '';
+}
+function fopsIsPrepaid(o) {
+  return (o.tags||[]).some(t=>{ const u=t.toUpperCase(); return u.includes('PREPAID')||u==='UPI'||u.includes('CARD'); });
+}
+function fopsIsCOD(o) { return (o.tags||[]).some(t=>t.toUpperCase()==='COD'); }
+
+function fopsGetFiltered() {
+  const payF     = document.getElementById('fops-f-pay')?.value || '';
+  const carrierF = document.getElementById('fops-f-carrier')?.value || '';
+  const q        = (document.getElementById('fops-search')?.value || '').toLowerCase();
+  return fopsOrders.filter(o => {
+    const ds = fopsGetDS(o);
+    if (!fopsActiveDS.has(ds)) return false;
+    if (payF === 'prepaid' && !fopsIsPrepaid(o)) return false;
+    if (payF === 'cod' && !fopsIsCOD(o)) return false;
+    if (carrierF && !fopsGetCarrier(o).includes(carrierF)) return false;
+    if (q) {
+      const awb = fopsGetAWB(o);
+      return (o.name||'').toLowerCase().includes(q) ||
+             (o.customer?.displayName||'').toLowerCase().includes(q) ||
+             awb.toLowerCase().includes(q);
+    }
+    return true;
+  });
+}
+
+function fopsGetSorted(rows) {
+  const sv = document.getElementById('fops-f-sort')?.value || 'date-desc';
+  let k = fopsSortKey, d = fopsSortDir;
+  if (fopsMode === 'research') {
+    if (sv==='date-desc'){k='date';d=-1;} else if (sv==='date-asc'){k='date';d=1;}
+    else if (sv==='amount-desc'){k='amount';d=-1;} else {k='amount';d=1;}
+  }
+  return [...rows].sort((a,b)=>{
+    if (k==='name') return d*(a.name||'').localeCompare(b.name||'');
+    if (k==='amount') return d*(parseFloat(a.totalPriceSet.shopMoney.amount)-parseFloat(b.totalPriceSet.shopMoney.amount));
+    return d*(new Date(a.processedAt)-new Date(b.processedAt));
+  });
+}
+
+function fopsToggleSort(k) {
+  if (fopsMode === 'research') return;
+  if (fopsSortKey === k) fopsSortDir *= -1; else { fopsSortKey = k; fopsSortDir = -1; }
+  ['name','date','amount'].forEach(sk => {
+    const el = document.getElementById('fops-sort-'+sk);
+    if (!el) return;
+    el.textContent = sk === fopsSortKey ? (fopsSortDir === -1 ? '↓' : '↑') : '↕';
+    el.style.opacity = sk === fopsSortKey ? '1' : '0.4';
+  });
+  fopsPage = 1; fopsRenderTable();
+}
+
+function fopsChangePage(d) {
+  const rows = fopsGetSorted(fopsGetFiltered());
+  const tp = Math.ceil(rows.length / FOPS_PER_PAGE) || 1;
+  fopsPage = Math.max(1, Math.min(tp, fopsPage + d));
+  fopsRenderTable();
+}
+
+function fopsRenderMetrics(rows) {
+  const count = s => rows.filter(o => fopsGetDS(o) === s).length;
+  const gmv = rows.reduce((s,o) => s + parseFloat(o.totalPriceSet.shopMoney.amount), 0);
+  const n = rows.length || 1;
+  const confirmed = count('CONFIRMED') + count('READY_FOR_PICKUP');
+  const transit   = count('IN_TRANSIT');
+  const ofd       = count('OUT_FOR_DELIVERY');
+  const attempted = count('ATTEMPTED_DELIVERY');
+  document.getElementById('fops-m-count').textContent     = rows.length.toLocaleString('en-IN');
+  document.getElementById('fops-m-gmv').textContent       = '₹' + Math.round(gmv).toLocaleString('en-IN');
+  document.getElementById('fops-m-confirmed').textContent = confirmed;
+  document.getElementById('fops-m-confirmed-sub').textContent = Math.round(confirmed/n*100)+'% — awaiting pickup';
+  document.getElementById('fops-m-transit').textContent   = transit;
+  document.getElementById('fops-m-transit-sub').textContent = Math.round(transit/n*100)+'% of active';
+  document.getElementById('fops-m-ofd').textContent       = ofd;
+  document.getElementById('fops-m-ofd-sub').textContent   = Math.round(ofd/n*100)+'% of active';
+  document.getElementById('fops-m-attempted').textContent = attempted;
+  // status summary pills
+  const statusCounts = {};
+  rows.forEach(o => { const ds=fopsGetDS(o)||'UNKNOWN'; statusCounts[ds]=(statusCounts[ds]||0)+1; });
+  const pills = document.getElementById('fops-status-pills');
+  if (pills) pills.innerHTML = Object.entries(statusCounts).map(([s,c])=>
+    `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-semibold rounded-full border border-slate-200 bg-white text-slate-600">
+      <span class="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-bold ${FOPS_DS_BADGE[s]||'bg-slate-100 text-slate-500'}">${FOPS_DS_LABEL[s]||s}</span>
+      ${c}
+    </span>`
+  ).join('');
+}
+
+function fopsRenderTable() {
+  const rows = fopsGetSorted(fopsGetFiltered());
+  fopsRenderMetrics(rows);
+  const tp    = Math.ceil(rows.length / FOPS_PER_PAGE) || 1;
+  const start = (fopsPage-1) * FOPS_PER_PAGE;
+  const page  = rows.slice(start, start + FOPS_PER_PAGE);
+  const tbody = document.getElementById('fops-tbody');
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="9" class="text-center py-12 text-slate-400 text-sm">${fopsOrders.length?'No orders match current filters':'Click Fetch MTD to load orders'}</td></tr>`;
+    document.getElementById('fops-pg-label').textContent = '';
+    document.getElementById('fops-foot-label').textContent = '';
+    document.getElementById('fops-pg-prev').disabled = true;
+    document.getElementById('fops-pg-next').disabled = true;
+    return;
+  }
+  tbody.innerHTML = page.map(o => {
+    const dt  = new Date(o.processedAt);
+    const ds  = fopsGetDS(o) || '';
+    const awb = fopsGetAWB(o);
+    const carrier = fopsGetCarrier(o);
+    const amt = parseFloat(o.totalPriceSet.shopMoney.amount);
+    const dateStr = dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short'}) + ' ' +
+                    dt.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false});
+    const phone = o.customer?.phone || '';
+    const payBadge = fopsIsPrepaid(o)
+      ? '<span class="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-700">Prepaid</span>'
+      : fopsIsCOD(o)
+      ? '<span class="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">COD</span>'
+      : '<span class="text-slate-300 text-xs">—</span>';
+    const enriching = fopsGetAWB(o) && !o.rapidshypStatus && !o.cancelledAt;
+    const dsBadge = enriching
+      ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-400"><span class="w-1.5 h-1.5 rounded-full bg-slate-300 animate-pulse flex-shrink-0"></span>${FOPS_DS_LABEL[ds]||ds||'—'}</span>`
+      : `<span class="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold ${FOPS_DS_BADGE[ds]||'bg-slate-100 text-slate-500'}">${FOPS_DS_LABEL[ds]||ds||'—'}</span>`;
+    const shopifyBadge = o.cancelledAt
+      ? '<span class="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-600">Cancelled</span>'
+      : '<span class="text-slate-300 text-[10px]">—</span>';
+    return `<tr>
+      <td class="font-semibold text-slate-700">${o.name}</td>
+      <td class="text-slate-400 text-[11px]">${dateStr}</td>
+      <td title="${o.customer?.displayName||''}${phone?' · '+phone:''}" class="text-slate-600">
+        ${o.customer?.displayName||'<span class="text-slate-300">Guest</span>'}
+        ${phone?`<br><span class="text-[10px] text-slate-400">${phone}</span>`:''}
+      </td>
+      <td class="font-semibold text-slate-700">₹${Math.round(amt).toLocaleString('en-IN')}</td>
+      <td>${payBadge}</td>
+      <td>${shopifyBadge}</td>
+      <td>${dsBadge}</td>
+      <td title="${awb}">${awb?`<button data-awb="${awb}" onclick="fopsTrack('${awb}','${carrier}','${(o.id||'').split('/').pop()}')" class="font-mono text-[11px] text-slate-500 hover:text-slate-800 hover:bg-slate-100 px-1.5 py-0.5 rounded transition-colors -mx-0.5 cursor-pointer" title="Click to track live">${awb}</button>`:'<span class="text-slate-200 text-xs">—</span>'}</td>
+      <td class="text-[11px] text-slate-400">${carrier||'—'}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('fops-pg-label').textContent = tp > 1 ? `${fopsPage} / ${tp}` : '';
+  document.getElementById('fops-foot-label').textContent = `Showing ${start+1}–${Math.min(start+FOPS_PER_PAGE, rows.length)} of ${rows.length} orders`;
+  document.getElementById('fops-pg-prev').disabled = fopsPage === 1;
+  document.getElementById('fops-pg-next').disabled = fopsPage === tp;
+  fopsEnrichVisiblePage();
+}
+
+function fopsLog(msg) { const el=document.getElementById('fops-log'); if(el) el.textContent=msg; }
+
+function fopsUpdateRowBadge(awb, ds) {
+  const label = FOPS_DS_LABEL[ds] || ds || '—';
+  const cls   = FOPS_DS_BADGE[ds]  || 'bg-slate-100 text-slate-500';
+  const btn = document.querySelector(`#fops-tbody button[data-awb="${awb}"]`);
+  if (btn) {
+    const tds = btn.closest('tr').querySelectorAll('td');
+    if (tds[5]) tds[5].innerHTML = `<span class="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold ${cls}">${label}</span>`;
+  }
+}
+
+async function fopsEnrichVisiblePage() {
+  const start = (fopsPage - 1) * FOPS_PER_PAGE;
+  const visible = fopsGetSorted(fopsGetFiltered()).slice(start, start + FOPS_PER_PAGE);
+  const toEnrich = visible.filter(o => fopsGetAWB(o) && !o.rapidshypStatus);
+  if (!toEnrich.length) return;
+  await Promise.all(toEnrich.map(async o => {
+    const awb = fopsGetAWB(o);
+    try {
+      const res = await fetch(`/api/fulfillment-ops/status/${encodeURIComponent(awb)}`, {
+        headers: { 'Authorization': 'Bearer ' + authToken }
+      });
+      const d = await res.json();
+      if (d.rsStatus) {
+        o.rapidshypStatus = d.rsStatus;
+        fopsUpdateRowBadge(awb, fopsGetDS(o));
+      }
+    } catch (_) {}
+  }));
+  fopsRenderMetrics(fopsGetSorted(fopsGetFiltered()));
+}
+
+async function fopsTrack(awb, carrier, numericId) {
+  const modal = document.getElementById('fops-track-modal');
+  const body  = document.getElementById('fops-track-body');
+  const statusBadge = document.getElementById('fops-track-status-badge');
+  const sourceBadge = document.getElementById('fops-track-source-badge');
+  document.getElementById('fops-track-awb').textContent = awb;
+  document.getElementById('fops-track-carrier').textContent = carrier || '';
+  statusBadge.className = 'hidden text-[11px] font-bold px-3 py-1 rounded-full';
+  sourceBadge.classList.add('hidden');
+  body.innerHTML = `
+    <div class="flex flex-col items-center justify-center py-14 gap-4">
+      <div style="position:relative;width:56px;height:56px;">
+        <img src="/static/assets/ecom-logo.png" style="width:56px;height:56px;border-radius:14px;object-fit:contain;box-shadow:0 4px 16px rgba(79,70,229,0.18);animation:loader-logo-pulse 1.6s ease-in-out infinite;">
+        <div class="loader-ring"></div>
+      </div>
+      <div class="text-xs text-slate-400 font-medium">Fetching live status…</div>
+    </div>`;
+  modal.classList.remove('hidden');
+  try {
+    const url = numericId
+      ? `/api/fulfillment-ops/track-order/${numericId}`
+      : `/api/fulfillment-ops/track/${encodeURIComponent(awb)}`;
+    const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + authToken } });
+    const d = await res.json();
+
+    // If Shopify returned a different (newer) AWB, show it in the modal header
+    const effectiveAWB = d.latestAWB || awb;
+    if (effectiveAWB !== awb) {
+      document.getElementById('fops-track-awb').textContent = effectiveAWB + ' (updated)';
+    }
+
+    // Live-update the matching order row's badge + AWB chip without re-rendering the table
+    if (d.rsStatus) {
+      const ord = fopsOrders.find(o => fopsGetAWB(o) === awb || fopsGetAWB(o) === effectiveAWB);
+      if (ord) {
+        ord.rapidshypStatus = d.rsStatus;
+        // If AWB changed, patch it in the in-memory order so future logic uses the new one
+        if (effectiveAWB !== awb && ord.fulfillments?.[0]?.trackingInfo?.[0]) {
+          ord.fulfillments[0].trackingInfo[0].number = effectiveAWB;
+          // Update AWB chip text + data-awb in the DOM
+          const btn = document.querySelector(`#fops-tbody button[data-awb="${awb}"]`);
+          if (btn) { btn.textContent = effectiveAWB; btn.dataset.awb = effectiveAWB; btn.setAttribute('onclick', `fopsTrack('${effectiveAWB}','${carrier}','${numericId}')`); }
+        }
+        fopsUpdateRowBadge(effectiveAWB, fopsGetDS(ord));
+        fopsRenderMetrics(fopsGetSorted(fopsGetFiltered()));
+      }
+    }
+
+    // Show Shopify-cancelled + RS cancel result banner
+    if (d.shopifyCancelled) {
+      const cancelBanner = d.rsCancelled
+        ? `<div class="mb-3 flex items-center gap-2 px-3 py-2 rounded-xl bg-green-50 border border-green-200 text-xs text-green-700"><span class="font-bold">✓ RapidShyp cancel sent:</span> ${d.rsCancelMsg || 'Done'}</div>`
+        : `<div class="mb-3 flex items-center gap-2 px-3 py-2 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700"><span class="font-bold">⚠ Shopify Cancelled.</span> ${d.rsCancelMsg || 'RS cancel not attempted'}</div>`;
+      body.innerHTML = cancelBanner + (d.events && d.events.length ? '' : `
+        <div class="flex flex-col items-center justify-center py-8 gap-2 text-center">
+          <div class="text-3xl">🚫</div>
+          <div class="text-sm font-medium text-slate-600">Order cancelled in Shopify</div>
+        </div>`);
+      if (!d.events || !d.events.length) return;
+    }
+
+    if (!d.success || !d.events || !d.events.length) {
+      body.innerHTML = `
+        <div class="flex flex-col items-center justify-center py-14 gap-2 text-center">
+          <div class="text-3xl">📦</div>
+          <div class="text-sm font-medium text-slate-600">No tracking events yet</div>
+          <div class="text-xs text-slate-400">This shipment may not have been scanned by the courier yet.</div>
+        </div>`;
+      return;
+    }
+
+    // Status badge
+    const latestStatus = d.easyecomStatus || d.events[0].status || '';
+    if (latestStatus) {
+      statusBadge.textContent = latestStatus;
+      statusBadge.className = 'text-[11px] font-bold px-3 py-1 rounded-full bg-indigo-100 text-indigo-700';
+    }
+
+    const scanEvents = d.events || [];
+    const noScans = scanEvents.length === 0;
+    if (noScans) sourceBadge.classList.remove('hidden');
+
+    // EasyEcom confirmation note (always shown when status is available)
+    const eeNote = d.easyecomStatus ? `
+      <div class="mb-4 flex items-center gap-2.5 px-3 py-2.5 rounded-xl ${noScans ? 'bg-amber-50 border border-amber-100' : 'bg-slate-50 border border-slate-100'}">
+        <span class="text-base flex-shrink-0">${noScans ? '⚠️' : '✅'}</span>
+        <div class="text-xs leading-relaxed ${noScans ? 'text-amber-700' : 'text-slate-600'}">
+          <span class="font-semibold">EasyEcom:</span> ${d.easyecomStatus}${noScans ? ' — courier scan not yet received' : ''}
+        </div>
+      </div>` : '';
+
+    body.innerHTML = eeNote +
+    (scanEvents.length ? `<div class="space-y-0">` + scanEvents.map((ev, i) => `
+      <div class="flex gap-3.5 ${i < scanEvents.length - 1 ? 'pb-5' : 'pb-1'}">
+        <div class="flex flex-col items-center pt-1 flex-shrink-0">
+          <div class="w-3 h-3 rounded-full border-2 flex-shrink-0 ${i === 0 ? 'bg-indigo-500 border-indigo-500 shadow-sm shadow-indigo-200' : 'bg-white border-slate-300'}"></div>
+          ${i < scanEvents.length - 1 ? '<div class="w-px flex-1 bg-gradient-to-b from-slate-200 to-transparent mt-1 min-h-[20px]"></div>' : ''}
+        </div>
+        <div class="flex-1 min-w-0 pb-1">
+          <div class="text-sm font-semibold text-slate-800 leading-snug">${ev.status || '—'}</div>
+          ${ev.location ? `<div class="flex items-center gap-1 mt-0.5"><svg class="w-3 h-3 text-slate-300 flex-shrink-0" fill="none" viewBox="0 0 16 16" stroke="currentColor" stroke-width="2"><path d="M8 2C5.79 2 4 3.79 4 6c0 3.54 4 8 4 8s4-4.46 4-8c0-2.21-1.79-4-4-4z"/></svg><span class="text-xs text-slate-500 truncate">${ev.location}</span></div>` : ''}
+          <div class="text-[11px] text-slate-400 mt-0.5">${ev.timestamp || ''}</div>
+        </div>
+      </div>`).join('') + `</div>`
+    : noScans ? '' : `<div class="flex flex-col items-center justify-center py-10 gap-2 text-center"><div class="text-3xl">📦</div><div class="text-sm font-medium text-slate-600">No courier scan events yet</div></div>`);
+  } catch (e) {
+    body.innerHTML = `<div class="flex flex-col items-center justify-center py-12 gap-2"><div class="text-2xl">❌</div><div class="text-sm text-red-500">${e.message}</div></div>`;
+  }
+}
+
+function fopsCloseTrack() {
+  document.getElementById('fops-track-modal').classList.add('hidden');
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') fopsCloseTrack(); });
+
+function fopsExportCSV() {
+  const rows = fopsGetSorted(fopsGetFiltered());
+  if (!rows.length) return;
+  const h = ['Order','Date','Customer','Phone','Email','Amount (INR)','Payment','Delivery Status','AWB','Carrier'];
+  const lines = rows.map(o => [
+    o.name, o.processedAt,
+    o.customer?.displayName||'', o.customer?.phone||'', o.customer?.email||'',
+    parseFloat(o.totalPriceSet.shopMoney.amount).toFixed(2),
+    fopsIsPrepaid(o)?'Prepaid':fopsIsCOD(o)?'COD':o.displayFinancialStatus,
+    fopsGetDS(o)||'', fopsGetAWB(o), fopsGetCarrier(o)
+  ].map(v=>`"${String(v||'').replace(/"/g,'""')}"`).join(','));
+  const { start, end } = fopsMTD();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([[h.join(','),...lines].join('\n')], {type:'text/csv'}));
+  a.download = `fulfillment-ops-${start}-${end}.csv`;
+  a.click();
+}
+// ── End Fulfillment Ops ───────────────────────────────────────────────────────
+
+// ════════════════════════ SERVICEABILITY CHECKER ════════════════════════════
+let _srvInited = false;
+function srvInit() {
+  if (_srvInited) return;
+  _srvInited = true;
+  // Default pickup to the configured warehouse pincode; digits-only inputs.
+  const pickup = document.getElementById('srv-pickup');
+  if (pickup && !pickup.value) pickup.value = '122101';
+  ['srv-pickup', 'srv-delivery'].forEach(id => {
+    const el = document.getElementById(id);
+    el?.addEventListener('input', () => { el.value = el.value.replace(/\D/g, '').slice(0, 6); });
+  });
+  ['srv-weight', 'srv-value'].forEach(id => {
+    const el = document.getElementById(id);
+    el?.addEventListener('input', () => { el.value = el.value.replace(/[^\d.]/g, ''); });
+  });
+}
+
+async function srvCheck(e) {
+  e.preventDefault();
+  const pickup = document.getElementById('srv-pickup').value.trim();
+  const delivery = document.getElementById('srv-delivery').value.trim();
+  if (!/^\d{6}$/.test(pickup) || !/^\d{6}$/.test(delivery)) {
+    showNotification('Enter valid 6-digit pickup and delivery pincodes.', true);
+    return;
+  }
+  const btn = document.getElementById('srv-submit');
+  const resultsEl = document.getElementById('srv-results');
+  btn.disabled = true; btn.textContent = 'Checking…';
+  resultsEl.innerHTML = `<div class="card p-6 text-center text-sm text-slate-400">Checking serviceability…</div>`;
+  try {
+    const data = await fetchApiData('/serviceability/check', 'Serviceability check failed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pickup_pincode: pickup,
+        delivery_pincode: delivery,
+        weight: Number(document.getElementById('srv-weight').value) || 0.5,
+        total_order_value: Number(document.getElementById('srv-value').value) || 0,
+        cod: document.getElementById('srv-cod').checked,
+        is_return: document.getElementById('srv-return').checked
+      })
+    });
+    srvRenderResult(data);
+  } catch (err) {
+    resultsEl.innerHTML = `<div class="card p-6 text-sm text-rose-600">${err && err.message ? err.message : 'Request failed'}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Check serviceability';
+  }
+}
+
+function srvExtractCouriers(resp) {
+  const list = resp && resp.serviceable_courier_list;
+  if (!Array.isArray(list)) return [];
+  const num = v => (typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v)) ? Number(v) : null));
+  const str = v => (typeof v === 'string' ? v : (typeof v === 'number' ? String(v) : null));
+  return list.map(c => (c || {})).map(c => ({
+    code: str(c.courier_code) || '',
+    name: str(c.courier_name) || 'Courier',
+    brand: str(c.parent_courier_name) || '',
+    mode: str(c.freight_mode) || '',
+    rate: num(c.total_freight),
+    edd: str(c.edd),
+    cutoff: str(c.cutoff_time),
+    minWeight: num(c.min_weight),
+    maxWeight: num(c.max_weight)
+  }));
+}
+
+function srvEddTs(edd) {
+  const m = String(edd || '').match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (!m) return Infinity;
+  return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1])).getTime();
+}
+function srvFormatEdd(edd) {
+  const m = String(edd || '').match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (!m) return { date: edd || '—', days: null };
+  const dt = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const diff = Math.round((dt.getTime() - today.getTime()) / 86400000);
+  return {
+    date: dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
+    days: diff <= 0 ? 'Today' : diff === 1 ? 'Tomorrow' : `${diff} days`
+  };
+}
+
+function srvStatCard(label, value, hint) {
+  return `<div class="card p-4">
+    <div class="text-[10px] text-slate-400 uppercase tracking-wide font-bold">${label}</div>
+    <div class="text-xl font-bold text-slate-800 mt-1">${value}</div>
+    ${hint ? `<div class="text-[11px] text-slate-400 mt-0.5 truncate">${hint}</div>` : ''}
+  </div>`;
+}
+
+function srvRenderResult(data) {
+  const resultsEl = document.getElementById('srv-results');
+  if (data && data.error) {
+    resultsEl.innerHTML = `<div class="card p-6 text-sm text-rose-600">${data.error}</div>`;
+    return;
+  }
+  const response = (data && data.response && typeof data.response === 'object') ? data.response : {};
+  const request = (data && data.request && typeof data.request === 'object') ? data.request : {};
+  const apiOk = response.status === true;
+  const couriers = srvExtractCouriers(response);
+  const serviceable = apiOk && couriers.length > 0;
+  const remark = typeof response.remark === 'string' ? response.remark : '';
+
+  const rates = couriers.map(c => c.rate).filter(r => typeof r === 'number');
+  const cheapest = rates.length ? Math.min(...rates) : null;
+  const avg = rates.length ? rates.reduce((a, b) => a + b, 0) / rates.length : null;
+  const fastest = [...couriers].filter(c => c.edd).sort((a, b) => srvEddTs(a.edd) - srvEddTs(b.edd))[0];
+  const cheapestCourier = [...couriers].filter(c => c.rate !== null).sort((a, b) => (a.rate ?? Infinity) - (b.rate ?? Infinity))[0];
+  const brands = Array.from(new Set(couriers.map(c => c.brand).filter(Boolean)));
+  const sorted = [...couriers].sort((a, b) => (a.rate ?? Infinity) - (b.rate ?? Infinity));
+
+  const hero = `
+    <div class="card p-6 border-l-4 ${serviceable ? 'border-l-emerald-500' : 'border-l-rose-500'}">
+      <div class="flex items-start justify-between gap-4 flex-wrap">
+        <div class="flex items-start gap-4">
+          <div class="h-11 w-11 rounded-full flex items-center justify-center text-lg font-bold ${serviceable ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}">${serviceable ? '✓' : '✕'}</div>
+          <div>
+            <h2 class="text-lg font-bold text-slate-800">${serviceable ? 'Route is serviceable' : 'Route is not serviceable'}</h2>
+            <p class="text-xs text-slate-500 mt-1">
+              <span class="font-mono">${request.Pickup_pincode || ''}</span>
+              <span class="mx-2 text-slate-300">→</span>
+              <span class="font-mono">${request.Delivery_pincode || ''}</span>
+              ${request.weight != null ? `<span class="ml-3">· ${request.weight} kg</span>` : ''}
+              <span class="ml-3">· ${request.cod ? 'COD' : 'Prepaid'}</span>
+              ${request.is_return ? `<span class="ml-3 text-amber-600 font-semibold">· Return</span>` : ''}
+            </p>
+            ${remark && remark.toLowerCase() !== 'success' ? `<p class="text-xs text-slate-500 mt-1">${remark}</p>` : ''}
+          </div>
+        </div>
+        <span class="px-3 py-1 rounded-full text-[11px] font-bold ${serviceable ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}">${serviceable ? 'Serviceable' : 'Unserviceable'}</span>
+      </div>
+    </div>`;
+
+  const stats = `
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      ${srvStatCard('Couriers', String(couriers.length), `${brands.length} brand${brands.length !== 1 ? 's' : ''}`)}
+      ${srvStatCard('Cheapest', cheapest !== null ? `₹${cheapest.toFixed(2)}` : '—', cheapestCourier ? cheapestCourier.name : '')}
+      ${srvStatCard('Avg rate', avg !== null ? `₹${avg.toFixed(2)}` : '—', '')}
+      ${srvStatCard('Fastest', fastest ? srvFormatEdd(fastest.edd).date : '—', fastest ? fastest.name : '')}
+    </div>`;
+
+  let table = '';
+  if (couriers.length) {
+    const rows = sorted.map(c => {
+      const edd = srvFormatEdd(c.edd);
+      const isCheap = cheapestCourier && cheapestCourier.code === c.code;
+      const isFast = fastest && fastest.code === c.code;
+      return `<tr class="border-t border-slate-100 hover:bg-slate-50">
+        <td class="px-4 py-3">
+          <div class="flex items-center gap-3">
+            <div class="h-8 w-8 rounded-md bg-slate-100 flex items-center justify-center text-[11px] font-bold text-slate-500">${(c.brand || c.name).slice(0, 2).toUpperCase()}</div>
+            <div>
+              <div class="text-sm font-semibold text-slate-700 flex items-center gap-1.5">${c.name}
+                ${isCheap ? '<span class="px-1.5 py-0 text-[9px] font-bold rounded bg-emerald-100 text-emerald-700 uppercase">Cheapest</span>' : ''}
+                ${isFast && !isCheap ? '<span class="px-1.5 py-0 text-[9px] font-bold rounded bg-sky-100 text-sky-700 uppercase">Fastest</span>' : ''}
+              </div>
+              <div class="text-[11px] text-slate-400">${c.brand || ''} · #${c.code}</div>
+            </div>
+          </div>
+        </td>
+        <td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${c.mode === 'Air' ? 'bg-sky-50 text-sky-600' : 'bg-amber-50 text-amber-700'}">${c.mode || '—'}</span></td>
+        <td class="px-4 py-3 text-right font-mono font-semibold text-slate-700">${c.rate !== null ? `₹${c.rate.toFixed(2)}` : '—'}</td>
+        <td class="px-4 py-3"><div class="text-sm text-slate-700">${edd.date}</div>${edd.days ? `<div class="text-[10px] text-slate-400">${edd.days}</div>` : ''}</td>
+        <td class="px-4 py-3 font-mono text-xs text-slate-500">${c.cutoff || '—'}</td>
+        <td class="px-4 py-3 text-[11px] text-slate-400">${c.minWeight !== null && c.maxWeight !== null ? `${c.minWeight}g – ${c.maxWeight}g` : '—'}</td>
+      </tr>`;
+    }).join('');
+    table = `
+      <div class="card overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-100"><h3 class="text-sm font-bold text-slate-700">Available couriers <span class="text-slate-400 font-normal">· ${couriers.length}</span></h3></div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left">
+            <thead class="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-400 font-bold">
+              <tr>
+                <th class="px-4 py-2.5">Courier</th><th class="px-4 py-2.5">Mode</th>
+                <th class="px-4 py-2.5 text-right">Freight</th><th class="px-4 py-2.5">Est. delivery</th>
+                <th class="px-4 py-2.5">Cutoff</th><th class="px-4 py-2.5">Weight range</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  const raw = `
+    <div>
+      <button onclick="const p=document.getElementById('srv-raw'); p.classList.toggle('hidden'); this.textContent = p.classList.contains('hidden') ? 'Show raw response' : 'Hide raw response';"
+              class="text-xs text-slate-400 hover:text-slate-600">Show raw response</button>
+      <pre id="srv-raw" class="hidden mt-2 text-[11px] bg-slate-50 border border-slate-100 rounded-lg p-3 overflow-auto max-h-96 text-slate-600">${JSON.stringify(response || data, null, 2).replace(/</g, '&lt;')}</pre>
+    </div>`;
+
+  resultsEl.innerHTML = hero + stats + table + raw;
+}
+// ── End Serviceability ────────────────────────────────────────────────────────

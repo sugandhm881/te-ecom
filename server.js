@@ -29,6 +29,10 @@ const easyecomRoutes = require('./app/api/easyecom');
 const { syncEasyecomOrders } = require('./app/api/easyecom');
 const amazonReviewRoutes = require('./app/api/amazon_review');
 const { router: amazonAutoReviewRoutes, initAutoReviewCron } = require('./app/api/amazon_auto_review');
+const { router: fulfillmentOpsRoutes, syncLast7Days, syncMTD } = require('./app/api/fulfillment_ops');
+const serviceabilityRoutes = require('./app/api/serviceability');
+const { sendWarehouseOpsReport } = require('./app/api/warehouse_slack_report');
+const cron = require('node-cron');
 
 // --- Register Routes ---
 app.use('/api', authRoutes);
@@ -42,7 +46,35 @@ app.use('/api/webhook', webhookRoutes);
 app.use('/api/easyecom', easyecomRoutes);
 app.use('/api/amazon', amazonReviewRoutes);
 app.use('/api/amazon', amazonAutoReviewRoutes);
+app.use('/api/fulfillment-ops', fulfillmentOpsRoutes);
+app.use('/api/serviceability', serviceabilityRoutes);
 initAutoReviewCron();
+
+// RS Sync — every 2 hours: last 7 days orders (skips 4 PM slot — MTD runs then)
+cron.schedule('0 */2 * * *', async () => {
+    const istHour = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false });
+    if (String(istHour) === '16') { console.log('[RS Sync] 2-hr skipping 4 PM slot — MTD cron will handle it'); return; }
+    console.log('[RS Sync] 2-hr trigger — syncing last 7 days…');
+    await syncLast7Days().catch(e => console.error('[RS Sync] 2-hr error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// RS Sync — daily at 4 PM IST: full MTD sweep
+cron.schedule('0 16 * * *', async () => {
+    console.log('[RS Sync] Daily 4 PM IST — syncing MTD…');
+    await syncMTD().catch(e => console.error('[RS Sync] daily error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// Warehouse Ops Slack report — Confirmed + Ready for Pickup + Unfulfillable, last 30 days, old→new.
+// Runs twice daily: 8:30 AM IST (data up to today−2) and 5:30 PM IST (data up to today−1).
+cron.schedule('30 8 * * *', async () => {
+    console.log('[WH Report] 8:30 AM IST — sending warehouse ops report (last 30d, −2)…');
+    await sendWarehouseOpsReport(2).catch(e => console.error('[WH Report] Error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+cron.schedule('30 17 * * *', async () => {
+    console.log('[WH Report] 5:30 PM IST — sending warehouse ops report (last 30d, −1)…');
+    await sendWarehouseOpsReport(1).catch(e => console.error('[WH Report] Error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
 
 // --- COD Confirmation Data (FROM SUPABASE) ---
 app.get('/api/cod-confirmations', async (req, res) => {

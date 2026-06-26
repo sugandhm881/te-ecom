@@ -30,7 +30,9 @@ function isExcluded(order) {
            s.includes('return') || s.includes('replac');
 }
 
-async function getEligibleOrders() {
+// failedOnly=true → retry ONLY orders whose previous request failed (manual button).
+// failedOnly=false → normal cron behaviour: every eligible order not yet successfully sent.
+async function getEligibleOrders(failedOnly = false) {
     const now   = Date.now();
     const minDt = new Date(now - MAX_DAYS * 86400000).toISOString();
     const maxDt = new Date(now - MIN_DAYS * 86400000).toISOString();
@@ -55,15 +57,25 @@ async function getEligibleOrders() {
             .filter(r => r.solicitation_status === 'sent')
             .map(r => r.order_id)
     );
+    const failedIds = new Set(
+        (requestsRes.data || [])
+            .filter(r => r.solicitation_status === 'failed')
+            .map(r => r.order_id)
+    );
     const allOrders = ordersRes.data || [];
     const excluded  = allOrders.filter(o => isExcluded(o));
     const alreadySent = allOrders.filter(o => !isExcluded(o) && sentIds.has(o.amazon_order_id));
-    const eligible  = allOrders.filter(o => !isExcluded(o) && !sentIds.has(o.amazon_order_id));
+    let eligible    = allOrders.filter(o => !isExcluded(o) && !sentIds.has(o.amazon_order_id));
+
+    // Manual retry mode: keep only orders that previously failed.
+    if (failedOnly) {
+        eligible = eligible.filter(o => failedIds.has(o.amazon_order_id));
+    }
 
     const prepaid = eligible.filter(o => !isCOD(o));
     const cod     = eligible.filter(o =>  isCOD(o));
 
-    return { ordered: [...prepaid, ...cod], prepaid, cod, alreadySent, excluded };
+    return { ordered: [...prepaid, ...cod], prepaid, cod, alreadySent, excluded, failedOnly };
 }
 
 // ─────────────────────────────────────────────────────
@@ -163,17 +175,20 @@ function startPolling(messageTz, orders) {
 // Main check — runs on cron
 // ─────────────────────────────────────────────────────
 
-async function runAutoReviewCheck() {
-    console.log('[AutoReview] Running eligibility check...');
+async function runAutoReviewCheck(failedOnly = false) {
+    console.log(`[AutoReview] Running eligibility check${failedOnly ? ' (retry failed only)' : ''}...`);
     stopPolling(); // cancel any previous pending run
 
     try {
-        const result = await getEligibleOrders();
+        const result = await getEligibleOrders(failedOnly);
         const dateStr = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+        const titleSuffix = failedOnly ? ' (Retry Failed)' : '';
 
         if (!result.ordered.length) {
             await postToSlack({
-                text: `✅ *Amazon Auto Review — ${dateStr}*\nNo eligible orders in the ${MIN_DAYS}–${MAX_DAYS} day window. All caught up!`
+                text: failedOnly
+                    ? `✅ *Amazon Review — Retry Failed — ${dateStr}*\nNo previously-failed orders to retry in the ${MIN_DAYS}–${MAX_DAYS} day window.`
+                    : `✅ *Amazon Auto Review — ${dateStr}*\nNo eligible orders in the ${MIN_DAYS}–${MAX_DAYS} day window. All caught up!`
             });
             console.log('[AutoReview] No eligible orders.');
             return;
@@ -183,11 +198,13 @@ async function runAutoReviewCheck() {
             blocks: [
                 {
                     type: 'header',
-                    text: { type: 'plain_text', text: `🔔 Amazon Review Auto-Run — ${dateStr}`, emoji: true }
+                    text: { type: 'plain_text', text: `🔔 Amazon Review Auto-Run${titleSuffix} — ${dateStr}`, emoji: true }
                 },
                 {
                     type: 'section',
-                    text: { type: 'mrkdwn', text: `*Orders eligible for review request (${MIN_DAYS}–${MAX_DAYS} days after delivery):*` }
+                    text: { type: 'mrkdwn', text: failedOnly
+                        ? `*Retrying previously-failed review requests (${MIN_DAYS}–${MAX_DAYS} days after delivery):*`
+                        : `*Orders eligible for review request (${MIN_DAYS}–${MAX_DAYS} days after delivery):*` }
                 },
                 {
                     type: 'section',
@@ -285,9 +302,10 @@ async function runBulkSend(orders) {
 // Routes
 // ─────────────────────────────────────────────────────
 
+// Manual trigger → retry ONLY previously-failed orders (failedOnly=true).
 router.post('/auto-review/trigger', (req, res) => {
-    res.json({ success: true, message: 'Check triggered — reply yes/no in Slack' });
-    runAutoReviewCheck().catch(e => console.error('[AutoReview] Trigger error:', e.message));
+    res.json({ success: true, message: 'Retry-failed check triggered — reply yes/no in Slack' });
+    runAutoReviewCheck(true).catch(e => console.error('[AutoReview] Trigger error:', e.message));
 });
 
 router.get('/auto-review/status', (req, res) => {
@@ -307,7 +325,9 @@ router.get('/auto-review/status', (req, res) => {
 
 function initAutoReviewCron() {
     const schedule = config.AUTO_REVIEW_CRON || '0 10 * * *';
-    cron.schedule(schedule, runAutoReviewCheck, { timezone: 'Asia/Kolkata' });
+    // Wrap so node-cron's execution context can't leak into `failedOnly` —
+    // the daily cron always runs the full eligibility check (failedOnly=false).
+    cron.schedule(schedule, () => runAutoReviewCheck(false), { timezone: 'Asia/Kolkata' });
     console.log(`[AutoReview] Cron scheduled: "${schedule}" (IST)`);
 }
 

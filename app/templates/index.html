@@ -242,11 +242,11 @@
             <h1 class="text-2xl font-bold text-slate-900">Sign in to Ecom Central</h1>
             <p class="text-slate-500 text-sm mt-2">One Stop Solution</p>
         </div>
-        <div class="space-y-5">
-            <input type="email" id="login-email" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="name@company.com">
-            <input type="password" id="login-password" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="Password">
-            <button id="login-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5">Continue</button>
-        </div>
+        <form class="space-y-5" onsubmit="return false;">
+            <input type="email" id="login-email" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="name@company.com" autocomplete="email">
+            <input type="password" id="login-password" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="Password" autocomplete="current-password">
+            <button id="login-btn" type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5">Continue</button>
+        </form>
     </div>
 </div>
 
@@ -269,6 +269,10 @@
                     <a href="#" id="nav-orders-dashboard" class="sidebar-link active flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7"></path></svg>
                         <span class="ml-3 text-sm font-medium">Orders Dashboard</span>
+                    </a>
+                    <a href="#" id="nav-fulfillment-ops" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Fulfillment Ops</span>
                     </a>
                 </div>
             </div>
@@ -327,6 +331,10 @@
             <a href="#" id="nav-amazon-review" class="sidebar-link flex items-center px-3 py-2">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"></path></svg>
                 <span class="ml-3 text-sm font-medium">Amazon Review</span>
+            </a>
+            <a href="#" id="nav-serviceability" class="sidebar-link flex items-center px-3 py-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                <span class="ml-3 text-sm font-medium">Serviceability</span>
             </a>
             <a href="#" id="nav-settings" class="sidebar-link flex items-center px-3 py-2">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-1.066 2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
@@ -394,6 +402,7 @@
                                     <th class="py-4 px-4 w-32 text-center">COD Status</th>
                                     <th class="py-4 px-4 w-24 text-right">Total</th>
                                     <th class="py-4 px-4 w-32 text-center">Status</th>
+                                    <th class="py-4 px-4 w-36 text-center">EDD</th>
                                     <th class="py-4 px-4 w-16 text-right"></th>
                                 </tr>
                             </thead>
@@ -836,10 +845,17 @@
               <p class="text-xs text-slate-400 mt-0.5" id="amzrev-ts">Loading…</p>
             </div>
           </div>
-          <button onclick="amzRevLoadOrders()" class="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 text-slate-600 rounded-lg border border-slate-200 transition-all">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-            Refresh
-          </button>
+          <div class="flex items-center gap-2">
+            <button id="amzrev-run-cron-btn" onclick="amzRevTriggerCron()" style="display:none" title="Retry review requests that previously FAILED (same 10–30 day criteria). Posts the list to Slack and waits for yes/no. The daily 10 AM cron is unaffected."
+                    class="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-amber-500 hover:bg-amber-600 text-white rounded-lg border border-amber-500 transition-all disabled:opacity-50">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              Retry Failed
+            </button>
+            <button onclick="amzRevLoadOrders()" class="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 text-slate-600 rounded-lg border border-slate-200 transition-all">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              Refresh
+            </button>
+          </div>
         </header>
 
         <div class="p-8 max-w-7xl mx-auto w-full">
@@ -996,6 +1012,262 @@
 
         </div>
         </div><!-- /amazon-review-view -->
+
+        <!-- ═══════════════════════════════════════════════════ FULFILLMENT OPS -->
+        <div id="fulfillment-ops-view" class="view-hidden">
+          <style>
+            #fulfillment-ops-view .fops-chip { display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:4px 12px;border-radius:9999px;border:1.5px solid #e2e8f0;cursor:pointer;background:#fff;color:#64748b;font-weight:600;transition:all .15s; }
+            #fulfillment-ops-view .fops-chip:hover { border-color:#c7d2fe;color:#4f46e5; }
+            #fulfillment-ops-view .fops-chip.active { background:#1e293b;color:#fff;border-color:transparent; }
+            #fulfillment-ops-view .fops-mode-btn { padding:6px 14px;font-size:12px;background:transparent;border:none;cursor:pointer;color:#64748b;font-weight:600;display:flex;align-items:center;gap:5px;border-radius:8px;transition:all .15s; }
+            #fulfillment-ops-view .fops-mode-btn.active { background:#1e293b;color:#fff; }
+            #fulfillment-ops-view table { table-layout:fixed;width:100%; }
+            #fulfillment-ops-view th { font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;padding:10px 12px;border-bottom:1px solid #f1f5f9;background:#f8fafc;cursor:pointer;white-space:nowrap;text-align:left; }
+            #fulfillment-ops-view th:hover { color:#475569; }
+            #fulfillment-ops-view td { padding:10px 12px;font-size:12px;border-bottom:1px solid #f8fafc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle; }
+            #fulfillment-ops-view tr:last-child td { border-bottom:none; }
+            #fulfillment-ops-view tr:hover td { background:#f8fafc; }
+          </style>
+
+          <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap justify-between items-center gap-4">
+            <div class="flex items-center gap-3">
+              <div class="w-9 h-9 bg-slate-800 rounded-xl flex items-center justify-center text-white text-lg leading-none select-none">📦</div>
+              <div>
+                <h1 class="text-xl font-bold text-slate-800">Fulfillment Ops</h1>
+                <p class="text-xs text-slate-400 mt-0.5" id="fops-ts">Load orders to begin</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-3 flex-wrap">
+              <div class="flex border border-slate-200 rounded-lg overflow-hidden">
+                <button class="fops-mode-btn active" id="fops-mode-ops" onclick="fopsSetMode('ops')">📋 Ops view</button>
+                <button class="fops-mode-btn" id="fops-mode-research" onclick="fopsSetMode('research')">🔍 Research</button>
+              </div>
+              <button onclick="fopsFetch()" id="fops-fetch-btn" class="flex items-center gap-1.5 px-4 py-2 text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-all">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                Fetch MTD
+              </button>
+              <button onclick="fopsExportCSV()" class="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg border border-slate-200 transition-all">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                CSV
+              </button>
+            </div>
+          </header>
+
+          <div class="p-6 max-w-7xl mx-auto w-full">
+
+            <!-- KPI Cards -->
+            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+              <div class="card p-4 border-l-4 border-l-slate-400"><p class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Active</p><p id="fops-m-count" class="text-2xl font-bold text-slate-800">—</p><p class="text-[10px] text-slate-400 mt-0.5">matching filters</p></div>
+              <div class="card p-4 border-l-4 border-l-indigo-400"><p class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">GMV at risk</p><p id="fops-m-gmv" class="text-2xl font-bold text-slate-800">—</p><p class="text-[10px] text-slate-400 mt-0.5">in-flight orders</p></div>
+              <div class="card p-4 border-l-4 border-l-blue-400"><p class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Confirmed / Pickup</p><p id="fops-m-confirmed" class="text-2xl font-bold text-blue-600">—</p><p id="fops-m-confirmed-sub" class="text-[10px] text-slate-400 mt-0.5">awaiting courier</p></div>
+              <div class="card p-4 border-l-4 border-l-amber-400"><p class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">In transit</p><p id="fops-m-transit" class="text-2xl font-bold text-amber-600">—</p><p id="fops-m-transit-sub" class="text-[10px] text-slate-400 mt-0.5"></p></div>
+              <div class="card p-4 border-l-4 border-l-emerald-400"><p class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Out for delivery</p><p id="fops-m-ofd" class="text-2xl font-bold text-emerald-600">—</p><p id="fops-m-ofd-sub" class="text-[10px] text-slate-400 mt-0.5"></p></div>
+              <div class="card p-4 border-l-4 border-l-rose-400"><p class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Attempted</p><p id="fops-m-attempted" class="text-2xl font-bold text-rose-600">—</p><p class="text-[10px] text-rose-400 mt-0.5 font-semibold">action needed</p></div>
+            </div>
+
+            <!-- Ops mode info bar -->
+            <div id="fops-ops-bar" class="flex flex-wrap items-center gap-2 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 mb-5">
+              <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+              <span class="font-semibold text-slate-600">Ops view — active shipments only:</span>
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">Confirmed</span>
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-700">Ready for pickup</span>
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">In transit</span>
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-700">Out for delivery</span>
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700">Attempted</span>
+            </div>
+
+            <!-- Research filters (hidden in ops mode) -->
+            <div id="fops-research-panel" class="hidden card p-5 mb-5">
+              <div class="flex flex-wrap gap-4 items-end mb-4">
+                <div class="flex flex-col gap-1">
+                  <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Date range</label>
+                  <select id="fops-date-preset" onchange="fopsOnPresetChange()" class="text-xs px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 w-40">
+                    <option value="today">Today</option>
+                    <option value="yesterday">Yesterday</option>
+                    <option value="last7">Last 7 days</option>
+                    <option value="last15">Last 15 days</option>
+                    <option value="mtd" selected>Month to date</option>
+                    <option value="this-month">This month</option>
+                    <option value="last-month">Last month</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                <div id="fops-custom-dates" class="hidden flex gap-2 items-end">
+                  <div class="flex flex-col gap-1"><label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">From</label><input type="date" id="fops-start" class="text-xs px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 w-36"/></div>
+                  <div class="flex flex-col gap-1"><label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">To</label><input type="date" id="fops-end" class="text-xs px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 w-36"/></div>
+                </div>
+                <div class="flex flex-col gap-1">
+                  <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Payment</label>
+                  <select id="fops-f-pay" onchange="fopsPage=1;fopsRenderTable()" class="text-xs px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 w-36">
+                    <option value="">All</option><option value="prepaid">Prepaid</option><option value="cod">COD</option>
+                  </select>
+                </div>
+                <div class="flex flex-col gap-1">
+                  <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Carrier</label>
+                  <select id="fops-f-carrier" onchange="fopsPage=1;fopsRenderTable()" class="text-xs px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 w-40">
+                    <option value="">All carriers</option><option value="Delhivery">Delhivery</option><option value="Ekart">Ekart</option><option value="Amazon">Amazon</option>
+                  </select>
+                </div>
+                <div class="flex flex-col gap-1">
+                  <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Sort by</label>
+                  <select id="fops-f-sort" onchange="fopsPage=1;fopsRenderTable()" class="text-xs px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 w-40">
+                    <option value="date-desc">Date — newest</option>
+                    <option value="date-asc">Date — oldest</option>
+                    <option value="amount-desc">Amount ↓</option>
+                    <option value="amount-asc">Amount ↑</option>
+                  </select>
+                </div>
+                <button onclick="fopsFetch()" class="flex items-center gap-1.5 px-4 py-2 text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-all">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                  Fetch
+                </button>
+              </div>
+              <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-2">Delivery status</p>
+              <div class="flex flex-wrap gap-2" id="fops-ds-chips"></div>
+            </div>
+
+            <!-- Search + status pills -->
+            <div class="flex flex-wrap items-center gap-3 mb-4">
+              <div class="relative flex-1 min-w-48">
+                <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                <input type="text" id="fops-search" placeholder="Order #, customer, AWB…" oninput="fopsPage=1;fopsRenderTable()" class="w-full pl-9 pr-3 py-2 text-xs border border-slate-200 rounded-lg bg-white text-slate-700 placeholder-slate-400"/>
+              </div>
+              <div id="fops-status-pills" class="flex flex-wrap gap-2"></div>
+            </div>
+
+            <p class="text-xs text-slate-400 mb-3" id="fops-log">Select a date range and click Fetch MTD.</p>
+
+            <!-- Table -->
+            <div class="card overflow-hidden">
+              <div class="overflow-x-auto">
+                <table style="min-width:780px">
+                  <colgroup>
+                    <col style="width:110px"><col style="width:110px"><col style="width:170px">
+                    <col style="width:90px"><col style="width:90px"><col style="width:120px">
+                    <col style="width:140px"><col style="width:150px"><col style="width:110px">
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th onclick="fopsToggleSort('name')">Order <span id="fops-sort-name" class="opacity-40 text-[9px]">↕</span></th>
+                      <th onclick="fopsToggleSort('date')">Date <span id="fops-sort-date" class="opacity-40 text-[9px]">↕</span></th>
+                      <th>Customer</th>
+                      <th onclick="fopsToggleSort('amount')">Amount <span id="fops-sort-amount" class="opacity-40 text-[9px]">↕</span></th>
+                      <th>Payment</th>
+                      <th>Shopify</th>
+                      <th>Delivery status</th>
+                      <th>AWB</th>
+                      <th>Carrier</th>
+                    </tr>
+                  </thead>
+                  <tbody id="fops-tbody">
+                    <tr><td colspan="9" class="text-center py-12 text-slate-400 text-sm">Click Fetch MTD to load live orders</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="flex justify-between items-center px-4 py-3 border-t border-slate-100 bg-slate-50/50">
+                <span class="text-xs text-slate-400" id="fops-foot-label"></span>
+                <div class="flex items-center gap-2">
+                  <button onclick="fopsChangePage(-1)" id="fops-pg-prev" class="px-2 py-1 text-xs border border-slate-200 rounded-lg bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">←</button>
+                  <span class="text-xs text-slate-500" id="fops-pg-label"></span>
+                  <button onclick="fopsChangePage(1)" id="fops-pg-next" class="px-2 py-1 text-xs border border-slate-200 rounded-lg bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">→</button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        <!-- AWB Tracking Modal -->
+        <div id="fops-track-modal" class="hidden fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" onclick="if(event.target===this)fopsCloseTrack()">
+          <div class="absolute inset-0 bg-black/50 backdrop-blur-sm"></div>
+          <div class="relative bg-white w-full sm:max-w-lg rounded-t-3xl sm:rounded-2xl shadow-2xl flex flex-col animate-slide-up" style="max-height:88vh">
+            <!-- Drag handle (mobile) -->
+            <div class="flex justify-center pt-3 pb-1 sm:hidden"><div class="w-10 h-1 rounded-full bg-slate-200"></div></div>
+            <!-- Header -->
+            <div class="px-5 pt-4 pb-4 border-b border-slate-100">
+              <div class="flex items-start justify-between gap-3">
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2 mb-1">
+                    <span class="text-[10px] font-bold uppercase tracking-widest text-slate-400">Live Tracking</span>
+                    <span id="fops-track-source-badge" class="hidden text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">EasyEcom</span>
+                  </div>
+                  <div id="fops-track-awb" class="font-mono text-base font-bold text-slate-800 tracking-wider truncate"></div>
+                  <div id="fops-track-carrier" class="text-xs text-slate-400 mt-0.5"></div>
+                </div>
+                <div class="flex flex-col items-end gap-2 flex-shrink-0">
+                  <button onclick="fopsCloseTrack()" class="w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 text-lg transition-colors">×</button>
+                  <div id="fops-track-status-badge" class="hidden text-[11px] font-bold px-3 py-1 rounded-full"></div>
+                </div>
+              </div>
+            </div>
+            <!-- Body -->
+            <div id="fops-track-body" class="overflow-y-auto flex-1 px-5 py-4"></div>
+          </div>
+        </div>
+        <style>
+          @keyframes slideUp { from { transform:translateY(24px); opacity:0; } to { transform:translateY(0); opacity:1; } }
+          .animate-slide-up { animation: slideUp .22s cubic-bezier(.22,1,.36,1) both; }
+        </style>
+        </div><!-- /fulfillment-ops-view -->
+
+        <!-- ============================ SERVICEABILITY ============================ -->
+        <div id="serviceability-view" class="view-hidden">
+          <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm">
+            <h1 class="text-xl font-bold text-slate-800">Pincode Serviceability</h1>
+            <p class="text-sm text-slate-400 mt-0.5">Check RapidShyp pickup → delivery serviceability, rates & EDD for any route.</p>
+          </header>
+          <div class="p-8 max-w-5xl mx-auto w-full space-y-6">
+
+            <!-- Form -->
+            <div class="card p-6">
+              <h2 class="text-sm font-bold text-slate-700 mb-1">Check a route</h2>
+              <p class="text-xs text-slate-400 mb-4">Enter pincodes, weight, order value and payment mode.</p>
+              <form id="srv-form" class="space-y-4" onsubmit="srvCheck(event)">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label class="block text-xs font-semibold text-slate-500 mb-1">Pickup pincode</label>
+                    <input id="srv-pickup" inputmode="numeric" maxlength="6" placeholder="e.g. 122101"
+                           class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-700" required>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-semibold text-slate-500 mb-1">Delivery pincode</label>
+                    <input id="srv-delivery" inputmode="numeric" maxlength="6" placeholder="e.g. 110068"
+                           class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-700" required>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-semibold text-slate-500 mb-1">Weight (kg)</label>
+                    <input id="srv-weight" inputmode="decimal" value="0.5" placeholder="0.5"
+                           class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-700" required>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-semibold text-slate-500 mb-1">Order value (₹)</label>
+                    <input id="srv-value" inputmode="decimal" value="500" placeholder="500"
+                           class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white text-slate-700" required>
+                  </div>
+                  <label class="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2.5 cursor-pointer">
+                    <div>
+                      <span class="text-sm font-medium text-slate-700">COD</span>
+                      <p class="text-[11px] text-slate-400">Cash on delivery</p>
+                    </div>
+                    <input id="srv-cod" type="checkbox" class="w-4 h-4 text-indigo-600 rounded border-slate-300">
+                  </label>
+                  <label class="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2.5 cursor-pointer">
+                    <div>
+                      <span class="text-sm font-medium text-slate-700">Return shipment</span>
+                      <p class="text-[11px] text-slate-400">Reverse pickup</p>
+                    </div>
+                    <input id="srv-return" type="checkbox" class="w-4 h-4 text-indigo-600 rounded border-slate-300">
+                  </label>
+                </div>
+                <button type="submit" id="srv-submit"
+                        class="w-full py-2.5 bg-slate-800 text-white text-sm font-semibold rounded-lg hover:bg-slate-900 transition-colors disabled:opacity-50">
+                  Check serviceability
+                </button>
+              </form>
+            </div>
+
+            <!-- Results -->
+            <div id="srv-results" class="space-y-6"></div>
+          </div>
+        </div><!-- /serviceability-view -->
 
     </main>
 </div>

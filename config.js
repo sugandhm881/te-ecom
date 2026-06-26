@@ -5,7 +5,7 @@ const CACHE_DIR = process.env.CACHE_DIR || '.';
 
 module.exports = {
     PORT: process.env.PORT || 5001,
-    SECRET_KEY: process.env.JWT_SECRET || 'you-should-really-change-this',
+    SECRET_KEY: process.env.JWT_SECRET,
 
     // --- Dashboard Login ---
     APP_USER_EMAIL: process.env.APP_USER_EMAIL,
@@ -38,7 +38,10 @@ module.exports = {
 
     // --- Logistics ---
     RAPIDSHYP_API_KEY: process.env.RAPIDSHYP_API_KEY,
+    RAPIDSHYP_API_URL: process.env.RAPIDSHYP_API_URL || 'https://api.rapidshyp.com/rapidshyp/apis/v1/',
     DOCPHARMA_API_KEY: process.env.DOCPHARMA_API_KEY,
+    // Warehouse origin pincode used for serviceability / EDD estimates
+    PICKUP_PINCODE: process.env.PICKUP_PINCODE || '122101',
 
     // --- EasyEcom OMS ---
     EASYECOM_BASE_URL: process.env.EASYECOM_BASE_URL || 'https://app.easyecom.io',
