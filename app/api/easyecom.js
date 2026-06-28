@@ -614,7 +614,21 @@ router.post('/confirm-order', tokenRequired, async (req, res) => {
     }
 });
 
+// Fetch a SINGLE order live from EasyEcom by its EasyEcom order_id (1 API call).
+// Returns the raw order object (with current order_status) or null.
+async function fetchEasyecomOrderById(easyecomOrderId) {
+    if (!easyecomOrderId) return null;
+    const jwt = await getEasyecomToken();
+    const url = `${EASYECOM_API_BASE}/orders/V2/getAllOrders?order_id=${encodeURIComponent(easyecomOrderId)}`;
+    const headers = { 'x-api-key': config.EASYECOM_API_KEY, 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' };
+    const res = await axios.get(url, { headers, timeout: 15000, validateStatus: () => true });
+    if (res.status !== 200) return null;
+    const orders = extractOrdersFromBody(res.data);
+    return orders[0] || null;
+}
+
 module.exports = router;
 module.exports.syncEasyecomOrders = syncEasyecomOrders;
 module.exports.dbRowToDashboard = dbRowToDashboard;
 module.exports.rawToDbRow = rawToDbRow;
+module.exports.fetchEasyecomOrderById = fetchEasyecomOrderById;

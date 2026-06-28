@@ -86,6 +86,7 @@ router.post('/easyecom', async (req, res) => {
     try {
         const payload = req.body;
         if (!payload) return;
+        console.log(`[Webhook EasyEcom] ⬇️ Received a webhook (${new Date().toLocaleTimeString('en-IN')})`);
 
         // V1 wraps in { orders: [...] }, V2 sends array directly
         let orders = [];
@@ -108,7 +109,7 @@ router.post('/easyecom', async (req, res) => {
         if (error) {
             console.error('[Webhook EasyEcom] Upsert error:', error.message);
         } else {
-            console.log(`[Webhook EasyEcom] Saved ${rows.length} order(s): ${rows.map(r => r.store_order_id || r.order_id).join(', ')}`);
+            console.log(`[Webhook EasyEcom] ✅ Updated ${rows.length} order(s): ${rows.map(r => `${r.reference_code || r.store_order_id || r.order_id}=${r.order_status}`).join(', ')}`);
         }
     } catch (e) {
         console.error('[Webhook EasyEcom] Critical error:', e.message);

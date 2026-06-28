@@ -3350,7 +3350,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ── Fulfillment Ops ───────────────────────────────────────────────────────────
 const FOPS_OPS_STATUSES = ['CONFIRMED','LABEL_PRINTED','LABEL_PURCHASED','FULFILLMENT_REQUESTED','READY_FOR_PICKUP'];
-const FOPS_ALL_STATUSES = ['CONFIRMED','READY_FOR_PICKUP','IN_TRANSIT','OUT_FOR_DELIVERY','ATTEMPTED_DELIVERY','DELIVERED','LABEL_PRINTED','LABEL_PURCHASED','FULFILLMENT_REQUESTED','SHOPIFY_CANCELLED'];
+const FOPS_ALL_STATUSES = ['CONFIRMED','READY_FOR_PICKUP','MANIFESTED','SHIPPED','IN_TRANSIT','OUT_FOR_DELIVERY','ATTEMPTED_DELIVERY','DELIVERED','RTO','REALLOCATION','LABEL_PRINTED','LABEL_PURCHASED','FULFILLMENT_REQUESTED','UNFULFILLED','CANCELLED','SHOPIFY_CANCELLED'];
+// Runtime list = known statuses ∪ whatever statuses actually appear in the loaded data (kept in sync by fopsBuildChips).
+let fopsAllStatuses = FOPS_ALL_STATUSES.slice();
 const FOPS_DS_LABEL = {
   CONFIRMED:'Confirmed', READY_FOR_PICKUP:'Ready for pickup',
   IN_TRANSIT:'In transit', OUT_FOR_DELIVERY:'Out for delivery',
@@ -3359,7 +3361,13 @@ const FOPS_DS_LABEL = {
   FULFILLMENT_REQUESTED:'Requested',
   SHIPPED:'Shipped', MANIFESTED:'Manifested',
   RTO:'RTO', CANCELLED:'Cancelled',
-  SHOPIFY_CANCELLED:'Shopify Cancelled'
+  REALLOCATION:'Reallocation Reqd',
+  SHOPIFY_CANCELLED:'Shopify Cancelled',
+  // Raw Shopify fulfillment statuses that can fall through fopsGetDS
+  ON_THE_WAY:'On the way', NOT_DELIVERED:'Not delivered',
+  PICKED_UP:'Picked up', FAILURE:'Failed', FULFILLED:'Fulfilled',
+  SUBMITTED:'Submitted', MARKED_AS_FULFILLED:'Marked fulfilled',
+  UNFULFILLED:'Unfulfilled'
 };
 const FOPS_DS_BADGE = {
   CONFIRMED:'bg-blue-100 text-blue-700',
@@ -3367,12 +3375,19 @@ const FOPS_DS_BADGE = {
   IN_TRANSIT:'bg-amber-100 text-amber-800',
   SHIPPED:'bg-amber-100 text-amber-800',
   MANIFESTED:'bg-amber-100 text-amber-800',
+  ON_THE_WAY:'bg-amber-100 text-amber-800',
+  PICKED_UP:'bg-amber-100 text-amber-800',
   OUT_FOR_DELIVERY:'bg-emerald-100 text-emerald-700',
   ATTEMPTED_DELIVERY:'bg-rose-100 text-rose-700',
+  NOT_DELIVERED:'bg-rose-100 text-rose-700',
+  FAILURE:'bg-red-100 text-red-700',
   DELIVERED:'bg-slate-100 text-slate-600',
+  FULFILLED:'bg-slate-100 text-slate-600',
   RTO:'bg-red-100 text-red-700',
+  REALLOCATION:'bg-orange-100 text-orange-700',
   CANCELLED:'bg-slate-200 text-slate-500',
   SHOPIFY_CANCELLED:'bg-red-100 text-red-600',
+  UNFULFILLED:'bg-slate-100 text-slate-400',
 };
 const FOPS_PER_PAGE = 50;
 
@@ -3421,38 +3436,61 @@ function fopsOnPresetChange() {
   if (!isCustom) fopsFetch();
 }
 
+// Prettify a raw status key (e.g. "ON_THE_WAY" → "On the way") when no FOPS_DS_LABEL exists.
+function fopsPretty(s) {
+  return String(s || '').toLowerCase().replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase());
+}
+
+// (Re)build the delivery-status filter chips from the union of the known statuses and
+// whatever statuses actually appear in the loaded orders — so NO order is ever unfilterable.
+function fopsBuildChips() {
+  const chips = document.getElementById('fops-ds-chips');
+  if (!chips) return;
+  const present = [...new Set((fopsOrders || []).map(fopsGetDS).filter(Boolean))];
+  fopsAllStatuses = [...new Set([...FOPS_ALL_STATUSES, ...present])];
+
+  chips.innerHTML = '';
+  const btnAll = document.createElement('button');
+  btnAll.id = 'fops-chip-all';
+  btnAll.className = 'fops-chip';
+  btnAll.textContent = 'Select All';
+  btnAll.onclick = () => {
+    fopsAllStatuses.forEach(s => fopsActiveDS.add(s));
+    document.querySelectorAll('#fops-ds-chips .fops-chip[data-s]').forEach(b => b.classList.add('active'));
+    fopsPage = 1; fopsRenderTable();
+  };
+  chips.appendChild(btnAll);
+
+  const btnNone = document.createElement('button');
+  btnNone.id = 'fops-chip-none';
+  btnNone.className = 'fops-chip';
+  btnNone.textContent = 'Unselect All';
+  btnNone.onclick = () => {
+    fopsActiveDS.clear();
+    document.querySelectorAll('#fops-ds-chips .fops-chip[data-s]').forEach(b => b.classList.remove('active'));
+    fopsPage = 1; fopsRenderTable();
+  };
+  chips.appendChild(btnNone);
+
+  fopsAllStatuses.forEach(s => {
+    const b = document.createElement('button');
+    b.className = 'fops-chip' + (fopsActiveDS.has(s) ? ' active' : '');
+    b.dataset.s = s;
+    b.textContent = FOPS_DS_LABEL[s] || fopsPretty(s);
+    b.onclick = () => {
+      if (fopsActiveDS.has(s)) fopsActiveDS.delete(s); else fopsActiveDS.add(s);
+      b.classList.toggle('active', fopsActiveDS.has(s));
+      fopsPage = 1; fopsRenderTable();
+    };
+    chips.appendChild(b);
+  });
+}
+
 function fopsInit() {
   if (fopsInited) return;
   fopsInited = true;
-  // build status chips for research mode
-  const chips = document.getElementById('fops-ds-chips');
-  if (chips && !chips.children.length) {
-    // Select All button
-    const btnAll = document.createElement('button');
-    btnAll.id = 'fops-chip-all';
-    btnAll.className = 'fops-chip';
-    btnAll.textContent = 'Select All';
-    btnAll.onclick = () => {
-      FOPS_ALL_STATUSES.forEach(s => fopsActiveDS.add(s));
-      document.querySelectorAll('#fops-ds-chips .fops-chip[data-s]').forEach(b => b.classList.add('active'));
-      fopsPage = 1; fopsRenderTable();
-    };
-    chips.appendChild(btnAll);
-
-    // Individual status chips
-    FOPS_ALL_STATUSES.forEach(s => {
-      const b = document.createElement('button');
-      b.className = 'fops-chip' + (FOPS_OPS_STATUSES.includes(s) ? ' active' : '');
-      b.dataset.s = s;
-      b.textContent = FOPS_DS_LABEL[s] || s;
-      b.onclick = () => {
-        if (fopsActiveDS.has(s)) fopsActiveDS.delete(s); else fopsActiveDS.add(s);
-        b.classList.toggle('active', fopsActiveDS.has(s));
-        fopsPage = 1; fopsRenderTable();
-      };
-      chips.appendChild(b);
-    });
-  }
+  // build status chips for research mode (dynamic — covers every status in the data)
+  fopsBuildChips();
   // auto-load immediately
   fopsFetch();
   // auto-refresh every 10 minutes
@@ -3498,6 +3536,7 @@ async function fopsFetch() {
     const d = await res.json();
     if (!d.success) throw new Error(d.error || 'Unknown error');
     fopsOrders = d.orders || [];
+    fopsBuildChips(); // refresh chips so any new status in the data becomes filterable
     const filtered = fopsGetFiltered();
     fopsLog(`Done — ${fopsOrders.length} total orders · ${filtered.length} match filters`);
     document.getElementById('fops-ts').textContent = `Updated ${new Date().toLocaleTimeString('en-IN',{hour12:false})} · ${fopsOrders.length} orders`;
@@ -3514,6 +3553,8 @@ function fopsGetDS(o) {
   // RS status is checked first — RTO orders are marked as cancelled in Shopify but must show as RTO
   if (o.rapidshypStatus) {
     const s = o.rapidshypStatus.toLowerCase();
+    // Courier couldn't service it → needs reallocation to another courier (action required)
+    if (s.includes('realloc')) return 'REALLOCATION';
     // Refused / cancelled-at-delivery → shipment returns to origin = RTO
     if (s.includes('rto') || s.includes('refused') || s.includes('return')) return 'RTO';
     if (s.includes('delivered') && !s.includes('out') && !s.includes('undeliver')) return 'DELIVERED';
@@ -3525,7 +3566,8 @@ function fopsGetDS(o) {
   // Only treat as Shopify Cancelled if RS has no status (no RS data = genuinely cancelled, not RTO)
   if (o.cancelledAt) return 'SHOPIFY_CANCELLED';
   const f = o.fulfillments || [];
-  return f.length ? (f[0].displayStatus || '').toUpperCase() : null;
+  // Always return a concrete bucket (never null) so every order is filterable.
+  return (f.length && (f[0].displayStatus || '').toUpperCase()) || 'UNFULFILLED';
 }
 function fopsGetAWB(o) {
   const f = o.fulfillments || [];
@@ -3678,7 +3720,7 @@ function fopsRenderTable() {
       <td>${payBadge}</td>
       <td>${shopifyBadge}</td>
       <td>${dsBadge}</td>
-      <td title="${awb}">${awb?`<button data-awb="${awb}" onclick="fopsTrack('${awb}','${carrier}','${(o.id||'').split('/').pop()}')" class="font-mono text-[11px] text-slate-500 hover:text-slate-800 hover:bg-slate-100 px-1.5 py-0.5 rounded transition-colors -mx-0.5 cursor-pointer" title="Click to track live">${awb}</button>`:'<span class="text-slate-200 text-xs">—</span>'}</td>
+      <td title="${awb}">${awb?`<button data-awb="${awb}" onclick="fopsTrack('${awb}','${carrier}','${(o.id||'').split('/').pop()}')" class="font-mono text-[11px] text-slate-500 hover:text-slate-800 hover:bg-slate-100 px-1.5 py-0.5 rounded transition-colors -mx-0.5 cursor-pointer" title="Click to track live">${awb}</button>`:`<button data-fetchawb="${(o.id||'').split('/').pop()}" onclick="fopsFetchAwb('${(o.id||'').split('/').pop()}', this)" class="text-[10px] font-semibold text-indigo-500 hover:text-white hover:bg-indigo-500 border border-indigo-200 px-1.5 py-0.5 rounded transition-colors" title="Fetch AWB from DocPharma / RapidShyp and sync to Shopify">Fetch AWB</button>`}</td>
       <td class="text-[11px] text-slate-400">${carrier||'—'}</td>
     </tr>`;
   }).join('');
@@ -3720,6 +3762,43 @@ async function fopsEnrichVisiblePage() {
     } catch (_) {}
   }));
   fopsRenderMetrics(fopsGetSorted(fopsGetFiltered()));
+}
+
+// Fetch AWB for an order with none in Shopify (DocPharma → RapidShyp), save it, and
+// create a Shopify fulfillment with the tracking number.
+async function fopsFetchAwb(numericId, btn) {
+  const original = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="inline-flex items-center gap-1"><svg class="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>Fetching…</span>'; }
+  try {
+    const res = await fetch('/api/fulfillment-ops/fetch-awb', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ numericId })
+    });
+    const d = await res.json();
+    if (!d.success) throw new Error(d.error || 'Failed');
+
+    if (d.found === false) {
+      showNotification('No AWB found in DocPharma or RapidShyp — left as is.', true);
+      if (btn) { btn.disabled = false; btn.innerHTML = original; }
+      return;
+    }
+    if (d.alreadyHadAwb) { showNotification('Order already has an AWB in Shopify.'); }
+
+    // Patch the in-memory order so the row shows the new AWB + carrier
+    const ord = fopsOrders.find(o => (o.id || '').split('/').pop() === String(numericId));
+    if (ord) {
+      ord.fulfillments = ord.fulfillments && ord.fulfillments.length ? ord.fulfillments : [{ trackingInfo: [{}] }];
+      ord.fulfillments[0].trackingInfo = [{ number: d.awb, company: d.courier || d.source }];
+      if (d.status) ord.rapidshypStatus = d.status;
+    }
+    const shop = d.shopify && d.shopify.ok ? ' · Shopify fulfillment created' : (d.shopify && d.shopify.error ? ` · Shopify: ${d.shopify.error}` : '');
+    showNotification(`AWB ${d.awb} (${d.source})${shop}`);
+    fopsRenderTable();
+  } catch (e) {
+    showNotification('Fetch AWB failed: ' + (e.message || e), true);
+    if (btn) { btn.disabled = false; btn.innerHTML = original; }
+  }
 }
 
 async function fopsTrack(awb, carrier, numericId) {
@@ -3813,7 +3892,18 @@ async function fopsTrack(awb, carrier, numericId) {
         </div>
       </div>` : '';
 
-    body.innerHTML = eeNote +
+    // Banner when we pushed RapidShyp's status onto Shopify (status mismatch reconciled)
+    const sp = d.statusPush || {};
+    const pushBanner = sp.pushed ? `
+      <div class="mb-4 flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-blue-50 border border-blue-100">
+        <span class="text-base flex-shrink-0">🔄</span>
+        <div class="text-xs leading-relaxed text-blue-700">
+          <span class="font-semibold">Shopify status updated to match RapidShyp:</span>
+          ${sp.from || '—'} → <span class="font-semibold">${(FOPS_DS_LABEL[sp.to] || sp.to)}</span>
+        </div>
+      </div>` : '';
+
+    body.innerHTML = pushBanner + eeNote +
     (scanEvents.length ? `<div class="space-y-0">` + scanEvents.map((ev, i) => `
       <div class="flex gap-3.5 ${i < scanEvents.length - 1 ? 'pb-5' : 'pb-1'}">
         <div class="flex flex-col items-center pt-1 flex-shrink-0">

@@ -65,20 +65,32 @@ async function getAllShopifyOrdersPaginated(params) {
 }
 
 // --- DOCPHARMA FUNCTIONS ---
-async function fetchDocpharmaDetails(partnerOrderNo) {
+// Retries on 429 (rate-limited) so a transient throttle doesn't get mistaken for "not found".
+// 200 → data; 400/404/other → null (order genuinely not in DocPharma → caller can try RapidShyp).
+async function fetchDocpharmaDetails(partnerOrderNo, maxRetries = 3) {
     const url = "https://partner-api.docpharma.in/fetch-details";
     if (!config.DOCPHARMA_API_KEY || !partnerOrderNo) return null;
 
     const cleanId = String(partnerOrderNo).replace('#', '');
 
-    try {
-        const response = await axios.post(url, { partner_order_no: cleanId }, {
-            headers: { 'x-api-key': config.DOCPHARMA_API_KEY, 'Content-Type': 'application/json' },
-            timeout: 3000
-        });
-        if (response.status === 200) return response.data;
-    } catch (e) {
-        console.error(`[DocPharma] Error fetching ${cleanId}: ${e.message}`);
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            const response = await axios.post(url, { partner_order_no: cleanId }, {
+                headers: { 'x-api-key': config.DOCPHARMA_API_KEY, 'Content-Type': 'application/json' },
+                timeout: 5000,
+                validateStatus: () => true
+            });
+            if (response.status === 200) return response.data;
+            if (response.status === 429) {
+                if (attempt < maxRetries) { await sleep(1500 * (attempt + 1)); continue; } // back off & retry
+                console.error(`[DocPharma] Rate limited fetching ${cleanId} after ${maxRetries} retries`);
+                return null;
+            }
+            return null; // 400/404/etc — order not in DocPharma
+        } catch (e) {
+            if (attempt >= maxRetries) { console.error(`[DocPharma] Error fetching ${cleanId}: ${e.message}`); return null; }
+            await sleep(1000 * (attempt + 1)); // network error — back off & retry
+        }
     }
     return null;
 }

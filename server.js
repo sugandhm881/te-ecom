@@ -29,9 +29,9 @@ const easyecomRoutes = require('./app/api/easyecom');
 const { syncEasyecomOrders } = require('./app/api/easyecom');
 const amazonReviewRoutes = require('./app/api/amazon_review');
 const { router: amazonAutoReviewRoutes, initAutoReviewCron } = require('./app/api/amazon_auto_review');
-const { router: fulfillmentOpsRoutes, syncLast7Days, syncMTD } = require('./app/api/fulfillment_ops');
+const { router: fulfillmentOpsRoutes, syncLast7Days, syncMTD, syncStatusesToShopify } = require('./app/api/fulfillment_ops');
 const serviceabilityRoutes = require('./app/api/serviceability');
-const { sendWarehouseOpsReport } = require('./app/api/warehouse_slack_report');
+const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport } = require('./app/api/warehouse_slack_report');
 const cron = require('node-cron');
 
 // --- Register Routes ---
@@ -64,6 +64,13 @@ cron.schedule('0 16 * * *', async () => {
     await syncMTD().catch(e => console.error('[RS Sync] daily error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
+// Status Sync → Shopify — DISABLED pending review (was pushing stale/incorrect statuses).
+// Re-enable only after verifying with a dry-run: `node app/api/fulfillment_ops.js status-sync 7 dry`
+// cron.schedule('30 */6 * * *', async () => {
+//     console.log('[StatusSync] 6-hr trigger — pushing RapidShyp/DocPharma statuses to Shopify…');
+//     await syncStatusesToShopify(30).catch(e => console.error('[StatusSync] error:', e.message));
+// }, { timezone: 'Asia/Kolkata' });
+
 // Warehouse Ops Slack report — Confirmed + Ready for Pickup + Unfulfillable, last 30 days, old→new.
 // Runs twice daily: 8:30 AM IST (data up to today−2) and 5:30 PM IST (data up to today−1).
 cron.schedule('30 8 * * *', async () => {
@@ -75,6 +82,22 @@ cron.schedule('30 17 * * *', async () => {
     console.log('[WH Report] 5:30 PM IST — sending warehouse ops report (last 30d, −1)…');
     await sendWarehouseOpsReport(1).catch(e => console.error('[WH Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
+
+// DocPharma-rejected → dp-to-mwh-orders — separate report, MTD, daily at 9 AM IST.
+cron.schedule('0 9 * * *', async () => {
+    console.log('[DP Report] 9 AM IST — sending DocPharma-rejected (MTD) report…');
+    await sendDocpharmaRejectedReport().catch(e => console.error('[DP Report] Error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// EasyEcom On-Hold report — daily at 11 AM IST. Reads the synced b2c_order_easycom table
+// only (NO EasyEcom API calls) and posts on-hold orders to its Slack channel.
+cron.schedule('0 11 * * *', async () => {
+    console.log('[Hold Report] 11 AM IST — sending EasyEcom On-Hold report…');
+    await sendEasyecomHoldReport().catch(e => console.error('[Hold Report] Error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// Slack trigger — typing "rejected" in #dp-to-mwh-orders runs the MTD DocPharma report.
+initDpSlackTrigger();
 
 // --- COD Confirmation Data (FROM SUPABASE) ---
 app.get('/api/cod-confirmations', async (req, res) => {
