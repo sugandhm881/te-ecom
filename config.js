@@ -42,6 +42,9 @@ module.exports = {
     DOCPHARMA_API_KEY: process.env.DOCPHARMA_API_KEY,
     // Warehouse origin pincode used for serviceability / EDD estimates
     PICKUP_PINCODE: process.env.PICKUP_PINCODE || '122101',
+    // Slack word that triggers the DocPharma→MWH report. LIVE leaves this unset → "rejected";
+    // LOCAL test instance sets DP_TRIGGER_WORD=test so the two don't both fire on one message.
+    DP_TRIGGER_WORD: process.env.DP_TRIGGER_WORD,
 
     // --- EasyEcom OMS ---
     EASYECOM_BASE_URL: process.env.EASYECOM_BASE_URL || 'https://app.easyecom.io',

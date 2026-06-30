@@ -23,6 +23,13 @@ function rsHasMoved(rawStatus) {
     return !!s && RS_MOVED.some(k => s.includes(k));
 }
 
+// A RapidShyp status that means the shipment is labelled and sitting in the warehouse waiting for
+// the courier (not yet moved) → it's genuinely "Ready for Pickup", regardless of Shopify's status.
+const RS_READY = /pickup|manifest|label|awb assign|booked|ready to ship|in[- ]?scan|order placed/i;
+function rsReadyForPickup(rawStatus) {
+    return !!(rawStatus || '').trim() && RS_READY.test(rawStatus);
+}
+
 // Supabase .in() chokes on thousands of values; chunk the AWB → raw_status lookup.
 async function fetchRsStatusByAwbs(awbs) {
     const uniq = [...new Set(awbs.filter(Boolean))];
@@ -82,6 +89,111 @@ function classifyOrder(order) {
     return null;
 }
 
+// ─── Real-time RapidShyp tracking — the source of truth for shipment status ───
+const RAPIDSHYP_TRACK_URL = 'https://api.rapidshyp.com/rapidshyp/apis/v1/track_order';
+
+// order name → { awbByName, cancelled }. Pulls the EasyEcom AWB (the fallback key for the RapidShyp
+// lookup — Shopify often has no tracking number) and the order_status in ONE query. `cancelled` is a
+// set of orders EasyEcom marks Cancelled, used only to drop dead orders (not for shipment status).
+async function fetchEasyecomInfoByName(names) {
+    const awbByName = {};
+    const cancelled = new Set();
+    const clean = [...new Set(names.map(normName).filter(Boolean))];
+    for (let i = 0; i < clean.length; i += 200) { // chunk .in() to stay under URL limits
+        const { data, error } = await supabase
+            .from('b2c_order_easycom')
+            .select('reference_code, awb_number, order_status')
+            .in('reference_code', clean.slice(i, i + 200));
+        if (error) { console.warn(`[WH Report] EasyEcom lookup failed: ${error.message}`); continue; }
+        (data || []).forEach(r => {
+            const n = normName(r.reference_code);
+            if (r.awb_number) awbByName[n] = String(r.awb_number);
+            if (/cancel/i.test(r.order_status || '')) cancelled.add(n);
+        });
+    }
+    return { awbByName, cancelled };
+}
+
+// Live RapidShyp status for one AWB; refreshes the cache. Retries on transient errors/timeouts/
+// rate-limits (RapidShyp throttles bursts — individual calls are fast). Returns raw_status or ''.
+async function fetchRsLive(awb, tries = 3) {
+    for (let attempt = 1; attempt <= tries; attempt++) {
+        try {
+            const res = await axios.post(RAPIDSHYP_TRACK_URL, { awb },
+                { headers: { 'rapidshyp-token': config.RAPIDSHYP_API_KEY, 'Content-Type': 'application/json' }, timeout: 25000, validateStatus: () => true });
+            const data = res.data;
+            // Rate-limited / transient server error → back off and retry the same AWB.
+            if (res.status === 429 || res.status >= 500 || (data && data.success === false && /limit|throttl|too many/i.test(JSON.stringify(data)))) {
+                if (attempt < tries) { await new Promise(r => setTimeout(r, attempt * 2000)); continue; }
+                return '';
+            }
+            if (data && data.success && Array.isArray(data.records) && data.records.length) {
+                const rec = data.records[0];
+                const sd = rec.shipment_details;
+                const shipment = Array.isArray(sd) && sd.length ? sd[0] : (sd && typeof sd === 'object' ? sd : rec);
+                const rawStatus = shipment.current_tracking_status_desc || shipment.shipment_status || '';
+                if (rawStatus) {
+                    await supabase.from('rapidshyp_tracking_ecom').upsert(
+                        { awb, raw_status: rawStatus, last_checked: new Date().toISOString(), updated_at: new Date().toISOString() },
+                        { onConflict: 'awb' });
+                    return rawStatus;
+                }
+            }
+            return ''; // success but no tracking yet — genuinely no status
+        } catch (e) {
+            if (attempt < tries) { await new Promise(r => setTimeout(r, attempt * 1500)); continue; } // timeout/network → retry
+        }
+    }
+    return '';
+}
+
+// Read RapidShyp status for a set of AWBs from the CACHE only (the background sync keeps it fresh).
+// The report uses this to drop orders the cache already knows have moved — no live calls here.
+// Returns { awb: raw_status }.
+async function resolveRsStatuses(awbs) {
+    const uniq = [...new Set(awbs.filter(Boolean))];
+    const status = {};
+    for (let i = 0; i < uniq.length; i += 200) {
+        const { data } = await supabase
+            .from('rapidshyp_tracking_ecom')
+            .select('awb, raw_status')
+            .in('awb', uniq.slice(i, i + 200));
+        (data || []).forEach(r => { if (r.raw_status) status[r.awb] = r.raw_status; });
+    }
+    return status;
+}
+
+// Background sync: refresh the RapidShyp cache for recent EasyEcom-shipped orders (1 req/sec, retry).
+// Runs on a cron + at startup so the report & dashboard read fresh status straight from the DB.
+// Skips terminal (delivered/RTO) and fresh (<3h) cache entries to bound the work.
+async function syncRsCacheEasyecom(days = 30) {
+    const since = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
+    const { data: orders, error } = await supabase
+        .from('b2c_order_easycom')
+        .select('awb_number')
+        .gte('order_date', since)
+        .not('awb_number', 'is', null);
+    if (error) { console.error('[RS-EC Sync] read error:', error.message); return; }
+    const awbs = [...new Set((orders || []).map(o => o.awb_number).filter(Boolean))];
+
+    const cache = {};
+    for (let i = 0; i < awbs.length; i += 200) {
+        const { data } = await supabase.from('rapidshyp_tracking_ecom').select('awb, raw_status, updated_at').in('awb', awbs.slice(i, i + 200));
+        (data || []).forEach(r => { cache[r.awb] = r; });
+    }
+    const threeHrAgo = Date.now() - 3 * 3600 * 1000;
+    const isTerminal = s => /deliver|rto|return/i.test(s || '');
+    const todo = awbs.filter(a => { const c = cache[a]; if (!c || !c.raw_status) return true; if (isTerminal(c.raw_status)) return false; return !c.updated_at || new Date(c.updated_at).getTime() < threeHrAgo; });
+
+    console.log(`[RS-EC Sync] ${awbs.length} EasyEcom AWBs · refreshing ${todo.length} (1/sec)…`);
+    let ok = 0;
+    for (const awb of todo) {
+        if (await fetchRsLive(awb)) ok++;
+        await new Promise(r => setTimeout(r, 1000));
+    }
+    console.log(`[RS-EC Sync] done — refreshed ${ok}/${todo.length} into the cache`);
+}
+
 // Slack mrkdwn text limit is 3000 chars — chunk order names into safe blocks
 function orderBlocks(label, emoji, orders) {
     if (!orders.length) return [];
@@ -136,7 +248,24 @@ function buildPayload(groups, start, end) {
     return { blocks };
 }
 
+let DRY_RUN = false; // CLI "dry" flag — print the report instead of posting to Slack
+
 async function postSlack(payload, channel = WH_CHANNEL) {
+    if (DRY_RUN) {
+        let preview = payload.text || '';
+        if (Array.isArray(payload.blocks)) {
+            preview = payload.blocks.map(b => {
+                if (b.type === 'header')                 return `# ${b.text.text}`;
+                if (b.type === 'section' && b.text)      return b.text.text;
+                if (b.type === 'section' && b.fields)    return b.fields.map(f => f.text).join('   |   ');
+                if (b.type === 'context')                return b.elements.map(e => e.text).join(' ');
+                if (b.type === 'divider')                return '──────────';
+                return '';
+            }).filter(Boolean).join('\n');
+        }
+        console.log(`\n════ DRY RUN — would post to ${channel} (no Slack message sent) ════\n${preview}\n════════════════════════════════════════════════════════════\n`);
+        return true;
+    }
     const token = config.SLACK_BOT_TOKEN;
     if (!token) { console.warn('[WH Report] SLACK_BOT_TOKEN not configured'); return; }
     const res = await axios.post(
@@ -190,7 +319,8 @@ async function findDocpharmaRejected(orders) {
         const found = dp !== null;                                    // DocPharma has the order
         const status = found ? extractDocpharmaStatusString(dp) : null;
         checks.push({ name: o.name, found, status });
-        if (found && status && status.includes('REJECT')) rejected.push({ name: o.name, status });
+        // DocPharma "Cancelled" is an indirect rejection (they won't ship it) → treat like Rejected.
+        if (found && status && (status.includes('REJECT') || status.includes('CANCEL'))) rejected.push({ name: o.name, status });
         await new Promise(r => setTimeout(r, 1100)); // ~1 req/sec
     }
     return { rejected, checks };
@@ -201,7 +331,7 @@ function buildDpRejectedPayload(rejected, start, end) {
     const lines = rejected.map(r => `🔴  \`${r.name}\`  —  *${r.status}*`);
     const blocks = [
         { type: 'header', text: { type: 'plain_text', text: `🚨 DocPharma Rejected → Warehouse Action`, emoji: true } },
-        { type: 'section', text: { type: 'mrkdwn', text: `*${rejected.length}* order${rejected.length !== 1 ? 's' : ''} with *no RapidShyp tracking* were *REJECTED by DocPharma* and need warehouse action _(re-route / re-ship)_.\n_Window: ${start} → ${end}_` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*${rejected.length}* order${rejected.length !== 1 ? 's' : ''} with *no RapidShyp tracking* were *Rejected / Cancelled by DocPharma* and need warehouse action _(re-route / re-ship)_.\n_Window: ${start} → ${end}_` } },
         { type: 'divider' }
     ];
     const CHUNK = 40;
@@ -217,8 +347,10 @@ function buildDpRejectedPayload(rejected, start, end) {
 function reportWindow(endOffsetDays) {
     const now = new Date();
     const endDate   = new Date(now.getFullYear(), now.getMonth(), now.getDate() - endOffsetDays);
-    const startDate = new Date(endDate);
-    startDate.setDate(startDate.getDate() - 30);
+    // Start is anchored to TODAY (fixed 32-day lookback), NOT to the cutoff — so the −1 (evening)
+    // window is always a superset of the −2 (morning) window and no pending order is missed between
+    // the two runs.
+    const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 32);
     return { start: fmtLocal(startDate), end: fmtLocal(endDate) };
 }
 
@@ -234,53 +366,129 @@ function mtdWindow() {
 async function collectPendingGroups(start, end, label = 'open orders') {
     console.log(`[WH Report] Fetching ${label} ${start} → ${end}…`);
 
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const q = `processed_at:>='${start}' AND processed_at:<='${end}T23:59:59Z' AND status:open`;
+    const MAX_TRIES = 6;
+
     const allOrders = [];
     let cursor = null, hasNext = true;
     try {
         while (hasNext) {
             const after = cursor ? `, after:"${cursor}"` : '';
-            const q = `processed_at:>='${start}' AND processed_at:<='${end}T23:59:59Z' AND status:open`;
             const gql = `{orders(first:50,sortKey:PROCESSED_AT,reverse:false,query:"${q}"${after}){edges{node{name processedAt displayFulfillmentStatus fulfillments{displayStatus trackingInfo{number}}}}pageInfo{hasNextPage endCursor}}}`;
 
-            const resp = await axios.post(
-                GQL_URL,
-                { query: gql },
-                { headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': config.SHOPIFY_TOKEN } }
-            );
-            if (resp.data.errors) throw new Error(resp.data.errors[0].message);
-            const { edges, pageInfo } = resp.data.data.orders;
-            edges.forEach(e => allOrders.push(e.node));
-            hasNext = pageInfo.hasNextPage;
-            cursor  = pageInfo.endCursor;
+            // Fetch each page with retry/backoff so one transient Shopify hiccup (throttle, 5xx,
+            // network blip) retries instead of failing the whole report.
+            let orders = null;
+            for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+                try {
+                    const resp = await axios.post(
+                        GQL_URL,
+                        { query: gql },
+                        { headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': config.SHOPIFY_TOKEN }, timeout: 20000 }
+                    );
+                    const errs = resp.data && resp.data.errors;
+                    const throttled = Array.isArray(errs) && errs.some(e =>
+                        (e.extensions && e.extensions.code) === 'THROTTLED' || /throttle/i.test(e.message || ''));
+                    if (throttled) {
+                        // Wait for the GraphQL cost bucket to refill, then retry this same page.
+                        const cost = resp.data.extensions && resp.data.extensions.cost;
+                        const ts = cost && cost.throttleStatus;
+                        const need = (cost && cost.requestedQueryCost) || 100;
+                        let wait = 2000;
+                        if (ts && ts.restoreRate && ts.currentlyAvailable < need) {
+                            wait = Math.ceil((need - ts.currentlyAvailable) / ts.restoreRate * 1000);
+                        }
+                        wait = Math.max(1000, Math.min(10000, wait));
+                        console.warn(`[WH Report] Shopify throttled — waiting ${wait}ms (try ${attempt}/${MAX_TRIES})`);
+                        await sleep(wait);
+                        continue;
+                    }
+                    if (Array.isArray(errs) && errs.length) throw new Error(errs[0].message);
+                    if (!resp.data.data || !resp.data.data.orders) throw new Error('empty Shopify response');
+                    orders = resp.data.data.orders;
+                    break;
+                } catch (e) {
+                    if (attempt === MAX_TRIES) throw e;
+                    const wait = Math.min(8000, 500 * 2 ** (attempt - 1));
+                    console.warn(`[WH Report] Shopify fetch error "${e.message}" — retry ${attempt}/${MAX_TRIES} in ${wait}ms`);
+                    await sleep(wait);
+                }
+            }
+
+            orders.edges.forEach(e => allOrders.push(e.node));
+            hasNext = orders.pageInfo.hasNextPage;
+            cursor  = orders.pageInfo.endCursor;
         }
     } catch (e) {
-        console.error('[WH Report] Shopify fetch failed:', e.message);
+        console.error('[WH Report] Shopify fetch failed after retries:', e.message);
         return null;
     }
 
-    // Cross-check RapidShyp: drop orders whose shipment has already moved/delivered.
-    const rsMap = await fetchRsStatusByAwbs(allOrders.map(orderAwb));
-    let movedSkipped = 0;
-    const groups = {};
+    // Resolve each order's AWB — Shopify fulfillment AWB first, else the EasyEcom AWB.
+    const { awbByName: ecAwbByName, cancelled: ecCancelled } = await fetchEasyecomInfoByName(allOrders.map(o => o.name));
+    const awbByName = {};
+    allOrders.forEach(o => {
+        const awb = orderAwb(o) || ecAwbByName[normName(o.name)] || null;
+        if (awb) awbByName[normName(o.name)] = String(awb);
+    });
+
+    // Phase 1 — from the DB CACHE: drop dead orders (EasyEcom-cancelled) and shipments the cache
+    // already knows have moved/delivered (the bulk — no live call). What remains = candidates.
+    const cacheStatus = await resolveRsStatuses(Object.values(awbByName));
+    let movedSkipped = 0, cancelledSkipped = 0;
+    const candidates = [];
     allOrders.forEach(order => {
-        const awb = orderAwb(order);
+        const nm = normName(order.name);
+        if (ecCancelled.has(nm)) { cancelledSkipped++; return; }
+        const awb = awbByName[nm];
+        const rs = awb ? cacheStatus[awb] : null;
+        if (rs && rsHasMoved(rs)) { movedSkipped++; return; } // cache says gone → drop, no live needed
+        candidates.push(order);
+    });
+
+    // Phase 2 — LIVE-verify ONLY the candidates (the orders that would appear in the report) with
+    // RapidShyp for the freshest status right before posting; this also refreshes the cache.
+    const rsMap = { ...cacheStatus };
+    const candAwbs = [...new Set(candidates.map(o => awbByName[normName(o.name)]).filter(Boolean))];
+    if (candAwbs.length) {
+        console.log(`[WH Report] Live-verifying ${candAwbs.length} report order(s) with RapidShyp…`);
+        let i = 0, done = 0;
+        const worker = async () => {
+            while (i < candAwbs.length) {
+                const awb = candAwbs[i++];
+                const live = await fetchRsLive(awb);
+                if (live) rsMap[awb] = live;
+                if (++done % 50 === 0) console.log(`[WH Report]   …verified ${done}/${candAwbs.length}`);
+                await sleep(200);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(4, candAwbs.length) }, worker));
+    }
+
+    // Phase 3 — classify the candidates from the FRESH RapidShyp status.
+    const groups = {};
+    candidates.forEach(order => {
+        const awb = awbByName[normName(order.name)] || null;
         const rs = awb ? rsMap[awb] : null;
-        if (rs && rsHasMoved(rs)) { movedSkipped++; return; }
-        // RapidShyp says the courier couldn't service it → needs reallocation (action required),
-        // even if Shopify still shows Ready for Pickup / Confirmed.
-        if (rs && /realloc/i.test(rs)) {
+        if (rs && rsHasMoved(rs)) { movedSkipped++; return; }               // moved since cache → drop
+        if (rs && /realloc/i.test(rs)) {                                    // courier failed → action
             (groups.REALLOCATION_REQUIRED = groups.REALLOCATION_REQUIRED || []).push(order);
             return;
         }
-        const status = classifyOrder(order);
+        if (rs && rsReadyForPickup(rs)) {                                   // labelled & awaiting pickup
+            (groups.READY_FOR_PICKUP = groups.READY_FOR_PICKUP || []).push(order);
+            return;
+        }
+        const status = classifyOrder(order);                               // no RS signal → Shopify
         if (!status) return;
         if (!groups[status]) groups[status] = [];
         groups[status].push(order);
     });
 
     const total = Object.values(groups).flat().length;
-    console.log(`[WH Report] READY=${(groups.READY_FOR_PICKUP||[]).length} CONFIRMED=${(groups.CONFIRMED||[]).length} UNFULFILLABLE=${(groups.UNFULFILLABLE||[]).length} REALLOC=${(groups.REALLOCATION_REQUIRED||[]).length} TOTAL=${total} (skipped ${movedSkipped} already-moved per RapidShyp)`);
-    return { groups, rsMap, start, end };
+    console.log(`[WH Report] READY=${(groups.READY_FOR_PICKUP||[]).length} CONFIRMED=${(groups.CONFIRMED||[]).length} UNFULFILLABLE=${(groups.UNFULFILLABLE||[]).length} REALLOC=${(groups.REALLOCATION_REQUIRED||[]).length} TOTAL=${total} (dropped ${movedSkipped} moved · ${cancelledSkipped} cancelled)`);
+    return { groups, rsMap, awbByName, start, end };
 }
 
 // Among pending orders that have NO RapidShyp tracking AND are not already handed to MWH,
@@ -289,9 +497,9 @@ async function collectPendingGroups(start, end, label = 'open orders') {
 // they stay in the warehouse report. Orders already in the handled list are skipped
 // entirely (RapidShyp-first from then on). This single classifier keeps the reports
 // mutually exclusive and prevents re-reporting handled orders.
-async function getDpRejectedOrders(groups, rsMap, handledSet) {
+async function getDpRejectedOrders(groups, rsMap, handledSet, awbByName = {}) {
     const pending = Object.values(groups).flat();
-    let noRsPending = pending.filter(o => { const awb = orderAwb(o); return !awb || !rsMap[awb]; });
+    let noRsPending = pending.filter(o => { const awb = awbByName[normName(o.name)] || orderAwb(o); return !awb || !rsMap[awb]; });
 
     // Skip orders already handed to MWH — they're tracked via RapidShyp now, never DocPharma again.
     if (handledSet && handledSet.size) {
@@ -330,13 +538,13 @@ async function sendWarehouseOpsReport(endOffsetDays = 2) {
     const { start, end } = reportWindow(endOffsetDays);
     const res = await collectPendingGroups(start, end, `last-30d open orders (cutoff −${endOffsetDays}d)`);
     if (!res) { await postSlack({ text: '⚠️ Warehouse Ops Report failed to fetch orders.' }); return; }
-    const { groups, rsMap } = res;
+    const { groups, rsMap, awbByName } = res;
 
     // Route currently-rejected DocPharma orders OUT of the warehouse report (they go to dp-to-mwh
     // only). Already-handled orders are NOT rejected here, so they correctly stay in this report
     // and are tracked via RapidShyp. The warehouse report never records the handled list.
     const handledSet = await fetchHandledNames();
-    const rejected = await getDpRejectedOrders(groups, rsMap, handledSet);
+    const rejected = await getDpRejectedOrders(groups, rsMap, handledSet, awbByName);
     if (rejected.length) {
         const rejectedNames = new Set(rejected.map(r => normName(r.name)));
         for (const k of Object.keys(groups)) groups[k] = groups[k].filter(o => !rejectedNames.has(normName(o.name)));
@@ -365,14 +573,15 @@ async function sendDocpharmaRejectedReport(announceEmpty = false) {
     const { start, end } = mtdWindow();
     const res = await collectPendingGroups(start, end, 'MTD open orders (DocPharma check)');
     if (!res) { await postSlack({ text: '⚠️ DocPharma→MWH check failed to fetch orders.' }, DP_CHANNEL); return; }
-    const { groups, rsMap } = res;
+    const { groups, rsMap, awbByName } = res;
 
     const handledSet = await fetchHandledNames();
-    const rejected = await getDpRejectedOrders(groups, rsMap, handledSet);
+    const rejected = await getDpRejectedOrders(groups, rsMap, handledSet, awbByName);
     if (rejected.length) {
         await postSlack(buildDpRejectedPayload(rejected, start, end), DP_CHANNEL);
         // Mark as handed to MWH so they're never re-reported (RapidShyp-first from here on).
-        await recordHandled(rejected);
+        // Skip in dry-run so a preview never mutates the handled list.
+        if (!DRY_RUN) await recordHandled(rejected);
         console.log(`[WH Report] ${rejected.length} DocPharma-rejected order(s) → dp-to-mwh-orders`);
     } else if (announceEmpty) {
         await postSlack({ blocks: [
@@ -386,8 +595,14 @@ async function sendDocpharmaRejectedReport(announceEmpty = false) {
 }
 
 // ─── Slack trigger ─────────────────────────────────────────────────────────
-// Typing "rejected" in #dp-to-mwh-orders runs the MTD DocPharma report on demand.
+// Typing the trigger word in #dp-to-mwh-orders runs the MTD DocPharma report on demand.
+// The word is configurable (env DP_TRIGGER_WORD) so the LIVE server and a LOCAL test instance can
+// listen for DIFFERENT words and not both fire on the same message:
+//   LIVE  (.env unset or DP_TRIGGER_WORD=rejected) → responds to "rejected"
+//   LOCAL (.env DP_TRIGGER_WORD=test)              → responds to "test"
 // Polls conversations.history; ignores the bot's own posts to avoid self-triggering.
+const DP_TRIGGER_WORD = String(config.DP_TRIGGER_WORD || 'rejected').toLowerCase().trim();
+const DP_TRIGGER_RE   = new RegExp(`\\b${DP_TRIGGER_WORD.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
 let _dpPollTs = null;
 let _dpRunning = false;
 
@@ -406,12 +621,12 @@ async function pollDpTrigger() {
     const all = res.data.messages || [];
     if (all.length) _dpPollTs = String(Math.max(...all.map(m => parseFloat(m.ts)))); // advance cursor
 
-    // Only human messages (skip bot posts / joins / edits) that say "rejected".
-    const triggered = all.some(m => !m.bot_id && !m.subtype && /\brejected\b/i.test(m.text || ''));
+    // Only human messages (skip bot posts / joins / edits) that say the trigger word.
+    const triggered = all.some(m => !m.bot_id && !m.subtype && DP_TRIGGER_RE.test(m.text || ''));
     if (!triggered || _dpRunning) return;
 
     _dpRunning = true;
-    console.log('[DP Trigger] "rejected" received — running MTD DocPharma report…');
+    console.log(`[DP Trigger] "${DP_TRIGGER_WORD}" received — running MTD DocPharma report…`);
     try {
         await postSlack({ text: '⏳ Running DocPharma-rejected (MTD) check…' }, DP_CHANNEL).catch(() => {});
         await sendDocpharmaRejectedReport(true); // announce even if none found
@@ -426,7 +641,7 @@ function initDpSlackTrigger(intervalMs = 30000) {
     if (!config.SLACK_BOT_TOKEN) { console.warn('[DP Trigger] SLACK_BOT_TOKEN not set — trigger disabled'); return; }
     _dpPollTs = String(Date.now() / 1000); // ignore history before startup
     setInterval(() => { pollDpTrigger().catch(() => {}); }, intervalMs);
-    console.log('[DP Trigger] Listening for "rejected" in dp-to-mwh-orders…');
+    console.log(`[DP Trigger] Listening for "${DP_TRIGGER_WORD}" in dp-to-mwh-orders…`);
 }
 
 // ─── EasyEcom On-Hold report → C0BBQNDH1CG ──────────────────────────────────
@@ -501,7 +716,7 @@ async function sendEasyecomHoldReport(announceEmpty = false) {
     console.log('[Hold Report] Sent to channel');
 }
 
-module.exports = { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport };
+module.exports = { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom };
 
 // --- Manual run ---
 // Run on demand and post to Slack immediately, then exit.
@@ -510,7 +725,9 @@ module.exports = { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSl
 //   node app/api/warehouse_slack_report.js dp       → DocPharma→MWH check only (MTD)
 //   node app/api/warehouse_slack_report.js hold     → EasyEcom On-Hold report (no EasyEcom API)
 if (require.main === module) {
-    const args = process.argv.slice(2);
+    const rawArgs = process.argv.slice(2);
+    if (rawArgs.some(a => a.toLowerCase() === 'dry')) { DRY_RUN = true; console.log('[WH Report] DRY RUN — nothing will be posted to Slack'); }
+    const args = rawArgs.filter(a => a.toLowerCase() !== 'dry');
     const mode = (args[0] || '').toLowerCase();
     const dpOnly = mode === 'dp';
 

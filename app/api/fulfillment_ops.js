@@ -255,7 +255,13 @@ async function pushShopifyFulfillmentStatus(fulfillmentId, currentDisplayStatus,
     const current = (currentDisplayStatus || '').toUpperCase();
     if (!fulfillmentId || !target) return { pushed: false, reason: 'no-mapping' };
     if (target === current)        return { pushed: false, reason: 'already-matching' };
-    if (current === 'DELIVERED' && target !== 'DELIVERED') return { pushed: false, reason: 'would-regress-delivered' };
+    // No-regression guard: never move a fulfillment BACKWARDS in its lifecycle. Shopify can be ahead
+    // of the cached RapidShyp status, and pushing the older value would drag it back — that's what
+    // produced the bad pushes before. Only forward (or same-rank lateral, e.g. NDR) is allowed.
+    const LIFECYCLE_RANK = { CONFIRMED: 1, READY_FOR_PICKUP: 2, FULFILLED: 3, PICKED_UP: 3, IN_TRANSIT: 3, ATTEMPTED_DELIVERY: 4, FAILURE: 4, OUT_FOR_DELIVERY: 4, DELIVERED: 5 };
+    if ((LIFECYCLE_RANK[target] || 0) < (LIFECYCLE_RANK[current] || 0)) {
+        return { pushed: false, reason: 'would-regress', from: current, to: target };
+    }
     if (opts.dryRun)               return { pushed: false, wouldPush: true, from: current, to: target, rsStatus };
     // Bulk pushes are gated by the switch; the manual AWB-click (opts.manual) is always allowed.
     if (!STATUS_PUSH_ENABLED && !opts.manual) return { pushed: false, reason: 'bulk-push-disabled' };
@@ -306,7 +312,7 @@ router.get('/track-order/:numericId', async (req, res) => {
         const latestAWB = ti[0].number;
 
         // 2. Call RapidShyp for latest status + events
-        let events = [], rsStatus = '';
+        let events = [], rsStatus = '', fromDocpharma = false;
         try {
             const rsRes = await axios.post(RS_URL, { awb: latestAWB }, { headers: RS_HDR(), timeout: 10000 });
             const data  = rsRes.data;
@@ -328,6 +334,26 @@ router.get('/track-order/:numericId', async (req, res) => {
             console.error(`[TrackOrder] RS error for ${latestAWB}:`, rsErr.message);
         }
 
+        // 2b. DocPharma fallback — DocPharma-dispatched orders aren't in RapidShyp (it 400s on their
+        //     AWB). If RapidShyp returned NO status, ask DocPharma. If DocPharma also has nothing,
+        //     leave it blank.
+        if (!rsStatus) {
+            try {
+                const dp = await fetchDocpharmaDetails((order.name || '').replace('#', '').trim());
+                const dpStatus = extractDocpharmaStatusString(dp);
+                if (dpStatus) {
+                    rsStatus = dpStatus;
+                    fromDocpharma = true; // display + cache only — never push to Shopify (avoids delivered emails)
+                    if (!events.length) events = [{ status: dpStatus, timestamp: '', location: 'DocPharma' }];
+                    console.log(`[TrackOrder] ${order.name} → RapidShyp empty → DocPharma: ${dpStatus}`);
+                } else {
+                    console.log(`[TrackOrder] ${order.name} → no status from RapidShyp or DocPharma — left blank`);
+                }
+            } catch (dpErr) {
+                console.error(`[TrackOrder] DocPharma fallback error for ${order.name}:`, dpErr.message);
+            }
+        }
+
         // 3. Save latest AWB + status to DB
         if (latestAWB) {
             await supabase.from('rapidshyp_tracking_ecom').upsert(
@@ -340,7 +366,7 @@ router.get('/track-order/:numericId', async (req, res) => {
         // 3b. Push RapidShyp status to Shopify when they don't match (keeps Shopify in sync
         //     with the courier — e.g. RapidShyp "Ready to Ship" but Shopify still "Confirmed").
         let statusPush = { pushed: false };
-        if (fulfillment && rsStatus && !order.cancelledAt) {
+        if (fulfillment && rsStatus && !order.cancelledAt && !fromDocpharma) {
             statusPush = await pushShopifyFulfillmentStatus(fulfillment.id, fulfillment.displayStatus, rsStatus, { manual: true });
         }
 

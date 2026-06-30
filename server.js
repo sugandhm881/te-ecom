@@ -31,7 +31,7 @@ const amazonReviewRoutes = require('./app/api/amazon_review');
 const { router: amazonAutoReviewRoutes, initAutoReviewCron } = require('./app/api/amazon_auto_review');
 const { router: fulfillmentOpsRoutes, syncLast7Days, syncMTD, syncStatusesToShopify } = require('./app/api/fulfillment_ops');
 const serviceabilityRoutes = require('./app/api/serviceability');
-const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport } = require('./app/api/warehouse_slack_report');
+const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom } = require('./app/api/warehouse_slack_report');
 const cron = require('node-cron');
 
 // --- Register Routes ---
@@ -83,9 +83,11 @@ cron.schedule('30 17 * * *', async () => {
     await sendWarehouseOpsReport(1).catch(e => console.error('[WH Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
-// DocPharma-rejected → dp-to-mwh-orders — separate report, MTD, daily at 9 AM IST.
-cron.schedule('0 9 * * *', async () => {
-    console.log('[DP Report] 9 AM IST — sending DocPharma-rejected (MTD) report…');
+// DocPharma-rejected → dp-to-mwh-orders — separate report, MTD. Runs HOURLY from 8 AM to 7 PM IST
+// (first run 08:00, last run 19:00). The Slack "rejected" word + CLI `dp` still trigger it manually.
+cron.schedule('0 8-19 * * *', async () => {
+    const hr = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false });
+    console.log(`[DP Report] ${hr}:00 IST — sending DocPharma-rejected (MTD) report…`);
     await sendDocpharmaRejectedReport().catch(e => console.error('[DP Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
@@ -95,6 +97,15 @@ cron.schedule('0 11 * * *', async () => {
     console.log('[Hold Report] 11 AM IST — sending EasyEcom On-Hold report…');
     await sendEasyecomHoldReport().catch(e => console.error('[Hold Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
+
+// RapidShyp cache sync for EasyEcom-shipped orders — every 3 hours + once at startup. Keeps the
+// rapidshyp_tracking_ecom cache fresh so the warehouse report & ops dashboard read status from the
+// DB (the report only live-verifies its final pending set at post time, not every order).
+cron.schedule('20 */3 * * *', async () => {
+    console.log('[RS-EC Sync] 3-hr trigger — refreshing RapidShyp cache for EasyEcom orders…');
+    await syncRsCacheEasyecom().catch(e => console.error('[RS-EC Sync] error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+setTimeout(() => { syncRsCacheEasyecom().catch(e => console.error('[RS-EC Sync] startup error:', e.message)); }, 15000);
 
 // Slack trigger — typing "rejected" in #dp-to-mwh-orders runs the MTD DocPharma report.
 initDpSlackTrigger();
