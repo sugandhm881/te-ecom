@@ -72,7 +72,7 @@ cron.schedule('0 16 * * *', async () => {
 // }, { timezone: 'Asia/Kolkata' });
 
 // Warehouse Ops Slack report — Confirmed + Ready for Pickup + Unfulfillable, last 30 days, old→new.
-// Runs twice daily: 8:30 AM IST (data up to today−2) and 5:30 PM IST (data up to today−1).
+// 8:30 AM IST → −2 window; 5:30 PM and 8:00 PM IST → −1 window (posted twice in the evening).
 cron.schedule('30 8 * * *', async () => {
     console.log('[WH Report] 8:30 AM IST — sending warehouse ops report (last 30d, −2)…');
     await sendWarehouseOpsReport(2).catch(e => console.error('[WH Report] Error:', e.message));
@@ -80,6 +80,15 @@ cron.schedule('30 8 * * *', async () => {
 
 cron.schedule('30 17 * * *', async () => {
     console.log('[WH Report] 5:30 PM IST — sending warehouse ops report (last 30d, −1)…');
+    await sendWarehouseOpsReport(1).catch(e => console.error('[WH Report] Error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+cron.schedule('0 20 * * *', async () => {
+    // 8 PM is the day's final warehouse report — refresh the RapidShyp cache for ALL recent EasyEcom
+    // AWBs FIRST so every order's status is latest, then build the report (which also live-verifies
+    // its final pending set). Forced refresh (maxAgeHours 0) so nothing is skipped as "fresh".
+    console.log('[WH Report] 8:00 PM IST — full RapidShyp refresh, then warehouse report (−1)…');
+    await syncRsCacheEasyecom(30, { force: true }).catch(e => console.error('[RS-EC Sync] 8PM error:', e.message));
     await sendWarehouseOpsReport(1).catch(e => console.error('[WH Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 

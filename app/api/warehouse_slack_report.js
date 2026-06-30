@@ -166,7 +166,8 @@ async function resolveRsStatuses(awbs) {
 // Background sync: refresh the RapidShyp cache for recent EasyEcom-shipped orders (1 req/sec, retry).
 // Runs on a cron + at startup so the report & dashboard read fresh status straight from the DB.
 // Skips terminal (delivered/RTO) and fresh (<3h) cache entries to bound the work.
-async function syncRsCacheEasyecom(days = 30) {
+async function syncRsCacheEasyecom(days = 30, opts = {}) {
+    const force = !!opts.force; // refresh ALL non-terminal AWBs, ignoring the 3h freshness skip
     const since = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
     const { data: orders, error } = await supabase
         .from('b2c_order_easycom')
@@ -183,9 +184,15 @@ async function syncRsCacheEasyecom(days = 30) {
     }
     const threeHrAgo = Date.now() - 3 * 3600 * 1000;
     const isTerminal = s => /deliver|rto|return/i.test(s || '');
-    const todo = awbs.filter(a => { const c = cache[a]; if (!c || !c.raw_status) return true; if (isTerminal(c.raw_status)) return false; return !c.updated_at || new Date(c.updated_at).getTime() < threeHrAgo; });
+    const todo = awbs.filter(a => {
+        const c = cache[a];
+        if (!c || !c.raw_status) return true;        // never tracked
+        if (isTerminal(c.raw_status)) return false;  // delivered/RTO won't change — skip even on force
+        if (force) return true;                      // force: refresh every non-terminal AWB
+        return !c.updated_at || new Date(c.updated_at).getTime() < threeHrAgo; // stale
+    });
 
-    console.log(`[RS-EC Sync] ${awbs.length} EasyEcom AWBs · refreshing ${todo.length} (1/sec)…`);
+    console.log(`[RS-EC Sync]${force ? ' [FORCE]' : ''} ${awbs.length} EasyEcom AWBs · refreshing ${todo.length} (1/sec)…`);
     let ok = 0;
     for (const awb of todo) {
         if (await fetchRsLive(awb)) ok++;
