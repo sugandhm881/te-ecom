@@ -92,11 +92,11 @@ cron.schedule('0 20 * * *', async () => {
     await sendWarehouseOpsReport(1).catch(e => console.error('[WH Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
-// DocPharma-rejected → dp-to-mwh-orders — separate report, MTD. Runs HOURLY from 8 AM to 7 PM IST
-// (first run 08:00, last run 19:00). The Slack "rejected" word + CLI `dp` still trigger it manually.
+// DocPharma-rejected → dp-to-mwh-orders — separate report, last 30 days. Runs HOURLY from 8 AM to
+// 7 PM IST (first run 08:00, last run 19:00). The Slack "rejected" word + CLI `dp` still trigger it.
 cron.schedule('0 8-19 * * *', async () => {
     const hr = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false });
-    console.log(`[DP Report] ${hr}:00 IST — sending DocPharma-rejected (MTD) report…`);
+    console.log(`[DP Report] ${hr}:00 IST — sending DocPharma-rejected (last 30 days) report…`);
     await sendDocpharmaRejectedReport().catch(e => console.error('[DP Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 

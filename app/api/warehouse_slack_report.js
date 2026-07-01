@@ -361,10 +361,10 @@ function reportWindow(endOffsetDays) {
     return { start: fmtLocal(startDate), end: fmtLocal(endDate) };
 }
 
-// Month-to-date window: 1st of the current month → today.
-function mtdWindow() {
+// Rolling last-30-days window: today−30 → today.
+function last30Window() {
     const now = new Date();
-    const startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
     return { start: fmtLocal(startDate), end: fmtLocal(now) };
 }
 
@@ -574,11 +574,11 @@ async function sendWarehouseOpsReport(endOffsetDays = 2) {
     }
 }
 
-// Separate report → DocPharma-rejected orders ONLY, over the MTD window, to dp-to-mwh-orders.
+// Separate report → DocPharma-rejected orders ONLY, over the last-30-days window, to dp-to-mwh-orders.
 // announceEmpty=true posts an "all clear" when nothing is rejected (manual / Slack-triggered runs).
 async function sendDocpharmaRejectedReport(announceEmpty = false) {
-    const { start, end } = mtdWindow();
-    const res = await collectPendingGroups(start, end, 'MTD open orders (DocPharma check)');
+    const { start, end } = last30Window();
+    const res = await collectPendingGroups(start, end, 'last-30d open orders (DocPharma check)');
     if (!res) { await postSlack({ text: '⚠️ DocPharma→MWH check failed to fetch orders.' }, DP_CHANNEL); return; }
     const { groups, rsMap, awbByName } = res;
 
@@ -593,7 +593,7 @@ async function sendDocpharmaRejectedReport(announceEmpty = false) {
     } else if (announceEmpty) {
         await postSlack({ blocks: [
             { type: 'header', text: { type: 'plain_text', text: '✅ DocPharma → Warehouse — All Clear', emoji: true } },
-            { type: 'section', text: { type: 'mrkdwn', text: `No DocPharma-rejected orders found.\n_Window (MTD): ${start} → ${end}_` } }
+            { type: 'section', text: { type: 'mrkdwn', text: `No DocPharma-rejected orders found.\n_Window (last 30 days): ${start} → ${end}_` } }
         ] }, DP_CHANNEL);
         console.log('[WH Report] No DocPharma-rejected orders — posted all-clear');
     } else {
@@ -602,7 +602,7 @@ async function sendDocpharmaRejectedReport(announceEmpty = false) {
 }
 
 // ─── Slack trigger ─────────────────────────────────────────────────────────
-// Typing the trigger word in #dp-to-mwh-orders runs the MTD DocPharma report on demand.
+// Typing the trigger word in #dp-to-mwh-orders runs the DocPharma report (last 30 days) on demand.
 // The word is configurable (env DP_TRIGGER_WORD) so the LIVE server and a LOCAL test instance can
 // listen for DIFFERENT words and not both fire on the same message:
 //   LIVE  (.env unset or DP_TRIGGER_WORD=rejected) → responds to "rejected"
@@ -633,9 +633,9 @@ async function pollDpTrigger() {
     if (!triggered || _dpRunning) return;
 
     _dpRunning = true;
-    console.log(`[DP Trigger] "${DP_TRIGGER_WORD}" received — running MTD DocPharma report…`);
+    console.log(`[DP Trigger] "${DP_TRIGGER_WORD}" received — running DocPharma report (last 30 days)…`);
     try {
-        await postSlack({ text: '⏳ Running DocPharma-rejected (MTD) check…' }, DP_CHANNEL).catch(() => {});
+        await postSlack({ text: '⏳ Running DocPharma-rejected (last 30 days) check…' }, DP_CHANNEL).catch(() => {});
         await sendDocpharmaRejectedReport(true); // announce even if none found
     } catch (e) {
         console.error('[DP Trigger] run error:', e.message);
@@ -658,21 +658,22 @@ function initDpSlackTrigger(intervalMs = 30000) {
 // in the table (self-healing) so the candidate list shrinks over time → few API calls per run.
 // announceEmpty posts an "all clear" when none.
 async function sendEasyecomHoldReport(announceEmpty = false) {
-    // MTD window — 1st of the current month → now.
+    // Rolling last-30-days window — today−30 → now.
     const now = new Date();
-    const mtdStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-    const mtdLabel = `${fmtLocal(new Date(now.getFullYear(), now.getMonth(), 1))} → ${fmtLocal(now)}`;
+    const winStartDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
+    const since30 = winStartDate.toISOString();
+    const winLabel = `${fmtLocal(winStartDate)} → ${fmtLocal(now)}`;
 
     const { data, error } = await supabase
         .from('b2c_order_easycom')
         .select('order_id, reference_code, store_order_id, marketplace_order_id, customer_name, order_total, order_date')
         .ilike('order_status', 'On Hold')
-        .gte('order_date', mtdStart)
+        .gte('order_date', since30)
         .order('order_date', { ascending: true });
     if (error) { console.error('[Hold Report] DB read error:', error.message); return; }
 
     const candidates = data || [];
-    console.log(`[Hold Report] ${candidates.length} On-Hold candidate(s) in table (MTD ${mtdLabel}) — verifying live with EasyEcom…`);
+    console.log(`[Hold Report] ${candidates.length} On-Hold candidate(s) in table (last 30d ${winLabel}) — verifying live with EasyEcom…`);
 
     // Verify each candidate's CURRENT status live (1 EasyEcom API call each). Correct the table
     // when it's stale (self-heal) and keep only orders EasyEcom *still* holds.
@@ -701,8 +702,8 @@ async function sendEasyecomHoldReport(announceEmpty = false) {
     if (!orders.length) {
         if (announceEmpty) {
             await postSlack({ blocks: [
-                { type: 'header', text: { type: 'plain_text', text: `⏸️ EasyEcom On-Hold Orders — MTD`, emoji: true } },
-                { type: 'section', text: { type: 'mrkdwn', text: `✅ *All clear!* No orders on hold in EasyEcom this month.\n_${mtdLabel}_` } }
+                { type: 'header', text: { type: 'plain_text', text: `⏸️ EasyEcom On-Hold Orders — Last 30 Days`, emoji: true } },
+                { type: 'section', text: { type: 'mrkdwn', text: `✅ *All clear!* No orders on hold in EasyEcom in the last 30 days.\n_${winLabel}_` } }
             ] }, HOLD_CHANNEL);
         }
         return;
@@ -710,8 +711,8 @@ async function sendEasyecomHoldReport(announceEmpty = false) {
 
     const ids = orders.map(o => o.reference_code || o.store_order_id || o.marketplace_order_id || `#${o.order_id}`);
     const blocks = [
-        { type: 'header', text: { type: 'plain_text', text: `⏸️ EasyEcom On-Hold Orders — ${orders.length} (MTD)`, emoji: true } },
-        { type: 'section', text: { type: 'mrkdwn', text: `*${orders.length}* order${orders.length !== 1 ? 's are' : ' is'} *On Hold* in EasyEcom _(MTD: ${mtdLabel}, oldest → newest)_.` } },
+        { type: 'header', text: { type: 'plain_text', text: `⏸️ EasyEcom On-Hold Orders — ${orders.length} (Last 30 Days)`, emoji: true } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*${orders.length}* order${orders.length !== 1 ? 's are' : ' is'} *On Hold* in EasyEcom _(last 30 days: ${winLabel}, oldest → newest)_.` } },
         { type: 'divider' }
     ];
     const CHUNK = 60;
@@ -729,7 +730,7 @@ module.exports = { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSl
 // Run on demand and post to Slack immediately, then exit.
 //   node app/api/warehouse_slack_report.js          → full warehouse report (last-30d, cutoff −2)
 //   node app/api/warehouse_slack_report.js 1        → full warehouse report (last-30d, cutoff −1)
-//   node app/api/warehouse_slack_report.js dp       → DocPharma→MWH check only (MTD)
+//   node app/api/warehouse_slack_report.js dp       → DocPharma→MWH check only (last 30 days)
 //   node app/api/warehouse_slack_report.js hold     → EasyEcom On-Hold report (no EasyEcom API)
 if (require.main === module) {
     const rawArgs = process.argv.slice(2);
@@ -743,7 +744,7 @@ if (require.main === module) {
         console.log('[Hold Report] Manual EasyEcom On-Hold report');
         run = sendEasyecomHoldReport(true); // announce all-clear too
     } else if (dpOnly) {
-        console.log('[WH Report] Manual DocPharma→MWH check (MTD)');
+        console.log('[WH Report] Manual DocPharma→MWH check (last 30 days)');
         run = sendDocpharmaRejectedReport(true); // announce all-clear too
     } else {
         let offset = parseInt(args[0] || '2', 10);
