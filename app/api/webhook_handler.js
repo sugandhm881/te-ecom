@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../supabase');
 const { rawToDbRow } = require('./easyecom');
+const { parseRapidshypJourney, parseDocpharmaJourney, saveJourney, updateJourneyForOrder } = require('./delivery_journey');
 const config = require('../../config');
 
 router.post('/rapidshyp', async (req, res) => {
@@ -54,6 +55,18 @@ router.post('/rapidshyp', async (req, res) => {
                     last_checked: Date.now() / 1000,
                     updated_at: new Date().toISOString()
                 }, { onConflict: 'awb' });
+
+                // Delivery-journey update (RTO/NDR/FASR dashboard).
+                const scans = shipment.track_scans || shipment.tracking_history || shipment.tracking_events || [];
+                if (scans.length) {
+                    // Webhook carried the full timeline → parse directly (no API call). Pass the canonical
+                    // current status code so RTO/lost/delivered are classified exactly.
+                    await saveJourney(awb, cleanId, 'rapidshyp', parseRapidshypJourney(scans, status, shipment.child_courier_name || shipment.courier_name, null, shipment.current_tracking_status_code, shipment.edd || shipment.current_courier_edd), null, null);
+                } else {
+                    // No scans in payload → refresh via one API call, ONLY if not already final.
+                    const { data: j } = await supabase.from('shipment_journey_ecom').select('is_final').eq('awb', awb).maybeSingle();
+                    if (!j || !j.is_final) updateJourneyForOrder(cleanId, awb, shipment.courier_name || null, null).catch(() => {});
+                }
             }
         }
 
@@ -113,6 +126,26 @@ router.post('/easyecom', async (req, res) => {
         }
     } catch (e) {
         console.error('[Webhook EasyEcom] Critical error:', e.message);
+    }
+});
+
+// ─── DocPharma Webhook → delivery journey ────────────────────────────────────
+// DocPharma POSTs order updates to the webhook_url set on each order. The payload carries the full
+// order (partner_order_no + suborders[].logistic_details with reattempt_count/current_status), so we
+// build the journey directly — no API call. Set the DocPharma webhook to POST here.
+router.post('/docpharma', async (req, res) => {
+    res.json({ status: 'received' }); // ack immediately
+    try {
+        const dp = (req.body && (req.body.data || req.body.order || req.body)) || null;
+        if (!dp || !dp.suborders) { console.warn('[Webhook DocPharma] no order in payload'); return; }
+        const orderName = dp.partner_order_no || dp.order_no || dp.reference || null;
+        const ld = (dp.suborders[0] && dp.suborders[0].logistic_details) || {};
+        const awb = ld.tracking_number || orderName;
+        if (!awb) { console.warn('[Webhook DocPharma] no awb/order name'); return; }
+        await saveJourney(awb, orderName, 'docpharma', parseDocpharmaJourney(dp), null, dp);
+        console.log(`[Webhook DocPharma] ⬇️ journey updated: ${orderName} → ${ld.current_status || dp.status || '?'}`);
+    } catch (e) {
+        console.error('[Webhook DocPharma] error:', e.message);
     }
 });
 

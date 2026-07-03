@@ -3,7 +3,6 @@ const cors = require('cors');
 const path = require('path');
 const config = require('./config');
 const { supabase } = require('./app/supabase');
-const { fetchSheetData } = require('./cod_confirmation');
 
 const app = express();
 
@@ -32,6 +31,9 @@ const { router: amazonAutoReviewRoutes, initAutoReviewCron } = require('./app/ap
 const { router: fulfillmentOpsRoutes, syncLast7Days, syncMTD, syncStatusesToShopify } = require('./app/api/fulfillment_ops');
 const serviceabilityRoutes = require('./app/api/serviceability');
 const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom } = require('./app/api/warehouse_slack_report');
+const deliveryReportsRoutes = require('./app/api/delivery_reports');
+const opsControlRoutes = require('./app/api/ops_control');
+const { backfillJourneys } = require('./app/api/delivery_journey');
 const cron = require('node-cron');
 
 // --- Register Routes ---
@@ -48,7 +50,30 @@ app.use('/api/amazon', amazonReviewRoutes);
 app.use('/api/amazon', amazonAutoReviewRoutes);
 app.use('/api/fulfillment-ops', fulfillmentOpsRoutes);
 app.use('/api/serviceability', serviceabilityRoutes);
+app.use('/api', deliveryReportsRoutes);
+app.use('/api', opsControlRoutes);
 initAutoReviewCron();
+
+// Delivery-journey gap-fill — every 6h, refresh non-final shipments (webhooks handle real-time;
+// this catches any misses). Skips shipments already delivered/RTO (is_final) → minimal API.
+cron.schedule('45 */6 * * *', async () => {
+    console.log('[Journey] 6-hr gap-fill — refreshing non-final shipment journeys…');
+    await backfillJourneys(30).catch(e => console.error('[Journey] gap-fill error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// New/Repeat classification — re-tag journey rows from Shopify's "Repeat" order tag. Pure SQL (0 API),
+// via the refresh_journey_order_type() DB function. Daily at 2:30 AM IST + once shortly after startup.
+cron.schedule('30 2 * * *', async () => {
+    console.log('[OrderType] Daily refresh — tagging journeys new/repeat from Shopify tags…');
+    const { error } = await supabase.rpc('refresh_journey_order_type');
+    if (error) console.error('[OrderType] refresh error:', error.message);
+}, { timezone: 'Asia/Kolkata' });
+setTimeout(() => {
+    supabase.rpc('refresh_journey_order_type').then(({ error }) => {
+        if (error) console.error('[OrderType] startup refresh error:', error.message);
+        else console.log('[OrderType] startup new/repeat refresh done');
+    });
+}, 60000);
 
 // RS Sync — every 2 hours: last 7 days orders (skips 4 PM slot — MTD runs then)
 cron.schedule('0 */2 * * *', async () => {
@@ -120,20 +145,40 @@ setTimeout(() => { syncRsCacheEasyecom().catch(e => console.error('[RS-EC Sync] 
 initDpSlackTrigger();
 
 // --- COD Confirmation Data (FROM SUPABASE) ---
+// Page past Supabase's 1000-row select cap so ALL confirmations are returned (the old table has ~17k).
+async function fetchAllCod(table) {
+    const PAGE = 1000;
+    const rows = [];
+    for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase
+            .from(table)
+            .select('id_key, data')
+            .range(from, from + PAGE - 1);
+        if (error) throw error;
+        if (!data || data.length === 0) break;
+        rows.push(...data);
+        if (data.length < PAGE) break;
+    }
+    return rows;
+}
+
 app.get('/api/cod-confirmations', async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('cod_confirmations_ecom')
-            .select('id_key, data');
+        // Merge historical (cod_confirmations_ecom — frozen sheet data) with live MSG91 webhook
+        // confirmations (cod_confirmations_msg91). A webhook confirmation supersedes the old sheet
+        // row for the same order.
+        const [oldRows, newRows] = await Promise.all([
+            fetchAllCod('cod_confirmations_ecom').catch(e => { console.error('COD old fetch:', e.message); return []; }),
+            fetchAllCod('cod_confirmations_msg91').catch(e => { console.error('COD new fetch:', e.message); return []; }),
+        ]);
 
-        if (error) {
-            console.error("Supabase Error fetching COD data:", error.message);
-            return res.status(500).json([]);
-        }
-
-        // Return the data field from each row (contains original sheet columns)
-        const result = (data || []).map(row => row.data || {});
-        res.json(result);
+        // Dedup by normalized order key (strip leading '#', uppercase) so the same order isn't
+        // returned twice; insert old first, then new (new overwrites).
+        const norm = (k) => String(k || '').replace(/^#/, '').toUpperCase().trim();
+        const byOrder = new Map();
+        for (const r of oldRows) byOrder.set(norm(r.id_key), r.data || {});
+        for (const r of newRows) byOrder.set(norm(r.id_key), r.data || {});
+        res.json(Array.from(byOrder.values()));
     } catch (e) {
         console.error("Error fetching COD data:", e.message);
         res.status(500).json([]);
@@ -145,25 +190,6 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'app/templates/index.html'));
 });
 
-// --- Auto-sync COD confirmations from Google Sheets ---
-setTimeout(async () => {
-    try {
-        console.log('[COD Sync] Running initial Google Sheets sync...');
-        await fetchSheetData();
-        console.log('[COD Sync] Initial sync complete.');
-    } catch (e) {
-        console.error('[COD Sync] Initial sync failed:', e.message);
-    }
-}, 5000);
-
-setInterval(async () => {
-    try {
-        console.log('[COD Sync] Running scheduled Google Sheets sync...');
-        await fetchSheetData();
-    } catch (e) {
-        console.error('[COD Sync] Scheduled sync failed:', e.message);
-    }
-}, 5 * 60 * 1000); // every 5 minutes
 
 // --- EasyEcom Sync Strategy (250 API calls/month limit) ---
 // PRIMARY: Webhook receives real-time order updates (0 API calls).

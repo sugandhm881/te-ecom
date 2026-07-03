@@ -226,6 +226,10 @@ router.get('/track/:awb', async (req, res) => {
 function rsToShopifyEventStatus(rsStatus) {
     const s = (rsStatus || '').toLowerCase();
     if (!s) return null;
+    // RTO / return / lost / cancel FIRST — "RTO Delivered", "RTO Out for delivery" etc. are the RETURN
+    // leg, NOT a customer delivery. Checking these before the deliver/OFD branches is critical: otherwise
+    // "RTO Delivered" matches includes('deliver') → DELIVERED → a FALSE customer "delivered" email.
+    if (s.includes('rto') || s.includes('return') || s.includes('lost') || s.includes('cancel')) return 'FAILURE';
     if (s.includes('out for delivery'))                                   return 'OUT_FOR_DELIVERY';
     if (s.includes('deliver') && !s.includes('undeliver'))                return 'DELIVERED';
     // NDR / failed-attempt states (consignee unavailable, address issue, undelivered, NDR…)
@@ -254,6 +258,11 @@ async function pushShopifyFulfillmentStatus(fulfillmentId, currentDisplayStatus,
     const target = rsToShopifyEventStatus(rsStatus);
     const current = (currentDisplayStatus || '').toUpperCase();
     if (!fulfillmentId || !target) return { pushed: false, reason: 'no-mapping' };
+    // NEVER push DELIVERED — Shopify's native "shipment delivered" email is shop-level and cannot be
+    // disabled, so marking a fulfillment Delivered emails the customer. We must never trigger that from
+    // our sync (and a mis-mapped RTO could email someone who never received the order). Shopify still
+    // tracks delivery itself; our dashboard shows the true status from RapidShyp.
+    if (target === 'DELIVERED')    return { pushed: false, reason: 'delivered-push-blocked' };
     if (target === current)        return { pushed: false, reason: 'already-matching' };
     // No-regression guard: never move a fulfillment BACKWARDS in its lifecycle. Shopify can be ahead
     // of the cached RapidShyp status, and pushing the older value would drag it back — that's what

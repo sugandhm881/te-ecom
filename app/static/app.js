@@ -377,6 +377,16 @@ function navigate(view) {
             activeViewElement = document.getElementById('serviceability-view');
             if (typeof srvInit === 'function') srvInit();
             break;
+        case 'delivery-perf':
+            activeLinkElement = document.getElementById('nav-delivery-perf');
+            activeViewElement = document.getElementById('delivery-perf-view');
+            if (typeof dpInit === 'function') dpInit();
+            break;
+        case 'ops-control':
+            activeLinkElement = document.getElementById('nav-ops-control');
+            activeViewElement = document.getElementById('ops-control-view');
+            if (typeof opsInit === 'function') opsInit();
+            break;
     }
 
     if (activeLinkElement) {
@@ -3132,6 +3142,552 @@ document.getElementById('nav-reports')?.addEventListener('click', (e) => { e.pre
 document.getElementById('nav-amazon-review')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-review'); });
 document.getElementById('nav-fulfillment-ops')?.addEventListener('click', (e) => { e.preventDefault(); navigate('fulfillment-ops'); });
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
+document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
+document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
+
+// ═══════════════ OPS CONTROL (NDR queue · Risk · Courier scorecard · Cost) ═══════════════
+let _opsData = null, _opsWired = false, _opsTab = 'ndr', _opsLoaded = {}, _opsRisk = null, _opsCourier = null, _opsCost = null, _opsCostPerRto = 150;
+let _opsSortNdr={k:'daysInNdr',d:'desc'}, _opsSortRisk={k:'score',d:'desc'}, _opsSortCourier={k:'shipped',d:'desc'}, _opsSortCity={k:'rtoPct',d:'desc'}, _opsExc=null, _opsSortExc={k:'value',d:'desc'}, _opsPr=null, _opsSortPr={k:'risk',d:'desc'};
+const OPS_INR = n => '₹' + (Math.round(n||0)).toLocaleString('en-IN');
+// Generic sort: nulls/'—' sink to the bottom; strings use locale compare, numbers numeric.
+function opsSortBy(list,st){ const {k,d}=st; return [...list].sort((a,b)=>{ let x=a[k],y=b[k];
+    const na=(x==null||x==='—'||(typeof x==='number'&&isNaN(x))), nb=(y==null||y==='—'||(typeof y==='number'&&isNaN(y)));
+    if(na&&nb) return 0; if(na) return 1; if(nb) return -1;
+    if(typeof x==='string'&&typeof y==='string') return d==='asc'? x.localeCompare(y): y.localeCompare(x);
+    return d==='asc'? x-y : y-x; }); }
+function opsArrow(st,k){ if(st.k!==k) return '<span class="arw opacity-30">↕</span>'; return `<span class="arw">${st.d==='asc'?'▲':'▼'}</span>`; }
+function opsInit(){
+    if(!_opsWired){ _opsWired = true;
+        document.getElementById('ops-refresh')?.addEventListener('click', ()=>{ _opsLoaded[_opsTab]=false; opsLoadTab(_opsTab); });
+        ['ops-search','ops-f-age','ops-f-pay','ops-f-type'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-search'?'input':'change', ()=>opsTable()); });
+        ['ops-risk-search','ops-rf-band','ops-rf-pay'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-risk-search'?'input':'change', ()=>opsRiskTable()); });
+        ['ops-exc-search','ops-ef-action','ops-ef-type'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-exc-search'?'input':'change', ()=>opsExcTable()); });
+        ['ops-pr-search','ops-prf-band'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-pr-search'?'input':'change', ()=>opsPrTable()); });
+        document.getElementById('ops-pr-days')?.addEventListener('change', ()=>opsLoadPrepaidRisk());
+        document.getElementById('ops-tabs')?.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return;
+            [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
+            b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
+            opsSwitchTab(b.dataset.t); });
+        // click-to-sort (event delegation — containers persist across re-renders)
+        const wireSort=(id,st,rerender)=> document.getElementById(id)?.addEventListener('click', e=>{ const th=e.target.closest('th[data-k]'); if(!th) return;
+            const k=th.dataset.k; if(st.k===k){ st.d = st.d==='asc'?'desc':'asc'; } else { st.k=k; st.d='desc'; } rerender(); });
+        wireSort('ops-table', _opsSortNdr, ()=>opsTable());
+        wireSort('ops-risk-table', _opsSortRisk, ()=>opsRiskTable());
+        wireSort('ops-courier-table', _opsSortCourier, ()=>opsCourierTable());
+        wireSort('ops-exc-table', _opsSortExc, ()=>opsExcTable());
+        wireSort('ops-pr-table', _opsSortPr, ()=>opsPrTable());
+        wireSort('ops-cities', _opsSortCity, ()=>opsCitiesTable());
+    }
+    opsSwitchTab('ndr');
+}
+function opsSwitchTab(t){ _opsTab=t;
+    ['ndr','risk','courier','exceptions','prepaidrisk','cost'].forEach(p=>document.getElementById('ops-'+p)?.classList.toggle('hidden', p!==t));
+    opsLoadTab(t);
+}
+function opsLoadTab(t){ if(_opsLoaded[t] && t!=='ndr') return;
+    if(t==='ndr') opsLoad(); else if(t==='risk') opsLoadRisk(); else if(t==='courier') opsLoadCourier(); else if(t==='exceptions') opsLoadExceptions(); else if(t==='prepaidrisk') opsLoadPrepaidRisk(); else if(t==='cost') opsLoadCost();
+    _opsLoaded[t]=true;
+}
+async function opsLoad(){
+    const kpi=document.getElementById('ops-kpis'); if(kpi) kpi.innerHTML='<div class="text-slate-400 text-sm p-6">Loading NDR queue…</div>';
+    try{
+        const r=await fetch('/api/ops-control/ndr-queue?days=45', { headers: getAuthHeaders() });
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _opsData=d; opsRender(d);
+    }catch(e){ if(kpi) kpi.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+}
+function opsKpi(label,accent,tint,icon,val,foot){ return `<div class="ops-kpi card p-5" style="border-top:3px solid ${accent}">
+    <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-3" style="background:${tint};color:${accent}">${icon}</div>
+    <div class="text-[2rem] leading-none font-extrabold text-slate-800 tracking-tight tabular-nums">${val}</div>
+    <div class="text-sm font-semibold text-slate-600 mt-1.5">${label}</div>
+    <div class="text-xs text-slate-400 mt-0.5">${foot}</div></div>`; }
+function opsRender(d){
+    const s=d.summary||{};
+    const inr=n=>'₹'+(n||0).toLocaleString('en-IN');
+    document.getElementById('ops-kpis').innerHTML =
+        opsKpi('Orders in NDR','#4f46e5','#eef2ff',DP_ICONS.refresh, s.total||0, 'awaiting a re-attempt / call')+
+        opsKpi('Aged ≥ 3 days','#e11d48','#fff1f2',DP_ICONS.bolt, s.aged||0, 'urgent — about to auto-RTO')+
+        opsKpi('Recoverable value','#059669','#ecfdf5',DP_ICONS.hash, inr(s.recoverable), `${inr(s.codValue)} of it COD`)+
+        opsKpi('Avg time in NDR','#0891b2','#ecfeff',DP_ICONS.hash, (s.avgDays||0)+'d', 'since first failed attempt');
+    opsTable();
+}
+function opsTable(){ const c=document.getElementById('ops-table'); const d=_opsData; if(!d||!c) return;
+    const q=(document.getElementById('ops-search')?.value||'').trim().toLowerCase();
+    const fAge=document.getElementById('ops-f-age')?.value||'all', fPay=document.getElementById('ops-f-pay')?.value||'all', fType=document.getElementById('ops-f-type')?.value||'all';
+    let list=(d.list||[]).slice();
+    if(fAge==='urgent') list=list.filter(r=>(r.daysInNdr||0)>=3);
+    if(fPay!=='all') list=list.filter(r=> fPay==='cod'? /cod/i.test(r.payment||'') : (r.payment&&!/cod/i.test(r.payment)));
+    if(fType!=='all') list=list.filter(r=>r.type===fType);
+    if(q) list=list.filter(r=>(r.order||'').toLowerCase().includes(q)||(r.phone||'').toLowerCase().includes(q));
+    list=opsSortBy(list,_opsSortNdr);
+    const cnt=document.getElementById('ops-count'); if(cnt) cnt.textContent=`${list.length} order${list.length===1?'':'s'}`;
+    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">Nothing matches — queue is clear 🎉</div>'; return; }
+    const td='px-4 py-3 text-sm text-slate-700 border-b border-slate-50 align-top';
+    const H=(k,lbl,extra)=>`<th data-k="${k}" class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide border-b border-slate-100 bg-slate-50 ${extra||''}">${lbl}${opsArrow(_opsSortNdr,k)}</th>`;
+    const Hp=lbl=>`<th class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide border-b border-slate-100 bg-slate-50">${lbl}</th>`;
+    const inr=n=>n!=null?'₹'+n.toLocaleString('en-IN'):'—';
+    const rows=list.slice(0,500).map(r=>{
+        const dn=r.daysInNdr==null?'—':r.daysInNdr+'d';
+        const urg=(r.daysInNdr||0)>=4?'bg-red-100 text-red-700':(r.daysInNdr||0)>=2?'bg-amber-100 text-amber-700':'bg-slate-100 text-slate-600';
+        const pay=r.payment?`<span class="px-1.5 py-0.5 rounded text-xs ${/cod/i.test(r.payment)?'bg-orange-100 text-orange-700':'bg-emerald-100 text-emerald-700'}">${/cod/i.test(r.payment)?'COD':'Prepaid'}</span>`:'';
+        const typ=r.type==='repeat'?'<span class="px-1.5 py-0.5 rounded text-xs bg-violet-100 text-violet-700">Repeat</span>':r.type==='new'?'<span class="px-1.5 py-0.5 rounded text-xs bg-blue-100 text-blue-700">New</span>':'';
+        const ph=r.phone?`<a href="tel:${r.phone}" class="text-indigo-600 font-medium hover:underline">${r.phone}</a> <a href="https://wa.me/91${String(r.phone).replace(/\D/g,'').slice(-10)}" target="_blank" class="inline-flex items-center text-emerald-600 ml-1" title="WhatsApp">🟢</a>`:'<span class="text-slate-300">no phone</span>';
+        return `<tr>`+
+          `<td class="${td}"><span class="inline-flex px-2 py-0.5 rounded-md text-xs font-bold ${urg} tabular-nums">${dn}</span></td>`+
+          `<td class="${td} font-semibold">${r.order||'—'}<div class="text-xs text-slate-400 font-normal">${r.awb||''}</div></td>`+
+          `<td class="${td}">${ph}</td>`+
+          `<td class="${td} font-semibold tabular-nums">${inr(r.value)}</td>`+
+          `<td class="${td}">${pay} ${typ}</td>`+
+          `<td class="${td}">${r.courier||'—'}<div class="text-xs text-slate-400">Zone ${r.zone||'—'}</div></td>`+
+          `<td class="${td} text-right tabular-nums">${r.ndrs}</td>`+
+          `<td class="${td} text-slate-500 text-xs">${(r.reasons||[]).join('; ')||'—'}</td>`+
+        `</tr>`; }).join('');
+    const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
+    c.innerHTML=`<table class="w-full"><thead><tr>${H('daysInNdr','Aging')}${H('order','Order / AWB')}${Hp('Customer')}${H('value','Value')}${Hp('Pay / Type')}${H('courier','Courier')}${H('ndrs','NDRs','text-right')}${Hp('Reasons')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+}
+const OPS_TH='px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide border-b border-slate-100';
+const OPS_TD='px-4 py-3 text-sm text-slate-700 border-b border-slate-50 align-top';
+
+// ── Pre-dispatch Risk ──
+async function opsLoadRisk(){
+    const k=document.getElementById('ops-risk-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Scoring pipeline orders…</div>';
+    try{ const r=await fetch('/api/ops-control/risk',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _opsRisk=d; const s=d.summary||{};
+        k.innerHTML =
+            opsKpi('Flagged to verify','#e11d48','#fff1f2',DP_ICONS.bolt, s.flagged||0, 'medium + high risk, not yet shipped')+
+            opsKpi('High risk','#b91c1c','#fef2f2',DP_ICONS.uturn, s.high||0, 'verify or convert to prepaid')+
+            opsKpi('At-risk value (high)','#059669','#ecfdf5',DP_ICONS.hash, OPS_INR(s.atRiskValue), 'order value on high-risk orders');
+        opsRiskTable();
+    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+}
+function opsRiskTable(){ const c=document.getElementById('ops-risk-table'); const d=_opsRisk; if(!d||!c) return;
+    const q=(document.getElementById('ops-risk-search')?.value||'').trim().toLowerCase();
+    const fBand=document.getElementById('ops-rf-band')?.value||'all', fPay=document.getElementById('ops-rf-pay')?.value||'all';
+    let list=(d.list||[]).slice();
+    if(fBand!=='all') list=list.filter(r=>r.band===fBand);
+    if(fPay!=='all') list=list.filter(r=> fPay==='cod'? /cod/i.test(r.payment||'') : (r.payment&&!/cod/i.test(r.payment)));
+    if(q) list=list.filter(r=> (r.order||'').toLowerCase().includes(q) || (r.city||'').toLowerCase().includes(q));
+    list=opsSortBy(list,_opsSortRisk);
+    const cnt=document.getElementById('ops-risk-count'); if(cnt) cnt.textContent=`${list.length} order${list.length===1?'':'s'}`;
+    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">No risky orders match 🎉</div>'; return; }
+    const H=(k,lbl)=>`<th data-k="${k}" class="${OPS_TH} bg-slate-50">${lbl}${opsArrow(_opsSortRisk,k)}</th>`;
+    const Hp=lbl=>`<th class="${OPS_TH} bg-slate-50">${lbl}</th>`;
+    const rows=list.slice(0,500).map(r=>{
+        const band=r.band==='High'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700';
+        const pay=r.payment?`<span class="px-1.5 py-0.5 rounded text-xs ${/cod/i.test(r.payment)?'bg-orange-100 text-orange-700':'bg-emerald-100 text-emerald-700'}">${/cod/i.test(r.payment)?'COD':'Prepaid'}</span>`:'';
+        const typ=r.type==='repeat'?'<span class="px-1.5 py-0.5 rounded text-xs bg-violet-100 text-violet-700">Repeat</span>':'<span class="px-1.5 py-0.5 rounded text-xs bg-blue-100 text-blue-700">New</span>';
+        return `<tr>`+
+          `<td class="${OPS_TD}"><span class="inline-flex px-2 py-0.5 rounded-md text-xs font-bold ${band}">${r.band} · ${r.score}</span></td>`+
+          `<td class="${OPS_TD} font-semibold">${r.order||'—'}<div class="text-xs text-slate-400 font-normal">${r.status||''}</div></td>`+
+          `<td class="${OPS_TD} font-semibold tabular-nums">${r.value!=null?OPS_INR(r.value):'—'}</td>`+
+          `<td class="${OPS_TD}">${pay} ${typ}</td>`+
+          `<td class="${OPS_TD}">${r.city||'—'}<div class="text-xs text-slate-400">${r.state||''}${r.cityRto!=null?` · ${r.cityRto}% RTO`:''}</div></td>`+
+          `<td class="${OPS_TD} text-slate-500 text-xs">${(r.reasons||[]).join(' · ')||'—'}</td>`+
+        `</tr>`; }).join('');
+    const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
+    c.innerHTML=`<table class="w-full"><thead><tr>${H('score','Risk')}${H('order','Order')}${H('value','Value')}${Hp('Pay / Type')}${H('city','Destination')}${Hp('Why flagged')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+}
+
+// ── Courier Scorecard ──
+async function opsLoadCourier(){
+    const c=document.getElementById('ops-courier-table'); if(c) c.innerHTML='<div class="text-slate-400 text-sm p-6">Loading courier scorecard…</div>';
+    try{ const r=await fetch('/api/ops-control/courier-scorecard?days=90',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _opsCourier=d; opsCourierTable();
+    }catch(e){ if(c) c.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+}
+function opsCourierTable(){ const c=document.getElementById('ops-courier-table'); const d=_opsCourier; if(!d||!c) return;
+    let list=(d.list||[]).slice(); if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-6">No courier data</div>'; return; }
+    list=opsSortBy(list,_opsSortCourier);
+    const pctCell=(v,badHigh)=>{ const cls=(badHigh? (v>=25?'text-red-600':v>=15?'text-amber-600':'text-emerald-600') : (v>=45?'text-emerald-600':v>=30?'text-amber-600':'text-red-600')); return `<span class="font-bold ${cls} tabular-nums">${v}%</span>`; };
+    const H=(k,lbl,r)=>`<th data-k="${k}" class="${OPS_TH} bg-slate-50 ${r?'text-right':''}">${lbl}${opsArrow(_opsSortCourier,k)}</th>`;
+    const rows=list.map(r=>`<tr>`+
+        `<td class="${OPS_TD} font-semibold">${r.courier}</td>`+
+        `<td class="${OPS_TD} text-right tabular-nums">${r.shipped.toLocaleString('en-IN')}</td>`+
+        `<td class="${OPS_TD} text-right">${pctCell(r.rtoPct,true)}<div class="text-xs text-slate-400">${r.rto} RTO</div></td>`+
+        `<td class="${OPS_TD} text-right">${pctCell(r.ndrRecovery,false)}</td>`+
+        `<td class="${OPS_TD} text-right">${pctCell(r.silentPct,true)}<div class="text-xs text-slate-400">${r.silent} silent</div></td>`+
+        `<td class="${OPS_TD} text-right tabular-nums">${r.otdAvg}h</td>`+
+        `<td class="${OPS_TD} text-right tabular-nums">${r.dtdAvg}d</td>`+
+      `</tr>`).join('');
+    c.innerHTML=`<table class="w-full"><thead><tr>${H('courier','Courier')}${H('shipped','Shipped',1)}${H('rtoPct','RTO %',1)}${H('ndrRecovery','NDR recovery',1)}${H('silentPct','Silent RTO',1)}${H('otdAvg','O→Dispatch',1)}${H('dtdAvg','Dispatch→Del',1)}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ── Cost & Hotspots ──
+async function opsLoadCost(){
+    const k=document.getElementById('ops-cost-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Loading…</div>';
+    try{ const r=await fetch('/api/ops-control/hotspots?days=90',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _opsCost=d; opsCostRender();
+    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+}
+function opsCostRender(){ const d=_opsCost; if(!d) return;
+    const cost=d.rtoCount*_opsCostPerRto;
+    document.getElementById('ops-cost-kpis').innerHTML =
+        `<div class="ops-kpi card p-5" style="border-top:3px solid #e11d48"><div class="text-[2rem] leading-none font-extrabold text-slate-800 tabular-nums">${OPS_INR(cost)}</div><div class="text-sm font-semibold text-slate-600 mt-1.5">Est. RTO cost · 90d</div><div class="text-xs text-slate-400 mt-1 flex items-center gap-1">${d.rtoCount.toLocaleString('en-IN')} RTO × ₹<input id="ops-cost-per" type="number" value="${_opsCostPerRto}" class="w-16 px-1 py-0.5 border border-slate-200 rounded text-xs tabular-nums"> /order</div></div>`+
+        opsKpi('RTO orders · 90d','#4f46e5','#eef2ff',DP_ICONS.uturn, d.rtoCount.toLocaleString('en-IN'), 'returned to origin')+
+        opsKpi('Monthly run-rate','#0891b2','#ecfeff',DP_ICONS.hash, OPS_INR(cost/3), 'approx RTO cost / month');
+    document.getElementById('ops-cost-per')?.addEventListener('change', e=>{ _opsCostPerRto=parseInt(e.target.value,10)||150; opsCostRender(); });
+    // segment mini-cards
+    const seg=(title,arr,order)=>{ const rows=(order||arr.map(a=>a.key)).map(key=>{ const it=arr.find(a=>a.key===key); if(!it) return ''; const c=it.rtoPct>=25?'bg-red-500':it.rtoPct>=15?'bg-amber-500':'bg-emerald-500';
+        return `<div class="flex items-center gap-2 text-xs mt-1.5"><span class="w-16 text-slate-500">${key}</span><div class="flex-1 h-3.5 bg-slate-100 rounded overflow-hidden"><div class="${c} h-3.5 rounded" style="width:${Math.min(100,it.rtoPct*2)}%"></div></div><span class="w-20 text-right text-slate-600 tabular-nums font-semibold">${it.rtoPct}% <span class="text-slate-400 font-normal">(${it.rto})</span></span></div>`; }).join('');
+        return `<div class="card p-4"><h3 class="text-xs font-bold text-slate-600 uppercase tracking-wide">${title}</h3>${rows}</div>`; };
+    document.getElementById('ops-segments').innerHTML =
+        seg('RTO by payment', d.byPayment, ['COD','Prepaid'])+
+        seg('RTO by customer', d.byType, ['new','repeat'])+
+        seg('RTO by zone', d.byZone);
+    opsCitiesTable();
+}
+function opsCitiesTable(){ const el=document.getElementById('ops-cities'); const d=_opsCost; if(!el||!d) return;
+    let cities=(d.topCities||[]).slice(); if(!cities.length){ el.innerHTML='<div class="text-slate-400 text-sm p-6">No city data</div>'; return; }
+    cities=opsSortBy(cities,_opsSortCity);
+    const H=(k,lbl,r)=>`<th data-k="${k}" class="${OPS_TH} bg-slate-50 ${r?'text-right':''}">${lbl}${opsArrow(_opsSortCity,k)}</th>`;
+    const crows=cities.map(r=>{ const c=r.rtoPct>=30?'text-red-600':r.rtoPct>=20?'text-amber-600':'text-slate-700';
+        return `<tr><td class="${OPS_TD} font-semibold">${r.city}</td><td class="${OPS_TD} text-slate-500">${r.state||'—'}</td><td class="${OPS_TD} text-right tabular-nums">${r.resolved}</td><td class="${OPS_TD} text-right tabular-nums">${r.rto}</td><td class="${OPS_TD} text-right"><span class="font-bold ${c} tabular-nums">${r.rtoPct}%</span></td></tr>`; }).join('');
+    el.innerHTML=`<table class="w-full"><thead><tr>${H('city','City')}${H('state','State')}${H('resolved','Shipped',1)}${H('rto','RTO',1)}${H('rtoPct','RTO %',1)}</tr></thead><tbody>${crows}</tbody></table>`;
+}
+
+// ── Exceptions & Claims ──
+async function opsLoadExceptions(){
+    const k=document.getElementById('ops-exc-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Loading exceptions…</div>';
+    try{ const r=await fetch('/api/ops-control/exceptions?days=90',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _opsExc=d; const s=d.summary||{};
+        k.innerHTML =
+            opsKpi('Claim from couriers','#e11d48','#fff1f2',DP_ICONS.uturn, OPS_INR(s.claimValue), `${s.claimCount||0} orders · lost / damaged / silent-RTO`)+
+            opsKpi('Late-delivery claims','#7c3aed','#f5f3ff',DP_ICONS.bolt, s.slaBreachCount||0, `>5 days past first EDD${s.slaBreachValue?` · ${OPS_INR(s.slaBreachValue)}`:''}`)+
+            opsKpi('Redispatch / refund','#4f46e5','#eef2ff',DP_ICONS.refresh, OPS_INR(s.redispatchValue), `${s.redispatchCount||0} prepaid — customer paid, didn't get it`)+
+            opsKpi('Misrouted · watch','#d97706','#fffbeb',DP_ICONS.bolt, s.monitorCount||0, 'in transit but off-route');
+        const tf=document.getElementById('ops-ef-type'); if(tf){ const cur=tf.value; tf.innerHTML='<option value="all">All types</option>'+Object.keys(s.byType||{}).sort().map(t=>`<option value="${t}">${t} (${s.byType[t]})</option>`).join(''); tf.value=cur; if(tf.value!==cur) tf.value='all'; }
+        opsExcTable();
+    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+}
+function opsExcTable(){ const c=document.getElementById('ops-exc-table'); const d=_opsExc; if(!d||!c) return;
+    const q=(document.getElementById('ops-exc-search')?.value||'').trim().toLowerCase();
+    const fA=document.getElementById('ops-ef-action')?.value||'all', fT=document.getElementById('ops-ef-type')?.value||'all';
+    let list=(d.list||[]).slice();
+    if(fA!=='all') list=list.filter(r=>r.action===fA);
+    if(fT!=='all') list=list.filter(r=>r.type===fT);
+    if(q) list=list.filter(r=>(r.order||'').toLowerCase().includes(q)||(r.courier||'').toLowerCase().includes(q));
+    list=opsSortBy(list,_opsSortExc);
+    const cnt=document.getElementById('ops-exc-count'); if(cnt) cnt.textContent=`${list.length} · ${OPS_INR(list.reduce((s,r)=>s+(r.value||0),0))}`;
+    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">No exceptions match 🎉</div>'; return; }
+    const H=(k,lbl,r)=>`<th data-k="${k}" class="${OPS_TH} bg-slate-50 ${r?'text-right':''}">${lbl}${opsArrow(_opsSortExc,k)}</th>`;
+    const Hp=lbl=>`<th class="${OPS_TH} bg-slate-50">${lbl}</th>`;
+    const tb=t=>{ const m={'Silent RTO':'bg-rose-100 text-rose-700','Lost':'bg-red-100 text-red-700','Damaged':'bg-red-100 text-red-700','Disposed':'bg-red-100 text-red-700','Missing':'bg-red-100 text-red-700','Prepaid RTO':'bg-indigo-100 text-indigo-700','Misrouted':'bg-amber-100 text-amber-700'}; return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${m[t]||'bg-slate-100 text-slate-600'}">${t}</span>`; };
+    const ab=a=> a==='claim'?'<span class="px-1.5 py-0.5 rounded text-xs bg-rose-50 text-rose-700 font-semibold">Claim</span>': a==='redispatch'?'<span class="px-1.5 py-0.5 rounded text-xs bg-indigo-50 text-indigo-700 font-semibold">Redispatch</span>':'<span class="px-1.5 py-0.5 rounded text-xs bg-amber-50 text-amber-700 font-semibold">Monitor</span>';
+    const rows=list.slice(0,500).map(r=>{
+        const ph=r.phone?`<a href="tel:${r.phone}" class="text-indigo-600 hover:underline">${r.phone}</a>`:'<span class="text-slate-300">—</span>';
+        const pay=r.payment?`<span class="px-1.5 py-0.5 rounded text-xs ${/cod/i.test(r.payment)?'bg-orange-100 text-orange-700':'bg-emerald-100 text-emerald-700'}">${/cod/i.test(r.payment)?'COD':'Prepaid'}</span>`:'';
+        return `<tr>`+
+          `<td class="${OPS_TD}">${tb(r.type)}${r.slaDelay?` <span class="ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-700" title="${r.slaDelay} days past first EDD">🕒 ${r.slaDelay}d</span>`:''}</td>`+
+          `<td class="${OPS_TD}">${ab(r.action)}</td>`+
+          `<td class="${OPS_TD} font-semibold">${r.order||'—'}<div class="text-xs text-slate-400 font-normal">${r.awb||''}</div></td>`+
+          `<td class="${OPS_TD} font-semibold tabular-nums">${r.value!=null?OPS_INR(r.value):'—'}</td>`+
+          `<td class="${OPS_TD}">${pay}</td>`+
+          `<td class="${OPS_TD}">${r.courier||'—'}<div class="text-xs text-slate-400">Zone ${r.zone||'—'}</div></td>`+
+          `<td class="${OPS_TD}">${ph}</td>`+
+          `<td class="${OPS_TD} text-slate-400 tabular-nums">${r.rto_at||'—'}</td>`+
+        `</tr>`; }).join('');
+    const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
+    c.innerHTML=`<table class="w-full"><thead><tr>${Hp('Type')}${Hp('Action')}${H('order','Order')}${H('value','Value',1)}${Hp('Pay')}${H('courier','Courier')}${Hp('Customer')}${H('rto_at','Date')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+}
+
+// ── Prepaid loss/misroute predictor ──
+async function opsLoadPrepaidRisk(){
+    const k=document.getElementById('ops-pr-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Scoring in-transit prepaid orders…</div>';
+    const days=document.getElementById('ops-pr-days')?.value||'60';
+    try{ const r=await fetch('/api/ops-control/prepaid-risk?days='+days,{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _opsPr=d; const s=d.summary||{};
+        k.innerHTML =
+            opsKpi('High-risk prepaid','#e11d48','#fff1f2',DP_ICONS.bolt, s.high||0, 'likely lost/misrouted — redispatch now')+
+            opsKpi('At-risk value (high)','#059669','#ecfdf5',DP_ICONS.hash, OPS_INR(s.atRiskValue), 'prepaid value that may never arrive')+
+            opsKpi('Prepaid in transit','#4f46e5','#eef2ff',DP_ICONS.refresh, s.prepaidInTransit||0, `${s.flagged||0} flagged medium+high`);
+        opsPrTable();
+    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+}
+function opsPrTable(){ const c=document.getElementById('ops-pr-table'); const d=_opsPr; if(!d||!c) return;
+    const q=(document.getElementById('ops-pr-search')?.value||'').trim().toLowerCase();
+    const fB=document.getElementById('ops-prf-band')?.value||'all';
+    let list=(d.list||[]).slice();
+    if(fB!=='all') list=list.filter(r=>r.band===fB);
+    if(q) list=list.filter(r=>(r.order||'').toLowerCase().includes(q)||(r.courier||'').toLowerCase().includes(q));
+    list=opsSortBy(list,_opsSortPr);
+    const cnt=document.getElementById('ops-pr-count'); if(cnt) cnt.textContent=`${list.length} · ${OPS_INR(list.reduce((s,r)=>s+(r.value||0),0))}`;
+    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">No at-risk prepaid orders 🎉</div>'; return; }
+    const H=(k,lbl,r)=>`<th data-k="${k}" class="${OPS_TH} bg-slate-50 ${r?'text-right':''}">${lbl}${opsArrow(_opsSortPr,k)}</th>`;
+    const Hp=lbl=>`<th class="${OPS_TH} bg-slate-50">${lbl}</th>`;
+    const rows=list.slice(0,500).map(r=>{
+        const bar=r.band==='High'?'bg-red-500':'bg-amber-500', badge=r.band==='High'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700';
+        const ph=r.phone?`<a href="tel:${r.phone}" class="text-indigo-600 hover:underline">${r.phone}</a>`:'<span class="text-slate-300">—</span>';
+        return `<tr>`+
+          `<td class="${OPS_TD}"><div class="flex items-center gap-2"><span class="inline-flex px-2 py-0.5 rounded-md text-xs font-bold ${badge} tabular-nums">${r.risk}%</span><div class="w-14 h-1.5 bg-slate-100 rounded overflow-hidden"><div class="${bar} h-1.5" style="width:${r.risk}%"></div></div></div></td>`+
+          `<td class="${OPS_TD} font-semibold">${r.order||'—'}<div class="text-xs text-slate-400 font-normal">${r.awb||''}</div></td>`+
+          `<td class="${OPS_TD} font-semibold tabular-nums">${r.value!=null?OPS_INR(r.value):'—'}</td>`+
+          `<td class="${OPS_TD}">${r.courier||'—'}<div class="text-xs text-slate-400">Zone ${r.zone||'—'}</div></td>`+
+          `<td class="${OPS_TD} text-right tabular-nums">${r.daysInTransit!=null?r.daysInTransit+'d':'—'}</td>`+
+          `<td class="${OPS_TD}">${ph}</td>`+
+          `<td class="${OPS_TD} text-slate-500 text-xs">${(r.reasons||[]).join(' · ')||'—'}</td>`+
+        `</tr>`; }).join('');
+    const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
+    c.innerHTML=`<table class="w-full"><thead><tr>${H('risk','Risk')}${H('order','Order')}${H('value','Value',1)}${H('courier','Courier')}${H('daysInTransit','In transit',1)}${Hp('Customer')}${Hp('Why')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+}
+
+// ─── Delivery Performance (RTO / NDR / FASR) ─────────────────────────────────
+let _dpFrom = null, _dpTo = null, _dpData = null, _dpWired = false, _dpSource = 'all', _dpPayment = 'all', _dpZone = 'all', _dpCourier = 'all', _dpOrderType = 'all', _dpCompare = false;
+function dpDaysAgo(d){ const t=new Date(); t.setDate(t.getDate()-d); return t.toISOString().slice(0,10); }
+function dpPresetRange(preset){
+    const iso=d=>d.toISOString().slice(0,10), today=new Date();
+    if(preset==='this-week'){ const dow=(today.getDay()+6)%7; const mon=new Date(); mon.setDate(today.getDate()-dow); return { from:iso(mon), to:iso(today) }; } // Mon→today
+    const n=parseInt(preset,10)||30; const from=new Date(); from.setDate(today.getDate()-(n-1)); return { from:iso(from), to:iso(today) };
+}
+function dpInit(){
+    if(!_dpFrom){ _dpFrom = dpDaysAgo(30); _dpTo = new Date().toISOString().slice(0,10); }
+    const fEl=document.getElementById('dp-from'), tEl=document.getElementById('dp-to');
+    if(fEl) fEl.value=_dpFrom; if(tEl) tEl.value=_dpTo;
+    if(!_dpWired){
+        _dpWired = true;
+        document.getElementById('dp-range-preset')?.addEventListener('change', e=>{
+            const v=e.target.value, cust=document.getElementById('dp-custom');
+            cust.classList.toggle('hidden', v!=='custom'); cust.classList.toggle('flex', v==='custom');
+            if(v==='custom') return; // wait for Apply
+            const r=dpPresetRange(v); _dpFrom=r.from; _dpTo=r.to;
+            document.getElementById('dp-from').value=_dpFrom; document.getElementById('dp-to').value=_dpTo; dpLoad(); });
+        document.getElementById('dp-apply')?.addEventListener('click', ()=>{ _dpFrom=document.getElementById('dp-from').value; _dpTo=document.getElementById('dp-to').value; dpLoad(); });
+        document.getElementById('dp-source')?.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return;
+            [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
+            b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
+            _dpSource=b.dataset.s; dpLoad(); });
+        document.getElementById('dp-payment')?.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return;
+            [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
+            b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
+            _dpPayment=b.dataset.p; dpLoad(); });
+        document.getElementById('dp-zone')?.addEventListener('change', e=>{ _dpZone=e.target.value; dpLoad(); });
+        document.getElementById('dp-courier-filter')?.addEventListener('change', e=>{ _dpCourier=e.target.value; dpTableRender(); });
+        document.getElementById('dp-ordertype')?.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return;
+            [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
+            b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
+            _dpOrderType=b.dataset.o; dpLoad(); });
+        document.getElementById('dp-state')?.addEventListener('change', ()=>dpTableRender());
+        document.getElementById('dp-search')?.addEventListener('input', ()=>dpTableRender());
+    }
+    dpLoad();
+}
+async function dpLoad(){
+    const kpi=document.getElementById('dp-kpis'); if(kpi) kpi.innerHTML='<div class="text-slate-400 text-sm p-6">Loading delivery data…</div>';
+    try{
+        const r=await fetch(`/api/delivery-performance?from=${_dpFrom}&to=${_dpTo}&source=${_dpSource}&payment=${_dpPayment}&zone=${encodeURIComponent(_dpZone)}&order_type=${_dpOrderType}&compare=1`, { headers: getAuthHeaders() });
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _dpData=d; dpRender(d);
+    }catch(e){ if(kpi) kpi.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+}
+const DP_ICONS={
+  bolt:'<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>',
+  refresh:'<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>',
+  uturn:'<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h11a4 4 0 010 8h-1M3 10l4-4M3 10l4 4"/></svg>',
+  hash:'<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14"/></svg>'
+};
+// Δ pill vs the previous period. Literal direction colouring: ▲ up = green, ▼ down = red.
+function dpDelta(cur,prev,higherBetter,unit){ if(prev==null) return '';
+    const diff=Math.round((cur-prev)*10)/10;
+    if(diff===0) return `<span class="inline-flex items-center px-2 py-0.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-400">—</span>`;
+    const up=diff>0, cls=up?'bg-emerald-50 text-emerald-700':'bg-rose-50 text-rose-700';
+    return `<span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-lg text-xs font-bold ${cls}" title="vs ${prev}${unit} previous period">${up?'▲':'▼'} ${Math.abs(diff)}${unit}</span>`;
+}
+// Tiny inline pp-delta for chips (▲ up = green / ▼ down = red, literal). cur/prev are share %.
+function dpPP(cur,prev){ if(prev==null||!isFinite(prev)||!isFinite(cur)) return ''; const d=Math.round((cur-prev)*10)/10; if(d===0) return '';
+    const up=d>0; return `<span class="text-[10px] font-bold ml-1 ${up?'text-emerald-600':'text-rose-600'}" title="${prev}pp prev">${up?'▲':'▼'}${Math.abs(d)}</span>`; }
+// Numeric delta for TAT averages (with unit suffix).
+function dpNumDelta(cur,prev,unit){ if(prev==null||!isFinite(prev)||!isFinite(cur)) return '';
+    const d=Math.round((cur-prev)*100)/100, up=d>0;
+    if(d===0) return `<div class="text-[11px] text-slate-400 mt-0.5">— vs ${prev}${unit} prev</div>`;
+    return `<div class="text-[11px] font-bold mt-0.5 ${up?'text-emerald-600':'text-rose-600'}">${up?'▲':'▼'} ${Math.abs(d)}${unit} <span class="text-slate-400 font-normal">vs ${prev}${unit} prev</span></div>`; }
+function dpKpiCard(cfg){
+    const hasPrev = cfg.prev!=null;
+    return `<div class="dp-kpi card p-5" style="--accent:${cfg.accent}">
+        <div class="flex items-start justify-between">
+          <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background:${cfg.tint};color:${cfg.accent}">${cfg.icon}</div>
+          ${hasPrev?dpDelta(cfg.cur,cfg.prev,cfg.better,cfg.unit):''}
+        </div>
+        <div class="text-[2rem] leading-none font-extrabold text-slate-800 tracking-tight tabular-nums mt-4">${cfg.val}</div>
+        <div class="text-sm font-semibold text-slate-600 mt-1.5">${cfg.label}</div>
+        <div class="text-xs text-slate-400 mt-0.5">${cfg.foot}</div>
+        ${hasPrev?`<div class="text-[11px] text-slate-400 mt-2 pt-2 border-t border-slate-100">vs <span class="tabular-nums">${cfg.prev}${cfg.unit}</span> previous period</div>`:''}
+    </div>`;
+}
+function dpRender(d){
+    const k=d.kpis, c=d.compare&&d.compare.kpis;
+    document.getElementById('dp-range').textContent=`${d.range.from} → ${d.range.to} · ${k.totalShipments} tracked = ${k.resolved} shipped (delivered+RTO) + ${k.pending} NDR-pending + ${k.inTransit} in-transit${k.lost?` + ${k.lost} lost`:''}`+(c?`  ·  vs prev ${d.compare.range.from} → ${d.compare.range.to} (${c.totalShipments} tracked)`:'');
+    document.getElementById('dp-kpis').innerHTML = [
+        {label:'First-Attempt Strike Rate', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.bolt,   val:k.fasr+'%',            foot:`${k.fasrNumerator} of ${k.totalShipments} on 1st attempt`, cur:k.fasr,            prev:c?c.fasr:null,            better:true,  unit:'pp'},
+        {label:'NDR Recovery',            accent:'#059669', tint:'#ecfdf5', icon:DP_ICONS.refresh, val:k.ndrRecoveryRate+'%', foot:`${k.ndrRecovered} of ${k.ndrTotal} NDRs recovered`,      cur:k.ndrRecoveryRate, prev:c?c.ndrRecoveryRate:null, better:true,  unit:'pp'},
+        {label:'RTO Rate',                accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn,   val:k.rtoRate+'%',         foot:`${k.rto} of ${k.totalShipments} returned`,               cur:k.rtoRate,         prev:c?c.rtoRate:null,         better:false, unit:'pp'},
+        {label:'Avg Delivery Attempts',   accent:'#0891b2', tint:'#ecfeff', icon:DP_ICONS.hash,    val:k.avgAttempts,         foot:`across ${k.resolved} resolved`,                          cur:k.avgAttempts,     prev:c?c.avgAttempts:null,     better:false, unit:''},
+    ].map(dpKpiCard).join('');
+    dpStatus(d.statusBreakdown, c);
+    dpRto(d.rtoBreakdown, c);
+    dpZones(d.zones); dpCouriers(d.couriers); dpTat(d.tat, c);
+    dpFasr(d.fasrTrend); dpFunnel(d.ndrFunnel); dpCourier(d.rtoByCourier); dpTableRender();
+}
+// Populate the Zone dropdown from the window's zones (preserves current selection).
+function dpZones(zones){ const sel=document.getElementById('dp-zone'); if(!sel) return;
+    const cur=_dpZone;
+    let html='<option value="all">All zones</option>';
+    (zones||[]).forEach(z=>{ html+=`<option value="${z.zone.replace(/"/g,'&quot;')}">${z.zone} (${z.count})</option>`; });
+    sel.innerHTML=html; sel.value=cur; if(sel.value!==cur){ _dpZone='all'; sel.value='all'; } // selected zone gone from window
+}
+// Populate the Courier dropdown from the window's couriers (preserves current selection).
+function dpCouriers(couriers){ const sel=document.getElementById('dp-courier-filter'); if(!sel) return;
+    const cur=_dpCourier;
+    let html='<option value="all">All couriers</option>';
+    (couriers||[]).forEach(c=>{ const nm=(c.courier||'').replace(/"/g,'&quot;'); html+=`<option value="${nm}">${c.courier} (${c.count})</option>`; });
+    sel.innerHTML=html; sel.value=cur; if(sel.value!==cur){ _dpCourier='all'; sel.value='all'; }
+}
+// TAT Dashboard — two cards: Order→Dispatch and Dispatch→Delivery, avg + bucket bars (0-1/1-3/3-5/5+).
+function dpTatCard(title,sub,t,prevAvg){ if(!t){ return ''; }
+    const colors=['bg-green-500','bg-sky-500','bg-amber-500','bg-orange-500','bg-red-500'];
+    const tot=t.count||0, suffix=t.unit==='hrs'?'h':'d', unitLbl=t.unit==='hrs'?'hrs':'days';
+    const bars=(t.buckets||[]).map((b,i)=>{ const n=b.count||0, pctv=tot?Math.round(n/tot*100):0;
+        return `<div class="flex items-center gap-2 text-xs">
+          <span class="w-14 text-slate-500 tabular-nums">${b.label}${suffix}</span>
+          <div class="flex-1 h-4 bg-slate-100 rounded overflow-hidden"><div class="${colors[i%colors.length]} h-4 rounded" style="width:${pctv}%"></div></div>
+          <span class="w-16 text-right text-slate-600 tabular-nums">${n} · ${pctv}%</span>
+        </div>`; }).join('');
+    return `<div class="card p-5">
+        <div class="flex items-start justify-between"><h2 class="text-sm font-bold text-slate-700">${title}</h2>
+          <div class="text-right"><div><span class="text-2xl font-bold text-slate-800 tabular-nums">${t.avg}</span><span class="text-xs text-slate-400 ml-1">avg ${unitLbl}</span></div>${dpNumDelta(t.avg,prevAvg,suffix)}</div></div>
+        <p class="text-xs text-slate-400 mb-3">${sub} · ${tot} shipments</p>
+        <div class="space-y-1.5">${bars}</div></div>`;
+}
+function dpTat(t,c){ const el=document.getElementById('dp-tat'); if(!el) return; if(!t){ el.innerHTML=''; return; }
+    el.innerHTML =
+        dpTatCard('Order → Dispatch TAT','Time from order to courier pickup', t.orderToDispatch, c?c.otdAvg:null)+
+        dpTatCard('Dispatch → Delivery TAT','Courier transit time to delivery', t.dispatchToDelivery, c?c.dtdAvg:null);
+}
+// Clickable partition chip — filters the shipment explorer to that state. Sums to `total`.
+function dpStatusChip(dot,label,val,total,state,prevShare){ const p=total?Math.round(val/total*1000)/10:0;
+    return `<button data-state="${state||''}" class="dp-chip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-indigo-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${val}</b><span class="text-slate-400 text-xs tabular-nums">${p}%</span>${dpPP(p,prevShare)}</button>`; }
+function dpStatus(s,c){ const el=document.getElementById('dp-status'); if(!s){ el.innerHTML=''; return; }
+    const t=s.total||0, pt=c?c.totalShipments:0;
+    const ps=v=> (c&&pt&&v!=null)? Math.round(v/pt*1000)/10 : null;   // previous-period share %
+    el.innerHTML =
+        `<span class="inline-flex items-center px-3 py-1.5 bg-slate-800 text-white rounded-lg font-semibold tabular-nums">${t} tracked</span>`+
+        dpStatusChip('bg-indigo-500','Delivered · 1st attempt', s.firstAttempt, t, 'delivered_first', ps(c&&c.firstAttempt))+
+        dpStatusChip('bg-sky-500','Delivered · after NDR', s.deliveredMulti, t, 'delivered_ndr', ps(c&&c.deliveredMulti))+
+        dpStatusChip('bg-red-500','RTO', s.rto, t, 'rto', ps(c&&c.rto))+
+        (s.lost>0 ? dpStatusChip('bg-rose-800','Lost', s.lost, t, 'lost', ps(c&&c.lost)) : '')+
+        dpStatusChip('bg-amber-500','NDR pending', s.ndrPending, t, 'ndr_pending', ps(c&&c.ndrPending))+
+        dpStatusChip('bg-slate-400','In-transit', s.inTransit, t, 'in_transit', ps(c&&c.inTransit))+
+        `<span class="inline-flex items-center gap-1 text-xs text-slate-400 ml-1">= sums to tracked</span>`;
+    el.querySelectorAll('.dp-chip').forEach(b=>b.addEventListener('click',()=>{ const st=b.dataset.state||'all';
+        const sel=document.getElementById('dp-state'); if(sel){ sel.value=st; } dpTableRender();
+        document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }));
+}
+// RTO composition — total RTO = attempted-then-returned + silent (never attempted). Both drill into the explorer.
+function dpRto(b,c){ const el=document.getElementById('dp-rto'); if(!el) return; if(!b||!b.total){ el.innerHTML=''; return; }
+    const cShare=v=> Math.round(v/b.total*1000)/10;              // share of current RTO
+    const pShare=v=> (c&&c.rto&&v!=null)? Math.round(v/c.rto*1000)/10 : null;
+    const chip=(state,dot,label,val,cur,prev)=>`<button data-state="${state}" class="dp-rchip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-red-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${val}</b>${dpPP(cur,prev)}</button>`;
+    el.innerHTML =
+        `<span class="text-slate-500 mr-1">RTO <b class="text-slate-800">${b.total}</b> =</span>`+
+        chip('rto_attempted','bg-red-500','after ≥1 attempt', b.attempted, cShare(b.attempted), pShare(c&&c.rtoAttempted))+
+        `<span class="text-slate-400">+</span>`+
+        chip('rto_silent','bg-rose-300','silent · no attempt', b.silent, cShare(b.silent), pShare(c&&c.rtoSilent));
+    el.querySelectorAll('.dp-rchip').forEach(x=>x.addEventListener('click',()=>{ const sel=document.getElementById('dp-state'); if(sel) sel.value=x.dataset.state; dpTableRender();
+        document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }));
+}
+function dpTip(){ let t=document.getElementById('dp-tip'); if(!t){ t=document.createElement('div'); t.id='dp-tip'; t.style.cssText='position:fixed;pointer-events:none;background:#0f172a;color:#fff;padding:5px 8px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .08s;z-index:60;white-space:nowrap'; document.body.appendChild(t);} return t; }
+function dpShow(html,x,y){ const t=dpTip(); t.innerHTML=html; t.style.opacity=1; t.style.left=(x+12)+'px'; t.style.top=(y+12)+'px'; }
+function dpHide(){ dpTip().style.opacity=0; }
+function dpFasr(rows){ const el=document.getElementById('dp-fasr'); if(!rows||!rows.length){ el.innerHTML='<div class="text-slate-400 text-sm py-8 text-center">No data</div>'; return; }
+    const W=640,H=220,p={l:32,r:14,t:12,b:26}, iw=W-p.l-p.r, ih=H-p.t-p.b;
+    const xs=rows.map((_,i)=>p.l+(rows.length===1?iw/2:i/(rows.length-1)*iw)); const y=v=>p.t+ih-(v/100)*ih;
+    let g=''; for(let t=0;t<=100;t+=25){ g+=`<line x1="${p.l}" y1="${y(t)}" x2="${W-p.r}" y2="${y(t)}" stroke="#e2e8f0"/><text x="${p.l-6}" y="${y(t)+3}" text-anchor="end" fill="#94a3b8" font-size="11">${t}</text>`; }
+    const pts=rows.map((r,i)=>`${xs[i]},${y(r.fasr)}`).join(' ');
+    const dots=rows.map((r,i)=>`<circle cx="${xs[i]}" cy="${y(r.fasr)}" r="4" fill="#4f46e5" data-i="${i}"/>`).join('');
+    const step=Math.ceil(rows.length/7); const xl=rows.map((r,i)=>i%step===0?`<text x="${xs[i]}" y="${H-8}" text-anchor="middle" fill="#94a3b8" font-size="11">${r.date.slice(5)}</text>`:'').join('');
+    el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%">${g}<polyline points="${pts}" fill="none" stroke="#4f46e5" stroke-width="2" stroke-linejoin="round"/>${dots}${xl}</svg>`;
+    el.querySelectorAll('circle').forEach(c=>{ c.addEventListener('mousemove',e=>{const r=rows[+c.dataset.i];dpShow(`<b>${r.date}</b> · FASR ${r.fasr}% (${r.first}/${r.reached})`,e.clientX,e.clientY);}); c.addEventListener('mouseleave',dpHide); });
+}
+function dpFunnel(f){ const el=document.getElementById('dp-funnel'); const total=f&&f.total||0;
+    if(!total){ el.innerHTML='<div class="text-slate-400 text-sm py-8 text-center">No NDR shipments in range</div>'; return; }
+    const seg=[['Recovered → Delivered',f.recovered,'#16a34a'],['Lost → RTO',f.lost,'#dc2626'],['Still pending',f.pending,'#d97706']];
+    const W=380,BH=26; let bar='',x=0,rows='';
+    seg.forEach(([lab,v,c])=>{ const w=v/total*W; if(w>0){ bar+=`<rect x="${x}" y="0" width="${Math.max(0,w-2)}" height="${BH}" rx="4" fill="${c}"/>`; x+=w; }
+      rows+=`<div class="flex items-center gap-2 mt-2 text-sm text-slate-700"><span class="w-2.5 h-2.5 rounded-full" style="background:${c}"></span><span class="flex-1">${lab}</span><b>${v}</b><span class="text-slate-400">${Math.round(v/total*1000)/10}%</span></div>`; });
+    // Reconcile the cohort's RTO (f.lost) to the dashboard's TOTAL RTO via "silent" RTOs (no failed attempt).
+    const dr=f.directRto||0, totalRto=f.totalRto!=null?f.totalRto:(f.lost+dr);
+    const recon = dr>0
+      ? `<div class="text-xs text-slate-400 mt-3 leading-relaxed">${total} shipments had ≥1 failed delivery attempt.<br>RTO here (${f.lost}) + ${dr} silent RTO (returned with no delivery attempt) = <b class="text-slate-500">${totalRto} total RTO</b>.</div>`
+      : `<div class="text-xs text-slate-400 mt-3">${total} shipments had ≥1 failed delivery attempt · all ${totalRto} RTO had an attempt.</div>`;
+    el.innerHTML=`<svg viewBox="0 0 ${W} ${BH}" style="width:100%;height:26px">${bar}</svg><div class="mt-1">${rows}</div>${recon}`;
+}
+function dpCourier(rows){ const el=document.getElementById('dp-courier'); if(!rows||!rows.length){ el.innerHTML='<div class="text-slate-400 text-sm py-6 text-center">No data in range</div>'; return; }
+    const max=Math.max(...rows.map(r=>r.rto),1);
+    // Bar LENGTH = RTO volume; bar/figure COLOR = RTO-rate severity (green ok · amber watch · red high).
+    const sev=rate=> rate>=25?{bar:'#ef4444',fig:'text-red-600',pill:'bg-red-50 text-red-600'}
+                    : rate>=15?{bar:'#f59e0b',fig:'text-amber-600',pill:'bg-amber-50 text-amber-600'}
+                    :          {bar:'#10b981',fig:'text-emerald-600',pill:'bg-emerald-50 text-emerald-600'};
+    el.innerHTML =
+      `<div class="flex items-center gap-2 text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-2 px-1">
+         <span class="w-40 shrink-0">Courier</span><span class="flex-1">Returns</span><span class="w-24 text-right shrink-0">RTO&nbsp;rate</span>
+       </div>`+
+      rows.map((r,i)=>{ const w=Math.max(3, Math.round(r.rto/max*100)); const s=sev(r.rtoRate); const inside=w>=14;
+        return `<div class="dp-cr flex items-center gap-3 py-1 px-1 -mx-1 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer" data-i="${i}" title="Filter dashboard to ${r.courier||''}">
+          <div class="w-40 shrink-0 text-sm text-slate-700 truncate" title="${r.courier||''}">${r.courier||'—'}</div>
+          <div class="flex-1 relative h-6 bg-slate-100 rounded-md overflow-hidden min-w-[56px]">
+            <div class="absolute inset-y-0 left-0 rounded-md flex items-center justify-end pr-2 transition-all" style="width:${w}%;background:${s.bar}">${inside?`<span class="text-[11px] font-bold text-white tabular-nums">${r.rto}</span>`:''}</div>
+            ${inside?'':`<span class="absolute inset-y-0 flex items-center text-[11px] font-bold text-slate-600 tabular-nums" style="left:calc(${w}% + 6px)">${r.rto}</span>`}
+          </div>
+          <div class="w-24 shrink-0 text-right leading-tight">
+            <span class="inline-block px-1.5 py-0.5 rounded-md text-xs font-bold tabular-nums ${s.pill}">${r.rtoRate}%</span>
+            <div class="text-[11px] text-slate-400 tabular-nums mt-0.5">of ${r.total}</div>
+          </div>
+        </div>`; }).join('');
+    el.querySelectorAll('.dp-cr').forEach(rc=>{ rc.addEventListener('mousemove',e=>{const r=rows[+rc.dataset.i];dpShow(`<b>${r.courier}</b> · ${r.rto} RTO of ${r.total} (${r.rtoRate}%)`,e.clientX,e.clientY);}); rc.addEventListener('mouseleave',dpHide);
+        rc.addEventListener('click',()=>{ const r=rows[+rc.dataset.i]; if(!r||!r.courier) return; _dpCourier=r.courier; const sel=document.getElementById('dp-courier-filter'); if(sel) sel.value=r.courier; dpHide(); dpTableRender();
+            document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }); });
+}
+const DP_STATE_BADGE={
+    delivered_first:['Delivered · 1st','bg-indigo-100 text-indigo-700'],
+    delivered_ndr:['Delivered · after NDR','bg-sky-100 text-sky-700'],
+    rto:['RTO','bg-red-100 text-red-700'],
+    lost:['Lost','bg-rose-200 text-rose-800'],
+    ndr_pending:['NDR pending','bg-amber-100 text-amber-700'],
+    in_transit:['In-transit','bg-slate-100 text-slate-600'],
+};
+// Powerful shipment explorer — filter by state (or NDR cohort) + free-text search over order/AWB.
+function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_dpData; if(!d||!c) return;
+    const all=d.shipments||[];
+    const state=document.getElementById('dp-state')?.value||'all';
+    const q=(document.getElementById('dp-search')?.value||'').trim().toLowerCase();
+    let list=all;
+    if(state==='ndr_cohort') list=list.filter(r=>(r.ndr_count||0)>0);
+    else if(state==='rto_attempted') list=list.filter(r=>r.state==='rto' && (r.ndr_count||0)>0);
+    else if(state==='rto_silent') list=list.filter(r=>r.state==='rto' && (r.ndr_count||0)===0);
+    else if(state!=='all') list=list.filter(r=>r.state===state);
+    if(_dpCourier!=='all') list=list.filter(r=>(r.courier||'Unknown')===_dpCourier);
+    if(q) list=list.filter(r=>(r.order||'').toLowerCase().includes(q)||(r.awb||'').toLowerCase().includes(q));
+    const cnt=document.getElementById('dp-count');
+    if(cnt) cnt.textContent=`${list.length} shown${d.shipmentsTruncated?` · list capped at ${all.length} of ${d.shipmentsTotal}`:''}`;
+    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-6">No shipments match this filter</div>'; return; }
+    const th='px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide border-b border-slate-100';
+    const td='px-4 py-2.5 text-sm text-slate-700 border-b border-slate-50 align-top';
+    const rows=list.slice(0,500).map(r=>{ const b=DP_STATE_BADGE[r.state]||['—','bg-slate-100 text-slate-600'];
+        const pay=r.payment?`<span class="px-1.5 py-0.5 rounded text-xs ${/cod/i.test(r.payment)?'bg-orange-100 text-orange-700':'bg-emerald-100 text-emerald-700'}">${/cod/i.test(r.payment)?'COD':'Prepaid'}</span>`:'<span class="text-slate-300">—</span>';
+        const typ=r.order_type==='repeat'?'<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-violet-100 text-violet-700">Repeat</span>':r.order_type==='new'?'<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">New</span>':'<span class="text-slate-300">—</span>';
+        return `<tr>`+
+          `<td class="${td} font-semibold">${r.order||'—'} ${r.source==='docpharma'?'<span class="text-slate-400 text-xs">· DP</span>':''}<div class="text-xs text-slate-400 font-normal">${r.awb||''}</div></td>`+
+          `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${b[1]}">${b[0]}</span></td>`+
+          `<td class="${td}">${typ}</td>`+
+          `<td class="${td}">${r.courier||'—'}</td>`+
+          `<td class="${td} text-right tabular-nums">${r.attempts}</td>`+
+          `<td class="${td} text-right tabular-nums">${r.ndr_count}</td>`+
+          `<td class="${td}">${pay}</td>`+
+          `<td class="${td} text-slate-500">${r.zone||'<span class="text-slate-300">—</span>'}</td>`+
+          `<td class="${td} text-slate-400 tabular-nums">${r.order_date||'—'}</td>`+
+          `<td class="${td} text-slate-500 text-xs">${(r.reasons||[]).join('; ')||'—'}</td>`+
+        `</tr>`; }).join('');
+    const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length} — narrow with search or filters</div>`:'';
+    c.innerHTML=`<table class="w-full"><thead><tr><th class="${th}">Order / AWB</th><th class="${th}">State</th><th class="${th}">Type</th><th class="${th}">Courier</th><th class="${th} text-right">Att.</th><th class="${th} text-right">NDRs</th><th class="${th}">Pay</th><th class="${th}">Zone</th><th class="${th}">Order date</th><th class="${th}">NDR reasons</th></tr></thead><tbody>${rows}</tbody></table>${more}`;
+}
 
 document.getElementById('btn-download-amazon-report')?.addEventListener('click', async () => {
     const startDate = document.getElementById('amazon-report-start-date').value;
@@ -3152,6 +3708,25 @@ document.getElementById('btn-download-amazon-report')?.addEventListener('click',
         a.remove();
         window.URL.revokeObjectURL(url);
         showNotification('Amazon report downloaded successfully!');
+    } catch (error) { }
+});
+
+document.getElementById('btn-download-noattempt-report')?.addEventListener('click', async () => {
+    const from = document.getElementById('noattempt-start-date').value;
+    const to = document.getElementById('noattempt-end-date').value;
+    if (!from || !to) { showNotification('Please select both start and end dates', true); return; }
+    showNotification('Generating “RTO without attempt” report…');
+    try {
+        const blob = await fetchApiData(`/reports/rto-no-attempt?from=${from}&to=${to}`, 'Failed to generate report');
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `rto-without-attempt_${from}_to_${to}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+        showNotification('Report downloaded.');
     } catch (error) { }
 });
 
@@ -3423,6 +3998,7 @@ function fopsDateRange() {
   if (preset === 'yesterday')   return { start: fmtL(ago(1)), end: fmtL(ago(1)) };
   if (preset === 'last7')       return { start: fmtL(ago(6)), end: fmtL(today) };
   if (preset === 'last15')      return { start: fmtL(ago(14)), end: fmtL(today) };
+  if (preset === 'last30')      return { start: fmtL(ago(29)), end: fmtL(today) };
   if (preset === 'mtd')         return fopsMTD();
   if (preset === 'this-month')  return { start: fmtL(new Date(y, mo, 1)),   end: fmtL(new Date(y, mo+1, 0)) };
   if (preset === 'last-month')  return { start: fmtL(new Date(y, mo-1, 1)), end: fmtL(new Date(y, mo, 0)) };

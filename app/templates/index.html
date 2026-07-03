@@ -60,12 +60,68 @@
     .rotate-180 { transform: rotate(180deg); }
 
     /* Cards */
-    .card { 
-        background: white; 
-        border: 1px solid #e2e8f0; 
-        border-radius: 1rem; 
+    .card {
+        background: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 1rem;
         box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
     }
+
+    /* ── Delivery Performance — elevated, professional styling (scoped) ── */
+    #delivery-perf-view { background:
+        radial-gradient(1200px 400px at 100% -5%, rgba(99,102,241,.06), transparent 60%),
+        radial-gradient(900px 360px at -5% 0%, rgba(16,185,129,.05), transparent 55%),
+        #f8fafc; }
+    #delivery-perf-view .card { transition: box-shadow .18s ease, transform .18s ease, border-color .18s ease; }
+    #delivery-perf-view .dp-kpi { position: relative; overflow: hidden; }
+    #delivery-perf-view .dp-kpi::before { content:''; position:absolute; inset:0 0 auto 0; height:3px; background: var(--accent, #4f46e5); }
+    #delivery-perf-view .dp-kpi:hover { transform: translateY(-3px); box-shadow: 0 16px 34px -16px rgba(15,23,42,.22); border-color:#e0e7ff; }
+    #delivery-perf-view header { background: rgba(255,255,255,.85); backdrop-filter: saturate(1.4) blur(8px); }
+    #delivery-perf-view .dp-seg button { transition: all .15s ease; }
+    #delivery-perf-view select, #delivery-perf-view input[type=date], #delivery-perf-view input[type=text] { transition: border-color .15s, box-shadow .15s, background-color .15s; height: 38px; }
+    #delivery-perf-view select:focus, #delivery-perf-view input:focus { outline:none; border-color:#a5b4fc; box-shadow:0 0 0 3px rgba(99,102,241,.15); }
+    /* Native selects → custom chevron, no OS arrow, tidy padding */
+    #delivery-perf-view select {
+        appearance:none; -webkit-appearance:none; -moz-appearance:none;
+        padding: 0 2.1rem 0 .85rem; font-weight:500; color:#334155; cursor:pointer;
+        border-radius:.6rem; background-color:#fff;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%2394a3b8' stroke-width='2.2' viewBox='0 0 24 24'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+        background-repeat:no-repeat; background-position:right .65rem center;
+    }
+    #delivery-perf-view select:hover { border-color:#c7d2fe; background-color:#fafbff; }
+    #delivery-perf-view input[type=date] { border-radius:.6rem; }
+    #delivery-perf-view input[type=date]:hover { border-color:#c7d2fe; }
+    /* Segmented pill groups (source / payment / new-repeat) — soft inset track + elevated active */
+    #dp-source, #dp-payment, #dp-ordertype { padding:3px; gap:2px; border-radius:.7rem; background:#f1f5f9; border-color:#e2e8f0; overflow:visible; height:38px; align-items:center; }
+    #dp-source button, #dp-payment button, #dp-ordertype button { border-radius:.5rem; font-weight:600; padding:4px 12px; transition:all .15s ease; color:#64748b; }
+    #dp-source button:hover, #dp-payment button:hover, #dp-ordertype button:hover { color:#4f46e5; }
+    #dp-source button.bg-indigo-600, #dp-payment button.bg-indigo-600, #dp-ordertype button.bg-indigo-600 { box-shadow:0 1px 3px rgba(79,70,229,.35); }
+
+    /* ── Ops Control — elevated styling (scoped) ── */
+    #ops-control-view { background:
+        radial-gradient(1200px 400px at 100% -5%, rgba(225,29,72,.05), transparent 60%),
+        radial-gradient(900px 360px at -5% 0%, rgba(99,102,241,.05), transparent 55%),
+        #f8fafc; }
+    #ops-control-view header { background: rgba(255,255,255,.85); backdrop-filter: saturate(1.4) blur(8px); }
+    #ops-control-view .card { transition: box-shadow .18s ease, transform .18s ease, border-color .18s ease; }
+    #ops-control-view .ops-kpi { position: relative; overflow: hidden; }
+    #ops-control-view .ops-kpi:hover { transform: translateY(-3px); box-shadow: 0 16px 34px -16px rgba(15,23,42,.22); border-color:#e0e7ff; }
+    #ops-control-view select, #ops-control-view input[type=text], #ops-control-view input[type=number] { transition: border-color .15s, box-shadow .15s; height:36px; }
+    #ops-control-view select:focus, #ops-control-view input:focus { outline:none; border-color:#a5b4fc; box-shadow:0 0 0 3px rgba(99,102,241,.15); }
+    #ops-control-view select { appearance:none; -webkit-appearance:none; padding:0 2rem 0 .8rem; font-weight:500; color:#334155; cursor:pointer; border-radius:.6rem; background-color:#fff;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%2394a3b8' stroke-width='2.2' viewBox='0 0 24 24'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right .55rem center; }
+    #ops-control-view select:hover { border-color:#c7d2fe; }
+    #ops-control-view #ops-tabs { padding:3px; gap:2px; border-radius:.7rem; background:#f1f5f9; height:38px; align-items:center; overflow:visible; }
+    #ops-control-view #ops-tabs button { border-radius:.5rem; font-weight:600; padding:4px 12px; transition:all .15s ease; }
+    #ops-control-view #ops-tabs button.bg-indigo-600 { box-shadow:0 1px 3px rgba(79,70,229,.35); }
+    #ops-control-view table tbody tr { transition: background .12s; }
+    #ops-control-view table tbody tr:hover { background:#f8fafc; }
+    #ops-control-view th[data-k] { cursor:pointer; user-select:none; white-space:nowrap; transition:color .12s; }
+    #ops-control-view th[data-k]:hover { color:#4f46e5; }
+    #ops-control-view th .arw { font-size:9px; margin-left:2px; }
+    #delivery-perf-view .dp-cr:hover { background:#f8fafc; }
+    #delivery-perf-view #dp-table tbody tr:hover { background:#f8fafc; }
+    #delivery-perf-view #dp-table tbody tr { transition: background .12s; }
 
     /* Modern Table Header */
     .table-header {
@@ -273,6 +329,14 @@
                     <a href="#" id="nav-fulfillment-ops" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
                         <span class="ml-3 text-sm font-medium">Fulfillment Ops</span>
+                    </a>
+                    <a href="#" id="nav-delivery-perf" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM20 17a2 2 0 11-4 0 2 2 0 014 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Delivery Performance</span>
+                    </a>
+                    <a href="#" id="nav-ops-control" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Ops Control</span>
                     </a>
                 </div>
             </div>
@@ -792,6 +856,25 @@
                         <button id="btn-download-amazon-report" class="btn-pill bg-amber-500 hover:bg-amber-600 text-white w-full sm:w-auto shadow-sm">Download</button>
                     </div>
                 </div>
+
+                <div class="card p-8 mt-6">
+                    <h2 class="text-lg font-bold text-slate-800 mb-1 flex items-center gap-2">
+                        <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                        RTO Without Attempt
+                    </h2>
+                    <p class="text-sm text-slate-400 mb-6">Orders that went <b>RTO</b> with no “Out for Delivery” scan — the courier returned them <b>without ever attempting delivery</b> (a silent RTO). Excel includes the full RapidShyp scan log as evidence.</p>
+                    <div class="flex flex-col sm:flex-row items-end gap-4 bg-slate-50 p-6 rounded-2xl border border-slate-100">
+                        <div class="w-full">
+                            <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Start Date</label>
+                            <input id="noattempt-start-date" type="date" class="w-full bg-white border border-slate-200 text-slate-800 text-sm rounded-xl p-2.5 focus:ring-red-500 focus:border-red-500">
+                        </div>
+                        <div class="w-full">
+                            <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">End Date</label>
+                            <input id="noattempt-end-date" type="date" class="w-full bg-white border border-slate-200 text-slate-800 text-sm rounded-xl p-2.5 focus:ring-red-500 focus:border-red-500">
+                        </div>
+                        <button id="btn-download-noattempt-report" class="btn-pill bg-red-500 hover:bg-red-600 text-white w-full sm:w-auto shadow-sm">Download</button>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -1086,6 +1169,7 @@
                     <option value="yesterday">Yesterday</option>
                     <option value="last7">Last 7 days</option>
                     <option value="last15">Last 15 days</option>
+                    <option value="last30">Last 30 days</option>
                     <option value="mtd" selected>Month to date</option>
                     <option value="this-month">This month</option>
                     <option value="last-month">Last month</option>
@@ -1268,6 +1352,180 @@
             <div id="srv-results" class="space-y-6"></div>
           </div>
         </div><!-- /serviceability-view -->
+
+        <div id="delivery-perf-view" class="view-hidden">
+          <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h1 class="text-xl font-bold text-slate-800">Delivery Performance</h1>
+              <p class="text-sm text-slate-400 mt-0.5" id="dp-range">RTO · NDR recovery · First-Attempt Strike Rate</p>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200" id="dp-source">
+                <button data-s="all" class="px-3 py-1.5 bg-indigo-600 text-white">All</button>
+                <button data-s="rapidshyp" class="px-3 py-1.5 text-slate-600">RapidShyp</button>
+                <button data-s="docpharma" class="px-3 py-1.5 text-slate-600">DocPharma</button>
+              </div>
+              <div class="flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200" id="dp-payment">
+                <button data-p="all" class="px-3 py-1.5 bg-indigo-600 text-white">All</button>
+                <button data-p="COD" class="px-3 py-1.5 text-slate-600">COD</button>
+                <button data-p="prepaid" class="px-3 py-1.5 text-slate-600">Prepaid</button>
+              </div>
+              <div class="flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200" id="dp-ordertype">
+                <button data-o="all" class="px-3 py-1.5 bg-indigo-600 text-white">All</button>
+                <button data-o="new" class="px-3 py-1.5 text-slate-600">New</button>
+                <button data-o="repeat" class="px-3 py-1.5 text-slate-600">Repeat</button>
+              </div>
+              <select id="dp-zone" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
+                <option value="all">All zones</option>
+              </select>
+              <select id="dp-range-preset" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
+                <option value="this-week">This Week</option>
+                <option value="7">Last 7 days</option>
+                <option value="15">Last 15 days</option>
+                <option value="30" selected>Last 30 days</option>
+                <option value="90">Last 90 days</option>
+                <option value="custom">Custom</option>
+              </select>
+              <div id="dp-custom" class="hidden items-center gap-2">
+                <input type="date" id="dp-from" class="px-2 py-1.5 text-sm border border-slate-200 rounded-lg bg-white text-slate-700">
+                <input type="date" id="dp-to" class="px-2 py-1.5 text-sm border border-slate-200 rounded-lg bg-white text-slate-700">
+                <button id="dp-apply" class="px-3 py-1.5 text-sm bg-slate-800 text-white rounded-lg hover:bg-slate-700">Apply</button>
+              </div>
+            </div>
+          </header>
+          <div class="p-8 space-y-6">
+            <div id="dp-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5"></div>
+            <div id="dp-status" class="flex flex-wrap gap-2 text-sm"></div>
+            <div id="dp-rto" class="flex flex-wrap items-center gap-2 text-sm"></div>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4" id="dp-tat"></div>
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <div class="card p-5 lg:col-span-2">
+                <h2 class="text-sm font-bold text-slate-700">First-Attempt Strike Rate — trend</h2>
+                <p class="text-xs text-slate-400 mb-3">Daily % of shipments delivered on the first attempt</p>
+                <div id="dp-fasr"></div>
+              </div>
+              <div class="card p-5">
+                <h2 class="text-sm font-bold text-slate-700">NDR outcome funnel</h2>
+                <p class="text-xs text-slate-400 mb-3">Where failed-attempt (NDR) shipments ended up</p>
+                <div id="dp-funnel"></div>
+              </div>
+            </div>
+            <div class="card p-5">
+              <h2 class="text-sm font-bold text-slate-700">RTO by courier</h2>
+              <p class="text-xs text-slate-400 mb-3">Returns and RTO-rate per courier</p>
+              <div id="dp-courier"></div>
+            </div>
+            <div>
+              <div class="flex items-center gap-2 mb-3 flex-wrap" id="dp-table-toolbar">
+                <h2 class="text-sm font-bold text-slate-700 mr-1">Shipment explorer</h2>
+                <select id="dp-state" class="text-sm px-3 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700">
+                  <option value="all">All shipments</option>
+                  <option value="delivered_first">Delivered · 1st attempt</option>
+                  <option value="delivered_ndr">Delivered · after NDR</option>
+                  <option value="rto">RTO (all)</option>
+                  <option value="rto_attempted">RTO · after ≥1 attempt</option>
+                  <option value="rto_silent">RTO · silent (no attempt)</option>
+                  <option value="lost">Lost</option>
+                  <option value="ndr_pending">NDR pending</option>
+                  <option value="in_transit">In-transit</option>
+                  <option value="ndr_cohort">NDR cohort (≥1 failed attempt)</option>
+                </select>
+                <select id="dp-courier-filter" class="text-sm px-3 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700">
+                  <option value="all">All couriers</option>
+                </select>
+                <input id="dp-search" type="text" placeholder="Search order / AWB…" class="text-sm px-3 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700 w-48">
+                <span id="dp-count" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
+              </div>
+              <div class="card p-0 overflow-x-auto" id="dp-table"></div>
+            </div>
+          </div>
+        </div><!-- /delivery-perf-view -->
+
+        <div id="ops-control-view" class="view-hidden">
+          <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h1 class="text-xl font-bold text-slate-800">Ops Control</h1>
+              <p class="text-sm text-slate-400 mt-0.5">Act before it becomes RTO — recover, prevent, hold couriers accountable</p>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200" id="ops-tabs">
+                <button data-t="ndr" class="px-3 py-1.5 bg-indigo-600 text-white">NDR Queue</button>
+                <button data-t="risk" class="px-3 py-1.5 text-slate-600">Risk Orders</button>
+                <button data-t="courier" class="px-3 py-1.5 text-slate-600">Courier Scorecard</button>
+                <button data-t="exceptions" class="px-3 py-1.5 text-slate-600">Exceptions &amp; Claims</button>
+                <button data-t="prepaidrisk" class="px-3 py-1.5 text-slate-600">Prepaid Risk</button>
+                <button data-t="cost" class="px-3 py-1.5 text-slate-600">Cost &amp; Hotspots</button>
+              </div>
+              <button id="ops-refresh" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-400 flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                Refresh
+              </button>
+            </div>
+          </header>
+          <div class="p-8 space-y-6">
+            <!-- NDR Action Queue -->
+            <div id="ops-ndr" class="ops-pane">
+              <div id="ops-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6"></div>
+              <div class="flex items-center gap-2 mb-3 flex-wrap">
+                <h2 class="text-sm font-bold text-slate-700 mr-1">Call these customers before the courier returns them</h2>
+                <select id="ops-f-age" class="text-sm border border-slate-200 rounded-lg bg-white"><option value="all">All ages</option><option value="urgent">Urgent · ≥3 days</option></select>
+                <select id="ops-f-pay" class="text-sm border border-slate-200 rounded-lg bg-white"><option value="all">All payment</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select>
+                <select id="ops-f-type" class="text-sm border border-slate-200 rounded-lg bg-white"><option value="all">All customers</option><option value="new">New</option><option value="repeat">Repeat</option></select>
+                <input id="ops-search" type="text" placeholder="Search order / phone…" class="text-sm px-3 border border-slate-200 rounded-lg bg-white text-slate-700 w-44">
+                <span id="ops-count" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
+              </div>
+              <div class="card p-0 overflow-x-auto" id="ops-table"></div>
+            </div>
+            <!-- Pre-dispatch Risk -->
+            <div id="ops-risk" class="ops-pane hidden">
+              <div id="ops-risk-kpis" class="grid grid-cols-2 lg:grid-cols-3 gap-5 mb-6"></div>
+              <div class="flex items-center gap-2 mb-3 flex-wrap">
+                <h2 class="text-sm font-bold text-slate-700 mr-1">Verify / convert these before they ship</h2>
+                <select id="ops-rf-band" class="text-sm border border-slate-200 rounded-lg bg-white"><option value="all">All risk</option><option value="High">High only</option><option value="Medium">Medium only</option></select>
+                <select id="ops-rf-pay" class="text-sm border border-slate-200 rounded-lg bg-white"><option value="all">All payment</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select>
+                <input id="ops-risk-search" type="text" placeholder="Search order / city…" class="text-sm px-3 border border-slate-200 rounded-lg bg-white text-slate-700 w-44">
+                <span id="ops-risk-count" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
+              </div>
+              <div class="card p-0 overflow-x-auto" id="ops-risk-table"></div>
+            </div>
+            <!-- Courier Scorecard -->
+            <div id="ops-courier" class="ops-pane hidden">
+              <p class="text-sm text-slate-400 mb-3">Last 90 days · couriers with ≥20 shipments · <span class="text-slate-500">route volume to the lowest RTO / highest recovery</span></p>
+              <div class="card p-0 overflow-x-auto" id="ops-courier-table"></div>
+            </div>
+            <!-- Exceptions & Claims -->
+            <div id="ops-exceptions" class="ops-pane hidden">
+              <div id="ops-exc-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6"></div>
+              <div class="flex items-center gap-2 mb-3 flex-wrap">
+                <h2 class="text-sm font-bold text-slate-700 mr-1">Redispatch to keep the customer · claim from the courier</h2>
+                <select id="ops-ef-action" class="text-sm border border-slate-200 rounded-lg bg-white"><option value="all">All actions</option><option value="claim">Claim · courier owes</option><option value="redispatch">Redispatch / refund</option><option value="monitor">Monitor</option></select>
+                <select id="ops-ef-type" class="text-sm border border-slate-200 rounded-lg bg-white"><option value="all">All types</option></select>
+                <input id="ops-exc-search" type="text" placeholder="Search order / courier…" class="text-sm px-3 border border-slate-200 rounded-lg bg-white text-slate-700 w-44">
+                <span id="ops-exc-count" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
+              </div>
+              <div class="card p-0 overflow-x-auto" id="ops-exc-table"></div>
+            </div>
+            <!-- Prepaid Risk (predictive) -->
+            <div id="ops-prepaidrisk" class="ops-pane hidden">
+              <div id="ops-pr-kpis" class="grid grid-cols-2 lg:grid-cols-3 gap-5 mb-6"></div>
+              <div class="flex items-center gap-2 mb-3 flex-wrap">
+                <h2 class="text-sm font-bold text-slate-700 mr-1">Prepaid orders likely to be lost / misrouted — redispatch proactively</h2>
+                <select id="ops-pr-days" class="text-sm border border-slate-200 rounded-lg bg-white"><option value="15">Last 15 days</option><option value="30">Last 30 days</option><option value="60" selected>Last 60 days</option><option value="90">Last 90 days</option></select>
+                <select id="ops-prf-band" class="text-sm border border-slate-200 rounded-lg bg-white"><option value="all">All risk</option><option value="High">High only</option><option value="Medium">Medium only</option></select>
+                <input id="ops-pr-search" type="text" placeholder="Search order / courier…" class="text-sm px-3 border border-slate-200 rounded-lg bg-white text-slate-700 w-44">
+                <span id="ops-pr-count" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
+              </div>
+              <div class="card p-0 overflow-x-auto" id="ops-pr-table"></div>
+            </div>
+            <!-- Cost & Hotspots -->
+            <div id="ops-cost" class="ops-pane hidden">
+              <div id="ops-cost-kpis" class="grid grid-cols-2 lg:grid-cols-3 gap-5 mb-6"></div>
+              <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6" id="ops-segments"></div>
+              <h2 class="text-sm font-bold text-slate-700 mb-3">Top RTO cities <span class="font-normal text-slate-400">(all-time · ≥30 shipments) — candidates to block COD / add verification</span></h2>
+              <div class="card p-0 overflow-x-auto" id="ops-cities"></div>
+            </div>
+          </div>
+        </div><!-- /ops-control-view -->
 
     </main>
 </div>
