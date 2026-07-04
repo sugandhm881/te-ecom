@@ -3222,9 +3222,9 @@ function opsTable(){ const c=document.getElementById('ops-table'); const d=_opsD
     list=opsSortBy(list,_opsSortNdr);
     const cnt=document.getElementById('ops-count'); if(cnt) cnt.textContent=`${list.length} order${list.length===1?'':'s'}`;
     if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">Nothing matches — queue is clear 🎉</div>'; return; }
-    const td='px-4 py-3 text-sm text-slate-700 border-b border-slate-50 align-top';
-    const H=(k,lbl,extra)=>`<th data-k="${k}" class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide border-b border-slate-100 bg-slate-50 ${extra||''}">${lbl}${opsArrow(_opsSortNdr,k)}</th>`;
-    const Hp=lbl=>`<th class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide border-b border-slate-100 bg-slate-50">${lbl}</th>`;
+    const td=OPS_TD;
+    const H=(k,lbl,extra)=>`<th data-k="${k}" class="${OPS_TH} cursor-pointer ${extra||''}">${lbl}${opsArrow(_opsSortNdr,k)}</th>`;
+    const Hp=lbl=>`<th class="${OPS_TH}">${lbl}</th>`;
     const inr=n=>n!=null?'₹'+n.toLocaleString('en-IN'):'—';
     const rows=list.slice(0,500).map(r=>{
         const dn=r.daysInNdr==null?'—':r.daysInNdr+'d';
@@ -3245,8 +3245,8 @@ function opsTable(){ const c=document.getElementById('ops-table'); const d=_opsD
     const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
     c.innerHTML=`<table class="w-full"><thead><tr>${H('daysInNdr','Aging')}${H('order','Order / AWB')}${Hp('Customer')}${H('value','Value')}${Hp('Pay / Type')}${H('courier','Courier')}${H('ndrs','NDRs','text-right')}${Hp('Reasons')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
 }
-const OPS_TH='px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide border-b border-slate-100';
-const OPS_TD='px-4 py-3 text-sm text-slate-700 border-b border-slate-50 align-top';
+const OPS_TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
+const OPS_TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
 
 // ── Pre-dispatch Risk ──
 async function opsLoadRisk(){
@@ -3403,6 +3403,37 @@ async function opsLoadPrepaidRisk(){
         opsPrTable();
     }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
 }
+// Prepaid-risk click-to-expand: risk breakdown + timeline + scan log (reuses the DP shipment endpoint).
+let _opsPrOpen=null; const _opsPrScan={};
+function opsPrDetail(r){ const sc=_opsPrScan[r.awb];
+    const reasons=(r.reasons||[]).map(x=>`<span class="inline-block px-2 py-0.5 rounded bg-white border border-slate-200 text-slate-600 text-xs mr-1 mb-1">${x}</span>`).join('')||'—';
+    let tl='<div class="text-slate-400 text-xs">Loading…</div>';
+    if(sc&&sc.journey&&sc.journey.ts){ const ts=sc.journey.ts;
+        const step=(label,iso,color)=>{ const on=!!iso; return `<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:${on?color:'#cbd5e1'}"></span><span class="w-28 text-slate-500">${label}</span><span class="tabular-nums ${on?'text-slate-700 font-medium':'text-slate-300'}">${dpFmtTs(iso)}</span></div>`; };
+        tl=step('Order placed',ts.order,'#6366f1')+step('Picked up',ts.dispatched,'#0ea5e9')+step('Out for delivery',ts.ofd,'#f59e0b')+step('Promised EDD',ts.edd,'#8b5cf6'); }
+    let scanHtml;
+    if(!sc||sc.loading) scanHtml='<div class="text-slate-400 text-xs py-3">Loading scan log…</div>';
+    else if(sc.error) scanHtml=`<div class="text-rose-400 text-xs py-3">Couldn’t load: ${sc.error}</div>`;
+    else if(!sc.scans||!sc.scans.length) scanHtml='<div class="text-slate-400 text-xs py-3">No scan log available.</div>';
+    else scanHtml=`<div class="space-y-1 max-h-56 overflow-auto pr-1">${sc.scans.map(s=>`<div class="flex gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${s.desc}${s.code?` <span class="text-slate-400">(${s.code})</span>`:''}${s.location?` <span class="text-slate-400">· ${s.location}</span>`:''}</span></div>`).join('')}</div>`+(sc.live?'<div class="text-[10px] text-emerald-500 mt-1">● fetched live from courier</div>':'');
+    return `<tr class="ops-pr-detail"><td colspan="7" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
+        <div class="grid md:grid-cols-3 gap-6">
+          <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Risk ${r.risk}% · ${r.band}</div>
+            <div class="mb-2">${reasons}</div>
+            <div class="text-xs text-slate-500">📍 Destination: <b class="text-slate-700">${[r.dest_city,r.dest_state].filter(Boolean).join(', ')||'—'}${r.dest_pincode?` · ${r.dest_pincode}`:''}</b></div>
+            <div class="text-xs text-slate-500 mt-1">Value: <b class="text-slate-700">${r.value!=null?OPS_INR(r.value):'—'}</b> · Zone <b class="text-slate-700">${r.zone||'—'}</b> · ${r.courier||'—'}</div>
+            ${r.phone?`<div class="text-xs text-slate-500 mt-1">📞 <a href="tel:${r.phone}" class="text-indigo-600 hover:underline">${r.phone}</a></div>`:''}</div>
+          <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Timeline</div>${tl}</div>
+          <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log</div>${scanHtml}</div>
+        </div></td></tr>`;
+}
+async function opsPrLoadScans(awb){ _opsPrScan[awb]={loading:true}; try{
+        const r=await fetch(`/api/delivery-performance/shipment/${encodeURIComponent(awb)}`,{headers:getAuthHeaders()});
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _opsPrScan[awb]={loading:false,scans:d.scans||[],live:!!d.live,journey:d.journey||null};
+    }catch(e){ _opsPrScan[awb]={loading:false,error:e.message}; }
+    if(_opsPrOpen===awb) opsPrTable();
+}
 function opsPrTable(){ const c=document.getElementById('ops-pr-table'); const d=_opsPr; if(!d||!c) return;
     const q=(document.getElementById('ops-pr-search')?.value||'').trim().toLowerCase();
     const fB=document.getElementById('ops-prf-band')?.value||'all';
@@ -3417,21 +3448,52 @@ function opsPrTable(){ const c=document.getElementById('ops-pr-table'); const d=
     const rows=list.slice(0,500).map(r=>{
         const bar=r.band==='High'?'bg-red-500':'bg-amber-500', badge=r.band==='High'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700';
         const ph=r.phone?`<a href="tel:${r.phone}" class="text-indigo-600 hover:underline">${r.phone}</a>`:'<span class="text-slate-300">—</span>';
-        return `<tr>`+
+        const open=r.awb===_opsPrOpen;
+        let out=`<tr class="ops-pr-row cursor-pointer ${open?'bg-indigo-50/60':''}" data-awb="${r.awb||''}">`+
           `<td class="${OPS_TD}"><div class="flex items-center gap-2"><span class="inline-flex px-2 py-0.5 rounded-md text-xs font-bold ${badge} tabular-nums">${r.risk}%</span><div class="w-14 h-1.5 bg-slate-100 rounded overflow-hidden"><div class="${bar} h-1.5" style="width:${r.risk}%"></div></div></div></td>`+
-          `<td class="${OPS_TD} font-semibold">${r.order||'—'}<div class="text-xs text-slate-400 font-normal">${r.awb||''}</div></td>`+
+          `<td class="${OPS_TD} font-semibold"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${r.order||'—'}<div class="text-xs text-slate-400 font-normal ml-4">${r.awb||''}</div></td>`+
           `<td class="${OPS_TD} font-semibold tabular-nums">${r.value!=null?OPS_INR(r.value):'—'}</td>`+
           `<td class="${OPS_TD}">${r.courier||'—'}<div class="text-xs text-slate-400">Zone ${r.zone||'—'}</div></td>`+
           `<td class="${OPS_TD} text-right tabular-nums">${r.daysInTransit!=null?r.daysInTransit+'d':'—'}</td>`+
           `<td class="${OPS_TD}">${ph}</td>`+
           `<td class="${OPS_TD} text-slate-500 text-xs">${(r.reasons||[]).join(' · ')||'—'}</td>`+
-        `</tr>`; }).join('');
+        `</tr>`;
+        if(open) out+=opsPrDetail(r);
+        return out; }).join('');
     const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
     c.innerHTML=`<table class="w-full"><thead><tr>${H('risk','Risk')}${H('order','Order')}${H('value','Value',1)}${H('courier','Courier')}${H('daysInTransit','In transit',1)}${Hp('Customer')}${Hp('Why')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+    c.querySelectorAll('.ops-pr-row').forEach(row=>row.addEventListener('click',e=>{ if(e.target.closest('a')) return;   // let phone links work
+        const awb=row.dataset.awb; if(!awb) return;
+        _opsPrOpen=(_opsPrOpen===awb)?null:awb; opsPrTable();
+        if(_opsPrOpen && !_opsPrScan[awb]) opsPrLoadScans(awb); }));
 }
 
 // ─── Delivery Performance (RTO / NDR / FASR) ─────────────────────────────────
-let _dpFrom = null, _dpTo = null, _dpData = null, _dpWired = false, _dpSource = 'all', _dpPayment = 'all', _dpZone = 'all', _dpCourier = 'all', _dpOrderType = 'all', _dpCompare = false;
+let _dpFrom = null, _dpTo = null, _dpData = null, _dpWired = false, _dpSource = 'all', _dpPayment = 'all', _dpZone = [], _dpState = [], _dpCourier = 'all', _dpOrderType = 'all', _dpCompare = false, _dpTatFilter = null;
+// Order→Dispatch TAT buckets (must mirror BUCKETS_HRS in delivery_reports.js). [borderColor, rowTint].
+const DP_TAT_BUCKETS = [
+  { label: '0-12',  max: 12,       color: '#22c55e', tint: '#f0fdf4' },
+  { label: '12-24', max: 24,       color: '#0ea5e9', tint: '#f0f9ff' },
+  { label: '24-36', max: 36,       color: '#f59e0b', tint: '#fffbeb' },
+  { label: '36-48', max: 48,       color: '#f97316', tint: '#fff7ed' },
+  { label: '48+',   max: Infinity, color: '#ef4444', tint: '#fef2f2' },
+];
+function dpOtdBucket(h){ if(h==null||isNaN(h)) return -1; for(let i=0;i<DP_TAT_BUCKETS.length;i++) if(h<=DP_TAT_BUCKETS[i].max) return i; return DP_TAT_BUCKETS.length-1; }
+// Shipment table sort + click-to-expand detail state.
+let _dpSort={key:'order_date',dir:'desc'}, _dpOpenAwb=null; const _dpScanCache={};
+// Format an ISO timestamp as "27 Jun, 2:04 PM" (local). '—' if missing.
+function dpFmtTs(iso){ if(!iso) return '—'; const d=new Date(iso); if(isNaN(d)) return '—';
+  return d.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'numeric',minute:'2-digit',hour12:true}); }
+// "2026-06-23" → "23 Jun" (compact, no wrap).
+const DP_MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function dpShortDate(ymd){ if(!ymd) return '—'; const p=String(ymd).split('-'); if(p.length<3) return ymd; return `${+p[2]} ${DP_MON[(+p[1])-1]||''}`; }
+function dpSortVal(r,key){ switch(key){
+  case 'attempts': return r.attempts||0; case 'ndr_count': return r.ndr_count||0;
+  case 'otdHrs': return r.otdHrs==null?-1:r.otdHrs;
+  case 'order_date': return r.ts&&r.ts.order?r.ts.order:'';
+  case 'order': return (r.order||'').toLowerCase(); case 'state': return r.state||'';
+  case 'courier': return (r.courier||'').toLowerCase(); case 'zone': return r.zone||'';
+  case 'type': return r.order_type||''; default: return ''; } }
 function dpDaysAgo(d){ const t=new Date(); t.setDate(t.getDate()-d); return t.toISOString().slice(0,10); }
 function dpPresetRange(preset){
     const iso=d=>d.toISOString().slice(0,10), today=new Date();
@@ -3459,7 +3521,28 @@ function dpInit(){
             [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
             b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
             _dpPayment=b.dataset.p; dpLoad(); });
-        document.getElementById('dp-zone')?.addEventListener('change', e=>{ _dpZone=e.target.value; dpLoad(); });
+        // Zone + State multi-select dropdowns (checkbox panels).
+        [['dp-zone-multi','zone'],['dp-geostate-multi','state']].forEach(([wrapId,key])=>{
+            const wrap=document.getElementById(wrapId); if(!wrap) return;
+            const btn=wrap.querySelector('.dp-multi-btn'), panel=wrap.querySelector('.dp-multi-panel');
+            const arr=()=>key==='zone'?_dpZone:_dpState;
+            btn.addEventListener('click',e=>{ e.stopPropagation(); const wasOpen=!panel.classList.contains('hidden');
+                document.querySelectorAll('#delivery-perf-view .dp-multi-panel').forEach(p=>p.classList.add('hidden'));
+                if(!wasOpen){ panel.classList.remove('hidden'); panel.querySelector('.dp-multi-search')?.focus(); } });
+            panel.addEventListener('click',e=>{ e.stopPropagation();
+                if(e.target.classList.contains('dp-multi-clear')){ arr().length=0; dpLoad(); }
+                else if(e.target.classList.contains('dp-multi-all')){   // select all VISIBLE (respects the search filter)
+                    const a=arr();
+                    [...panel.querySelectorAll('.dp-multi-item')].filter(it=>it.style.display!=='none')
+                        .forEach(it=>{ const v=it.querySelector('input').value; if(!a.includes(v)) a.push(v); });
+                    dpLoad();
+                } });
+            panel.addEventListener('change',e=>{ if(e.target.type!=='checkbox') return; const a=arr(), v=e.target.value, i=a.indexOf(v);
+                if(e.target.checked){ if(i<0) a.push(v); } else if(i>=0) a.splice(i,1); dpLoad(); });
+            panel.addEventListener('input',e=>{ if(!e.target.classList.contains('dp-multi-search')) return;
+                _dpMultiSearch[key]=e.target.value; dpMultiFilter(panel, e.target.value); });
+        });
+        document.addEventListener('click',()=>document.querySelectorAll('#delivery-perf-view .dp-multi-panel').forEach(p=>p.classList.add('hidden')));
         document.getElementById('dp-courier-filter')?.addEventListener('change', e=>{ _dpCourier=e.target.value; dpTableRender(); });
         document.getElementById('dp-ordertype')?.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return;
             [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
@@ -3473,7 +3556,7 @@ function dpInit(){
 async function dpLoad(){
     const kpi=document.getElementById('dp-kpis'); if(kpi) kpi.innerHTML='<div class="text-slate-400 text-sm p-6">Loading delivery data…</div>';
     try{
-        const r=await fetch(`/api/delivery-performance?from=${_dpFrom}&to=${_dpTo}&source=${_dpSource}&payment=${_dpPayment}&zone=${encodeURIComponent(_dpZone)}&order_type=${_dpOrderType}&compare=1`, { headers: getAuthHeaders() });
+        const r=await fetch(`/api/delivery-performance?from=${_dpFrom}&to=${_dpTo}&source=${_dpSource}&payment=${_dpPayment}&zone=${encodeURIComponent(_dpZone.join(','))}&state=${encodeURIComponent(_dpState.join(','))}&order_type=${_dpOrderType}&compare=1`, { headers: getAuthHeaders() });
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _dpData=d; dpRender(d);
     }catch(e){ if(kpi) kpi.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
@@ -3516,23 +3599,40 @@ function dpRender(d){
     const k=d.kpis, c=d.compare&&d.compare.kpis;
     document.getElementById('dp-range').textContent=`${d.range.from} → ${d.range.to} · ${k.totalShipments} tracked = ${k.resolved} shipped (delivered+RTO) + ${k.pending} NDR-pending + ${k.inTransit} in-transit${k.lost?` + ${k.lost} lost`:''}`+(c?`  ·  vs prev ${d.compare.range.from} → ${d.compare.range.to} (${c.totalShipments} tracked)`:'');
     document.getElementById('dp-kpis').innerHTML = [
-        {label:'First-Attempt Strike Rate', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.bolt,   val:k.fasr+'%',            foot:`${k.fasrNumerator} of ${k.totalShipments} on 1st attempt`, cur:k.fasr,            prev:c?c.fasr:null,            better:true,  unit:'pp'},
+        {label:'First-Attempt Strike Rate', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.bolt,   val:k.fasr+'%',            foot:`${k.fasrNumerator} of ${k.totalShipments} tracked on 1st attempt`, cur:k.fasr,            prev:c?c.fasr:null,            better:true,  unit:'pp'},
         {label:'NDR Recovery',            accent:'#059669', tint:'#ecfdf5', icon:DP_ICONS.refresh, val:k.ndrRecoveryRate+'%', foot:`${k.ndrRecovered} of ${k.ndrTotal} NDRs recovered`,      cur:k.ndrRecoveryRate, prev:c?c.ndrRecoveryRate:null, better:true,  unit:'pp'},
         {label:'RTO Rate',                accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn,   val:k.rtoRate+'%',         foot:`${k.rto} of ${k.totalShipments} returned`,               cur:k.rtoRate,         prev:c?c.rtoRate:null,         better:false, unit:'pp'},
         {label:'Avg Delivery Attempts',   accent:'#0891b2', tint:'#ecfeff', icon:DP_ICONS.hash,    val:k.avgAttempts,         foot:`across ${k.resolved} resolved`,                          cur:k.avgAttempts,     prev:c?c.avgAttempts:null,     better:false, unit:''},
     ].map(dpKpiCard).join('');
     dpStatus(d.statusBreakdown, c);
     dpRto(d.rtoBreakdown, c);
-    dpZones(d.zones); dpCouriers(d.couriers); dpTat(d.tat, c);
+    dpMulti('zone', d.zones); dpMulti('state', d.states); dpCouriers(d.couriers); dpTat(d.tat, c);
     dpFasr(d.fasrTrend); dpFunnel(d.ndrFunnel); dpCourier(d.rtoByCourier); dpTableRender();
 }
 // Populate the Zone dropdown from the window's zones (preserves current selection).
-function dpZones(zones){ const sel=document.getElementById('dp-zone'); if(!sel) return;
-    const cur=_dpZone;
-    let html='<option value="all">All zones</option>';
-    (zones||[]).forEach(z=>{ html+=`<option value="${z.zone.replace(/"/g,'&quot;')}">${z.zone} (${z.count})</option>`; });
-    sel.innerHTML=html; sel.value=cur; if(sel.value!==cur){ _dpZone='all'; sel.value='all'; } // selected zone gone from window
+// Multi-select checkbox dropdown for Zone / State — with search + Select all / Clear all.
+const _dpMultiSearch = { zone:'', state:'' };
+function dpMulti(key, options){
+    const cfg = key==='zone'
+      ? { wrapId:'dp-zone-multi', sel:_dpZone, all:'All zones', word:'Zones', fmt:o=>`Zone ${o.zone}` }
+      : { wrapId:'dp-geostate-multi', sel:_dpState, all:'All states', word:'States', fmt:o=>o.state };
+    const wrap=document.getElementById(cfg.wrapId); if(!wrap) return;
+    const btn=wrap.querySelector('.dp-multi-btn'), panel=wrap.querySelector('.dp-multi-panel');
+    const opts=(options||[]).map(o=>({ v:String(key==='zone'?o.zone:o.state), l:cfg.fmt(o), c:o.count }));
+    const valid=new Set(opts.map(o=>o.v)); for(let i=cfg.sel.length-1;i>=0;i--){ if(!valid.has(cfg.sel[i])) cfg.sel.splice(i,1); }
+    btn.innerHTML = (cfg.sel.length===0 ? `<span class="text-slate-400">${cfg.all}</span>`
+      : cfg.sel.length===1 ? cfg.sel[0] : `${cfg.word}: ${cfg.sel.length}`) + ' <span class="text-slate-400">▾</span>';
+    const items = opts.map(o=>`<label class="dp-multi-item" data-s="${o.l.toLowerCase().replace(/"/g,'&quot;')}"><input type="checkbox" value="${o.v.replace(/"/g,'&quot;')}" ${cfg.sel.includes(o.v)?'checked':''}><span class="flex-1">${o.l}</span><span class="dp-multi-count">${o.c}</span></label>`).join('');
+    panel.innerHTML =
+      `<div class="dp-multi-head">`+
+        `<input type="text" class="dp-multi-search" placeholder="Search…" value="${_dpMultiSearch[key].replace(/"/g,'&quot;')}">`+
+        `<div class="dp-multi-actions"><button type="button" class="dp-multi-all">Select all</button><button type="button" class="dp-multi-clear">Clear all</button></div>`+
+      `</div>`+
+      `<div class="dp-multi-list">${items||'<div class="px-3 py-2 text-xs text-slate-400">No options</div>'}</div>`;
+    dpMultiFilter(panel, _dpMultiSearch[key]);
 }
+function dpMultiFilter(panel, term){ const t=String(term||'').trim().toLowerCase();
+    panel.querySelectorAll('.dp-multi-item').forEach(it=>{ it.style.display=(!t||(it.dataset.s||'').includes(t))?'':'none'; }); }
 // Populate the Courier dropdown from the window's couriers (preserves current selection).
 function dpCouriers(couriers){ const sel=document.getElementById('dp-courier-filter'); if(!sel) return;
     const cur=_dpCourier;
@@ -3541,25 +3641,38 @@ function dpCouriers(couriers){ const sel=document.getElementById('dp-courier-fil
     sel.innerHTML=html; sel.value=cur; if(sel.value!==cur){ _dpCourier='all'; sel.value='all'; }
 }
 // TAT Dashboard — two cards: Order→Dispatch and Dispatch→Delivery, avg + bucket bars (0-1/1-3/3-5/5+).
-function dpTatCard(title,sub,t,prevAvg){ if(!t){ return ''; }
+function dpTatCard(title,sub,t,prevAvg,filterable){ if(!t){ return ''; }
     const colors=['bg-green-500','bg-sky-500','bg-amber-500','bg-orange-500','bg-red-500'];
     const tot=t.count||0, suffix=t.unit==='hrs'?'h':'d', unitLbl=t.unit==='hrs'?'hrs':'days';
     const bars=(t.buckets||[]).map((b,i)=>{ const n=b.count||0, pctv=tot?Math.round(n/tot*100):0;
-        return `<div class="flex items-center gap-2 text-xs">
-          <span class="w-14 text-slate-500 tabular-nums">${b.label}${suffix}</span>
+        const active=filterable && _dpTatFilter===i;
+        // When filterable, each row is a clickable button that filters the shipment table to that bucket.
+        const cls=filterable?`dp-tatbar w-full flex items-center gap-2 text-xs rounded-md px-1 py-0.5 -mx-1 cursor-pointer transition-colors ${active?'':'hover:bg-slate-50'}`:'flex items-center gap-2 text-xs';
+        const style=active?`style="background:${DP_TAT_BUCKETS[i].tint};box-shadow:inset 0 0 0 2px ${DP_TAT_BUCKETS[i].color}"`:'';
+        const tag=filterable?'button':'div';
+        const attrs=filterable?`data-bucket="${i}" title="Click to show these ${n} shipments in the table"`:'';
+        return `<${tag} type="button" class="${cls}" ${attrs} ${style}>
+          <span class="w-14 text-slate-500 tabular-nums text-left">${b.label}${suffix}</span>
           <div class="flex-1 h-4 bg-slate-100 rounded overflow-hidden"><div class="${colors[i%colors.length]} h-4 rounded" style="width:${pctv}%"></div></div>
           <span class="w-16 text-right text-slate-600 tabular-nums">${n} · ${pctv}%</span>
-        </div>`; }).join('');
+        </${tag}>`; }).join('');
+    const hint=filterable?`<span class="text-[10px] text-indigo-400 ml-1">${_dpTatFilter!=null?'· filtering — click again to clear':'· click a bucket to filter'}</span>`:'';
     return `<div class="card p-5">
         <div class="flex items-start justify-between"><h2 class="text-sm font-bold text-slate-700">${title}</h2>
           <div class="text-right"><div><span class="text-2xl font-bold text-slate-800 tabular-nums">${t.avg}</span><span class="text-xs text-slate-400 ml-1">avg ${unitLbl}</span></div>${dpNumDelta(t.avg,prevAvg,suffix)}</div></div>
-        <p class="text-xs text-slate-400 mb-3">${sub} · ${tot} shipments</p>
+        <p class="text-xs text-slate-400 mb-3">${sub} · ${tot} shipments${hint}</p>
         <div class="space-y-1.5">${bars}</div></div>`;
 }
 function dpTat(t,c){ const el=document.getElementById('dp-tat'); if(!el) return; if(!t){ el.innerHTML=''; return; }
     el.innerHTML =
-        dpTatCard('Order → Dispatch TAT','Time from order to courier pickup', t.orderToDispatch, c?c.otdAvg:null)+
+        dpTatCard('Order → Dispatch TAT','Time from order to courier pickup', t.orderToDispatch, c?c.otdAvg:null, true)+
         dpTatCard('Dispatch → Delivery TAT','Courier transit time to delivery', t.dispatchToDelivery, c?c.dtdAvg:null);
+    // Wire the Order→Dispatch buckets: toggle the TAT filter and refresh the table (colored by bucket).
+    el.querySelectorAll('.dp-tatbar').forEach(b=>b.addEventListener('click',()=>{
+        const i=+b.dataset.bucket; _dpTatFilter = (_dpTatFilter===i)?null:i;
+        dpTat(t,c); dpTableRender();
+        if(_dpTatFilter!=null) document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'});
+    }));
 }
 // Clickable partition chip — filters the shipment explorer to that state. Sums to `total`.
 function dpStatusChip(dot,label,val,total,state,prevShare){ const p=total?Math.round(val/total*1000)/10:0;
@@ -3603,7 +3716,11 @@ function dpFasr(rows){ const el=document.getElementById('dp-fasr'); if(!rows||!r
     const pts=rows.map((r,i)=>`${xs[i]},${y(r.fasr)}`).join(' ');
     const dots=rows.map((r,i)=>`<circle cx="${xs[i]}" cy="${y(r.fasr)}" r="4" fill="#4f46e5" data-i="${i}"/>`).join('');
     const step=Math.ceil(rows.length/7); const xl=rows.map((r,i)=>i%step===0?`<text x="${xs[i]}" y="${H-8}" text-anchor="middle" fill="#94a3b8" font-size="11">${r.date.slice(5)}</text>`:'').join('');
-    el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%">${g}<polyline points="${pts}" fill="none" stroke="#4f46e5" stroke-width="2" stroke-linejoin="round"/>${dots}${xl}</svg>`;
+    // Weighted-average line = Σfirst / Σresolved — this equals the FASR card value (period average).
+    const sumF=rows.reduce((a,r)=>a+(r.first||0),0), sumR=rows.reduce((a,r)=>a+(r.reached||0),0);
+    const avg=sumR?Math.round(sumF/sumR*1000)/10:0; const ay=y(avg);
+    const avgLine=`<line x1="${p.l}" y1="${ay}" x2="${W-p.r}" y2="${ay}" stroke="#4f46e5" stroke-width="1.5" stroke-dasharray="5 4" opacity="0.6"/><text x="${W-p.r}" y="${ay-5}" text-anchor="end" fill="#4f46e5" font-size="11" font-weight="600">avg ${avg}%</text>`;
+    el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%">${g}${avgLine}<polyline points="${pts}" fill="none" stroke="#4f46e5" stroke-width="2" stroke-linejoin="round"/>${dots}${xl}</svg>`;
     el.querySelectorAll('circle').forEach(c=>{ c.addEventListener('mousemove',e=>{const r=rows[+c.dataset.i];dpShow(`<b>${r.date}</b> · FASR ${r.fasr}% (${r.first}/${r.reached})`,e.clientX,e.clientY);}); c.addEventListener('mouseleave',dpHide); });
 }
 function dpFunnel(f){ const el=document.getElementById('dp-funnel'); const total=f&&f.total||0;
@@ -3664,29 +3781,91 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
     else if(state==='rto_silent') list=list.filter(r=>r.state==='rto' && (r.ndr_count||0)===0);
     else if(state!=='all') list=list.filter(r=>r.state===state);
     if(_dpCourier!=='all') list=list.filter(r=>(r.courier||'Unknown')===_dpCourier);
+    if(_dpTatFilter!=null) list=list.filter(r=>dpOtdBucket(r.otdHrs)===_dpTatFilter);   // Order→Dispatch TAT bucket
     if(q) list=list.filter(r=>(r.order||'').toLowerCase().includes(q)||(r.awb||'').toLowerCase().includes(q));
     const cnt=document.getElementById('dp-count');
-    if(cnt) cnt.textContent=`${list.length} shown${d.shipmentsTruncated?` · list capped at ${all.length} of ${d.shipmentsTotal}`:''}`;
+    if(cnt) cnt.textContent=`${list.length} shown${_dpTatFilter!=null?` · O→Dispatch ${DP_TAT_BUCKETS[_dpTatFilter].label}h`:''}${d.shipmentsTruncated?` · list capped at ${all.length} of ${d.shipmentsTotal}`:''}`;
     if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-6">No shipments match this filter</div>'; return; }
-    const th='px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide border-b border-slate-100';
-    const td='px-4 py-2.5 text-sm text-slate-700 border-b border-slate-50 align-top';
+    // ── sort (click a header to change) ──
+    const dir=_dpSort.dir==='asc'?1:-1;
+    list=list.slice().sort((a,b)=>{ const va=dpSortVal(a,_dpSort.key), vb=dpSortVal(b,_dpSort.key); return va<vb?-dir:va>vb?dir:0; });
+    const th='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
+    const td='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
+    const cols=[{k:'order',l:'Order / AWB'},{k:'state',l:'State'},{k:'type',l:'Type'},{k:'courier',l:'Courier'},
+        {k:'attempts',l:'Att',a:1},{k:'ndr_count',l:'NDR',a:1},{k:null,l:'Pay'},{k:null,l:'Zone',c:1},
+        {k:'order_date',l:'Ordered'},{k:'otdHrs',l:'O→Disp'},{k:null,l:'NDR reasons'}];
+    const head=cols.map(col=>{ const al=col.a?' text-right':col.c?' text-center':'';
+        if(!col.k) return `<th class="${th}${al}">${col.l}</th>`;
+        const act=_dpSort.key===col.k;
+        const arrow=act?`<span class="text-indigo-500">${_dpSort.dir==='asc'?'↑':'↓'}</span>`:'<span class="text-slate-300 opacity-0 group-hover:opacity-100">↕</span>';
+        return `<th class="${th}${al} dp-sort group cursor-pointer select-none hover:text-slate-600 ${act?'text-slate-600':''}" data-k="${col.k}">${col.l} ${arrow}</th>`; }).join('');
     const rows=list.slice(0,500).map(r=>{ const b=DP_STATE_BADGE[r.state]||['—','bg-slate-100 text-slate-600'];
-        const pay=r.payment?`<span class="px-1.5 py-0.5 rounded text-xs ${/cod/i.test(r.payment)?'bg-orange-100 text-orange-700':'bg-emerald-100 text-emerald-700'}">${/cod/i.test(r.payment)?'COD':'Prepaid'}</span>`:'<span class="text-slate-300">—</span>';
-        const typ=r.order_type==='repeat'?'<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-violet-100 text-violet-700">Repeat</span>':r.order_type==='new'?'<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">New</span>':'<span class="text-slate-300">—</span>';
-        return `<tr>`+
-          `<td class="${td} font-semibold">${r.order||'—'} ${r.source==='docpharma'?'<span class="text-slate-400 text-xs">· DP</span>':''}<div class="text-xs text-slate-400 font-normal">${r.awb||''}</div></td>`+
-          `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${b[1]}">${b[0]}</span></td>`+
+        // TAT bucket drives ONLY a slim left accent stripe + a soft-tint pill (keeps rows clean, not loud).
+        const bi=dpOtdBucket(r.otdHrs), bk=bi>=0?DP_TAT_BUCKETS[bi]:null, open=r.awb===_dpOpenAwb;
+        const rowCls=open?'bg-indigo-50/70':'hover:bg-slate-50';
+        const stripe=`box-shadow:inset 3px 0 0 ${bk?bk.color:'transparent'}`;
+        const otdCell=bk?`<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold tabular-nums" style="background:${bk.color}1f;color:${bk.color}">${Math.round(r.otdHrs)}h<span class="font-normal opacity-70">${bk.label}</span></span>`:'<span class="text-slate-300">—</span>';
+        const pay=r.payment?`<span class="px-1.5 py-0.5 rounded text-[11px] font-medium ${/cod/i.test(r.payment)?'bg-orange-100 text-orange-700':'bg-emerald-100 text-emerald-700'}">${/cod/i.test(r.payment)?'COD':'Prepaid'}</span>`:'<span class="text-slate-300">—</span>';
+        const typ=r.order_type==='repeat'?'<span class="px-1.5 py-0.5 rounded text-[11px] font-medium bg-violet-100 text-violet-700">Repeat</span>':r.order_type==='new'?'<span class="px-1.5 py-0.5 rounded text-[11px] font-medium bg-blue-100 text-blue-700">New</span>':'<span class="text-slate-300">—</span>';
+        const reasons=(r.reasons||[]).join(' · ');
+        let out=`<tr class="dp-row cursor-pointer transition-colors ${rowCls}" data-awb="${r.awb||''}">`+
+          `<td class="${td}" style="${stripe}"><div class="flex items-center gap-1.5"><span class="text-slate-300 text-xs w-3">${open?'▾':'▸'}</span><div><div class="font-semibold text-slate-800 leading-tight">${r.order||'—'}${r.source==='docpharma'?'<span class="text-slate-400 text-[10px] font-normal ml-1">DP</span>':''}</div><div class="text-[11px] text-slate-400 leading-tight">${r.awb||''}</div></div></div></td>`+
+          `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${b[1]}">${b[0]}</span></td>`+
           `<td class="${td}">${typ}</td>`+
-          `<td class="${td}">${r.courier||'—'}</td>`+
-          `<td class="${td} text-right tabular-nums">${r.attempts}</td>`+
-          `<td class="${td} text-right tabular-nums">${r.ndr_count}</td>`+
+          `<td class="${td} text-slate-600"><div class="truncate max-w-[130px]" title="${r.courier||''}">${r.courier||'—'}</div></td>`+
+          `<td class="${td} text-right tabular-nums ${r.attempts>1?'text-slate-800 font-medium':'text-slate-400'}">${r.attempts}</td>`+
+          `<td class="${td} text-right tabular-nums ${r.ndr_count>0?'text-rose-600 font-medium':'text-slate-400'}">${r.ndr_count}</td>`+
           `<td class="${td}">${pay}</td>`+
-          `<td class="${td} text-slate-500">${r.zone||'<span class="text-slate-300">—</span>'}</td>`+
-          `<td class="${td} text-slate-400 tabular-nums">${r.order_date||'—'}</td>`+
-          `<td class="${td} text-slate-500 text-xs">${(r.reasons||[]).join('; ')||'—'}</td>`+
-        `</tr>`; }).join('');
-    const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length} — narrow with search or filters</div>`:'';
-    c.innerHTML=`<table class="w-full"><thead><tr><th class="${th}">Order / AWB</th><th class="${th}">State</th><th class="${th}">Type</th><th class="${th}">Courier</th><th class="${th} text-right">Att.</th><th class="${th} text-right">NDRs</th><th class="${th}">Pay</th><th class="${th}">Zone</th><th class="${th}">Order date</th><th class="${th}">NDR reasons</th></tr></thead><tbody>${rows}</tbody></table>${more}`;
+          `<td class="${td} text-center text-slate-500 font-medium">${r.zone||'<span class="text-slate-300">—</span>'}</td>`+
+          `<td class="${td} text-slate-500 tabular-nums">${dpShortDate(r.order_date)}</td>`+
+          `<td class="${td}">${otdCell}</td>`+
+          `<td class="px-3 py-2.5 text-sm border-b border-slate-100 align-middle"><div class="truncate max-w-[240px] text-xs text-slate-500" title="${reasons.replace(/"/g,'&quot;')}">${reasons||'—'}</div></td>`+
+        `</tr>`;
+        if(open) out+=dpRenderDetail(r,td);
+        return out; }).join('');
+    const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center border-t border-slate-100">Showing first 500 of ${list.length} — narrow with search or filters</div>`:'';
+    c.innerHTML=`<div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>${more}`;
+    c.querySelectorAll('.dp-sort').forEach(h=>h.addEventListener('click',()=>{ const k=h.dataset.k;
+        if(_dpSort.key===k) _dpSort.dir=_dpSort.dir==='asc'?'desc':'asc';
+        else _dpSort={key:k, dir:(['attempts','ndr_count','otdHrs','order_date'].includes(k)?'desc':'asc')};
+        dpTableRender(); }));
+    c.querySelectorAll('.dp-row').forEach(row=>row.addEventListener('click',()=>{ const awb=row.dataset.awb; if(!awb) return;
+        _dpOpenAwb=(_dpOpenAwb===awb)?null:awb; dpTableRender();
+        if(_dpOpenAwb && !_dpScanCache[awb]) dpLoadScans(awb); }));
+}
+// Expanded detail row — date-log (instant, from stored timeline) + scan-log (fetched on demand).
+function dpRenderDetail(r,td){ const ts=r.ts||{};
+    const step=(label,iso,color)=>{ const on=!!iso; return `<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:${on?color:'#cbd5e1'}"></span><span class="w-28 text-slate-500">${label}</span><span class="tabular-nums ${on?'text-slate-700 font-medium':'text-slate-300'}">${dpFmtTs(iso)}</span></div>`; };
+    const timeline=step('Order placed',ts.order,'#6366f1')+step('Picked up',ts.dispatched,'#0ea5e9')+
+        step('Out for delivery',ts.ofd,'#f59e0b')+
+        (r.state==='rto'?step('RTO',ts.rto,'#ef4444'):step('Delivered',ts.delivered,'#16a34a'))+
+        step('Promised EDD',ts.edd,'#8b5cf6');
+    const dest=[r.dest_city,r.dest_state].filter(Boolean).join(', ');
+    const meta=`<div class="text-xs text-slate-500 mt-2 flex flex-wrap gap-x-4 gap-y-1">
+        <span>📍 Destination: <b class="text-slate-700">${dest||'—'}${r.dest_pincode?` · ${r.dest_pincode}`:''}</b>${r.zone?` <span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 font-semibold">Zone ${r.zone}</span>`:''}</span>
+        <span>Status code: <b class="text-slate-700">${r.status_code||'—'}</b></span>
+        <span>Attempts: <b class="text-slate-700">${r.attempts}</b></span>
+        <span>NDRs: <b class="text-slate-700">${r.ndr_count}</b></span>
+        ${r.otdHrs!=null?`<span>O→Dispatch: <b class="text-slate-700">${Math.round(r.otdHrs)}h</b></span>`:''}
+        ${(r.reasons&&r.reasons.length)?`<span>Reasons: <b class="text-slate-700">${r.reasons.join('; ')}</b></span>`:''}</div>`;
+    const sc=_dpScanCache[r.awb]; let scanHtml;
+    if(!sc||sc.loading) scanHtml='<div class="text-slate-400 text-xs py-3">Loading scan log…</div>';
+    else if(sc.error) scanHtml=`<div class="text-rose-400 text-xs py-3">Couldn’t load scans: ${sc.error}</div>`;
+    else if(!sc.scans||!sc.scans.length) scanHtml='<div class="text-slate-400 text-xs py-3">No scan log available for this shipment.</div>';
+    else scanHtml=`<div class="space-y-1 max-h-64 overflow-auto pr-1">${sc.scans.map(s=>`<div class="flex gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${s.desc}${s.code?` <span class="text-slate-400">(${s.code})</span>`:''}${s.location?` <span class="text-slate-400">· ${s.location}</span>`:''}</span></div>`).join('')}</div>${sc.live?'<div class="text-[10px] text-emerald-500 mt-1">● fetched live from courier</div>':''}`;
+    return `<tr class="dp-detail"><td colspan="11" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
+        <div class="grid md:grid-cols-2 gap-6">
+          <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Date log</div>${timeline}${meta}</div>
+          <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log</div>${scanHtml}</div>
+        </div></td></tr>`;
+}
+// Fetch the full scan log for one AWB (cached; served from DB if stored, else 1 live courier call).
+async function dpLoadScans(awb){ _dpScanCache[awb]={loading:true}; try{
+        const r=await fetch(`/api/delivery-performance/shipment/${encodeURIComponent(awb)}`,{headers:getAuthHeaders()});
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _dpScanCache[awb]={loading:false,scans:d.scans||[],live:!!d.live};
+    }catch(e){ _dpScanCache[awb]={loading:false,error:e.message}; }
+    if(_dpOpenAwb===awb) dpTableRender();
 }
 
 document.getElementById('btn-download-amazon-report')?.addEventListener('click', async () => {

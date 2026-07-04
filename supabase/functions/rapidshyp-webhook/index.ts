@@ -49,7 +49,7 @@ function codeOutcome(code: string): string | null {
 }
 
 // ── zone (A–E) from destination state/city, origin Gurgaon/NCR ──
-const ZONE_E = new Set(["jammu & kashmir", "jammu and kashmir", "j&k", "ladakh", "himachal pradesh", "assam", "meghalaya", "manipur", "mizoram", "nagaland", "tripura", "arunachal pradesh", "sikkim", "andaman & nicobar islands", "andaman and nicobar islands", "lakshadweep"]);
+const ZONE_E = new Set(["jammu & kashmir", "jammu and kashmir", "j&k", "ladakh", "himachal pradesh", "assam", "meghalaya", "manipur", "mizoram", "nagaland", "tripura", "arunachal pradesh", "sikkim", "andaman & nicobar islands", "andaman and nicobar islands", "lakshadweep", "kerala"]);
 const ZONE_B = new Set(["haryana", "delhi", "new delhi", "nct of delhi", "chandigarh"]);
 const ZONE_C = new Set(["maharashtra", "karnataka", "tamil nadu", "telangana", "west bengal", "gujarat"]);
 function zoneFromState(state: string, city: string): string | null {
@@ -67,7 +67,8 @@ function parseScanDate(v: any): string | null {
   if (!v) return null;
   const s = String(v).trim();
   const m = s.match(/^(\d{2})-(\d{2})-(\d{4})[ T](\d{2}):(\d{2}):(\d{2})/);
-  if (m) return `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:${m[6]}`;
+  // RapidShyp scan times are IST wall-clock (no zone) → stamp +05:30 so it stores as the correct UTC instant.
+  if (m) return `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:${m[6]}+05:30`;
   const d = new Date(s);
   return isNaN(d.getTime()) ? null : d.toISOString();
 }

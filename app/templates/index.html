@@ -96,6 +96,26 @@
     #dp-source button, #dp-payment button, #dp-ordertype button { border-radius:.5rem; font-weight:600; padding:4px 12px; transition:all .15s ease; color:#64748b; }
     #dp-source button:hover, #dp-payment button:hover, #dp-ordertype button:hover { color:#4f46e5; }
     #dp-source button.bg-indigo-600, #dp-payment button.bg-indigo-600, #dp-ordertype button.bg-indigo-600 { box-shadow:0 1px 3px rgba(79,70,229,.35); }
+    /* Zone / State multi-select dropdowns */
+    #delivery-perf-view .dp-multi { position:relative; }
+    #delivery-perf-view .dp-multi-btn { height:38px; min-width:130px; text-align:left; font-size:.875rem; padding:0 .8rem; border:1px solid #e2e8f0; border-radius:.6rem; background:#fff; color:#334155; display:flex; align-items:center; justify-content:space-between; gap:.4rem; cursor:pointer; transition:border-color .15s; white-space:nowrap; }
+    #delivery-perf-view .dp-multi-btn:hover { border-color:#c7d2fe; }
+    #delivery-perf-view .dp-multi-panel { position:absolute; z-index:40; top:calc(100% + 4px); left:0; min-width:200px; max-height:280px; overflow:auto; background:#fff; border:1px solid #e2e8f0; border-radius:.6rem; box-shadow:0 12px 30px -10px rgba(15,23,42,.25); padding:4px; }
+    #delivery-perf-view .dp-multi-panel.hidden { display:none; }
+    #delivery-perf-view .dp-multi-item { display:flex; align-items:center; gap:.5rem; padding:.35rem .5rem; border-radius:.4rem; font-size:.8rem; color:#334155; cursor:pointer; }
+    #delivery-perf-view .dp-multi-item:hover { background:#f1f5f9; }
+    #delivery-perf-view .dp-multi-item input { accent-color:#4f46e5; width:15px; height:15px; }
+    #delivery-perf-view .dp-multi-count { font-size:.7rem; color:#94a3b8; font-variant-numeric:tabular-nums; }
+    #delivery-perf-view .dp-multi-head { position:sticky; top:-4px; background:#fff; padding:2px 2px 6px; border-bottom:1px solid #f1f5f9; margin-bottom:4px; z-index:1; }
+    #delivery-perf-view .dp-multi-search { width:100%; height:32px; padding:0 .6rem; font-size:.8rem; border:1px solid #e2e8f0; border-radius:.4rem; color:#334155; outline:none; }
+    #delivery-perf-view .dp-multi-search:focus { border-color:#a5b4fc; box-shadow:0 0 0 3px rgba(99,102,241,.12); }
+    #delivery-perf-view .dp-multi-actions { display:flex; gap:6px; margin-top:6px; }
+    #delivery-perf-view .dp-multi-all, #delivery-perf-view .dp-multi-clear { flex:1; padding:.3rem; font-size:.72rem; font-weight:600; border-radius:.4rem; cursor:pointer; border:1px solid #e2e8f0; background:#f8fafc; color:#4f46e5; }
+    #delivery-perf-view .dp-multi-all:hover, #delivery-perf-view .dp-multi-clear:hover { background:#eef2ff; border-color:#c7d2fe; }
+    #delivery-perf-view .dp-multi-clear { color:#64748b; }
+    /* Ops Control tables — subtle row hover + tabular figures, to match the Delivery Performance table */
+    #ops-control-view tbody tr:hover { background:#f8fafc; }
+    #ops-control-view table { font-variant-numeric: tabular-nums; }
 
     /* ── Ops Control — elevated styling (scoped) ── */
     #ops-control-view { background:
@@ -1375,9 +1395,14 @@
                 <button data-o="new" class="px-3 py-1.5 text-slate-600">New</button>
                 <button data-o="repeat" class="px-3 py-1.5 text-slate-600">Repeat</button>
               </div>
-              <select id="dp-zone" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
-                <option value="all">All zones</option>
-              </select>
+              <div id="dp-zone-multi" class="dp-multi">
+                <button type="button" class="dp-multi-btn"><span class="text-slate-400">All zones</span> <span class="text-slate-400">▾</span></button>
+                <div class="dp-multi-panel hidden"></div>
+              </div>
+              <div id="dp-geostate-multi" class="dp-multi">
+                <button type="button" class="dp-multi-btn"><span class="text-slate-400">All states</span> <span class="text-slate-400">▾</span></button>
+                <div class="dp-multi-panel hidden"></div>
+              </div>
               <select id="dp-range-preset" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
                 <option value="this-week">This Week</option>
                 <option value="7">Last 7 days</option>

@@ -299,7 +299,8 @@ router.get('/ops-control/exceptions', async (req, res) => {
 // ── Prepaid loss/misroute predictor ─────────────────────────────────────────────────────────────
 // Scores in-transit PREPAID orders by their chance of never reaching the customer (courier lost it /
 // returned without attempting), so ops can redispatch a fresh one proactively.
-//   Risk% = base(courier·zone historical failure rate) + transit-stuck penalty + prior-NDR penalty
+//   Risk% = strongest of { lateness-vs-EDD curve, extreme-transit net, courier·zone prior },
+//           then proportional bumps for an unresolved failed attempt / misroute.
 // GET /api/ops-control/prepaid-risk
 router.get('/ops-control/prepaid-risk', async (req, res) => {
     try {
@@ -332,7 +333,7 @@ router.get('/ops-control/prepaid-risk', async (req, res) => {
         const live = [];
         for (let off = 0; ; off += 1000) {
             const { data, error } = await supabase.from('shipment_journey_ecom')
-                .select('order_name, awb, courier, zone, dispatched_at, order_date, ndr_count, outcome, payment_mode')
+                .select('order_name, awb, courier, zone, dispatched_at, order_date, out_for_delivery_at, first_edd, status_code, ndr_count, outcome, payment_mode, dest_state, dest_city, dest_pincode')
                 .in('outcome', ['in_transit', 'ndr_pending']).gte('order_date', recent).range(off, off + 999);
             if (error) throw new Error(error.message);
             live.push(...(data || []));
@@ -340,24 +341,52 @@ router.get('/ops-control/prepaid-risk', async (req, res) => {
         }
         const prepaid = live.filter(r => r.payment_mode && !/cod/i.test(r.payment_mode));
 
+        // Typical door-to-door transit budget per zone (fallback when the courier gave no EDD).
+        const ZONE_BUDGET = { A: 3, B: 4, C: 6, D: 8, E: 10 };
         const now = Date.now();
+        const daysSince = t => t ? (now - new Date(t).getTime()) / 86400000 : null;
+
         const scored = prepaid.map(r => {
-            const cr = Math.round(cRate(r.courier || 'Unknown') * 10) / 10;
-            const zr = Math.round(zRate(r.zone || 'NA') * 10) / 10;
-            let risk = 0.6 * cr + 0.4 * zr; const reasons = [];
-            if (cr >= 10) reasons.push(`${r.courier} fails ${cr}%`);
-            if (zr >= 15) reasons.push(`Zone ${r.zone} ${zr}%`);
-            const ref = r.dispatched_at || r.order_date;
-            const daysT = ref ? Math.round((now - new Date(ref).getTime()) / 86400000) : null;
-            if (daysT != null) {
-                if (daysT > 12) { risk += 40; reasons.push(`${daysT}d in transit`); }
-                else if (daysT > 8) { risk += 25; reasons.push(`${daysT}d in transit`); }
-                else if (daysT > 5) { risk += 12; reasons.push(`${daysT}d in transit`); }
-            }
-            if ((r.ndr_count || 0) > 0) { risk += 10; reasons.push('had a failed attempt'); }
-            risk = Math.min(95, Math.round(risk));
-            const band = risk >= 40 ? 'High' : risk >= 20 ? 'Medium' : 'Low';
-            return { order: r.order_name, awb: r.awb, courier: r.courier || '—', zone: r.zone || '—', state: r.outcome, daysInTransit: daysT, risk, band, reasons };
+            const cf = Math.round(cRate(r.courier || 'Unknown') * 10) / 10;   // courier historical fail %
+            const zf = Math.round(zRate(r.zone || 'NA') * 10) / 10;          // zone historical fail %
+            const reasons = [];
+            const transitAge = daysSince(r.dispatched_at || r.order_date);
+            const budget = ZONE_BUDGET[r.zone] || 7;
+
+            // ── Overdue: take the WORSE of (a) days past the courier's EDD and (b) days over the zone's
+            //    transit budget. Couriers keep pushing the EDD forward to mask delays, so a badly-stuck
+            //    parcel can show ~0 past its (extended) EDD — the immovable zone budget catches those. ──
+            const cands = [];
+            if (r.first_edd != null) cands.push(daysSince(r.first_edd));
+            if (transitAge != null) cands.push(transitAge - budget);
+            const od = cands.length ? Math.max(0, ...cands) : 0;
+
+            // Lateness is the dominant signal — a saturating curve so extreme overdue approaches ~90%.
+            //   od: 2→31, 4→52, 6→67, 8→76, 11→84, 15→90
+            const lateRisk = od > 0 ? 95 * (1 - Math.exp(-od / 5)) : 0;
+            // Absolute safety net for truly extreme transits (in case EDD/budget is missing or wrong).
+            const absRisk = transitAge >= 20 ? 88 : 0;
+            // Historical prior (courier × zone), damped — acts as a floor, never the driver.
+            const prior = 0.55 * cf + 0.35 * zf;
+
+            // Strongest evidence wins (don't dilute a strong signal by averaging).
+            let risk = Math.max(prior, lateRisk, absRisk);
+            // A failed attempt still unresolved → proportional push toward redispatch.
+            if ((r.ndr_count || 0) > 0) { risk += (100 - risk) * 0.30; reasons.push('failed attempt unresolved'); }
+            // Misrouted by the courier → high chance of loss/delay.
+            if (/MSR|RMSR/i.test(r.status_code || '')) { risk += (100 - risk) * 0.35; reasons.push('misrouted'); }
+            risk = Math.min(96, Math.round(risk));
+
+            // Human-readable "why"
+            if (od >= 1) reasons.unshift(`${Math.round(transitAge)}d in transit · ${Math.round(od)}d overdue`);
+            else if (transitAge != null && transitAge >= 6) reasons.unshift(`${Math.round(transitAge)}d in transit`);
+            if (cf >= 12) reasons.push(`${r.courier} fails ${cf}%`);
+            if (zf >= 15) reasons.push(`Zone ${r.zone} ${zf}%`);
+
+            const band = risk >= 55 ? 'High' : risk >= 30 ? 'Medium' : 'Low';
+            return { order: r.order_name, awb: r.awb, courier: r.courier || '—', zone: r.zone || '—', state: r.outcome,
+                     dest_state: r.dest_state || null, dest_city: r.dest_city || null, dest_pincode: r.dest_pincode || null,
+                     daysInTransit: transitAge != null ? Math.round(transitAge) : null, risk, band, reasons };
         }).filter(o => o.band !== 'Low').sort((a, b) => b.risk - a.risk);
 
         // 3. enrich with value + phone

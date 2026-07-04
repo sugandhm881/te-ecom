@@ -65,7 +65,7 @@ function codeOutcome(code) {
 //   E = J&K / Ladakh / Himachal / North-East / islands (special/remote). Approximate but consistent.
 const ZONE_E_STATES = new Set(['jammu & kashmir', 'jammu and kashmir', 'j&k', 'ladakh', 'himachal pradesh',
     'assam', 'meghalaya', 'manipur', 'mizoram', 'nagaland', 'tripura', 'arunachal pradesh', 'sikkim',
-    'andaman & nicobar islands', 'andaman and nicobar islands', 'lakshadweep']);
+    'andaman & nicobar islands', 'andaman and nicobar islands', 'lakshadweep', 'kerala']);
 const ZONE_B_STATES = new Set(['haryana', 'delhi', 'new delhi', 'nct of delhi', 'chandigarh']);
 const ZONE_C_STATES = new Set(['maharashtra', 'karnataka', 'tamil nadu', 'telangana', 'west bengal', 'gujarat']);
 function zoneFromState(state, city) {
@@ -84,7 +84,9 @@ function parseScanDate(v) {
     if (!v) return null;
     const s = String(v).trim();
     const m = s.match(/^(\d{2})-(\d{2})-(\d{4})[ T](\d{2}):(\d{2}):(\d{2})/);
-    if (m) return `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:${m[6]}`;
+    // RapidShyp scan times are IST wall-clock (no zone) → stamp +05:30 so it's stored as the correct
+    // UTC instant. Without this, "20:07" IST was saved as 20:07 UTC (+5:30 too late), inflating TAT.
+    if (m) return `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:${m[6]}+05:30`;
     const d = new Date(s);
     return isNaN(d.getTime()) ? null : d.toISOString();
 }

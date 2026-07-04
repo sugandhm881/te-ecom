@@ -67,11 +67,18 @@ cron.schedule('30 2 * * *', async () => {
     console.log('[OrderType] Daily refresh — tagging journeys new/repeat from Shopify tags…');
     const { error } = await supabase.rpc('refresh_journey_order_type');
     if (error) console.error('[OrderType] refresh error:', error.message);
+    // Sync destination state/city/pincode from the Shopify address (powers the State filter + Kerala→Zone E).
+    const { error: e2 } = await supabase.rpc('refresh_journey_dest');
+    if (e2) console.error('[JourneyDest] refresh error:', e2.message);
 }, { timezone: 'Asia/Kolkata' });
 setTimeout(() => {
     supabase.rpc('refresh_journey_order_type').then(({ error }) => {
         if (error) console.error('[OrderType] startup refresh error:', error.message);
         else console.log('[OrderType] startup new/repeat refresh done');
+    });
+    supabase.rpc('refresh_journey_dest').then(({ error }) => {
+        if (error) console.error('[JourneyDest] startup refresh error:', error.message);
+        else console.log('[JourneyDest] startup dest state/city refresh done');
     });
 }, 60000);
 
