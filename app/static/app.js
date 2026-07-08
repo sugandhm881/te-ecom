@@ -3616,17 +3616,18 @@ function dpreBuildStatusPanel(){
     sync();
 }
 async function dpreLoad(){
-    const k=document.getElementById('dpre-kpis'); if(k) k.innerHTML='<div class="col-span-6 text-slate-400 text-sm p-6">Loading DocPharma orders…</div>';
+    const k=document.getElementById('dpre-kpis'); if(k) k.innerHTML=ecSkelCards(6);
+    const tbl=document.getElementById('dpre-table'); if(tbl) tbl.innerHTML='<div class="p-4 space-y-2">'+Array.from({length:6}).map(()=>'<div class="skl" style="height:34px;width:100%"></div>').join('')+'</div>';
     try{
         const r=await fetch(`/api/docpharma-recon?from=${_dpreFrom}&to=${_dpreTo}&status=${encodeURIComponent(_dpreStatus.join(','))}&payment=${_dprePayment}&dfrom=${_dpreDFrom}&dto=${_dpreDTo}&customer=${encodeURIComponent(_dpreCustomer)}`,{headers:getAuthHeaders()});
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
-        _dpreData=d; dpreRender(d);
+        _dpreData=d; dpreRender(d); ecFade('dpre-kpis','dpre-table');
     }catch(e){ if(k) k.innerHTML='<div class="col-span-6 text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
 }
 function dpreRender(d){
     const rc=d.rateCard||{}, k=d.kpis||{};
     const rb=document.getElementById('dpre-ratebadge'); if(rb) rb.innerHTML=`Service ₹${rc.flat_service_charge} · RTO ₹${rc.rto_charge} · COD ₹${rc.cod_collection_charge}`;
-    const card=(label,val,sub,accent)=>`<div class="card p-4"><div class="text-xs text-slate-400 uppercase tracking-wide">${label}</div><div class="text-2xl font-bold ${accent||'text-slate-800'} tabular-nums mt-1">${val}</div><div class="text-xs text-slate-400 mt-0.5">${sub||''}</div></div>`;
+    const card=(label,val,sub,accent)=>`<div class="card p-4 lift"><div class="text-xs text-slate-400 uppercase tracking-wide">${label}</div><div class="text-2xl font-bold ${accent||'text-slate-800'} tabular-nums mt-1">${val}</div><div class="text-xs text-slate-400 mt-0.5">${sub||''}</div></div>`;
     document.getElementById('dpre-kpis').innerHTML=
         card('DocPharma orders',k.orders,`${k.codOrders} COD · excl. rejected/cancelled`)+
         card('Delivered',k.delivered,'billable','text-emerald-600')+
@@ -3909,32 +3910,36 @@ function dpreOverviewDrill(statuses,payment){
 function dpreOverviewInit(){ const sec=document.getElementById('dpre-tab-overview'); if(!sec) return;
     if(!_dpovWired){
         const t=new Date(), f=new Date(t.getFullYear(),t.getMonth()-5,1);
-        const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-        _dpovFrom=fmt(f); _dpovTo=fmt(t);
+        const fmtM=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;   // YYYY-MM, month granularity (matches Ledger)
+        _dpovFrom=fmtM(f); _dpovTo=fmtM(t);
         sec.innerHTML=`<div class="p-6 space-y-4">
           <div class="flex items-center justify-between flex-wrap gap-2">
             <div><h2 class="text-sm font-bold text-slate-700">DocPharma throughput · order-date cohort</h2><p class="text-[11px] text-slate-400">Orders grouped by the day they were handed to DocPharma, then their outcomes. Recent months are still in transit.</p></div>
             <div class="flex items-center gap-2 text-xs">
-              <span class="text-slate-400">Ordered</span>
-              <input type="date" id="dpov-from" value="${_dpovFrom}" class="border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700">
+              <span class="text-slate-400">Months</span>
+              <input type="month" id="dpov-from" value="${_dpovFrom}" class="border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700">
               <span class="text-slate-400">→</span>
-              <input type="date" id="dpov-to" value="${_dpovTo}" class="border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700">
+              <input type="month" id="dpov-to" value="${_dpovTo}" class="border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700">
               <button id="dpov-apply" class="px-3 py-1.5 bg-indigo-600 text-white rounded-lg">Apply</button>
+              <button id="dpov-clear" class="px-2 py-1.5 text-slate-500">clear</button>
               <button id="dpov-refresh" class="px-3 py-1.5 bg-slate-800 text-white rounded-lg">↻ Refresh</button>
             </div>
           </div>
           <div id="dpov-body" class="space-y-4"><div class="text-xs text-slate-400 p-4">Loading…</div></div>
         </div>`;
         sec.querySelector('#dpov-apply').addEventListener('click',()=>{ _dpovFrom=sec.querySelector('#dpov-from').value||''; _dpovTo=sec.querySelector('#dpov-to').value||''; dpreOverviewLoad(); });
+        sec.querySelector('#dpov-clear').addEventListener('click',()=>{ _dpovFrom=_dpovTo=''; sec.querySelector('#dpov-from').value=''; sec.querySelector('#dpov-to').value=''; dpreOverviewLoad(); });
         sec.querySelector('#dpov-refresh').addEventListener('click',()=>dpreOverviewLoad());
         _dpovWired=true;
     }
     dpreOverviewLoad();
 }
-async function dpreOverviewLoad(){ const box=document.getElementById('dpov-body'); if(!box) return; box.innerHTML='<div class="text-xs text-slate-400 p-4">Loading…</div>';
-    try{ const r=await fetch(`/api/docpharma-overview?from=${_dpovFrom}&to=${_dpovTo}`,{headers:getAuthHeaders()});
+async function dpreOverviewLoad(){ const box=document.getElementById('dpov-body'); if(!box) return;
+    box.innerHTML='<div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">'+ecSkelCards(6)+'</div><div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">'+ecSkelCards(3,'p-5')+'</div>';
+    const from=_dpovFrom?`${_dpovFrom}-01`:'', to=_dpovTo?dpledMonthEnd(_dpovTo):'';   // month → full-day range for the API
+    try{ const r=await fetch(`/api/docpharma-overview?from=${from}&to=${to}`,{headers:getAuthHeaders()});
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
-        _dpovData=d; dpreOverviewRender(d);
+        _dpovData=d; dpreOverviewRender(d); ecFade('dpov-body');
     }catch(e){ box.innerHTML='<div class="text-xs text-rose-500 p-4">'+e.message+'</div>'; }
 }
 function dpreOverviewRender(d){
@@ -3971,7 +3976,7 @@ function dpreOverviewRender(d){
         ${vfRow('RTO value (returned)',vf.rtoValue,'text-rose-600','lost sale')}
         ${vfRow('Lost value',vf.lostValue,'text-rose-600','compensated')}
         ${vfRow('In-transit value',vf.inTransitValue,'text-sky-600','at risk')}</div>`;
-    const tile=(l,v,c)=>`<div class="card p-4"><div class="text-xs text-slate-400 uppercase tracking-wide">${l}</div><div class="text-2xl font-bold ${c||'text-slate-800'} tabular-nums mt-1">${v}</div></div>`;
+    const tile=(l,v,c)=>`<div class="card p-4 lift"><div class="text-xs text-slate-400 uppercase tracking-wide">${l}</div><div class="text-2xl font-bold ${c||'text-slate-800'} tabular-nums mt-1">${v}</div></div>`;
     const effHtml=`<div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         ${tile('Delivery rate',pc(ef.deliveryRate),'text-emerald-600')}
         ${tile('RTO rate',pc(ef.rtoRate),'text-rose-600')}
@@ -3983,13 +3988,23 @@ function dpreOverviewRender(d){
     const trendCols=tr.map(m=>{ const h=Math.max(2,Math.round(m.deliveryRate*maxH)); const col=m.incomplete?'bg-slate-300':'bg-emerald-500';
         return `<div class="flex flex-col items-center gap-1" title="${dpledMonLabel(m.month)} · delivery ${pc(m.deliveryRate)} · ${m.delivered}/${m.delivered+m.rto+m.lost} closed${m.incomplete?' · still in transit':''}"><div class="flex items-end" style="height:${maxH}px"><div class="w-4 ${col} rounded-t" style="height:${h}px"></div></div><div class="text-[9px] text-slate-400 whitespace-nowrap">${dpovShortM(m.month)}</div></div>`; }).join('');
     const trendHtml=tr.length?`<div class="card p-5"><div class="flex items-center justify-between mb-3"><h3 class="text-sm font-bold text-slate-700">Delivery-rate trend</h3><span class="text-[11px] text-slate-400">grey = cohort still in transit</span></div><div class="flex items-end gap-3 overflow-x-auto pb-1">${trendCols}</div></div>`:'';
+    // Monthly cohort detail table (order-date cohort, newest first)
+    const th='px-3 py-2 text-right text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap',thl=th.replace('text-right','text-left');
+    const td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100 text-right tabular-nums whitespace-nowrap';
+    const drate=r=>r>=0.7?'text-emerald-600':r>=0.5?'text-amber-600':'text-rose-600';
+    const mrows=[...tr].reverse().map(m=>`<tr class="hover:bg-slate-50"><td class="${td} text-left font-semibold">${dpledMonLabel(m.month)}${m.incomplete?' <span class="text-amber-600" title="cohort still in transit — delivery rate will rise">⏳</span>':''}</td><td class="${td}">${nfmt(m.orders)}</td><td class="${td} text-indigo-600">${nfmt(m.dispatched)}</td><td class="${td} text-emerald-700">${nfmt(m.delivered)}</td><td class="${td} text-rose-600">${nfmt(m.rto)}</td><td class="${td}">${m.lost||0}</td><td class="${td} text-slate-500">${nfmt(m.rejected)}</td><td class="${td} text-slate-500">${nfmt(m.cancelled)}</td><td class="${td} text-sky-600">${nfmt(m.inTransit)}</td><td class="${td} font-semibold ${drate(m.deliveryRate)}">${pc(m.deliveryRate)}</td><td class="${td}">${INR(m.handedValue)}</td><td class="${td} text-emerald-700">${INR(m.deliveredValue)}</td></tr>`).join('');
+    const monthlyHtml=tr.length?`<div class="card p-0 overflow-hidden"><div class="px-5 py-3 border-b border-slate-100"><h3 class="text-sm font-bold text-slate-700">Monthly cohort detail</h3><p class="text-[11px] text-slate-400">Each order counted in the month it was handed to DocPharma · ⏳ = still in transit (delivery rate will rise)</p></div><div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr><th class="${thl}">Month</th><th class="${th}">Handed</th><th class="${th}">Dispatched</th><th class="${th}">Delivered</th><th class="${th}">RTO</th><th class="${th}">Lost</th><th class="${th}">Rej</th><th class="${th}">Cancel</th><th class="${th}">In-transit</th><th class="${th}">Delivery %</th><th class="${th}">GMV handed</th><th class="${th}">Delivered GMV</th></tr></thead><tbody>${mrows}</tbody></table></div></div>`:'';
     box.innerHTML=effHtml
         +`<div class="grid grid-cols-1 lg:grid-cols-3 gap-4"><div class="lg:col-span-2">${funnelHtml}</div>${valueHtml}</div>`
-        +`<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">${splitHtml}${trendHtml}</div>`;
+        +`<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">${splitHtml}${trendHtml}</div>`
+        +monthlyHtml;
     box.querySelectorAll('.dpov-drill').forEach(el=>el.addEventListener('click',()=>{ const st=(el.dataset.st||'').split(',').filter(Boolean); dpreOverviewDrill(st, el.dataset.pay); }));
 }
 
 // ─── DocPharma Ledger tab (Receivable / Payable / Net / Outstanding) ─────────
+// Smoothness helpers (reusable): re-trigger a fade-in on freshly-rendered containers; skeleton card placeholders.
+function ecFade(){ for(const id of arguments){ const el=document.getElementById(id); if(el){ el.classList.remove('ec-fade'); void el.offsetWidth; el.classList.add('ec-fade'); } } }
+const ecSkelCards=(n,cls)=>Array.from({length:n}).map(()=>`<div class="card ${cls||'p-4'}"><div class="skl" style="height:10px;width:55%"></div><div class="skl" style="height:22px;width:78%;margin-top:11px"></div><div class="skl" style="height:9px;width:66%;margin-top:10px"></div></div>`).join('');
 let _dpreLedgerWired=false, _dpledRows=[], _dpledCharges=[], _dpledPayments=[], _dpledFifo=null, _dpledRate={}, _dpledFrom='', _dpledTo='', _dpledOpen={}, _dpledCard='';
 const DPLED_SETTLE={settled:['Settled','bg-emerald-100 text-emerald-700'],partial:['Partial','bg-amber-100 text-amber-700'],outstanding:['Outstanding','bg-rose-100 text-rose-700'],na:['—','text-slate-300']};
 const DPLED_MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -4022,9 +4037,12 @@ function dpreLedgerInit(){ const sec=document.getElementById('dpre-tab-ledger');
     }
     dpreLedgerLoad();
 }
-async function dpreLedgerLoad(){ const k=document.getElementById('dpled-kpis'); if(k)k.innerHTML='<div class="col-span-6 text-xs text-slate-400 p-4">Loading ledger…</div>';
+async function dpreLedgerLoad(){ const k=document.getElementById('dpled-kpis'); if(k)k.innerHTML=ecSkelCards(6);
+    const ops=document.getElementById('dpled-ops'); if(ops)ops.innerHTML='';
+    const tbl=document.getElementById('dpled-table'); if(tbl)tbl.innerHTML='<div class="p-4 space-y-2">'+Array.from({length:6}).map(()=>'<div class="skl" style="height:34px;width:100%"></div>').join('')+'</div>';
     try{ const r=await fetch('/api/docpharma-ledger',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
         _dpledRows=d.rows||[]; _dpledCharges=d.charges||[]; _dpledPayments=d.payments||[]; _dpledFifo=(d.summary||{}).fifo||null; _dpledRate=d.rateCard||{}; dpledRender();
+        ecFade('dpled-kpis','dpled-ops','dpled-table');
     }catch(e){ if(k)k.innerHTML='<div class="col-span-6 text-xs text-rose-500 p-4">'+e.message+'</div>'; }
 }
 const dpledInRange=mk=>{ if(!mk)return false; if(mk==='unknown')return !_dpledFrom&&!_dpledTo; if(_dpledFrom&&mk<_dpledFrom)return false; if(_dpledTo&&mk>_dpledTo)return false; return true; };
@@ -4146,7 +4164,7 @@ function dpledRender(){
     const net=receivable-basisPayable, outstanding=net-paid;
     const bv=dpledBillVar(g);
     const wi=basisMode?` · <span class="text-amber-600 font-semibold">what-if: ${basisMode}</span>`:'';
-    const card=(key,l,v,sub,acc)=>`<div class="card p-4 cursor-pointer transition hover:shadow-md ${_dpledCard===key?'ring-2 ring-indigo-400':''}" data-card="${key}"><div class="flex items-center justify-between"><div class="text-xs text-slate-400 uppercase tracking-wide">${l}</div><span class="text-slate-300 text-[10px]">${_dpledCard===key?'▾':'▸'}</span></div><div class="text-2xl font-bold ${acc||'text-slate-800'} tabular-nums mt-1">${v}</div><div class="text-xs text-slate-400 mt-0.5">${sub||''}</div></div>`;
+    const card=(key,l,v,sub,acc)=>`<div class="card p-4 cursor-pointer lift ${_dpledCard===key?'ring-2 ring-indigo-400':''}" data-card="${key}"><div class="flex items-center justify-between"><div class="text-xs text-slate-400 uppercase tracking-wide">${l}</div><span class="text-slate-300 text-[10px]">${_dpledCard===key?'▾':'▸'}</span></div><div class="text-2xl font-bold ${acc||'text-slate-800'} tabular-nums mt-1">${v}</div><div class="text-xs text-slate-400 mt-0.5">${sub||''}</div></div>`;
     const invSub=bv&&bv.flag?`<span class="text-amber-600 font-semibold">⚠ ${bv.pct>0?'+':''}${bv.pct.toFixed(1)}% vs expected</span>`:'DocPharma bills (incl tax)';
     const netSub=`receivable − ${basisMode==='expected'?'expected (incl GST)':'invoiced only'}${wi}`;
     const outSub=(bv&&bv.flag?`<span class="text-amber-600 font-semibold">⚠ billing ${bv.pct>0?'+':''}${bv.pct.toFixed(1)}%</span> · ${outstanding>=0?'owes you':'you owe'}`:(outstanding>=0?'DocPharma owes you':'you owe DocPharma'))+wi;
@@ -4165,7 +4183,7 @@ function dpledRender(){
     const ops=document.getElementById('dpled-ops');
     if(ops){ const nf=x=>Number(x||0).toLocaleString('en-IN'), gst=Math.round((g.expCharges||0)*0.18);
         const deliveredGmv=(g.codCollected||0)+(g.prepaidValue||0), totalGmv=deliveredGmv+(g.rtoValue||0)+(g.lostComp||0)+(g.rejectedValue||0);
-        const icard=(l,v,sub,acc,st,pay,val)=>`<div class="card p-3.5 ${st!=null?'cursor-pointer hover:shadow-md transition dpled-ocard':''}"${st!=null?` data-st="${st}" data-pay="${pay||'all'}"`:''}><div class="text-[11px] text-slate-400 uppercase tracking-wide">${l}</div><div class="flex items-baseline gap-2 mt-0.5"><div class="text-xl font-bold ${acc||'text-slate-800'} tabular-nums">${v}</div>${val?`<div class="text-sm font-semibold text-slate-500 tabular-nums">${val}</div>`:''}</div><div class="text-[11px] text-slate-400 mt-0.5">${sub||''}</div></div>`;
+        const icard=(l,v,sub,acc,st,pay,val)=>`<div class="card p-3.5 ${st!=null?'cursor-pointer lift dpled-ocard':''}"${st!=null?` data-st="${st}" data-pay="${pay||'all'}"`:''}><div class="text-[11px] text-slate-400 uppercase tracking-wide">${l}</div><div class="flex items-baseline gap-2 mt-0.5"><div class="text-xl font-bold ${acc||'text-slate-800'} tabular-nums">${v}</div>${val?`<div class="text-sm font-semibold text-slate-500 tabular-nums">${val}</div>`:''}</div><div class="text-[11px] text-slate-400 mt-0.5">${sub||''}</div></div>`;
         const sec=(title,cards)=>`<div><div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 mt-1">${title}</div><div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">${cards}</div></div>`;
         const opsCards=icard('Total orders',nf(g.totalOrders),`Deliv ${nf(g.delivered)} · RTO ${nf(g.rto)} · Rej ${nf(g.rejected)}`,'text-slate-800','delivered,rto,lost,rejected,cancelled,shipped',undefined,OPS_INR(totalGmv))
             +icard('Delivered',nf(g.delivered),`COD ${nf(g.codOrders)} · Prepaid ${nf(g.prepaidOrders)}`,'text-emerald-600','delivered',undefined,OPS_INR(deliveredGmv))
@@ -4223,7 +4241,7 @@ function dpledRender(){
             +li(m.invoices?`Billed · payable ${R(m.invGrand||0)}`:'Not billed yet · payable ₹0',R(outInv),oc(outInv))
             +li(`If billed @ rate card · est ${R(payExp)}`,R(outExp),oc(outExp))
             +`<div class="mt-2">${m.settled==='na'?'':`<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold ${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[1]}">${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[0]}</span>`}</div>`;
-        const det=open?`<tr class="dpled-det bg-slate-50/60"><td colspan="14" class="px-8 py-4 border-b border-slate-100"><div class="grid grid-cols-1 md:grid-cols-3 gap-x-10 gap-y-1 max-w-4xl">
+        const det=open?`<tr class="dpled-det ec-fade bg-slate-50/60"><td colspan="14" class="px-8 py-4 border-b border-slate-100"><div class="grid grid-cols-1 md:grid-cols-3 gap-x-10 gap-y-1 max-w-4xl">
             <div>${col1}</div><div>${col2}</div><div>${col3}</div></div></td></tr>`:'';
         return `<tr class="dpled-row hover:bg-slate-50 cursor-pointer" data-m="${m.month}"><td class="${td} text-left font-semibold">${car} ${dpledMonLabel(m.month)}</td><td class="${td} font-semibold text-slate-700">${(m.totalOrders||0).toLocaleString('en-IN')}</td><td class="${td}">${m.delivered}</td><td class="${td}">${m.rto}</td><td class="${td}">${m.rejected?`<span class="text-slate-500">${m.rejected}</span>`:'<span class="text-slate-300">0</span>'}</td><td class="${td}">${OPS_INR(Math.round(m.expCharges))}</td><td class="${td}">${m.invoices?OPS_INR(Math.round(m.invCharges)):dash}</td><td class="${td}">${varTxt}</td><td class="${td} text-emerald-700">${OPS_INR(Math.round(m.codCollected))}</td><td class="${td}">${m.lostComp?`<span class="text-emerald-700">${OPS_INR(Math.round(m.lostComp))}</span>${m.lost?` <span class="text-slate-400">(${m.lost})</span>`:''}`:dash}</td><td class="${td}">${OPS_INR(Math.round(m.remitExpected))}</td><td class="${td} text-emerald-700">${m.paidNet?OPS_INR(Math.round(m.paidNet)):dash}</td><td class="${td} text-center">${m.settled==='na'?dash:`<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[1]}">${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[0]}</span>`}</td><td class="${td} font-bold ${m.outstanding>0?'text-amber-600':m.outstanding<0?'text-rose-600':'text-slate-400'}">${OPS_INR(Math.round(m.outstanding))}</td></tr>${det}`;}).join('');
     document.getElementById('dpled-table').innerHTML=`<table class="w-full border-collapse"><thead><tr><th class="${thl}">Month</th><th class="${th}">Total</th><th class="${th}">Deliv</th><th class="${th}">RTO</th><th class="${th}">Rej</th><th class="${th}">Exp charges</th><th class="${th}">Invoiced</th><th class="${th}">Variance</th><th class="${th}">COD collected</th><th class="${th}">Lost comp</th><th class="${th}">Net remit</th><th class="${th}">Paid (FIFO)</th><th class="${th} text-center">Status</th><th class="${th}">Outstanding</th></tr></thead><tbody>${body||'<tr><td colspan="14" class="p-6 text-center text-xs text-slate-400">No data</td></tr>'}</tbody></table>`;

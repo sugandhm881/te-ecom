@@ -41,12 +41,13 @@ router.get('/docpharma-overview', async (req, res) => {
                 const k = st + '|' + pay; const c = byStatusPay[k] || (byStatusPay[k] = { orders: 0, value: 0 });
                 c.orders++; c.value += val;
                 const mk = istMonth(o.order_date) || 'unknown';
-                const m = months[mk] || (months[mk] = { delivered: 0, rto: 0, lost: 0, inTransit: 0, dispatched: 0, orders: 0 });
-                m.orders++;
-                if (st === 'delivered') { m.delivered++; m.dispatched++; }
-                else if (st === 'rto') { m.rto++; m.dispatched++; }
+                const m = months[mk] || (months[mk] = { orders: 0, handedValue: 0, delivered: 0, deliveredValue: 0, rto: 0, rtoValue: 0, lost: 0, rejected: 0, cancelled: 0, inTransit: 0, dispatched: 0 });
+                m.orders++; m.handedValue += val;
+                if (st === 'delivered') { m.delivered++; m.deliveredValue += val; m.dispatched++; }
+                else if (st === 'rto') { m.rto++; m.rtoValue += val; m.dispatched++; }
                 else if (st === 'lost') { m.lost++; m.dispatched++; }
-                else if (st === 'rejected' || st === 'cancelled') { /* never dispatched */ }
+                else if (st === 'rejected') { m.rejected++; }
+                else if (st === 'cancelled') { m.cancelled++; }
                 else { m.inTransit++; m.dispatched++; }            // shipped / open
             });
             if (!data || data.length < 1000) break;
@@ -82,7 +83,8 @@ router.get('/docpharma-overview', async (req, res) => {
         // Monthly delivery-rate trend (order-date cohort). Flag cohorts still largely in transit.
         const trend = Object.keys(months).filter(m => m !== 'unknown').sort().map(mk => {
             const m = months[mk]; const cl = m.delivered + m.rto + m.lost;
-            return { month: mk, orders: m.orders, dispatched: m.dispatched, delivered: m.delivered, rto: m.rto, lost: m.lost, inTransit: m.inTransit,
+            return { month: mk, orders: m.orders, handedValue: m.handedValue, dispatched: m.dispatched, delivered: m.delivered, deliveredValue: m.deliveredValue,
+                rto: m.rto, rtoValue: m.rtoValue, lost: m.lost, rejected: m.rejected, cancelled: m.cancelled, inTransit: m.inTransit,
                 deliveryRate: cl ? m.delivered / cl : 0, incomplete: m.dispatched > 0 && (m.inTransit / m.dispatched) > 0.1 };
         });
 
