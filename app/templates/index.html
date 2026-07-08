@@ -116,6 +116,27 @@
     /* Ops Control tables — subtle row hover + tabular figures, to match the Delivery Performance table */
     #ops-control-view tbody tr:hover { background:#f8fafc; }
     #ops-control-view table { font-variant-numeric: tabular-nums; }
+    /* DocPharma Reconciliation — scoped look, matching the other dashboards */
+    #docpharma-recon-view { background:
+        radial-gradient(1000px 380px at 100% -5%, rgba(16,185,129,.05), transparent 60%),
+        radial-gradient(900px 360px at -5% 0%, rgba(99,102,241,.05), transparent 55%), #f8fafc; min-height:100%; }
+    #docpharma-recon-view header { background: rgba(255,255,255,.85); backdrop-filter: saturate(1.4) blur(8px); }
+    #docpharma-recon-view .card { background:#fff; border:1px solid #e2e8f0; border-radius:.75rem; transition: box-shadow .18s ease, border-color .18s ease; }
+    #docpharma-recon-view tbody tr:hover { background:#f8fafc; }
+    #docpharma-recon-view input:focus, #docpharma-recon-view select:focus { outline:none; border-color:#a5b4fc; box-shadow:0 0 0 3px rgba(99,102,241,.15); }
+    /* DocPharma Recon — multi-select (order status) */
+    #docpharma-recon-view .dpre-multi { position:relative; }
+    #docpharma-recon-view .dpre-multi-btn { height:38px; min-width:140px; text-align:left; font-size:.875rem; padding:0 .8rem; border:1px solid #e2e8f0; border-radius:.5rem; background:#fff; color:#334155; display:flex; align-items:center; justify-content:space-between; gap:.4rem; cursor:pointer; white-space:nowrap; }
+    #docpharma-recon-view .dpre-multi-btn:hover { border-color:#a5b4fc; }
+    #docpharma-recon-view .dpre-multi-panel { position:absolute; z-index:40; top:calc(100% + 4px); left:0; min-width:190px; background:#fff; border:1px solid #e2e8f0; border-radius:.5rem; box-shadow:0 12px 30px -10px rgba(15,23,42,.25); padding:4px; }
+    #docpharma-recon-view .dpre-multi-panel.hidden { display:none; }
+    #docpharma-recon-view .dpre-multi-item { display:flex; align-items:center; gap:.5rem; padding:.4rem .5rem; border-radius:.4rem; font-size:.82rem; color:#334155; cursor:pointer; }
+    #docpharma-recon-view .dpre-multi-item:hover { background:#f1f5f9; }
+    #docpharma-recon-view .dpre-multi-item input { accent-color:#4f46e5; width:15px; height:15px; }
+    #docpharma-recon-view .dpre-multi-actions { display:flex; gap:6px; padding:2px 2px 6px; border-bottom:1px solid #f1f5f9; margin-bottom:4px; }
+    #docpharma-recon-view .dpre-multi-all, #docpharma-recon-view .dpre-multi-clear { flex:1; padding:.3rem; font-size:.72rem; font-weight:600; border-radius:.4rem; cursor:pointer; border:1px solid #e2e8f0; background:#f8fafc; color:#4f46e5; }
+    #docpharma-recon-view .dpre-multi-all:hover, #docpharma-recon-view .dpre-multi-clear:hover { background:#eef2ff; border-color:#c7d2fe; }
+    #docpharma-recon-view .dpre-multi-clear { color:#64748b; }
 
     /* ── Ops Control — elevated styling (scoped) ── */
     #ops-control-view { background:
@@ -357,6 +378,10 @@
                     <a href="#" id="nav-ops-control" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                         <span class="ml-3 text-sm font-medium">Ops Control</span>
+                    </a>
+                    <a href="#" id="nav-docpharma-recon" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m-6 4h6m-6 4h4M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"></path></svg>
+                        <span class="ml-3 text-sm font-medium">DocPharma Recon</span>
                     </a>
                 </div>
             </div>
@@ -1372,6 +1397,9 @@
             <div id="srv-results" class="space-y-6"></div>
           </div>
         </div><!-- /serviceability-view -->
+
+        <!-- DocPharma Reconciliation — rendered by dpreInit() in app.js -->
+        <div id="docpharma-recon-view" class="view-hidden"></div>
 
         <div id="delivery-perf-view" class="view-hidden">
           <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">

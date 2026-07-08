@@ -3,6 +3,7 @@ const router = express.Router();
 const { supabase } = require('../supabase');
 const { rawToDbRow } = require('./easyecom');
 const { parseRapidshypJourney, parseDocpharmaJourney, saveJourney, updateJourneyForOrder } = require('./delivery_journey');
+const { syncDocpharmaOrderFromPortal } = require('./docpharma_portal');
 const config = require('../../config');
 
 router.post('/rapidshyp', async (req, res) => {
@@ -143,7 +144,10 @@ router.post('/docpharma', async (req, res) => {
         const awb = ld.tracking_number || orderName;
         if (!awb) { console.warn('[Webhook DocPharma] no awb/order name'); return; }
         await saveJourney(awb, orderName, 'docpharma', parseDocpharmaJourney(dp), null, dp);
-        console.log(`[Webhook DocPharma] ⬇️ journey updated: ${orderName} → ${ld.current_status || dp.status || '?'}`);
+        // docpharma_orders (recon) is owned solely by the portal sync — never write it from the partner API
+        // (avoids overlap/mismatch). Just refresh THIS order from the portal (order fields + timeline).
+        syncDocpharmaOrderFromPortal(orderName).catch(() => {});
+        console.log(`[Webhook DocPharma] ⬇️ ${orderName} → journey updated (${ld.current_status || dp.status || '?'})`);
     } catch (e) {
         console.error('[Webhook DocPharma] error:', e.message);
     }

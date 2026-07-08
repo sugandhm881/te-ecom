@@ -33,6 +33,11 @@ const serviceabilityRoutes = require('./app/api/serviceability');
 const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom } = require('./app/api/warehouse_slack_report');
 const deliveryReportsRoutes = require('./app/api/delivery_reports');
 const opsControlRoutes = require('./app/api/ops_control');
+const docpharmaReconRoutes = require('./app/api/docpharma_recon');
+const docpharmaInvoiceRoutes = require('./app/api/docpharma_invoices');
+const docpharmaLedgerRoutes = require('./app/api/docpharma_ledger');
+const docpharmaOverviewRoutes = require('./app/api/docpharma_overview');
+const { ingestRecentDocpharmaOrders } = require('./app/api/docpharma_portal');
 const { backfillJourneys } = require('./app/api/delivery_journey');
 const cron = require('node-cron');
 
@@ -52,6 +57,10 @@ app.use('/api/fulfillment-ops', fulfillmentOpsRoutes);
 app.use('/api/serviceability', serviceabilityRoutes);
 app.use('/api', deliveryReportsRoutes);
 app.use('/api', opsControlRoutes);
+app.use('/api', docpharmaReconRoutes);
+app.use('/api', docpharmaInvoiceRoutes);
+app.use('/api', docpharmaLedgerRoutes);
+app.use('/api', docpharmaOverviewRoutes);
 initAutoReviewCron();
 
 // Delivery-journey gap-fill — every 6h, refresh non-final shipments (webhooks handle real-time;
@@ -60,6 +69,15 @@ cron.schedule('45 */6 * * *', async () => {
     console.log('[Journey] 6-hr gap-fill — refreshing non-final shipment journeys…');
     await backfillJourneys(30).catch(e => console.error('[Journey] gap-fill error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
+
+// DocPharma portal INGESTION — DocPharma doesn't webhook us (webhook_url is null), so every 3h we pull
+// their latest orders from the partner portal (auto-login) → upsert docpharma_orders + fetch timelines.
+// This is what actually captures NEW DocPharma orders. Also runs ~40s after startup.
+cron.schedule('40 */3 * * *', async () => {
+    console.log('[DP portal] 3-hr ingest — pulling DocPharma latest orders…');
+    await ingestRecentDocpharmaOrders().catch(e => console.error('[DP portal] ingest error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+setTimeout(() => { ingestRecentDocpharmaOrders().catch(e => console.error('[DP portal] startup ingest error:', e.message)); }, 40000);
 
 // New/Repeat classification — re-tag journey rows from Shopify's "Repeat" order tag. Pure SQL (0 API),
 // via the refresh_journey_order_type() DB function. Daily at 2:30 AM IST + once shortly after startup.

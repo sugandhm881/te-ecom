@@ -387,6 +387,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('ops-control-view');
             if (typeof opsInit === 'function') opsInit();
             break;
+        case 'docpharma-recon':
+            activeLinkElement = document.getElementById('nav-docpharma-recon');
+            activeViewElement = document.getElementById('docpharma-recon-view');
+            if (typeof dpreInit === 'function') dpreInit();
+            break;
     }
 
     if (activeLinkElement) {
@@ -3141,6 +3146,7 @@ async function amzRevSendBulk(){
 document.getElementById('nav-reports')?.addEventListener('click', (e) => { e.preventDefault(); navigate('reports-view'); });
 document.getElementById('nav-amazon-review')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-review'); });
 document.getElementById('nav-fulfillment-ops')?.addEventListener('click', (e) => { e.preventDefault(); navigate('fulfillment-ops'); });
+document.getElementById('nav-docpharma-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('docpharma-recon'); });
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
 document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
@@ -3466,6 +3472,804 @@ function opsPrTable(){ const c=document.getElementById('ops-pr-table'); const d=
         const awb=row.dataset.awb; if(!awb) return;
         _opsPrOpen=(_opsPrOpen===awb)?null:awb; opsPrTable();
         if(_opsPrOpen && !_opsPrScan[awb]) opsPrLoadScans(awb); }));
+}
+
+// ─── DocPharma Reconciliation ────────────────────────────────────────────────
+let _dpreFrom=null,_dpreTo=null,_dpreData=null,_dpreWired=false,_dpreStatus=[],_dprePayment='all',_dpreSort={k:'orderDate',d:'desc'},_dpreOpen=null,_dpreDFrom='',_dpreDTo='',_dpreCustomer='',_dpreTab='recon'; const _dpreScan={};
+// DocPharma workspace tab switcher (Reconciliation / Ledger / Invoices / Payments / Inventory Match)
+function dpreTab(name){
+    const v=document.getElementById('docpharma-recon-view'); if(!v) return;
+    _dpreTab=name;
+    v.querySelectorAll('.dpre-tabsec').forEach(s=>s.classList.toggle('hidden', s.id!=='dpre-tab-'+name));
+    v.querySelectorAll('.dpre-tab').forEach(b=>{ const on=b.dataset.tab===name;
+        b.classList.toggle('border-indigo-500',on); b.classList.toggle('text-indigo-600',on);
+        b.classList.toggle('border-transparent',!on); b.classList.toggle('text-slate-500',!on); });
+    if(name==='overview') dpreOverviewInit();
+    if(name==='recon' && !_dpreData) dpreLoad();
+    if(name==='invoices') dpreInvInit();
+    if(name==='ledger') dpreLedgerInit();
+    if(name==='payments') dprePayInit();
+}
+const DPRE_STATUS={delivered:['Delivered','bg-emerald-100 text-emerald-700'],rto:['RTO','bg-red-100 text-red-700'],lost:['Lost','bg-rose-100 text-rose-800'],rejected:['Rejected','bg-slate-100 text-slate-500'],cancelled:['Cancelled','bg-slate-100 text-slate-500'],shipped:['Shipped','bg-sky-100 text-sky-700']};
+const DPRE_STATUS_OPTS=[['delivered','Delivered'],['rto','RTO'],['lost','Lost'],['rejected','Rejected'],['cancelled','Cancelled'],['shipped','Shipped']];
+// 'YYYY-MM-DD' → 'DD-MM-YYYY'
+function dpreDMY(s){ if(!s)return ''; const p=String(s).slice(0,10).split('-'); return p.length===3?`${p[2]}-${p[1]}-${p[0]}`:s; }
+function dpreBucket(o){ const s=(o.order_status||o.outcome||'').toLowerCase(); return s||'other'; }
+function dpreInit(){
+    const v=document.getElementById('docpharma-recon-view'); if(!v) return;
+    if(!_dpreWired){
+        const t=new Date(), f=new Date(t.getFullYear(),t.getMonth(),t.getDate()-30);
+        const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        _dpreFrom=fmt(f); _dpreTo=fmt(t);
+        v.innerHTML=`
+        <div class="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200 px-6 pt-4">
+          <h1 class="text-2xl font-bold text-slate-800">DocPharma</h1>
+          <nav class="flex gap-1 mt-3 -mb-px overflow-x-auto">
+            ${[['overview','Overview'],['recon','Reconciliation'],['ledger','Ledger'],['invoices','Invoices'],['payments','Payments'],['inventory','Inventory Match']].map(([k,l])=>`<button class="dpre-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-700 whitespace-nowrap" data-tab="${k}">${l}</button>`).join('')}
+          </nav>
+        </div>
+
+        <section id="dpre-tab-overview" class="dpre-tabsec"></section>
+
+        <section id="dpre-tab-recon" class="dpre-tabsec hidden">
+        <header class="px-6 py-4 border-b border-slate-200">
+          <div class="flex items-start justify-between flex-wrap gap-3">
+            <p class="text-sm text-slate-400" id="dpre-sub">Expected DocPharma charges from delivery status &amp; your rate card</p>
+            <div class="flex items-center gap-2">
+              <span id="dpre-ratebadge" class="text-xs text-slate-500 px-3 py-1.5 bg-white border border-slate-200 rounded-lg"></span>
+              <button id="dpre-settings-btn" class="text-sm px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700 hover:border-indigo-400">⚙ Rate Card</button>
+              <button id="dpre-import-btn" class="text-sm px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700 hover:border-indigo-400" title="Upload DocPharma's order export (CSV) to backfill history">📤 Import CSV</button>
+              <input type="file" id="dpre-import-file" accept=".csv,.tsv,.txt" class="hidden">
+              <button id="dpre-snapshot-btn" class="text-sm px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700 hover:border-indigo-400" title="Freeze current charges into the log">🧾 Log snapshot</button>
+              <button id="dpre-refresh" class="text-sm px-3 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700">↻ Refresh</button>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap mt-3">
+            <input type="date" id="dpre-from" value="${_dpreFrom}" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
+            <span class="text-slate-400">→</span>
+            <input type="date" id="dpre-to" value="${_dpreTo}" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
+            <button id="dpre-apply" class="text-sm px-4 py-2 bg-slate-800 text-white rounded-lg">Apply</button>
+            <div id="dpre-status-multi" class="dpre-multi"><button type="button" class="dpre-multi-btn"><span class="text-slate-400">All status</span> <span class="text-slate-400">▾</span></button><div class="dpre-multi-panel hidden"></div></div>
+            <select id="dpre-payment" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
+              <option value="all">All payment</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select>
+            <input type="text" id="dpre-customer" placeholder="Customer name" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 min-w-[150px]">
+            <input type="text" id="dpre-search" placeholder="Search order / AWB / courier" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 flex-1 min-w-[160px]">
+          </div>
+          <div class="flex items-center gap-2 flex-wrap mt-2">
+            <span class="text-xs text-slate-400 font-medium">Delivered / RTO</span>
+            <input type="date" id="dpre-dfrom" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
+            <span class="text-slate-400">→</span>
+            <input type="date" id="dpre-dto" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
+            <button id="dpre-dclear" class="text-xs px-2.5 py-2 text-slate-500 hover:text-slate-700">clear</button>
+          </div>
+        </header>
+        <div class="p-6 space-y-5">
+          <div id="dpre-kpis" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3"></div>
+          <div class="card p-5"><h2 class="text-sm font-bold text-slate-700 mb-3">Expected charge breakdown</h2><div id="dpre-breakdown"></div></div>
+          <div class="card p-0 overflow-hidden">
+            <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100"><h2 class="text-sm font-bold text-slate-700">Orders</h2><span id="dpre-count" class="text-xs text-slate-400"></span></div>
+            <div id="dpre-table" class="overflow-x-auto"></div>
+          </div>
+        </div>
+        </section>
+
+        <section id="dpre-tab-ledger" class="dpre-tabsec hidden"><div class="p-6"><div class="card p-10 text-center text-slate-400">Ledger — coming in Phase 3 · Receivable / Payable / Net / Outstanding</div></div></section>
+        <section id="dpre-tab-invoices" class="dpre-tabsec hidden"><div class="p-6"><div class="card p-10 text-center text-slate-400">Invoices — coming in Phase 2 · goods-out invoices + DocPharma charge invoices</div></div></section>
+        <section id="dpre-tab-payments" class="dpre-tabsec hidden"><div class="p-6"><div class="card p-10 text-center text-slate-400">Payments — coming in Phase 3 · remittances received from DocPharma</div></div></section>
+        <section id="dpre-tab-inventory" class="dpre-tabsec hidden"><div class="p-6"><div class="card p-10 text-center text-slate-400">Inventory / SKU Match — coming in Phase 4 · goods sent vs delivered/RTO/lost</div></div></section>
+
+        <!-- Rate card modal -->
+        <div id="dpre-settings" class="fixed inset-0 z-50 hidden items-center justify-center" style="background:rgba(15,23,42,.4)">
+          <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6" onclick="event.stopPropagation()">
+            <h3 class="text-lg font-bold text-slate-800 mb-1">DocPharma Rate Card</h3>
+            <p class="text-xs text-slate-400 mb-4">Applies to new reconciliations. Past snapshots keep their original rates.</p>
+            <label class="block text-sm text-slate-600 mb-1">Flat Service Charge (₹ per delivered order)</label>
+            <input type="number" id="dpre-rc-service" class="w-full mb-3 px-3 py-2 border border-slate-200 rounded-lg" min="0" step="0.01">
+            <label class="block text-sm text-slate-600 mb-1">RTO Charge (₹ per RTO order)</label>
+            <input type="number" id="dpre-rc-rto" class="w-full mb-3 px-3 py-2 border border-slate-200 rounded-lg" min="0" step="0.01">
+            <label class="block text-sm text-slate-600 mb-1">COD Collection Charge (₹ per delivered COD order)</label>
+            <input type="number" id="dpre-rc-cod" class="w-full mb-4 px-3 py-2 border border-slate-200 rounded-lg" min="0" step="0.01">
+            <div class="flex justify-end gap-2"><button id="dpre-rc-cancel" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
+              <button id="dpre-rc-save" class="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg">Save rate card</button></div>
+          </div>
+        </div>`;
+        v.querySelectorAll('.dpre-tab').forEach(btn=>btn.addEventListener('click',()=>dpreTab(btn.dataset.tab)));
+        v.querySelector('#dpre-apply').addEventListener('click',()=>{ _dpreFrom=v.querySelector('#dpre-from').value; _dpreTo=v.querySelector('#dpre-to').value; dpreLoad(); });
+        v.querySelector('#dpre-refresh').addEventListener('click',()=>dpreLoad());
+        dpreBuildStatusPanel();
+        v.querySelector('#dpre-payment').addEventListener('change',e=>{ _dprePayment=e.target.value; dpreLoad(); });
+        v.querySelector('#dpre-search').addEventListener('input',()=>dpreTable());
+        v.querySelector('#dpre-dfrom').addEventListener('change',e=>{ _dpreDFrom=e.target.value; dpreLoad(); });
+        v.querySelector('#dpre-dto').addEventListener('change',e=>{ _dpreDTo=e.target.value; dpreLoad(); });
+        v.querySelector('#dpre-dclear').addEventListener('click',()=>{ _dpreDFrom=''; _dpreDTo=''; v.querySelector('#dpre-dfrom').value=''; v.querySelector('#dpre-dto').value=''; dpreLoad(); });
+        { let ct; v.querySelector('#dpre-customer').addEventListener('input',e=>{ clearTimeout(ct); const val=e.target.value; ct=setTimeout(()=>{ _dpreCustomer=val; dpreLoad(); },350); }); }
+        v.querySelector('#dpre-settings-btn').addEventListener('click',()=>dpreOpenSettings());
+        v.querySelector('#dpre-settings').addEventListener('click',()=>dpreCloseSettings());
+        v.querySelector('#dpre-rc-cancel').addEventListener('click',()=>dpreCloseSettings());
+        v.querySelector('#dpre-rc-save').addEventListener('click',()=>dpreSaveSettings());
+        v.querySelector('#dpre-snapshot-btn').addEventListener('click',()=>dpreSnapshot());
+        v.querySelector('#dpre-import-btn').addEventListener('click',()=>v.querySelector('#dpre-import-file').click());
+        v.querySelector('#dpre-import-file').addEventListener('change',e=>{ const f=e.target.files&&e.target.files[0]; if(f) dpreImport(f); });
+        _dpreWired=true;
+        dpreTab('overview');
+        return;                                    // landing tab loads itself
+    }
+    // subsequent entries → refresh the active tab
+    if(_dpreTab==='overview') dpreOverviewLoad();
+    else if(_dpreTab==='ledger') dpreLedgerLoad();
+    else dpreLoad();
+}
+function dpreBuildStatusPanel(){
+    const wrap=document.getElementById('dpre-status-multi'); if(!wrap) return;
+    const btn=wrap.querySelector('.dpre-multi-btn'), panel=wrap.querySelector('.dpre-multi-panel');
+    panel.innerHTML=`<div class="dpre-multi-actions"><button type="button" class="dpre-multi-all">Select all</button><button type="button" class="dpre-multi-clear">Clear all</button></div>`+
+        DPRE_STATUS_OPTS.map(([v,l])=>`<label class="dpre-multi-item"><input type="checkbox" value="${v}"><span>${l}</span></label>`).join('');
+    const sync=()=>{ panel.querySelectorAll('input[type=checkbox]').forEach(cb=>{ cb.checked=_dpreStatus.includes(cb.value); });
+        btn.innerHTML=(_dpreStatus.length===0?'<span class="text-slate-400">All status</span>':_dpreStatus.length===1?((DPRE_STATUS[_dpreStatus[0]]||[_dpreStatus[0]])[0]):`Status: ${_dpreStatus.length}`)+' <span class="text-slate-400">▾</span>'; };
+    panel.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.addEventListener('change',()=>{
+        if(cb.checked){ if(!_dpreStatus.includes(cb.value)) _dpreStatus.push(cb.value); } else _dpreStatus=_dpreStatus.filter(x=>x!==cb.value);
+        sync(); dpreLoad(); }));
+    panel.querySelector('.dpre-multi-all').addEventListener('click',()=>{ _dpreStatus=DPRE_STATUS_OPTS.map(o=>o[0]); sync(); dpreLoad(); });
+    panel.querySelector('.dpre-multi-clear').addEventListener('click',()=>{ _dpreStatus=[]; sync(); dpreLoad(); });
+    btn.addEventListener('click',e=>{ e.stopPropagation(); panel.classList.toggle('hidden'); });
+    document.addEventListener('click',e=>{ if(!wrap.contains(e.target)) panel.classList.add('hidden'); });
+    sync();
+}
+async function dpreLoad(){
+    const k=document.getElementById('dpre-kpis'); if(k) k.innerHTML='<div class="col-span-6 text-slate-400 text-sm p-6">Loading DocPharma orders…</div>';
+    try{
+        const r=await fetch(`/api/docpharma-recon?from=${_dpreFrom}&to=${_dpreTo}&status=${encodeURIComponent(_dpreStatus.join(','))}&payment=${_dprePayment}&dfrom=${_dpreDFrom}&dto=${_dpreDTo}&customer=${encodeURIComponent(_dpreCustomer)}`,{headers:getAuthHeaders()});
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _dpreData=d; dpreRender(d);
+    }catch(e){ if(k) k.innerHTML='<div class="col-span-6 text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+}
+function dpreRender(d){
+    const rc=d.rateCard||{}, k=d.kpis||{};
+    const rb=document.getElementById('dpre-ratebadge'); if(rb) rb.innerHTML=`Service ₹${rc.flat_service_charge} · RTO ₹${rc.rto_charge} · COD ₹${rc.cod_collection_charge}`;
+    const card=(label,val,sub,accent)=>`<div class="card p-4"><div class="text-xs text-slate-400 uppercase tracking-wide">${label}</div><div class="text-2xl font-bold ${accent||'text-slate-800'} tabular-nums mt-1">${val}</div><div class="text-xs text-slate-400 mt-0.5">${sub||''}</div></div>`;
+    document.getElementById('dpre-kpis').innerHTML=
+        card('DocPharma orders',k.orders,`${k.codOrders} COD · excl. rejected/cancelled`)+
+        card('Delivered',k.delivered,'billable','text-emerald-600')+
+        card('RTO',k.rto,'RTO charge','text-red-600')+
+        card('Rejected / Cancelled',(k.rejected||0)+(k.cancelled||0),'not billed','text-slate-500')+
+        card('Total charges',OPS_INR(k.totalWithGst),'incl 18% GST','text-indigo-600')+
+        card('Delivered GMV',OPS_INR(k.gmvDelivered),'order value','text-slate-600');
+    const seg=[['Flat Service',k.serviceTotal,'#6366f1'],['RTO',k.rtoTotal,'#ef4444'],['COD Collection',k.codTotal,'#0ea5e9']];
+    const tot=Math.max(1,seg.reduce((s,x)=>s+x[1],0));
+    document.getElementById('dpre-breakdown').innerHTML=
+        `<div class="flex h-3 rounded overflow-hidden mb-3">${seg.map(x=>`<div style="width:${x[1]/tot*100}%;background:${x[2]}"></div>`).join('')}</div>`+
+        `<div class="flex flex-wrap gap-x-6 gap-y-1 text-sm">${seg.map(x=>`<span class="text-slate-600"><span class="inline-block w-2.5 h-2.5 rounded-full mr-1 align-middle" style="background:${x[2]}"></span>${x[0]}: <b class="tabular-nums">${OPS_INR(x[1])}</b></span>`).join('')}<span class="ml-auto text-slate-500">Subtotal ${OPS_INR(k.confirmedTotal)} · GST 18% ${OPS_INR(k.gst)} · <b class="text-slate-800">Total ${OPS_INR(k.totalWithGst)}</b></span></div>`;
+    dpreTable();
+}
+function dpreSortVal(o,k){ switch(k){ case'value':return o.value||0; case'total':return o.total||0; case'service':return o.service||0; case'rto':return o.rto||0; case'cod':return o.cod||0; case'order':return(o.order||'').toLowerCase(); case'status':return dpreBucket(o); case'payment':return o.isCOD?'cod':'prepaid'; case'orderDate':return o.orderDate||''; case'closeDate':return o.closeDate||''; default:return''; } }
+function dpreTable(){ const c=document.getElementById('dpre-table'); const d=_dpreData; if(!d||!c) return;
+    const q=(document.getElementById('dpre-search')?.value||'').trim().toLowerCase();
+    let list=(d.orders||[]).slice();
+    if(q) list=list.filter(o=>(o.order||'').toLowerCase().includes(q)||(o.awb||'').toLowerCase().includes(q)||(o.courier||'').toLowerCase().includes(q));
+    const dir=_dpreSort.d==='asc'?1:-1;
+    list=list.sort((a,b)=>{const va=dpreSortVal(a,_dpreSort.k),vb=dpreSortVal(b,_dpreSort.k);return va<vb?-dir:va>vb?dir:0;});
+    const cnt=document.getElementById('dpre-count'); if(cnt) cnt.textContent=`${list.length} orders · ${OPS_INR(list.reduce((s,o)=>s+(o.total||0),0))} confirmed${d.truncated?` · capped at ${d.orders.length} of ${d.total}`:''}`;
+    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-8 text-center">No DocPharma orders in this window</div>'; return; }
+    const th='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
+    const td='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
+    const cols=[{k:'order',l:'Order / AWB'},{k:'orderDate',l:'Ordered'},{k:'value',l:'Value',a:1},{k:'payment',l:'Pay'},{k:'status',l:'Status'},{k:'closeDate',l:'Delivered / RTO'},{k:'service',l:'Service',a:1},{k:'rto',l:'RTO',a:1},{k:'cod',l:'COD',a:1},{k:'total',l:'Total',a:1}];
+    const closeDateStr=o=>o.closeDate||'';
+    const head=cols.map(col=>{const al=col.a?' text-right':'';const act=_dpreSort.k===col.k;const ar=act?`<span class="text-indigo-500">${_dpreSort.d==='asc'?'↑':'↓'}</span>`:'<span class="text-slate-300">↕</span>';return `<th class="${th}${al} dpre-sort cursor-pointer select-none ${act?'text-slate-600':''}" data-k="${col.k}">${col.l} ${ar}</th>`;}).join('');
+    const rows=list.slice(0,600).map(o=>{ const bk=dpreBucket(o), sb=DPRE_STATUS[bk]||['—','bg-slate-100 text-slate-600'], open=!!_dpreOpen&&(o.awb===_dpreOpen||('#'+o.order)===_dpreOpen||o.order===_dpreOpen);
+        const key=o.awb||o.order;
+        const money=v=>v?`<span class="tabular-nums">${OPS_INR(v)}</span>`:'<span class="text-slate-300">—</span>';
+        let out=`<tr class="dpre-row cursor-pointer ${open?'bg-indigo-50/60':'hover:bg-slate-50'}" data-key="${key}" data-order="${o.order}">`+
+          `<td class="${td} font-semibold"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${o.order||'—'}<div class="text-[11px] text-slate-400 font-normal ml-4">${o.awb||''}</div></td>`+
+          `<td class="${td} text-slate-500 tabular-nums">${o.orderDate?dpreDMY(o.orderDate):'—'}</td>`+
+          `<td class="${td} text-right tabular-nums">${o.value!=null?OPS_INR(o.value):'—'}</td>`+
+          `<td class="${td}"><span class="px-1.5 py-0.5 rounded text-[11px] font-medium ${o.isCOD?'bg-orange-100 text-orange-700':'bg-emerald-100 text-emerald-700'}">${o.isCOD?'COD':'Prepaid'}</span></td>`+
+          `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${sb[1]}">${sb[0]}</span></td>`+
+          `<td class="${td} text-slate-500 tabular-nums">${closeDateStr(o)?dpreDMY(closeDateStr(o)):'<span class="text-slate-300">—</span>'}</td>`+
+          `<td class="${td} text-right">${money(o.service)}</td>`+
+          `<td class="${td} text-right">${money(o.rto)}</td>`+
+          `<td class="${td} text-right">${money(o.cod)}</td>`+
+          `<td class="${td} text-right font-bold">${o.total?`<span class="tabular-nums text-slate-800">${OPS_INR(o.total)}</span>`:'<span class="text-slate-300">—</span>'}</td>`+
+        `</tr>`;
+        if(open) out+=dpreDetail(o);
+        return out; }).join('');
+    const more=list.length>600?`<div class="text-xs text-slate-400 p-3 text-center border-t border-slate-100">Showing first 600 of ${list.length}</div>`:'';
+    c.innerHTML=`<table class="w-full border-collapse"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+    c.querySelectorAll('.dpre-sort').forEach(h=>h.addEventListener('click',()=>{const k=h.dataset.k; if(_dpreSort.k===k)_dpreSort.d=_dpreSort.d==='asc'?'desc':'asc'; else _dpreSort={k,d:['value','total','service','rto','cod','orderDate'].includes(k)?'desc':'asc'}; dpreTable();}));
+    c.querySelectorAll('.dpre-row').forEach(row=>row.addEventListener('click',e=>{ if(e.target.closest('a')||e.target.closest('button'))return; const key=row.dataset.key; if(!key)return;
+        _dpreOpen=(_dpreOpen===key)?null:key; dpreTable(); }));
+}
+function dpreDetail(o){
+    const dest=[o.dest_city,o.dest_state].filter(Boolean).join(', ')||'—';
+    const step=(label,iso,color)=>{const on=!!iso;return `<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:${on?color:'#cbd5e1'}"></span><span class="w-24 text-slate-500">${label}</span><span class="tabular-nums ${on?'text-slate-700 font-medium':'text-slate-300'}">${dpFmtTs(iso)}</span></div>`;};
+    const ts=o.ts||{}, bk=dpreBucket(o);
+    const tl=step('Order placed',ts.order,'#6366f1')+step('Dispatched',ts.dispatched,'#0ea5e9')+(bk==='rto'?step('RTO',ts.rto,'#ef4444'):bk==='delivered'?step('Delivered',ts.delivered,'#16a34a'):bk==='lost'?step('Lost',ts.last,'#e11d48'):step('Last update',ts.last,'#94a3b8'))+step('Promised EDD',ts.edd,'#8b5cf6');
+    const trackLink=o.tracking_url?`<a href="${o.tracking_url}" target="_blank" rel="noopener" class="text-indigo-600 hover:underline">Track ↗</a>`:'';
+    const pretty=l=>String(l||'').split('_').map(w=>/^(rto|ofd|edd)$/i.test(w)?w.toUpperCase():w.charAt(0).toUpperCase()+w.slice(1)).join(' ');
+    const dot=l=>/rto_delivered|^delivered$/.test(l)?'#16a34a':/rto/.test(l)?'#ef4444':/out_for_delivery|ofd/.test(l)?'#f59e0b':/picked_up|manifest|in_transit|reached|dispatch/.test(l)?'#0ea5e9':'#94a3b8';
+    const scans=Array.isArray(o.scans)?o.scans:[];
+    const scanHtml=scans.length
+      ? `<div class="space-y-1.5 max-h-64 overflow-auto pr-1">${scans.map(s=>`<div class="flex gap-2 text-xs"><span class="w-1.5 h-1.5 rounded-full shrink-0 mt-1.5" style="background:${dot(s.label)}"></span><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${pretty(s.label)}${s.location?` <span class="text-slate-400">· ${s.location}</span>`:''}${s.reason?` <span class="text-slate-400">· ${s.reason}</span>`:''}</span></div>`).join('')}</div>`
+      : `<div class="text-slate-400 text-xs py-2">No scan timeline synced yet.</div>`;
+    const items=Array.isArray(o.items)?o.items:[];
+    const itemsHtml=items.length?`<div class="mt-2 pt-2 border-t border-slate-200"><div class="text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1">Items (${items.length})</div>${items.map(it=>`<div class="text-xs text-slate-500 leading-snug">${it.qty}× <b class="text-slate-700">${it.sku||'—'}</b>${it.name?` <span class="text-slate-400">${it.name}${it.variant?' · '+it.variant:''}</span>`:''}</div>`).join('')}</div>`:'';
+    return `<tr class="dpre-detail"><td colspan="10" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
+        <div class="grid md:grid-cols-3 gap-6">
+          <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Charge</div>
+            <div class="text-xs text-slate-500">Service <b class="text-slate-700">${OPS_INR(o.service)}</b> · RTO <b class="text-slate-700">${OPS_INR(o.rto)}</b> · COD <b class="text-slate-700">${OPS_INR(o.cod)}</b></div>
+            <div class="text-sm text-slate-800 font-bold mt-1">Total ${OPS_INR(o.total)}</div>
+            <div class="text-xs text-slate-500 mt-2">📍 ${dest}${o.dest_pincode?` · ${o.dest_pincode}`:''}</div>
+            <div class="text-xs text-slate-500">Value <b class="text-slate-700">${o.value!=null?OPS_INR(o.value):'—'}</b> · ${o.customer||'—'}</div>
+            <div class="text-xs text-slate-500 mt-1">AWB <b class="text-slate-700">${o.awb||'—'}</b> ${trackLink}</div>
+            ${o.reason?`<div class="text-xs text-slate-500 mt-1">Reason: <span class="text-slate-700">${o.reason}</span></div>`:''}
+            ${o.phone?`<div class="text-xs text-slate-500 mt-1">📞 <a href="tel:${o.phone}" class="text-indigo-600 hover:underline">${o.phone}</a></div>`:''}
+            ${itemsHtml}</div>
+          <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Timeline</div>${tl}</div>
+          <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log ${scans.length?`<span class="text-slate-400 font-normal">(${scans.length})</span>`:''}</div>${scanHtml}</div>
+        </div></td></tr>`;
+}
+async function dpreLoadScans(awb){ _dpreScan[awb]={loading:true}; try{
+        const r=await fetch(`/api/delivery-performance/shipment/${encodeURIComponent(awb)}`,{headers:getAuthHeaders()});
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _dpreScan[awb]={loading:false,scans:d.scans||[]};
+    }catch(e){ _dpreScan[awb]={loading:false,error:e.message}; }
+    if(_dpreOpen===awb) dpreTable();
+}
+async function dpreFetchStatus(order,btn){ if(btn){ btn.disabled=true; btn.textContent='Fetching…'; }
+    try{ const r=await fetch(`/api/docpharma-recon/fetch/${encodeURIComponent(order)}`,{method:'POST',headers:getAuthHeaders()});
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'not found');
+        showNotification(`${order} → ${d.status||d.outcome||'updated'}`); dpreLoad();
+    }catch(e){ showNotification('Fetch failed: '+e.message,true); if(btn){ btn.disabled=false; btn.textContent='↻ Fetch DocPharma status'; } }
+}
+document.addEventListener('click',e=>{ const b=e.target.closest('.dpre-fetch'); if(b){ e.stopPropagation(); dpreFetchStatus(b.dataset.order,b); } });
+function dpreOpenSettings(){ const rc=(_dpreData&&_dpreData.rateCard)||{}; const m=document.getElementById('dpre-settings');
+    document.getElementById('dpre-rc-service').value=rc.flat_service_charge??0;
+    document.getElementById('dpre-rc-rto').value=rc.rto_charge??0;
+    document.getElementById('dpre-rc-cod').value=rc.cod_collection_charge??0;
+    m.classList.remove('hidden'); m.classList.add('flex'); }
+function dpreCloseSettings(){ const m=document.getElementById('dpre-settings'); m.classList.add('hidden'); m.classList.remove('flex'); }
+async function dpreSaveSettings(){
+    const body={ flat_service_charge:parseFloat(document.getElementById('dpre-rc-service').value)||0,
+        rto_charge:parseFloat(document.getElementById('dpre-rc-rto').value)||0,
+        cod_collection_charge:parseFloat(document.getElementById('dpre-rc-cod').value)||0, updated_by:'dashboard' };
+    try{ const r=await fetch('/api/docpharma-recon/settings',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify(body)});
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        dpreCloseSettings(); showNotification('Rate card saved'); dpreLoad();
+    }catch(e){ showNotification('Save failed: '+e.message,true); }
+}
+async function dpreSnapshot(){ const d=_dpreData; if(!d||!d.orders||!d.orders.length){ showNotification('Nothing to snapshot',true); return; }
+    try{ const r=await fetch('/api/docpharma-recon/snapshot',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({orders:d.orders})});
+        const j=await r.json(); if(!j.success) throw new Error(j.error||'failed');
+        showNotification(`Logged snapshot of ${j.logged} orders`);
+    }catch(e){ showNotification('Snapshot failed: '+e.message,true); }
+}
+async function dpreImport(file){
+    const btn=document.getElementById('dpre-import-btn'); const label=btn?btn.textContent:''; if(btn){ btn.disabled=true; btn.textContent='Uploading…'; }
+    try{
+        const text=await file.text();
+        const r=await fetch('/api/docpharma-recon/import',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'text/plain; charset=utf-8'},body:text});
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'import failed');
+        const dist=Object.entries(d.statusDist||{}).map(([k,v])=>`${k}: ${v}`).join(' · ');
+        showNotification(`Imported ${d.imported} DocPharma orders${dist?' ('+dist+')':''}`);
+        dpreLoad();
+    }catch(e){ showNotification('Import failed: '+e.message,true); }
+    finally{ if(btn){ btn.disabled=false; btn.textContent=label; } const f=document.getElementById('dpre-import-file'); if(f) f.value=''; }
+}
+
+// ─── DocPharma Ledger — Invoices tab ─────────────────────────────────────────
+let _dpreInvWired=false, _dpinvForm={items:[]};
+const DPINV_IN='border border-slate-200 rounded px-2 py-1 text-xs focus:border-indigo-400 outline-none';
+function dpreInvInit(){
+    const sec=document.getElementById('dpre-tab-invoices'); if(!sec) return;
+    if(!_dpreInvWired){
+        sec.innerHTML=`<div class="p-6 space-y-6">
+          <div class="card p-0 overflow-hidden">
+            <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+              <h2 class="text-sm font-bold text-slate-700">Goods-Out Invoices <span class="text-slate-400 font-normal">· you → DocPharma (stock sent)</span></h2>
+              <div class="flex gap-2">
+                <button id="dpinv-goods-add" class="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-indigo-400">＋ Add</button>
+                <button id="dpinv-goods-upload" class="text-xs px-3 py-1.5 bg-slate-800 text-white rounded-lg">📤 Upload (Excel/CSV/PDF)</button>
+                <input type="file" id="dpinv-goods-file" accept=".pdf,.xlsx,.xls,.csv" class="hidden">
+              </div>
+            </div>
+            <div id="dpinv-goods-list" class="overflow-x-auto"></div>
+          </div>
+          <div class="card p-0 overflow-hidden">
+            <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+              <h2 class="text-sm font-bold text-slate-700">DocPharma Charge Invoices <span class="text-slate-400 font-normal">· DocPharma → you (service fees)</span></h2>
+              <div class="flex gap-2">
+                <button id="dpinv-charge-add" class="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-indigo-400">＋ Add</button>
+                <button id="dpinv-charge-upload" class="text-xs px-3 py-1.5 bg-slate-800 text-white rounded-lg">📤 Upload PDF</button>
+                <input type="file" id="dpinv-charge-file" accept=".pdf" class="hidden">
+              </div>
+            </div>
+            <div id="dpinv-charge-list" class="overflow-x-auto"></div>
+          </div>
+        </div>
+        <div id="dpinv-modal" class="fixed inset-0 z-50 hidden items-start justify-center overflow-auto py-8" style="background:rgba(15,23,42,.45)"><div id="dpinv-modal-box" class="bg-white rounded-xl shadow-2xl w-full max-w-3xl p-6 mx-4" onclick="event.stopPropagation()"></div></div>`;
+        sec.querySelector('#dpinv-goods-add').addEventListener('click',()=>dpinvGoodsForm());
+        sec.querySelector('#dpinv-goods-upload').addEventListener('click',()=>sec.querySelector('#dpinv-goods-file').click());
+        sec.querySelector('#dpinv-goods-file').addEventListener('change',e=>{const f=e.target.files[0]; if(f)dpinvUpload('goods',f); e.target.value='';});
+        sec.querySelector('#dpinv-charge-add').addEventListener('click',()=>dpinvChargeForm());
+        sec.querySelector('#dpinv-charge-upload').addEventListener('click',()=>sec.querySelector('#dpinv-charge-file').click());
+        sec.querySelector('#dpinv-charge-file').addEventListener('change',e=>{const f=e.target.files[0]; if(f)dpinvUpload('charge',f); e.target.value='';});
+        sec.querySelector('#dpinv-modal').addEventListener('click',()=>dpinvCloseModal());
+        _dpreInvWired=true;
+    }
+    dpinvLoadGoods(); dpinvLoadCharge();
+}
+function dpinvOpenModal(){ const m=document.getElementById('dpinv-modal'); m.classList.remove('hidden'); m.classList.add('flex'); }
+function dpinvCloseModal(){ const m=document.getElementById('dpinv-modal'); m.classList.add('hidden'); m.classList.remove('flex'); }
+const _th='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60', _td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100';
+async function dpinvLoadGoods(){ const el=document.getElementById('dpinv-goods-list'); if(!el)return; el.innerHTML='<div class="p-4 text-xs text-slate-400">Loading…</div>';
+    try{ const r=await fetch('/api/docpharma-invoices/goods',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        const invs=d.invoices||[]; if(!invs.length){ el.innerHTML='<div class="p-6 text-center text-xs text-slate-400">No goods invoices yet — Add or Upload one.</div>'; return; }
+        el.innerHTML=`<table class="w-full"><thead><tr><th class="${_th}">Invoice</th><th class="${_th}">Date</th><th class="${_th}">PO</th><th class="${_th} text-right">Qty</th><th class="${_th} text-right">Value</th><th class="${_th}"></th></tr></thead><tbody>${invs.map(iv=>`<tr class="hover:bg-slate-50"><td class="${_td} font-semibold">${iv.invoice_no||'—'}</td><td class="${_td} tabular-nums">${dpreDMY(iv.invoice_date)||'—'}</td><td class="${_td}">${iv.po_number||'—'}</td><td class="${_td} text-right tabular-nums">${iv.total_qty||0}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.total_value||0)}</td><td class="${_td} text-right whitespace-nowrap"><button class="dpinv-gv text-indigo-600 text-xs" data-id="${iv.id}">View</button> <button class="dpinv-gd text-rose-500 text-xs ml-2" data-id="${iv.id}" data-no="${iv.invoice_no||''}">Delete</button></td></tr>`).join('')}</tbody></table>`;
+        el.querySelectorAll('.dpinv-gv').forEach(b=>b.addEventListener('click',()=>dpinvGoodsView(b.dataset.id)));
+        el.querySelectorAll('.dpinv-gd').forEach(b=>b.addEventListener('click',()=>dpinvDelete('goods',b.dataset.id,b.dataset.no)));
+    }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+e.message+'</div>'; }
+}
+async function dpinvLoadCharge(){ const el=document.getElementById('dpinv-charge-list'); if(!el)return; el.innerHTML='<div class="p-4 text-xs text-slate-400">Loading…</div>';
+    try{ const r=await fetch('/api/docpharma-invoices/charge',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        const invs=d.invoices||[]; if(!invs.length){ el.innerHTML='<div class="p-6 text-center text-xs text-slate-400">No charge invoices yet — Add or Upload one.</div>'; return; }
+        el.innerHTML=`<table class="w-full"><thead><tr><th class="${_th}">Invoice</th><th class="${_th}">Date</th><th class="${_th}">Subject</th><th class="${_th} text-right">Service</th><th class="${_th} text-right">RTO</th><th class="${_th} text-right">COD</th><th class="${_th} text-right">Grand Total</th><th class="${_th}"></th></tr></thead><tbody>${invs.map(iv=>`<tr class="hover:bg-slate-50"><td class="${_td} font-semibold">${iv.invoice_no||'—'}</td><td class="${_td} tabular-nums">${dpreDMY(iv.invoice_date)||'—'}</td><td class="${_td} text-slate-500">${iv.subject||'—'}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.service_total||0)}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.rto_total||0)}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.cod_fee_total||0)}</td><td class="${_td} text-right tabular-nums font-bold">${OPS_INR(iv.grand_total||iv.total_charges||0)}</td><td class="${_td} text-right whitespace-nowrap"><button class="dpinv-cv text-indigo-600 text-xs" data-id="${iv.id}">Edit</button> <button class="dpinv-cd text-rose-500 text-xs ml-2" data-id="${iv.id}" data-no="${iv.invoice_no||''}">Delete</button></td></tr>`).join('')}</tbody></table>`;
+        el.querySelectorAll('.dpinv-cv').forEach(b=>b.addEventListener('click',()=>dpinvChargeForm(invs.find(x=>String(x.id)===b.dataset.id))));
+        el.querySelectorAll('.dpinv-cd').forEach(b=>b.addEventListener('click',()=>dpinvDelete('charge',b.dataset.id,b.dataset.no)));
+    }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+e.message+'</div>'; }
+}
+async function dpinvGoodsView(id){ try{ const r=await fetch('/api/docpharma-invoices/goods/'+id,{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error); dpinvGoodsForm({...d.invoice, items:d.items}); }catch(e){ showNotification(e.message,true); } }
+function dpinvField(label,id,val,type){ return `<div><label class="block text-[11px] text-slate-500 mb-0.5">${label}</label><input id="${id}" type="${type||'text'}" value="${val==null?'':String(val).replace(/"/g,'&quot;')}" class="${DPINV_IN} w-full"></div>`; }
+function dpinvGoodsRow(it,i){ return `<tr class="border-b border-slate-100"><td class="p-1"><input data-i="${i}" data-f="sku" value="${(it.sku||'').replace(/"/g,'&quot;')}" class="${DPINV_IN} w-24" placeholder="SKU"></td><td class="p-1"><input data-i="${i}" data-f="name" value="${(it.name||'').replace(/"/g,'&quot;')}" class="${DPINV_IN} w-full min-w-[200px]" placeholder="Product name"></td><td class="p-1"><input data-i="${i}" data-f="hsn" value="${it.hsn||''}" class="${DPINV_IN} w-20" placeholder="HSN"></td><td class="p-1"><input data-i="${i}" data-f="qty" value="${it.qty||''}" class="${DPINV_IN} w-16 text-right" placeholder="Qty"></td><td class="p-1"><input data-i="${i}" data-f="rate" value="${it.rate||''}" class="${DPINV_IN} w-20 text-right" placeholder="Rate"></td><td class="p-1"><input data-i="${i}" data-f="amount" value="${it.amount||''}" class="${DPINV_IN} w-24 text-right" placeholder="Amount"></td><td class="p-1 text-center"><button class="dpinv-delrow text-rose-400 text-sm" data-i="${i}">✕</button></td></tr>`; }
+function dpinvRenderRows(){ const c=document.getElementById('dpinv-items'); if(!c)return; c.innerHTML=`<table class="w-full text-xs"><thead><tr><th class="${_th}">SKU</th><th class="${_th}">Product</th><th class="${_th}">HSN</th><th class="${_th} text-right">Qty</th><th class="${_th} text-right">Rate</th><th class="${_th} text-right">Amount</th><th class="${_th}"></th></tr></thead><tbody>${_dpinvForm.items.map((it,i)=>dpinvGoodsRow(it,i)).join('')}</tbody></table>`;
+    c.querySelectorAll('input').forEach(inp=>inp.addEventListener('input',e=>{ const i=+e.target.dataset.i, f=e.target.dataset.f; _dpinvForm.items[i][f]=e.target.value; }));
+    c.querySelectorAll('.dpinv-delrow').forEach(b=>b.addEventListener('click',()=>{ _dpinvForm.items.splice(+b.dataset.i,1); if(!_dpinvForm.items.length)_dpinvForm.items=[{}]; dpinvRenderRows(); }));
+}
+function dpinvGoodsForm(inv){ inv=inv||{}; _dpinvForm={items:(Array.isArray(inv.items)&&inv.items.length?inv.items.map(x=>({...x})):[{sku:'',name:'',hsn:'',qty:'',rate:'',amount:''}])};
+    const box=document.getElementById('dpinv-modal-box'); box.classList.remove('max-w-3xl'); box.classList.add('max-w-5xl');
+    box.innerHTML=`<div class="flex items-center justify-between mb-4"><h3 class="text-lg font-bold text-slate-800">${inv.id?'Goods Invoice':'New Goods Invoice'}${inv.source&&inv.source!=='manual'?` <span class="text-xs text-amber-600">(extracted from ${inv.source} — review)</span>`:''}</h3><button id="dpinv-x" class="text-slate-400 text-xl">✕</button></div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        ${dpinvField('Invoice No','gi-no',inv.invoice_no)}${dpinvField('Date','gi-date',inv.invoice_date,'date')}${dpinvField('PO Number','gi-po',inv.po_number)}${dpinvField('Grand Total (₹)','gi-total',inv.total_value,'number')}
+      </div>
+      <div id="dpinv-items" class="border border-slate-100 rounded-lg overflow-x-auto mb-2"></div>
+      <button id="dpinv-addrow" class="text-xs text-indigo-600 mb-4">＋ Add line</button>
+      <div class="grid grid-cols-3 gap-3 mb-4">${dpinvField('Taxable Amount (₹)','gi-taxable',inv.taxable_amount,'number')}${dpinvField('Tax / IGST (₹)','gi-tax',inv.tax_amount,'number')}${dpinvField('Notes','gi-notes',inv.notes)}</div>
+      <div class="flex justify-end gap-2"><button id="dpinv-cancel" class="px-4 py-2 text-sm text-slate-600">Cancel</button><button id="dpinv-save" class="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg">Save invoice</button></div>`;
+    dpinvRenderRows();
+    box.querySelector('#dpinv-addrow').addEventListener('click',()=>{ _dpinvForm.items.push({sku:'',name:'',hsn:'',qty:'',rate:'',amount:''}); dpinvRenderRows(); });
+    box.querySelector('#dpinv-x').addEventListener('click',dpinvCloseModal); box.querySelector('#dpinv-cancel').addEventListener('click',dpinvCloseModal);
+    box.querySelector('#dpinv-save').addEventListener('click',()=>dpinvSaveGoods());
+    dpinvOpenModal();
+}
+async function dpinvSaveGoods(){
+    const g=id=>document.getElementById(id).value;
+    const body={ invoice_no:g('gi-no'), invoice_date:g('gi-date')||null, po_number:g('gi-po'), total_value:g('gi-total'), taxable_amount:g('gi-taxable'), tax_amount:g('gi-tax'), notes:g('gi-notes'), source:'manual', items:_dpinvForm.items.filter(it=>(it.name||'').trim()||it.qty) };
+    if(!body.invoice_no){ showNotification('Invoice No is required',true); return; }
+    try{ const r=await fetch('/api/docpharma-invoices/goods',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify(body)}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        showNotification('Goods invoice saved'); dpinvCloseModal(); dpinvLoadGoods();
+    }catch(e){ showNotification('Save failed: '+e.message,true); }
+}
+function dpinvChargeForm(inv){ inv=inv||{}; const box=document.getElementById('dpinv-modal-box'); box.classList.remove('max-w-5xl'); box.classList.add('max-w-3xl');
+    box.innerHTML=`<div class="flex items-center justify-between mb-4"><h3 class="text-lg font-bold text-slate-800">${inv.id?'Charge Invoice':'New Charge Invoice'}${inv.source&&inv.source!=='manual'?` <span class="text-xs text-amber-600">(extracted from ${inv.source} — review)</span>`:''}</h3><button id="dpinv-x" class="text-slate-400 text-xl">✕</button></div>
+      <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">${dpinvField('Invoice No','ci-no',inv.invoice_no)}${dpinvField('Date','ci-date',inv.invoice_date,'date')}${dpinvField('Subject / Period','ci-subject',inv.subject)}</div>
+      <table class="w-full text-xs mb-4"><thead><tr><th class="${_th}">Charge</th><th class="${_th} text-right">Qty (orders)</th><th class="${_th} text-right">Rate ₹</th><th class="${_th} text-right">Amount ₹</th></tr></thead><tbody>
+        <tr><td class="${_td}">Service (delivered)</td><td class="p-1"><input id="ci-sqty" value="${inv.service_qty||''}" class="${DPINV_IN} w-full text-right"></td><td class="p-1"><input id="ci-srate" value="${inv.service_rate||''}" class="${DPINV_IN} w-full text-right"></td><td class="p-1"><input id="ci-stot" value="${inv.service_total||''}" class="${DPINV_IN} w-full text-right"></td></tr>
+        <tr><td class="${_td}">RTO</td><td class="p-1"><input id="ci-rqty" value="${inv.rto_qty||''}" class="${DPINV_IN} w-full text-right"></td><td class="p-1"><input id="ci-rrate" value="${inv.rto_rate||''}" class="${DPINV_IN} w-full text-right"></td><td class="p-1"><input id="ci-rtot" value="${inv.rto_total||''}" class="${DPINV_IN} w-full text-right"></td></tr>
+        <tr><td class="${_td}">COD collection</td><td class="p-1"><input id="ci-cqty" value="${inv.cod_qty||''}" class="${DPINV_IN} w-full text-right"></td><td class="p-1"><input id="ci-crate" value="${inv.cod_rate||''}" class="${DPINV_IN} w-full text-right"></td><td class="p-1"><input id="ci-ctot" value="${inv.cod_fee_total||''}" class="${DPINV_IN} w-full text-right"></td></tr>
+      </tbody></table>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">${dpinvField('Tax / IGST (₹)','ci-tax',inv.tax_amount,'number')}${dpinvField('Grand Total (₹)','ci-grand',inv.grand_total,'number')}${dpinvField('COD collected (₹)','ci-codcol',inv.cod_collected,'number')}${dpinvField('COD remitted (₹)','ci-codrem',inv.cod_remitted,'number')}</div>
+      <div class="flex justify-end gap-2"><button id="dpinv-cancel" class="px-4 py-2 text-sm text-slate-600">Cancel</button><button id="dpinv-save" class="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg">Save invoice</button></div>`;
+    box.querySelector('#dpinv-x').addEventListener('click',dpinvCloseModal); box.querySelector('#dpinv-cancel').addEventListener('click',dpinvCloseModal);
+    box.querySelector('#dpinv-save').addEventListener('click',()=>dpinvSaveCharge());
+    // Auto-calc: amount = qty × rate per row; tax auto-suggests 18% (until edited); grand = subtotal + tax.
+    const $c=id=>box.querySelector('#'+id), nC=v=>{const x=parseFloat(String(v||'').replace(/[^0-9.\-]/g,''));return isNaN(x)?0:x;};
+    let taxTouched=!!(inv.tax_amount);
+    const rowAmt=(q,r,t)=>{const qty=nC($c(q).value),rate=nC($c(r).value); if(qty&&rate)$c(t).value=Math.round(qty*rate);};
+    const recalcGrand=()=>{const sub=nC($c('ci-stot').value)+nC($c('ci-rtot').value)+nC($c('ci-ctot').value); if(!taxTouched)$c('ci-tax').value=sub?Math.round(sub*0.18):''; $c('ci-grand').value=sub?sub+nC($c('ci-tax').value):'';};
+    const recalcAll=()=>{rowAmt('ci-sqty','ci-srate','ci-stot');rowAmt('ci-rqty','ci-rrate','ci-rtot');rowAmt('ci-cqty','ci-crate','ci-ctot');recalcGrand();};
+    ['ci-sqty','ci-srate','ci-rqty','ci-rrate','ci-cqty','ci-crate'].forEach(id=>$c(id).addEventListener('input',recalcAll));
+    ['ci-stot','ci-rtot','ci-ctot'].forEach(id=>$c(id).addEventListener('input',recalcGrand));
+    $c('ci-tax').addEventListener('input',()=>{taxTouched=true;recalcGrand();});
+    dpinvOpenModal();
+}
+async function dpinvSaveCharge(){
+    const g=id=>document.getElementById(id).value;
+    const body={ invoice_no:g('ci-no'), invoice_date:g('ci-date')||null, subject:g('ci-subject'), service_qty:g('ci-sqty'), service_rate:g('ci-srate'), service_total:g('ci-stot'), rto_qty:g('ci-rqty'), rto_rate:g('ci-rrate'), rto_total:g('ci-rtot'), cod_qty:g('ci-cqty'), cod_rate:g('ci-crate'), cod_fee_total:g('ci-ctot'), tax_amount:g('ci-tax'), grand_total:g('ci-grand'), cod_collected:g('ci-codcol'), cod_remitted:g('ci-codrem'), source:'manual' };
+    if(!body.invoice_no){ showNotification('Invoice No is required',true); return; }
+    try{ const r=await fetch('/api/docpharma-invoices/charge',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify(body)}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        showNotification('Charge invoice saved'); dpinvCloseModal(); dpinvLoadCharge();
+    }catch(e){ showNotification('Save failed: '+e.message,true); }
+}
+async function dpinvUpload(type,file){ showNotification('Reading '+file.name+'…');
+    try{ const r=await fetch('/api/docpharma-invoices/parse?type='+type,{method:'POST',headers:{...getAuthHeaders(),'X-Filename':file.name},body:file}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        const ex=d.extracted||{}; ex.source=file.name.toLowerCase().endsWith('.pdf')?'pdf':'excel';
+        if(type==='charge') dpinvChargeForm(ex); else dpinvGoodsForm(ex);
+        showNotification('Extracted — please review the fields, then Save');
+    }catch(e){ showNotification('Could not read file: '+e.message,true); }
+}
+async function dpinvDelete(type,id,no){ if(!confirm('Delete invoice '+(no||id)+'?'))return;
+    try{ const r=await fetch('/api/docpharma-invoices/'+type+'/'+id,{method:'DELETE',headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        showNotification('Deleted'); type==='goods'?dpinvLoadGoods():dpinvLoadCharge();
+    }catch(e){ showNotification('Delete failed: '+e.message,true); }
+}
+
+// ─── DocPharma Overview tab (operational + value funnel, order-date cohort) ──
+let _dpovWired=false,_dpovFrom='',_dpovTo='',_dpovData=null;
+function dpovShortM(ym){ const p=String(ym).split('-'); return (DPLED_MONTHS[+p[1]-1]||'').slice(0,3)+" '"+p[0].slice(2); }
+// Drill from an Overview figure → Reconciliation, pre-filtered to those orders (order-date cohort → recon's order-date range).
+function dpreOverviewDrill(statuses,payment){
+    _dpreStatus=(statuses||[]).filter(Boolean); _dprePayment=payment||'all';
+    _dpreFrom=_dpovFrom||_dpreFrom; _dpreTo=_dpovTo||_dpreTo; _dpreDFrom=''; _dpreDTo='';
+    dpreTab('recon');
+    const v=document.getElementById('docpharma-recon-view');
+    if(v){ const ff=v.querySelector('#dpre-from'); if(ff)ff.value=_dpreFrom; const tf=v.querySelector('#dpre-to'); if(tf)tf.value=_dpreTo;
+        const df=v.querySelector('#dpre-dfrom'); if(df)df.value=''; const dto=v.querySelector('#dpre-dto'); if(dto)dto.value='';
+        const pay=v.querySelector('#dpre-payment'); if(pay)pay.value=_dprePayment;
+        const wrap=v.querySelector('#dpre-status-multi'); if(wrap){ wrap.querySelectorAll('.dpre-multi-panel input[type=checkbox]').forEach(cb=>cb.checked=_dpreStatus.includes(cb.value)); const btn=wrap.querySelector('.dpre-multi-btn'); if(btn) btn.innerHTML=(_dpreStatus.length===0?'<span class="text-slate-400">All status</span>':_dpreStatus.length===1?((DPRE_STATUS[_dpreStatus[0]]||[_dpreStatus[0]])[0]):`Status: ${_dpreStatus.length}`)+' <span class="text-slate-400">▾</span>'; } }
+    dpreLoad();
+}
+function dpreOverviewInit(){ const sec=document.getElementById('dpre-tab-overview'); if(!sec) return;
+    if(!_dpovWired){
+        const t=new Date(), f=new Date(t.getFullYear(),t.getMonth()-5,1);
+        const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        _dpovFrom=fmt(f); _dpovTo=fmt(t);
+        sec.innerHTML=`<div class="p-6 space-y-4">
+          <div class="flex items-center justify-between flex-wrap gap-2">
+            <div><h2 class="text-sm font-bold text-slate-700">DocPharma throughput · order-date cohort</h2><p class="text-[11px] text-slate-400">Orders grouped by the day they were handed to DocPharma, then their outcomes. Recent months are still in transit.</p></div>
+            <div class="flex items-center gap-2 text-xs">
+              <span class="text-slate-400">Ordered</span>
+              <input type="date" id="dpov-from" value="${_dpovFrom}" class="border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700">
+              <span class="text-slate-400">→</span>
+              <input type="date" id="dpov-to" value="${_dpovTo}" class="border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700">
+              <button id="dpov-apply" class="px-3 py-1.5 bg-indigo-600 text-white rounded-lg">Apply</button>
+              <button id="dpov-refresh" class="px-3 py-1.5 bg-slate-800 text-white rounded-lg">↻ Refresh</button>
+            </div>
+          </div>
+          <div id="dpov-body" class="space-y-4"><div class="text-xs text-slate-400 p-4">Loading…</div></div>
+        </div>`;
+        sec.querySelector('#dpov-apply').addEventListener('click',()=>{ _dpovFrom=sec.querySelector('#dpov-from').value||''; _dpovTo=sec.querySelector('#dpov-to').value||''; dpreOverviewLoad(); });
+        sec.querySelector('#dpov-refresh').addEventListener('click',()=>dpreOverviewLoad());
+        _dpovWired=true;
+    }
+    dpreOverviewLoad();
+}
+async function dpreOverviewLoad(){ const box=document.getElementById('dpov-body'); if(!box) return; box.innerHTML='<div class="text-xs text-slate-400 p-4">Loading…</div>';
+    try{ const r=await fetch(`/api/docpharma-overview?from=${_dpovFrom}&to=${_dpovTo}`,{headers:getAuthHeaders()});
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _dpovData=d; dpreOverviewRender(d);
+    }catch(e){ box.innerHTML='<div class="text-xs text-rose-500 p-4">'+e.message+'</div>'; }
+}
+function dpreOverviewRender(d){
+    const box=document.getElementById('dpov-body'); if(!box) return;
+    const f=d.funnel, sp=d.split, vf=d.valueFlow, ef=d.efficiency, tr=d.trend||[], cr=d.codRealization||{};
+    const INR=OPS_INR, pc=v=>(v*100).toFixed(1)+'%', nfmt=n=>Number(n||0).toLocaleString('en-IN');
+    const ho=f.handedOver.orders||1;
+    const bar=(label,orders,value,pct,color,st,pay)=>`<div class="dpov-drill cursor-pointer group" data-st="${st||''}" data-pay="${pay||'all'}">
+        <div class="flex items-center justify-between text-xs mb-1"><span class="font-semibold text-slate-700 group-hover:text-indigo-600">${label} <span class="text-slate-400 font-normal">${nfmt(orders)}</span></span><span class="text-slate-500 tabular-nums">${INR(value)}${pct!=null?` · ${pct}`:''}</span></div>
+        <div class="h-3 rounded bg-slate-100 overflow-hidden"><div class="h-full ${color}" style="width:${Math.max(1,Math.min(100,orders/ho*100)).toFixed(1)}%"></div></div></div>`;
+    const chip=(l,o,v,cls,st)=>`<span class="dpov-drill cursor-pointer px-2.5 py-1 rounded-full ${cls}" data-st="${st}" data-pay="all">${l} <b>${nfmt(o)}</b> · ${INR(v)}</span>`;
+    const funnelHtml=`<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-4">Order funnel</h3><div class="space-y-3">
+        ${bar('Handed over',f.handedOver.orders,f.handedOver.value,null,'bg-slate-400','','all')}
+        ${bar('Dispatched',f.dispatched.orders,f.dispatched.value,pc(f.dispatched.orders/ho),'bg-indigo-500','delivered,rto,lost,shipped','all')}
+        ${bar('Delivered (served)',f.delivered.orders,f.delivered.value,pc(f.delivered.orders/ho)+' served','bg-emerald-500','delivered','all')}</div>
+        <div class="flex flex-wrap gap-2 mt-4 text-xs">
+        ${chip('RTO',f.rto.orders,f.rto.value,'bg-rose-50 text-rose-700','rto')}
+        ${chip('Lost',f.lost.orders,f.lost.value,'bg-rose-50 text-rose-700','lost')}
+        ${chip('Rejected',f.rejected.orders,f.rejected.value,'bg-slate-100 text-slate-500','rejected')}
+        ${chip('Cancelled',f.cancelled.orders,f.cancelled.value,'bg-slate-100 text-slate-500','cancelled')}
+        ${chip('In transit',f.inTransit.orders,f.inTransit.value,'bg-sky-50 text-sky-700','shipped')}</div></div>`;
+    const total=sp.cod.value+sp.prepaid.value||1;
+    const splitHtml=`<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-4">COD vs Prepaid</h3>
+        <div class="flex h-3 rounded overflow-hidden mb-3"><div class="bg-amber-500" style="width:${(sp.cod.value/total*100).toFixed(1)}%"></div><div class="bg-indigo-500" style="width:${(sp.prepaid.value/total*100).toFixed(1)}%"></div></div>
+        <div class="grid grid-cols-2 gap-4">
+          <div class="dpov-drill cursor-pointer" data-st="" data-pay="cod"><div class="text-xs text-amber-600 font-semibold">● COD</div><div class="text-lg font-bold text-slate-800 tabular-nums">${INR(sp.cod.value)}</div><div class="text-[11px] text-slate-400">${nfmt(sp.cod.orders)} orders · delivered ${INR(sp.cod.delivered)}</div></div>
+          <div class="dpov-drill cursor-pointer" data-st="" data-pay="prepaid"><div class="text-xs text-indigo-600 font-semibold">● Prepaid</div><div class="text-lg font-bold text-slate-800 tabular-nums">${INR(sp.prepaid.value)}</div><div class="text-[11px] text-slate-400">${nfmt(sp.prepaid.orders)} orders · delivered ${INR(sp.prepaid.delivered)}</div></div>
+        </div>
+        <div class="mt-3 pt-3 border-t border-slate-100 text-[11px] text-slate-500">COD delivered (DocPharma collects) <b>${INR(cr.codDeliveredValue||0)}</b> · remitted to date <b class="text-emerald-700">${INR(cr.received||0)}</b>${cr.codDeliveredValue?` · realized ${pc((cr.received||0)/cr.codDeliveredValue)}`:''}</div></div>`;
+    const vfRow=(l,v,c,note)=>`<div class="flex items-center justify-between py-1.5 border-b border-slate-100 last:border-0"><span class="text-sm text-slate-600">${l}${note?` <span class="text-[11px] text-slate-400">${note}</span>`:''}</span><span class="text-sm font-semibold ${c||'text-slate-800'} tabular-nums">${INR(v)}</span></div>`;
+    const valueHtml=`<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-3">Value flow</h3>
+        ${vfRow('GMV handed over',vf.gmvHanded,'text-slate-800')}
+        ${vfRow('Delivered GMV (served)',vf.deliveredGmv,'text-emerald-700')}
+        ${vfRow('RTO value (returned)',vf.rtoValue,'text-rose-600','lost sale')}
+        ${vfRow('Lost value',vf.lostValue,'text-rose-600','compensated')}
+        ${vfRow('In-transit value',vf.inTransitValue,'text-sky-600','at risk')}</div>`;
+    const tile=(l,v,c)=>`<div class="card p-4"><div class="text-xs text-slate-400 uppercase tracking-wide">${l}</div><div class="text-2xl font-bold ${c||'text-slate-800'} tabular-nums mt-1">${v}</div></div>`;
+    const effHtml=`<div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        ${tile('Delivery rate',pc(ef.deliveryRate),'text-emerald-600')}
+        ${tile('RTO rate',pc(ef.rtoRate),'text-rose-600')}
+        ${tile('Rejection rate',pc(ef.rejectionRate),'text-slate-600')}
+        ${tile('Avg order value',INR(ef.avgOrderValue),'text-slate-700')}
+        ${tile('Charge / delivered',INR(ef.chargePerDelivered),'text-indigo-600')}
+        ${tile('Charge % of del. GMV',pc(ef.chargePctOfDeliveredGmv),'text-indigo-600')}</div>`;
+    const maxH=44;
+    const trendCols=tr.map(m=>{ const h=Math.max(2,Math.round(m.deliveryRate*maxH)); const col=m.incomplete?'bg-slate-300':'bg-emerald-500';
+        return `<div class="flex flex-col items-center gap-1" title="${dpledMonLabel(m.month)} · delivery ${pc(m.deliveryRate)} · ${m.delivered}/${m.delivered+m.rto+m.lost} closed${m.incomplete?' · still in transit':''}"><div class="flex items-end" style="height:${maxH}px"><div class="w-4 ${col} rounded-t" style="height:${h}px"></div></div><div class="text-[9px] text-slate-400 whitespace-nowrap">${dpovShortM(m.month)}</div></div>`; }).join('');
+    const trendHtml=tr.length?`<div class="card p-5"><div class="flex items-center justify-between mb-3"><h3 class="text-sm font-bold text-slate-700">Delivery-rate trend</h3><span class="text-[11px] text-slate-400">grey = cohort still in transit</span></div><div class="flex items-end gap-3 overflow-x-auto pb-1">${trendCols}</div></div>`:'';
+    box.innerHTML=effHtml
+        +`<div class="grid grid-cols-1 lg:grid-cols-3 gap-4"><div class="lg:col-span-2">${funnelHtml}</div>${valueHtml}</div>`
+        +`<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">${splitHtml}${trendHtml}</div>`;
+    box.querySelectorAll('.dpov-drill').forEach(el=>el.addEventListener('click',()=>{ const st=(el.dataset.st||'').split(',').filter(Boolean); dpreOverviewDrill(st, el.dataset.pay); }));
+}
+
+// ─── DocPharma Ledger tab (Receivable / Payable / Net / Outstanding) ─────────
+let _dpreLedgerWired=false, _dpledRows=[], _dpledCharges=[], _dpledPayments=[], _dpledFifo=null, _dpledRate={}, _dpledFrom='', _dpledTo='', _dpledOpen={}, _dpledCard='';
+const DPLED_SETTLE={settled:['Settled','bg-emerald-100 text-emerald-700'],partial:['Partial','bg-amber-100 text-amber-700'],outstanding:['Outstanding','bg-rose-100 text-rose-700'],na:['—','text-slate-300']};
+const DPLED_MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
+function dpledMonLabel(ym){ if(!ym||ym==='unknown')return 'Unknown'; const p=String(ym).split('-'); const mi=parseInt(p[1],10)-1; return (DPLED_MONTHS[mi]||p[1])+'-'+p[0]; }
+function dpreLedgerInit(){ const sec=document.getElementById('dpre-tab-ledger'); if(!sec) return;
+    if(!_dpreLedgerWired){ sec.innerHTML=`<div class="p-6 space-y-5">
+        <div class="flex items-center justify-between flex-wrap gap-2"><h2 class="text-sm font-bold text-slate-700">DocPharma account · Receivable vs Payable</h2>
+          <div class="flex items-center gap-2 text-xs">
+            <span class="text-slate-400">Months</span>
+            <input type="month" id="dpled-from" class="border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700">
+            <span class="text-slate-400">→</span>
+            <input type="month" id="dpled-to" class="border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700">
+            <button id="dpled-apply" class="px-3 py-1.5 bg-indigo-600 text-white rounded-lg">Apply</button>
+            <button id="dpled-clear" class="px-2 py-1.5 text-slate-500">clear</button>
+            <button id="dpled-csv" class="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 hover:border-indigo-400">⬇ CSV</button>
+            <button id="dpled-pdf" class="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 hover:border-indigo-400">⬇ PDF</button>
+            <button id="dpled-refresh" class="px-3 py-1.5 bg-slate-800 text-white rounded-lg">↻ Refresh</button>
+          </div></div>
+        <div id="dpled-kpis" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3"></div>
+        <div id="dpled-detail"></div>
+        <div id="dpled-ops" class="space-y-3"></div>
+        <div class="card p-0 overflow-hidden"><div class="px-5 py-3 border-b border-slate-100"><h2 class="text-sm font-bold text-slate-700">Monthly ledger</h2><p class="text-[11px] text-slate-400">Charges grouped by delivered/RTO month · invoices by their period · payments by date · click a month to break it down</p></div><div id="dpled-table" class="overflow-x-auto"></div></div>
+      </div>`;
+        sec.querySelector('#dpled-refresh').addEventListener('click',()=>dpreLedgerLoad());
+        sec.querySelector('#dpled-apply').addEventListener('click',()=>{ _dpledFrom=sec.querySelector('#dpled-from').value||''; _dpledTo=sec.querySelector('#dpled-to').value||''; dpledRender(); });
+        sec.querySelector('#dpled-clear').addEventListener('click',()=>{ _dpledFrom=_dpledTo=''; sec.querySelector('#dpled-from').value=''; sec.querySelector('#dpled-to').value=''; dpledRender(); });
+        sec.querySelector('#dpled-csv').addEventListener('click',dpledExportCsv);
+        sec.querySelector('#dpled-pdf').addEventListener('click',dpledPrint);
+        _dpreLedgerWired=true;
+    }
+    dpreLedgerLoad();
+}
+async function dpreLedgerLoad(){ const k=document.getElementById('dpled-kpis'); if(k)k.innerHTML='<div class="col-span-6 text-xs text-slate-400 p-4">Loading ledger…</div>';
+    try{ const r=await fetch('/api/docpharma-ledger',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        _dpledRows=d.rows||[]; _dpledCharges=d.charges||[]; _dpledPayments=d.payments||[]; _dpledFifo=(d.summary||{}).fifo||null; _dpledRate=d.rateCard||{}; dpledRender();
+    }catch(e){ if(k)k.innerHTML='<div class="col-span-6 text-xs text-rose-500 p-4">'+e.message+'</div>'; }
+}
+const dpledInRange=mk=>{ if(!mk)return false; if(mk==='unknown')return !_dpledFrom&&!_dpledTo; if(_dpledFrom&&mk<_dpledFrom)return false; if(_dpledTo&&mk>_dpledTo)return false; return true; };
+function dpledVisibleRows(){ return _dpledRows.filter(m=>{ if(m.month==='unknown') return !_dpledFrom&&!_dpledTo; if(_dpledFrom&&m.month<_dpledFrom)return false; if(_dpledTo&&m.month>_dpledTo)return false; return true; }); }
+function dpledMonthEnd(ym){ const p=String(ym).split('-'); const d=new Date(+p[0],+p[1],0); return `${p[0]}-${String(+p[1]).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+// Billing variance: DocPharma's invoiced grand total vs our rate-card expectation incl. est. GST. Flags material over/under-billing.
+function dpledBillVar(g){ if(!(g.invGrand>0))return null; const exp=g.expCharges*1.18, diff=g.invGrand-exp, pct=exp?diff/exp*100:0; const flag=Math.abs(diff)>100&&Math.abs(pct)>=5; return {exp,act:g.invGrand,diff,pct,flag}; }
+// Drill-through: jump to the Reconciliation tab, pre-filtered to the exact orders behind a ledger figure.
+function dpledDrill(statuses,payment){
+    _dpreStatus=(statuses||[]).filter(Boolean); _dprePayment=payment||'all';
+    _dpreDFrom=_dpledFrom?`${_dpledFrom}-01`:''; _dpreDTo=_dpledTo?dpledMonthEnd(_dpledTo):'';
+    dpreTab('recon');
+    const v=document.getElementById('docpharma-recon-view');
+    if(v){ const df=v.querySelector('#dpre-dfrom'); if(df)df.value=_dpreDFrom; const dto=v.querySelector('#dpre-dto'); if(dto)dto.value=_dpreDTo; const pay=v.querySelector('#dpre-payment'); if(pay)pay.value=_dprePayment;
+        const wrap=v.querySelector('#dpre-status-multi'); if(wrap){ wrap.querySelectorAll('.dpre-multi-panel input[type=checkbox]').forEach(cb=>cb.checked=_dpreStatus.includes(cb.value)); const btn=wrap.querySelector('.dpre-multi-btn'); if(btn) btn.innerHTML=(_dpreStatus.length===0?'<span class="text-slate-400">All status</span>':_dpreStatus.length===1?((DPRE_STATUS[_dpreStatus[0]]||[_dpreStatus[0]])[0]):`Status: ${_dpreStatus.length}`)+' <span class="text-slate-400">▾</span>'; } }
+    dpreLoad();
+}
+function dpledExportCsv(){
+    const rows=dpledVisibleRows(); if(!rows.length){ showNotification&&showNotification('Nothing to export',true); return; }
+    const hdr=['Month','Total orders','Delivered','RTO','RTO COD','RTO Prepaid','Rejected/Cancelled','Lost','Prepaid orders','Expected charges','Invoiced (incl tax)','Variance','COD collected','Prepaid value','Lost comp','Net remit','Paid (FIFO)','Settled','Outstanding'];
+    const esc=v=>{ const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+    const R=v=>Math.round(v||0), lines=[hdr.join(',')]; const t={};
+    rows.forEach(m=>{ ['totalOrders','delivered','rto','rtoCod','rtoPrepaid','rejected','lost','prepaidOrders','expCharges','codCollected','prepaidValue','lostComp','remitExpected','paidNet','outstanding'].forEach(k=>t[k]=(t[k]||0)+(m[k]||0)); t.inv=(t.inv||0)+(m.invoices?(m.invGrand||m.invCharges):0);
+        lines.push([dpledMonLabel(m.month),m.totalOrders||0,m.delivered,m.rto,m.rtoCod||0,m.rtoPrepaid||0,m.rejected||0,m.lost||0,m.prepaidOrders||0,R(m.expCharges),m.invoices?R(m.invGrand||m.invCharges):'',m.variance==null?'':R(m.variance),R(m.codCollected),R(m.prepaidValue),R(m.lostComp),R(m.remitExpected),R(m.paidNet),m.settled&&m.settled!=='na'?m.settled:'',R(m.outstanding)].map(esc).join(',')); });
+    lines.push(['TOTAL',t.totalOrders,t.delivered,t.rto,t.rtoCod,t.rtoPrepaid,t.rejected,t.lost,t.prepaidOrders,R(t.expCharges),R(t.inv),'',R(t.codCollected),R(t.prepaidValue),R(t.lostComp),R(t.remitExpected),R(t.paidNet),'',R(t.outstanding)].map(esc).join(','));
+    const range=(_dpledFrom||_dpledTo)?`_${_dpledFrom||'start'}_to_${_dpledTo||'end'}`:'_all';
+    const blob=new Blob([lines.join('\n')],{type:'text/csv;charset=utf-8'}), a=document.createElement('a');
+    a.href=URL.createObjectURL(blob); a.download=`docpharma-ledger${range}.csv`; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+}
+async function dpledPrint(){
+    const rows=dpledVisibleRows(); if(!rows.length){ showNotification&&showNotification('Nothing to export',true); return; }
+    const g=rows.reduce((a,m)=>{ ['codCollected','lostComp','invGrand','paidNet'].forEach(k=>a[k]=(a[k]||0)+(m[k]||0)); return a; },{codCollected:0,lostComp:0,invGrand:0,paidNet:0});
+    const receivable=g.codCollected+g.lostComp, net=receivable-g.invGrand, paid=g.paidNet, outstanding=net-paid;
+    const period=(_dpledFrom||_dpledTo)?`${_dpledFrom?dpledMonLabel(_dpledFrom):'start'} to ${_dpledTo?dpledMonLabel(_dpledTo):'latest'}`:'All periods';
+    const fifo=_dpledFifo?{...(_dpledFifo),settledThroughLabel:_dpledFifo.settledThrough?dpledMonLabel(_dpledFifo.settledThrough):'—'}:null;
+    const payload={ period, totals:{receivable,payableInvoiced:g.invGrand,net,paid,outstanding}, fifo,
+        rows: rows.map(m=>({ month:dpledMonLabel(m.month), total:m.totalOrders||0, delivered:m.delivered, rto:m.rto, rejected:m.rejected||0, expCharges:Math.round(m.expCharges||0),
+            invoiced:m.invoices?Math.round(m.invGrand||m.invCharges||0):null, codCollected:Math.round(m.codCollected||0), lostComp:Math.round(m.lostComp||0),
+            remitExpected:Math.round(m.remitExpected||0), paidNet:Math.round(m.paidNet||0), settled:m.settled, outstanding:Math.round(m.outstanding||0) })) };
+    try{
+        const r=await fetch('/api/docpharma-ledger-pdf',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify(payload)});
+        if(!r.ok) throw new Error('server '+r.status);
+        const blob=await r.blob(); const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+        const range=(_dpledFrom||_dpledTo)?`_${_dpledFrom||'start'}_to_${_dpledTo||'end'}`:'_all';
+        a.download=`docpharma-ledger${range}.pdf`; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+    }catch(e){ showNotification&&showNotification('PDF failed: '+e.message,true); }
+}
+// Breakdown panel for the selected KPI card, computed from the filtered rows/invoices/payments.
+function dpledCardDetail(g,receivable,net,paid,outstanding){
+    if(!_dpledCard) return '';
+    const line=(l,v,c,note,drill)=>{ const lab=drill?`<button class="dpled-drill text-sm text-indigo-600 hover:underline text-left" data-st="${drill.st||''}" data-pay="${drill.pay||'all'}">${l} <span class="text-[10px]">↗</span></button>`:`<span class="text-sm text-slate-600">${l}</span>`; return `<div class="flex items-start justify-between gap-3 py-1.5 border-b border-slate-100 last:border-0"><div>${lab}${note?`<div class="text-[11px] text-slate-400">${note}</div>`:''}</div><span class="text-sm font-semibold ${c||'text-slate-800'} tabular-nums whitespace-nowrap">${v}</span></div>`; };
+    const subtotal=(l,v,c)=>`<div class="flex items-center justify-between gap-3 py-2 mt-1 border-t-2 border-slate-200"><span class="text-sm font-bold text-slate-700">${l}</span><span class="text-base font-bold ${c||'text-slate-800'} tabular-nums">${v}</span></div>`;
+    const wrap=(title,inner)=>`<div class="card p-5 border-l-4 border-indigo-400"><div class="flex items-center justify-between mb-3"><h3 class="text-sm font-bold text-slate-700">${title}</h3><button id="dpled-detclose" class="text-slate-400 text-lg leading-none">✕</button></div>${inner}</div>`;
+    const invs=_dpledCharges.filter(iv=>dpledInRange(iv._month));
+    const pays=_dpledPayments.filter(p=>dpledInRange(p._month));
+    const R=v=>OPS_INR(Math.round(v||0));
+    const bv=dpledBillVar(g);
+    const varNote=bv&&bv.flag?`<div class="mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">⚠ <b>Billing variance:</b> DocPharma invoiced ${R(bv.act)} vs expected ${R(bv.exp)} incl. GST — <b>${bv.diff>0?'+':''}${R(bv.diff)} (${bv.pct>0?'+':''}${bv.pct.toFixed(1)}%)</b>. ${bv.diff>0?'They billed more than the rate card implies — review before paying.':'They billed less than expected.'}</div>`:'';
+    // Payable = DocPharma's actual invoices (where billed) + rate-card estimate for months not yet invoiced. Show both parts.
+    const invPart=g.invGrand, estPart=g.unInvEst||0;
+    // Only invoiced charges are deducted. The un-invoiced rate-card estimate is shown as a memo (NOT subtracted from Net/Outstanding).
+    const payableLines=()=>{ let s=line('Payable — invoiced (actual, incl tax)',`− ${R(invPart)}`,'text-red-600',`DocPharma bills · tax ${R(g.invTax)}`);
+        if(estPart>0.5) s+=line('Un-invoiced charges (memo, not deducted)',`(${R(estPart)})`,'text-slate-400',`rate card ${R(estPart/1.18)} + est 18% GST — excluded until DocPharma actually invoices`);
+        return s; };
+    const basisFoot=`<div class="mt-3 pt-2 border-t border-slate-100 text-[11px] text-amber-600">↑ While this card is selected, the <b>Net</b> & <b>Outstanding</b> cards above are re-based on this figure (what-if). Click again to restore the blended default.</div>`;
+    let inner='';
+    if(_dpledCard==='receivable'){
+        inner=line('COD collected',`+ ${R(g.codCollected)}`,'text-emerald-700',`${g.codOrders} COD orders — DocPharma collected & owes you`,{st:'delivered',pay:'cod'})
+            +line('Lost compensation',`+ ${R(g.lostComp)}`,'text-emerald-700',`${g.lost} lost shipments — full order value reimbursed`,{st:'lost'})
+            +subtotal('Total receivable',R(receivable),'text-emerald-700')
+            +`<div class="mt-3 pt-2 text-[11px] text-slate-400">For reference — not receivable from DocPharma:</div>`
+            +line('Prepaid delivered',R(g.prepaidValue),'text-slate-500',`${g.prepaidOrders} prepaid orders — already paid to you online, DocPharma collects nothing`,{st:'delivered',pay:'prepaid'});
+    } else if(_dpledCard==='payableExpected'){
+        const gst=Math.round(g.expCharges*0.18);
+        inner=line('Flat service',`+ ${R(g.expService)}`,'text-slate-700',`${g.serviceOrders} billable orders (delivered + RTO)`,{st:'delivered,rto'})
+            +line('RTO charge',`+ ${R(g.expRto)}`,'text-slate-700',`${g.rto} RTO orders`,{st:'rto'})
+            +line('COD collection fee',`+ ${R(g.expCod)}`,'text-slate-700',`${g.codOrders} COD orders`,{st:'delivered',pay:'cod'})
+            +subtotal('Subtotal (rate card)',R(g.expCharges),'text-slate-800')
+            +line('Est. GST @ 18%',`+ ${R(gst)}`,'text-slate-500','expected — actual tax per DocPharma invoice')
+            +subtotal('Est. total incl GST',R(g.expCharges+gst),'text-slate-800')
+            +basisFoot;
+    } else if(_dpledCard==='payableInvoiced'){
+        const tdc='px-3 py-2 text-sm border-b border-slate-100 tabular-nums',thc='px-3 py-2 text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60';
+        if(!invs.length) inner=`<div class="text-sm text-slate-400 py-4 text-center">No DocPharma charge invoices recorded for this period. Add them in the Invoices tab.</div>`+basisFoot;
+        else{ let tc=0,tt=0,tg=0; const body=invs.map(iv=>{ const c=+iv.total_charges||0,t=+iv.tax_amount||0,gt=(+iv.grand_total||0)||(c+t); tc+=c;tt+=t;tg+=gt; return `<tr><td class="${tdc} text-left font-semibold">${iv.invoice_no||'—'}</td><td class="${tdc} text-left text-slate-500">${iv.subject||dpledMonLabel(iv._month)}</td><td class="${tdc} text-right">${R(c)}</td><td class="${tdc} text-right">${R(t)}</td><td class="${tdc} text-right font-semibold text-red-600">${R(gt)}</td></tr>`;}).join('');
+            inner=`<div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr><th class="${thc} text-left">Invoice</th><th class="${thc} text-left">Period / Subject</th><th class="${thc} text-right">Charges</th><th class="${thc} text-right">Tax</th><th class="${thc} text-right">Grand total</th></tr></thead><tbody>${body}<tr class="bg-slate-50 font-bold"><td class="${tdc} text-left" colspan="2">Total (${invs.length})</td><td class="${tdc} text-right">${R(tc)}</td><td class="${tdc} text-right">${R(tt)}</td><td class="${tdc} text-right text-red-600">${R(tg)}</td></tr></tbody></table></div>`+varNote+basisFoot; }
+    } else if(_dpledCard==='netExpected'){
+        inner=line('Receivable',`+ ${R(receivable)}`,'text-emerald-700',`COD collected ${R(g.codCollected)} + lost comp ${R(g.lostComp)}`)
+            +payableLines()
+            +subtotal('Net DocPharma should remit',R(net),'text-indigo-600');
+    } else if(_dpledCard==='paymentsReceived'){
+        const tdc='px-3 py-2 text-sm border-b border-slate-100 tabular-nums',thc='px-3 py-2 text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60';
+        if(!pays.length) inner=`<div class="text-sm text-slate-400 py-4 text-center">No remittances recorded for this period. Add them in the Payments tab — they apply oldest-first (FIFO) across the whole account.</div>`;
+        else{ let tot=0; const body=pays.map(p=>{ const amt=(+p.amount||0)*((p.direction||'received')==='received'?1:-1); tot+=amt; return `<tr><td class="${tdc} text-left">${(p.payment_date||'').slice(0,10).split('-').reverse().join('-')||'—'}</td><td class="${tdc} text-left text-slate-500">${p.reference||'—'}</td><td class="${tdc} text-left text-slate-500">${p.method||'—'}</td><td class="${tdc} text-right font-semibold ${amt>=0?'text-emerald-700':'text-rose-600'}">${amt>=0?'+ ':'− '}${R(Math.abs(amt))}</td></tr>`;}).join('');
+            inner=`<div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr><th class="${thc} text-left">Date</th><th class="${thc} text-left">Reference</th><th class="${thc} text-left">Method</th><th class="${thc} text-right">Amount</th></tr></thead><tbody>${body}<tr class="bg-slate-50 font-bold"><td class="${tdc} text-left" colspan="3">Net received (${pays.length})</td><td class="${tdc} text-right text-emerald-700">${R(tot)}</td></tr></tbody></table></div>`; }
+    } else if(_dpledCard==='outstanding'){
+        inner=line('COD collected',`+ ${R(g.codCollected)}`,'text-emerald-700',`${g.codOrders} COD orders`,{st:'delivered',pay:'cod'})
+            +line('Lost compensation',`+ ${R(g.lostComp)}`,'text-emerald-700',`${g.lost} lost shipments`,{st:'lost'})
+            +subtotal('Receivable',R(receivable),'text-emerald-700')
+            +payableLines()
+            +subtotal('Net should remit',R(net),'text-indigo-600')
+            +line('Payments received',`− ${R(paid)}`,'text-emerald-700','FIFO-applied oldest-first · from Payments tab')
+            +subtotal('Outstanding',R(outstanding),outstanding>=0?'text-amber-600':'text-rose-600')
+            +varNote
+            +`<div class="mt-3 pt-2 text-[11px] text-slate-400">Prepaid delivered (info): ${R(g.prepaidValue)} across ${g.prepaidOrders} orders — settled online, outside DocPharma's COD remittance.</div>`;
+    }
+    return `<div class="mb-1">${wrap(({receivable:'Receivable breakdown',payableExpected:'Expected charges (rate card)',payableInvoiced:'DocPharma charge invoices',netExpected:'Net remittance',paymentsReceived:'Payments received',outstanding:'Outstanding — full statement'})[_dpledCard]||'Breakdown',inner)}</div>`;
+}
+// Render KPIs + monthly table from _dpledRows, honouring the month filter. All figures recompute from the visible rows.
+function dpledRender(){
+    const k=document.getElementById('dpled-kpis'); if(!k)return;
+    const rows=dpledVisibleRows();
+    const g=rows.reduce((a,m)=>{ a.codCollected+=m.codCollected||0; a.codOrders+=m.codOrders||0; a.prepaidValue+=m.prepaidValue||0; a.prepaidOrders+=m.prepaidOrders||0; a.lostComp+=m.lostComp||0; a.lost+=m.lost||0; a.delivered+=m.delivered||0; a.rto+=m.rto||0; a.rtoCod+=m.rtoCod||0; a.rtoPrepaid+=m.rtoPrepaid||0; a.rtoValue+=m.rtoValue||0; a.rejected+=m.rejected||0; a.rejectedValue+=m.rejectedValue||0; a.totalOrders+=m.totalOrders||0; a.expService+=m.expService||0; a.expRto+=m.expRto||0; a.expCod+=m.expCod||0; a.expCharges+=m.expCharges||0; a.invGrand+=m.invGrand||0; a.invCharges+=m.invCharges||0; a.invTax+=m.invTax||0; a.payableActual+=(m.invGrand||0); a.unInvEst+=(m.invGrand>0?0:Math.round((m.expCharges||0)*1.18)); a.paidApplied+=m.paidNet||0; return a; },{codCollected:0,codOrders:0,prepaidValue:0,prepaidOrders:0,lostComp:0,lost:0,delivered:0,rto:0,rtoCod:0,rtoPrepaid:0,rtoValue:0,rejected:0,rejectedValue:0,totalOrders:0,expService:0,expRto:0,expCod:0,expCharges:0,invGrand:0,invCharges:0,invTax:0,payableActual:0,unInvEst:0,paidApplied:0});
+    g.serviceOrders=g.delivered+g.rto; g.paymentsIn=g.paidApplied; g.paymentsOut=0;
+    const receivable=g.codCollected+g.lostComp, paid=g.paidApplied;
+    // Payable basis is a what-if toggle: clicking Payable·expected / Payable·invoiced re-bases Net & Outstanding on that figure.
+    const basisMode=_dpledCard==='payableExpected'?'expected':_dpledCard==='payableInvoiced'?'invoiced':'';
+    const basisPayable=basisMode==='expected'?Math.round(g.expCharges*1.18):basisMode==='invoiced'?g.invGrand:g.payableActual;
+    const net=receivable-basisPayable, outstanding=net-paid;
+    const bv=dpledBillVar(g);
+    const wi=basisMode?` · <span class="text-amber-600 font-semibold">what-if: ${basisMode}</span>`:'';
+    const card=(key,l,v,sub,acc)=>`<div class="card p-4 cursor-pointer transition hover:shadow-md ${_dpledCard===key?'ring-2 ring-indigo-400':''}" data-card="${key}"><div class="flex items-center justify-between"><div class="text-xs text-slate-400 uppercase tracking-wide">${l}</div><span class="text-slate-300 text-[10px]">${_dpledCard===key?'▾':'▸'}</span></div><div class="text-2xl font-bold ${acc||'text-slate-800'} tabular-nums mt-1">${v}</div><div class="text-xs text-slate-400 mt-0.5">${sub||''}</div></div>`;
+    const invSub=bv&&bv.flag?`<span class="text-amber-600 font-semibold">⚠ ${bv.pct>0?'+':''}${bv.pct.toFixed(1)}% vs expected</span>`:'DocPharma bills (incl tax)';
+    const netSub=`receivable − ${basisMode==='expected'?'expected (incl GST)':'invoiced only'}${wi}`;
+    const outSub=(bv&&bv.flag?`<span class="text-amber-600 font-semibold">⚠ billing ${bv.pct>0?'+':''}${bv.pct.toFixed(1)}%</span> · ${outstanding>=0?'owes you':'you owe'}`:(outstanding>=0?'DocPharma owes you':'you owe DocPharma'))+wi;
+    k.innerHTML=card('receivable','Receivable',OPS_INR(receivable),`COD ${OPS_INR(g.codCollected)} + lost ${OPS_INR(g.lostComp)}`,'text-emerald-600')
+      +card('payableExpected','Payable · expected',OPS_INR(Math.round(g.expCharges*1.18)),'rate card + est 18% GST','text-slate-700')
+      +card('payableInvoiced','Payable · invoiced',OPS_INR(g.invGrand||g.invCharges),invSub,'text-red-600')
+      +card('netExpected','Net (should remit)',OPS_INR(net),netSub,'text-indigo-600')
+      +card('paymentsReceived','Payments received',OPS_INR(paid),'','text-emerald-700')
+      +(()=>{ const outInv=receivable-g.invGrand-paid, outExp=receivable-Math.round(g.expCharges*1.18)-paid;
+          const sub=`<span class="text-slate-500">invoiced-only · ${outInv>=0?'owes you':'you owe'}</span><br><span class="text-slate-400">if billed @ rate card: <b class="text-amber-600">${OPS_INR(outExp)}</b></span>`;
+          return card('outstanding','Outstanding',OPS_INR(outInv),sub,outInv>=0?'text-amber-600':'text-rose-600'); })();
+    const dt=document.getElementById('dpled-detail'); if(dt){ dt.innerHTML=dpledCardDetail(g,receivable,net,paid,outstanding); const cl=dt.querySelector('#dpled-detclose'); if(cl)cl.addEventListener('click',()=>{ _dpledCard=''; dpledRender(); });
+        dt.querySelectorAll('.dpled-drill').forEach(b=>b.addEventListener('click',()=>dpledDrill((b.dataset.st||'').split(',').filter(Boolean),b.dataset.pay))); }
+    document.querySelectorAll('#dpled-kpis [data-card]').forEach(c=>c.addEventListener('click',()=>{ const key=c.getAttribute('data-card'); _dpledCard=_dpledCard===key?'':key; dpledRender(); }));
+    // ── Detail cards: Operations + Charges & collection (aggregated over the filtered months) ──
+    const ops=document.getElementById('dpled-ops');
+    if(ops){ const nf=x=>Number(x||0).toLocaleString('en-IN'), gst=Math.round((g.expCharges||0)*0.18);
+        const deliveredGmv=(g.codCollected||0)+(g.prepaidValue||0), totalGmv=deliveredGmv+(g.rtoValue||0)+(g.lostComp||0)+(g.rejectedValue||0);
+        const icard=(l,v,sub,acc,st,pay,val)=>`<div class="card p-3.5 ${st!=null?'cursor-pointer hover:shadow-md transition dpled-ocard':''}"${st!=null?` data-st="${st}" data-pay="${pay||'all'}"`:''}><div class="text-[11px] text-slate-400 uppercase tracking-wide">${l}</div><div class="flex items-baseline gap-2 mt-0.5"><div class="text-xl font-bold ${acc||'text-slate-800'} tabular-nums">${v}</div>${val?`<div class="text-sm font-semibold text-slate-500 tabular-nums">${val}</div>`:''}</div><div class="text-[11px] text-slate-400 mt-0.5">${sub||''}</div></div>`;
+        const sec=(title,cards)=>`<div><div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 mt-1">${title}</div><div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">${cards}</div></div>`;
+        const opsCards=icard('Total orders',nf(g.totalOrders),`Deliv ${nf(g.delivered)} · RTO ${nf(g.rto)} · Rej ${nf(g.rejected)}`,'text-slate-800','delivered,rto,lost,rejected,cancelled,shipped',undefined,OPS_INR(totalGmv))
+            +icard('Delivered',nf(g.delivered),`COD ${nf(g.codOrders)} · Prepaid ${nf(g.prepaidOrders)}`,'text-emerald-600','delivered',undefined,OPS_INR(deliveredGmv))
+            +icard('RTO',nf(g.rto),`COD ${nf(g.rtoCod)} · Prepaid ${nf(g.rtoPrepaid)}`,'text-rose-600','rto',undefined,OPS_INR(g.rtoValue))
+            +icard('Rejected / Cancelled',nf(g.rejected),'rejected + cancelled','text-slate-600','rejected,cancelled',undefined,OPS_INR(g.rejectedValue))
+            +icard('Lost',nf(g.lost),'comp = full order value',g.lost?'text-rose-600':'text-slate-400','lost',undefined,OPS_INR(g.lostComp))
+            +icard('Prepaid delivered',OPS_INR(g.prepaidValue),`${nf(g.prepaidOrders)} orders · memo`,'text-slate-500','delivered','prepaid');
+        const chargeCards=icard('Flat service',OPS_INR(g.expService),`${nf(g.serviceOrders)} billable orders`,'text-indigo-600')
+            +icard('RTO charge',OPS_INR(g.expRto),`${nf(g.rto)} RTO orders`,'text-rose-600')
+            +icard('COD fee',OPS_INR(g.expCod),`${nf(g.codOrders)} COD orders`,'text-sky-600')
+            +icard('Est GST 18%',OPS_INR(gst),`on ${OPS_INR(g.expCharges)} subtotal`,'text-slate-500')
+            +icard('COD collected',OPS_INR(g.codCollected),`${nf(g.codOrders)} COD orders`,'text-emerald-700','delivered','cod')
+            +icard('Lost compensation',OPS_INR(g.lostComp),`${nf(g.lost)} shipments`,'text-emerald-700','lost');
+        ops.innerHTML=sec('Operations',opsCards)+sec('Charges & collection',chargeCards);
+        ops.querySelectorAll('.dpled-ocard').forEach(c=>c.addEventListener('click',()=>dpledDrill((c.dataset.st||'').split(',').filter(Boolean),c.dataset.pay)));
+    }
+    const th='px-3 py-2 text-right text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap',thl=th.replace('text-right','text-left');
+    const td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100 text-right tabular-nums whitespace-nowrap';
+    const dash='<span class="text-slate-300">—</span>';
+    const body=rows.map(m=>{ const bigVar=m.variance!=null&&Math.abs(m.variance)>Math.max(0.05*(m.expCharges||0),100);
+        const varTxt=m.variance==null?dash:`<span class="${Math.abs(m.variance)<1?'text-slate-400':m.variance>0?'text-rose-600':'text-emerald-600'}" title="${bigVar?'Material variance — DocPharma invoiced differs from rate-card expectation':''}">${bigVar?'⚠ ':''}${m.variance>0?'+':''}${OPS_INR(Math.round(m.variance))}</span>`;
+        const open=!!_dpledOpen[m.month], car=`<span class="inline-block w-3 text-slate-400">${open?'▾':'▸'}</span>`;
+        const R=v=>OPS_INR(Math.round(v||0));
+        const li=(l,v,c,strong)=>`<div class="flex items-center justify-between gap-3 py-1 text-xs ${strong?'border-t border-slate-200 mt-1 pt-1.5':''}"><span class="${strong?'font-semibold text-slate-700':'text-slate-500'}">${l}</span><span class="font-semibold ${c||'text-slate-700'} tabular-nums whitespace-nowrap">${v}</span></div>`;
+        const hd=t=>`<div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">${t}</div>`;
+        const rate=_dpledRate||{}, gst=Math.round((m.expCharges||0)*0.18), svc=(m.delivered||0)+(m.rto||0);
+        const rateN=v=>v?`${R(v)}`:'₹0';
+        const col1=hd('Fulfilment')
+            +li('Delivered',`${m.delivered||0} orders`,'text-emerald-700')
+            +li('· COD delivered',`${m.codOrders||0}`)
+            +li('· Prepaid delivered',`${m.prepaidOrders||0}`)
+            +li('RTO',`${m.rto||0}`,'text-rose-600')
+            +li('· COD RTO',`${m.rtoCod||0}`)
+            +li('· Prepaid RTO',`${m.rtoPrepaid||0}`)
+            +li('Lost',`${m.lost||0}`,m.lost?'text-rose-600':'text-slate-400')
+            +li('Rejected / Cancelled',`${m.rejected||0}`,m.rejected?'text-slate-500':'text-slate-400')
+            +li('Total orders',`${m.totalOrders||0}`,'text-slate-800',true);
+        const col2=hd('Expected charges (payable)')
+            +li(`Flat service · ${svc}×${rateN(rate.flat_service_charge)}`,R(m.expService),'text-indigo-600')
+            +li(`RTO · ${m.rto||0}×${rateN(rate.rto_charge)}`,R(m.expRto),'text-rose-600')
+            +li(`COD fee · ${m.codOrders||0}×${rateN(rate.cod_collection_charge)}`,R(m.expCod),'text-sky-600')
+            +li('Subtotal (rate card)',R(m.expCharges),'text-slate-800',true)
+            +li('Est. GST 18%',R(gst),'text-slate-400')
+            +li('Est. total incl GST',R((m.expCharges||0)+gst),'text-slate-800')
+            +(m.invoices?li('Invoiced (actual, incl tax)',R(m.invGrand||m.invCharges||0),'text-red-600')+(m.variance!=null?li('Variance vs expected',`${m.variance>0?'+':''}${R(m.variance)}`,Math.abs(m.variance)<1?'text-slate-400':m.variance>0?'text-rose-600':'text-emerald-600'):''):li('Invoiced','not yet billed','text-slate-400'));
+        const payExp=Math.round((m.expCharges||0)*1.18), outInv=m.outstanding, outExp=(m.receivable||0)-payExp-(m.paidNet||0);
+        const oc=v=>v>0?'text-amber-600':v<0?'text-rose-600':'text-slate-400';
+        const col3=hd('Receivable & settlement')
+            +li('COD collected',`+ ${R(m.codCollected)}`,'text-emerald-700')
+            +(m.lostComp?li(`Lost compensation (${m.lost||0})`,`+ ${R(m.lostComp)}`,'text-emerald-700'):'')
+            +li('Prepaid delivered (memo)',R(m.prepaidValue||0),'text-slate-400')
+            +li('Receivable',R(m.receivable),'text-emerald-700',true)
+            +li('− Paid (FIFO)',R(m.paidNet||0),'text-emerald-700')
+            +`<div class="border-t-2 border-slate-200 mt-1.5 pt-1.5"><div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Outstanding — both scenarios</div></div>`
+            +li(m.invoices?`Billed · payable ${R(m.invGrand||0)}`:'Not billed yet · payable ₹0',R(outInv),oc(outInv))
+            +li(`If billed @ rate card · est ${R(payExp)}`,R(outExp),oc(outExp))
+            +`<div class="mt-2">${m.settled==='na'?'':`<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold ${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[1]}">${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[0]}</span>`}</div>`;
+        const det=open?`<tr class="dpled-det bg-slate-50/60"><td colspan="14" class="px-8 py-4 border-b border-slate-100"><div class="grid grid-cols-1 md:grid-cols-3 gap-x-10 gap-y-1 max-w-4xl">
+            <div>${col1}</div><div>${col2}</div><div>${col3}</div></div></td></tr>`:'';
+        return `<tr class="dpled-row hover:bg-slate-50 cursor-pointer" data-m="${m.month}"><td class="${td} text-left font-semibold">${car} ${dpledMonLabel(m.month)}</td><td class="${td} font-semibold text-slate-700">${(m.totalOrders||0).toLocaleString('en-IN')}</td><td class="${td}">${m.delivered}</td><td class="${td}">${m.rto}</td><td class="${td}">${m.rejected?`<span class="text-slate-500">${m.rejected}</span>`:'<span class="text-slate-300">0</span>'}</td><td class="${td}">${OPS_INR(Math.round(m.expCharges))}</td><td class="${td}">${m.invoices?OPS_INR(Math.round(m.invCharges)):dash}</td><td class="${td}">${varTxt}</td><td class="${td} text-emerald-700">${OPS_INR(Math.round(m.codCollected))}</td><td class="${td}">${m.lostComp?`<span class="text-emerald-700">${OPS_INR(Math.round(m.lostComp))}</span>${m.lost?` <span class="text-slate-400">(${m.lost})</span>`:''}`:dash}</td><td class="${td}">${OPS_INR(Math.round(m.remitExpected))}</td><td class="${td} text-emerald-700">${m.paidNet?OPS_INR(Math.round(m.paidNet)):dash}</td><td class="${td} text-center">${m.settled==='na'?dash:`<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[1]}">${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[0]}</span>`}</td><td class="${td} font-bold ${m.outstanding>0?'text-amber-600':m.outstanding<0?'text-rose-600':'text-slate-400'}">${OPS_INR(Math.round(m.outstanding))}</td></tr>${det}`;}).join('');
+    document.getElementById('dpled-table').innerHTML=`<table class="w-full border-collapse"><thead><tr><th class="${thl}">Month</th><th class="${th}">Total</th><th class="${th}">Deliv</th><th class="${th}">RTO</th><th class="${th}">Rej</th><th class="${th}">Exp charges</th><th class="${th}">Invoiced</th><th class="${th}">Variance</th><th class="${th}">COD collected</th><th class="${th}">Lost comp</th><th class="${th}">Net remit</th><th class="${th}">Paid (FIFO)</th><th class="${th} text-center">Status</th><th class="${th}">Outstanding</th></tr></thead><tbody>${body||'<tr><td colspan="14" class="p-6 text-center text-xs text-slate-400">No data</td></tr>'}</tbody></table>`;
+    document.querySelectorAll('#dpled-table .dpled-row').forEach(tr=>tr.addEventListener('click',()=>{ const mk=tr.getAttribute('data-m'); _dpledOpen[mk]=!_dpledOpen[mk]; dpledRender(); }));
+}
+
+// ─── DocPharma Payments tab ─────────────────────────────────────────────────
+let _dprePayWired=false;
+function dprePayInit(){ const sec=document.getElementById('dpre-tab-payments'); if(!sec)return;
+    if(!_dprePayWired){ sec.innerHTML=`<div class="p-6 space-y-5">
+        <div class="card p-0 overflow-hidden"><div class="flex items-center justify-between px-5 py-3 border-b border-slate-100"><h2 class="text-sm font-bold text-slate-700">Payments <span class="text-slate-400 font-normal">· remittances from DocPharma</span></h2><button id="dppay-add" class="text-xs px-3 py-1.5 bg-slate-800 text-white rounded-lg">＋ Record payment</button></div><div id="dppay-list" class="overflow-x-auto"></div></div>
+      </div>
+      <div id="dppay-modal" class="fixed inset-0 z-50 hidden items-center justify-center" style="background:rgba(15,23,42,.45)"><div id="dppay-box" class="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6 mx-4" onclick="event.stopPropagation()"></div></div>`;
+        sec.querySelector('#dppay-add').addEventListener('click',()=>dprePayForm());
+        sec.querySelector('#dppay-modal').addEventListener('click',()=>{ const m=document.getElementById('dppay-modal'); m.classList.add('hidden'); m.classList.remove('flex'); });
+        _dprePayWired=true;
+    }
+    dprePayLoad();
+}
+async function dprePayLoad(){ const el=document.getElementById('dppay-list'); if(!el)return; el.innerHTML='<div class="p-4 text-xs text-slate-400">Loading…</div>';
+    try{ const r=await fetch('/api/docpharma-payments',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        const ps=d.payments||[]; if(!ps.length){ el.innerHTML='<div class="p-6 text-center text-xs text-slate-400">No payments recorded yet.</div>'; return; }
+        const th='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60',td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100';
+        el.innerHTML=`<table class="w-full"><thead><tr><th class="${th}">Date</th><th class="${th}">Direction</th><th class="${th} text-right">Amount</th><th class="${th}">Reference</th><th class="${th}">Period</th><th class="${th}">Notes</th><th class="${th}"></th></tr></thead><tbody>${ps.map(p=>`<tr class="hover:bg-slate-50"><td class="${td} tabular-nums">${dpreDMY(p.payment_date)||'—'}</td><td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${p.direction==='paid'?'bg-rose-100 text-rose-700':'bg-emerald-100 text-emerald-700'}">${p.direction==='paid'?'Paid out':'Received'}</span></td><td class="${td} text-right tabular-nums font-semibold">${OPS_INR(p.amount||0)}</td><td class="${td}">${p.reference||'—'}</td><td class="${td} text-slate-500">${p.period_from?dpreDMY(p.period_from):'—'}</td><td class="${td} text-slate-500">${p.notes||''}</td><td class="${td} text-right"><button class="dppay-del text-rose-500 text-xs" data-id="${p.id}">Delete</button></td></tr>`).join('')}</tbody></table>`;
+        el.querySelectorAll('.dppay-del').forEach(b=>b.addEventListener('click',()=>dprePayDelete(b.dataset.id)));
+    }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+e.message+'</div>'; }
+}
+function dprePayForm(){ const box=document.getElementById('dppay-box'); const f=(l,id,v,t)=>`<div><label class="block text-[11px] text-slate-500 mb-0.5">${l}</label><input id="${id}" type="${t||'text'}" value="${v||''}" class="${DPINV_IN} w-full"></div>`;
+    box.innerHTML=`<div class="flex items-center justify-between mb-4"><h3 class="text-lg font-bold text-slate-800">Record payment</h3><button id="dppay-x" class="text-slate-400 text-xl">✕</button></div>
+      <div class="grid grid-cols-2 gap-3 mb-3">${f('Date','pp-date','','date')}<div><label class="block text-[11px] text-slate-500 mb-0.5">Direction</label><select id="pp-dir" class="${DPINV_IN} w-full"><option value="received">Received from DocPharma</option><option value="paid">Paid to DocPharma</option></select></div>${f('Amount (₹)','pp-amt','','number')}${f('Reference / UTR','pp-ref')}${f('Period from','pp-pf','','date')}${f('Period to','pp-pt','','date')}${f('Notes','pp-notes')}</div>
+      <div class="flex justify-end gap-2"><button id="dppay-cancel" class="px-4 py-2 text-sm text-slate-600">Cancel</button><button id="dppay-save" class="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg">Save</button></div>`;
+    const close=()=>{ const m=document.getElementById('dppay-modal'); m.classList.add('hidden'); m.classList.remove('flex'); };
+    box.querySelector('#dppay-x').addEventListener('click',close); box.querySelector('#dppay-cancel').addEventListener('click',close);
+    box.querySelector('#dppay-save').addEventListener('click',()=>dprePaySave());
+    const m=document.getElementById('dppay-modal'); m.classList.remove('hidden'); m.classList.add('flex');
+}
+async function dprePaySave(){ const g=id=>document.getElementById(id).value;
+    const body={ payment_date:g('pp-date')||null, direction:g('pp-dir'), amount:g('pp-amt'), reference:g('pp-ref'), period_from:g('pp-pf')||null, period_to:g('pp-pt')||null, notes:g('pp-notes') };
+    if(!body.payment_date||!body.amount){ showNotification('Date and amount required',true); return; }
+    try{ const r=await fetch('/api/docpharma-payments',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify(body)}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        showNotification('Payment saved'); const m=document.getElementById('dppay-modal'); m.classList.add('hidden'); m.classList.remove('flex'); dprePayLoad();
+    }catch(e){ showNotification('Save failed: '+e.message,true); }
+}
+async function dprePayDelete(id){ if(!confirm('Delete this payment?'))return;
+    try{ const r=await fetch('/api/docpharma-payments/'+id,{method:'DELETE',headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error); showNotification('Deleted'); dprePayLoad(); }
+    catch(e){ showNotification('Delete failed: '+e.message,true); }
 }
 
 // ─── Delivery Performance (RTO / NDR / FASR) ─────────────────────────────────
