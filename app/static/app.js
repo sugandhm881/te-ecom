@@ -3489,6 +3489,7 @@ function dpreTab(name){
     if(name==='invoices') dpreInvInit();
     if(name==='ledger') dpreLedgerInit();
     if(name==='payments') dprePayInit();
+    if(name==='inventory') dpreInvMatchInit();
 }
 const DPRE_STATUS={delivered:['Delivered','bg-emerald-100 text-emerald-700'],rto:['RTO','bg-red-100 text-red-700'],lost:['Lost','bg-rose-100 text-rose-800'],rejected:['Rejected','bg-slate-100 text-slate-500'],cancelled:['Cancelled','bg-slate-100 text-slate-500'],shipped:['Shipped','bg-sky-100 text-sky-700']};
 const DPRE_STATUS_OPTS=[['delivered','Delivered'],['rto','RTO'],['lost','Lost'],['rejected','Rejected'],['cancelled','Cancelled'],['shipped','Shipped']];
@@ -3999,6 +4000,106 @@ function dpreOverviewRender(d){
         +`<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">${splitHtml}${trendHtml}</div>`
         +monthlyHtml;
     box.querySelectorAll('.dpov-drill').forEach(el=>el.addEventListener('click',()=>{ const st=(el.dataset.st||'').split(',').filter(Boolean); dpreOverviewDrill(st, el.dataset.pay); }));
+}
+
+// ─── DocPharma Inventory / SKU Match tab (goods sent vs delivered/RTO/lost) ──
+let _dpimWired=false, _dpimData=null, _dpimFilter='all', _dpimLead=15, _dpimOpen=null, _dpimDetail={};
+const DPIM_ST={ ok:['In stock','bg-emerald-100 text-emerald-700'], low:['Low','bg-amber-100 text-amber-700'], reorder:['Reorder','bg-orange-100 text-orange-700'], short:['Short','bg-rose-100 text-rose-700'], 'no-invoice':['No invoice','bg-slate-100 text-slate-500'] };
+const dpimDate=s=>s?String(s).slice(0,10).split('-').reverse().join('-'):'—';
+function dpimSeg(){ document.querySelectorAll('#dpim-seg button').forEach(b=>{ const on=b.dataset.f===_dpimFilter; b.classList.toggle('bg-indigo-600',on); b.classList.toggle('text-white',on); b.classList.toggle('text-slate-600',!on); }); }
+function dpreInvMatchInit(){ const sec=document.getElementById('dpre-tab-inventory'); if(!sec) return;
+    if(!_dpimWired){ sec.innerHTML=`<div class="p-6 space-y-4">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <div><h2 class="text-sm font-bold text-slate-700">Inventory / SKU match · 3-source reconciliation</h2><p class="text-[11px] text-slate-400">Implied (our books) vs <b>DocPharma</b> (their system) vs EasyEcom · <span id="dpim-synced">not synced yet</span> · click a SKU to drill in</p></div>
+          <div class="flex items-center gap-2 text-xs flex-wrap justify-end">
+            <label class="text-slate-400">Lead</label><input id="dpim-lead" type="number" min="1" value="${_dpimLead}" class="w-14 border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700 text-right"><span class="text-slate-400 -ml-1">days</span>
+            <div id="dpim-seg" class="inline-flex rounded-lg border border-slate-200 overflow-hidden text-slate-600">
+              <button data-f="all" class="px-3 py-1.5">All</button>
+              <button data-f="invoiced" class="px-3 py-1.5 border-l border-slate-200">Invoiced</button>
+              <button data-f="reorder" class="px-3 py-1.5 border-l border-slate-200">Reorder</button>
+              <button data-f="discrepancy" class="px-3 py-1.5 border-l border-slate-200">Mismatch</button>
+            </div>
+            <button id="dpim-sync-dp" class="px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">↻ Sync DocPharma</button>
+            <button id="dpim-sync" class="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 hover:border-indigo-400">↻ EasyEcom</button>
+            <button id="dpim-refresh" class="px-3 py-1.5 bg-slate-800 text-white rounded-lg">↻ Refresh</button>
+          </div>
+        </div>
+        <div id="dpim-kpis" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3"></div>
+        <div class="card p-0 overflow-hidden"><div class="px-5 py-3 border-b border-slate-100"><h2 class="text-sm font-bold text-slate-700">Per-SKU reconciliation</h2><p class="text-[11px] text-slate-400">Days-cover = on-hand ÷ recent run-rate · <b>Reorder</b> when cover &lt; lead time · “Short/No invoice” = enter that SKU’s goods invoice</p></div><div id="dpim-table" class="overflow-x-auto"></div></div>
+      </div>`;
+        sec.querySelector('#dpim-refresh').addEventListener('click',()=>dpreInvMatchLoad());
+        sec.querySelector('#dpim-sync-dp').addEventListener('click',()=>dpimSync('docpharma'));
+        sec.querySelector('#dpim-sync').addEventListener('click',()=>dpimSync('easyecom'));
+        { let t; sec.querySelector('#dpim-lead').addEventListener('input',e=>{ clearTimeout(t); const v=parseInt(e.target.value,10); t=setTimeout(()=>{ if(v>0){ _dpimLead=v; dpreInvMatchLoad(); } },400); }); }
+        sec.querySelectorAll('#dpim-seg button').forEach(b=>b.addEventListener('click',()=>{ _dpimFilter=b.dataset.f; dpimSeg(); dpimRenderTable(); }));
+        _dpimWired=true; dpimSeg();
+    }
+    dpreInvMatchLoad();
+}
+async function dpreInvMatchLoad(){ const k=document.getElementById('dpim-kpis'); if(k)k.innerHTML=ecSkelCards(6);
+    const tbl=document.getElementById('dpim-table'); if(tbl)tbl.innerHTML='<div class="p-4 space-y-2">'+Array.from({length:6}).map(()=>'<div class="skl" style="height:34px;width:100%"></div>').join('')+'</div>';
+    try{ const r=await fetch('/api/docpharma-inventory?lead='+_dpimLead,{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        _dpimData=d; _dpimDetail={}; dpimRenderKpis(); dpimRenderTable(); ecFade('dpim-kpis','dpim-table');
+        const sy=document.getElementById('dpim-synced'); if(sy) sy.innerHTML = (d.dpSyncedAt?`DocPharma ${dpimDate(d.dpSyncedAt)}`:'<b class="text-amber-600">DocPharma not synced</b>')+' · '+(d.eeSyncedAt?`EasyEcom ${dpimDate(d.eeSyncedAt)}`:'EasyEcom not synced');
+    }catch(e){ if(k)k.innerHTML='<div class="col-span-6 text-xs text-rose-500 p-4">'+e.message+'</div>'; }
+}
+function dpimRenderKpis(){ const k=document.getElementById('dpim-kpis'); if(!k||!_dpimData)return; const s=_dpimData.summary, nf=x=>Number(x||0).toLocaleString('en-IN');
+    const card=(l,v,sub,acc)=>`<div class="card p-4 lift"><div class="text-xs text-slate-400 uppercase tracking-wide">${l}</div><div class="text-2xl font-bold ${acc||'text-slate-800'} tabular-nums mt-1">${v}</div><div class="text-xs text-slate-400 mt-0.5">${sub||''}</div></div>`;
+    k.innerHTML=card('SKUs tracked',nf(s.skuCount),`${s.invoicedSkus} invoiced · ${s.missingInvoiceSkus} not`,'text-slate-800')
+      +card('Implied on-hand',nf(s.onHand)+' u',OPS_INR(s.onHandValue)+' (our books)',s.onHand>=0?'text-slate-800':'text-amber-600')
+      +card('DocPharma actual',s.dpSyncedAt?OPS_INR(s.actualValue):'—',s.dpSyncedAt?`${nf(s.dpStock)} u · ${s.dpMatched} matched`:'click Sync DocPharma','text-indigo-600')
+      +card('EasyEcom actual',s.eeSyncedAt?nf(s.eeStock)+' u':'—','cross-check',s.eeSyncedAt?'text-slate-700':'text-slate-400')
+      +card('Reorder needed',nf(s.reorderSkus),s.reorderSkus?`${nf(s.reorderQty)} u to order`:'all above lead time',s.reorderSkus?'text-orange-600':'text-emerald-600')
+      +card('Mismatches',nf(s.discrepancySkus+s.shortSkus),`${s.discrepancySkus} variance · ${s.shortSkus} short · ${s.missingInvoiceSkus} no-inv`,(s.discrepancySkus||s.shortSkus)?'text-amber-600':'text-emerald-600');
+}
+async function dpimSync(which){ const dp=which==='docpharma'; const btn=document.getElementById(dp?'dpim-sync-dp':'dpim-sync'); const old=btn?btn.textContent:''; if(btn){ btn.disabled=true; btn.textContent='Syncing…'; }
+    try{ const r=await fetch('/api/docpharma-inventory/sync-'+which,{method:'POST',headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        showNotification&&showNotification(`${dp?'DocPharma':'EasyEcom'} synced — ${d.stocked} SKUs in stock (${Number(d.units||0).toLocaleString('en-IN')} units)`);
+        await dpreInvMatchLoad();
+    }catch(e){ showNotification&&showNotification((dp?'DocPharma':'EasyEcom')+' sync failed: '+e.message,true); }
+    finally{ if(btn){ btn.disabled=false; btn.textContent=old||(dp?'↻ Sync DocPharma':'↻ EasyEcom'); } }
+}
+function dpimRenderTable(){ const c=document.getElementById('dpim-table'); if(!c||!_dpimData)return;
+    const lead=_dpimData.lead||_dpimLead;
+    let rows=_dpimData.skus;
+    if(_dpimFilter==='invoiced') rows=rows.filter(x=>x.invoiced);
+    else if(_dpimFilter==='reorder') rows=rows.filter(x=>x.status==='reorder');
+    else if(_dpimFilter==='discrepancy') rows=rows.filter(x=>x.discrepancy);
+    else if(_dpimFilter==='attention') rows=rows.filter(x=>x.status==='short'||x.status==='no-invoice'||x.status==='low'||x.status==='reorder');
+    const nf=x=>Number(x||0).toLocaleString('en-IN');
+    const th='px-3 py-2 text-right text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap',thl=th.replace('text-right','text-left');
+    const td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100 text-right tabular-nums whitespace-nowrap';
+    const dash='<span class="text-slate-300">—</span>';
+    const body=rows.map(x=>{ const st=DPIM_ST[x.status]||DPIM_ST['no-invoice']; const open=_dpimOpen===x.sku;
+        const rtoC=x.rtoRate>0.35?'text-rose-600':x.rtoRate>0.25?'text-amber-600':'text-slate-500';
+        const dcC=x.daysCover==null?'text-slate-300':x.daysCover<lead?'text-rose-600 font-bold':x.daysCover<lead*2?'text-amber-600':'text-slate-700';
+        const varC=x.variance==null?'text-slate-300':x.discrepancy?(x.variance<0?'text-rose-600':'text-amber-600'):'text-emerald-600';
+        const dpC=x.dpStock==null?'text-slate-300':x.dpStock<0?'text-rose-600 font-bold':'font-bold text-indigo-700';
+        const row=`<tr class="dpim-row hover:bg-slate-50 cursor-pointer" data-sku="${x.sku}"><td class="${td} text-left font-semibold"><span class="inline-block w-3 text-slate-400">${open?'▾':'▸'}</span>${x.sku}<div class="text-[11px] text-slate-400 font-normal ml-3">${(x.name||'').slice(0,42)}</div></td><td class="${td}">${x.invoiced?nf(x.sent):dash}</td><td class="${td} text-emerald-700">${nf(x.delivered)}</td><td class="${td} font-semibold ${!x.invoiced?'text-slate-300':x.onHand<0?'text-rose-600':'text-slate-800'}">${x.invoiced?nf(x.onHand):dash}</td><td class="${td} ${dpC}">${x.dpStock!=null?nf(x.dpStock):dash}</td><td class="${td} text-slate-500">${x.eeStock!=null?nf(x.eeStock):dash}</td><td class="${td} font-semibold ${varC}">${x.variance==null?dash:(x.discrepancy?'⚠ ':'')+(x.variance>0?'+':'')+nf(x.variance)}</td><td class="${td}">${x.actualValue!=null?OPS_INR(x.actualValue):dash}</td><td class="${td} ${dcC}">${x.daysCover==null?dash:x.daysCover+'d'}</td><td class="${td} text-center"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${st[1]}">${st[0]}</span></td></tr>`;
+        const det=open?`<tr class="dpim-det ec-fade bg-slate-50/60"><td colspan="10" class="px-8 py-4 border-b border-slate-100">${dpimDrillHtml(x,_dpimDetail[x.sku])}</td></tr>`:'';
+        return row+det; }).join('');
+    c.innerHTML=`<table class="w-full border-collapse"><thead><tr><th class="${thl}">SKU / Product</th><th class="${th}">Sent</th><th class="${th}">Delivered</th><th class="${th}">Implied</th><th class="${th}">DocPharma</th><th class="${th}">EasyEcom</th><th class="${th}">Variance</th><th class="${th}">Value ₹</th><th class="${th}">Days cover</th><th class="${th} text-center">Status</th></tr></thead><tbody>${body||'<tr><td colspan="10" class="p-6 text-center text-xs text-slate-400">No SKUs</td></tr>'}</tbody></table>`;
+    c.querySelectorAll('.dpim-row').forEach(tr=>tr.addEventListener('click',()=>dpimToggle(tr.dataset.sku)));
+}
+async function dpimToggle(sku){
+    if(_dpimOpen===sku){ _dpimOpen=null; dpimRenderTable(); return; }
+    _dpimOpen=sku; dpimRenderTable();
+    if(!_dpimDetail[sku]){
+        try{ const r=await fetch('/api/docpharma-inventory/detail?sku='+encodeURIComponent(sku),{headers:getAuthHeaders()}); const d=await r.json(); if(d.success) _dpimDetail[sku]=d; }catch(e){}
+        if(_dpimOpen===sku) dpimRenderTable();
+    }
+}
+function dpimDrillHtml(x,dt){ const nf=n=>Number(n||0).toLocaleString('en-IN'), lead=_dpimData.lead||_dpimLead;
+    const chip=(l,v,c)=>`<span class="inline-flex items-baseline gap-1 mr-5"><span class="text-[10px] text-slate-400 uppercase tracking-wide">${l}</span><span class="text-sm font-semibold ${c||'text-slate-700'} tabular-nums">${v}</span></span>`;
+    const banner=x.reorder?`<div class="mb-3 p-2.5 rounded-lg bg-orange-50 border border-orange-200 text-xs text-orange-800">⚠ <b>Reorder now</b> — only ${x.daysCover} days of cover left at ${x.runRate}/day. Suggested order: <b>${nf(x.suggestedQty)} units</b> (to ~${lead*2}-day cover).</div>`:'';
+    const recon=`<div class="mb-2 flex flex-wrap gap-y-1 items-center">${chip('Implied',nf(x.onHand),'text-slate-700')}${chip('DocPharma',x.dpStock==null?'—':nf(x.dpStock),x.dpStock<0?'text-rose-600':'text-indigo-700')}${chip('EasyEcom',x.eeStock==null?'—':nf(x.eeStock),'text-slate-600')}${chip('Variance',x.variance==null?'—':(x.variance>0?'+':'')+nf(x.variance),x.discrepancy?'text-amber-600':'text-emerald-600')}${x.dpExpiry?chip('Expiry',dpimDate(x.dpExpiry)+(x.expiryDays!=null?` (${x.expiryDays}d)`:''),x.expiryDays!=null&&x.expiryDays<120?'text-rose-600':'text-slate-600'):''}${x.sourcesDisagree?'<span class="text-[11px] text-amber-600 font-semibold">⚠ sources disagree — check which is right</span>':''}</div>`;
+    const stats=`<div class="mb-3 flex flex-wrap gap-y-1">${chip('Run-rate',(x.runRate||0)+'/day')}${chip('Days cover',x.daysCover==null?'—':x.daysCover+'d')}${chip('RTO rate',(x.rtoRate*100).toFixed(0)+'%',x.rtoRate>0.35?'text-rose-600':'text-slate-700')}${chip('RTO value',OPS_INR(x.rtoValue||0),'text-rose-600')}${chip('Lost',nf(x.lost))}${chip('In-transit',nf(x.inTransit),'text-sky-600')}${chip('Unit rate',OPS_INR(x.unitRate||0))}</div>`;
+    if(!dt) return `${banner}${recon}${stats}<div class="text-xs text-slate-400">Loading detail…</div>`;
+    const maxV=Math.max(1,...dt.monthly.map(m=>m.delivered)), maxH=34;
+    const spark=dt.monthly.length?`<div><div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Delivered / month (base units)</div><div class="flex items-end gap-2 overflow-x-auto">${dt.monthly.map(m=>`<div class="flex flex-col items-center gap-1" title="${dpledMonLabel(m.month)}: ${nf(m.delivered)}"><div class="flex items-end" style="height:${maxH}px"><div class="w-5 bg-emerald-500 rounded-t" style="height:${Math.max(2,Math.round(m.delivered/maxV*maxH))}px"></div></div><div class="text-[9px] text-slate-400 whitespace-nowrap">${dpovShortM(m.month)}</div></div>`).join('')}</div></div>`:'';
+    const contrib=dt.contributors.length?`<div><div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Demand from (packs &amp; combos)</div><div class="flex flex-wrap gap-1.5">${dt.contributors.map(c=>`<span class="px-2 py-1 rounded-lg bg-white border border-slate-200 text-[11px] text-slate-600">${c.sku}${c.mult>1?` <b class="text-indigo-600">×${c.mult}</b>`:''} · ${nf(c.delivered)}u</span>`).join('')}</div></div>`:'';
+    const inv=dt.invoices.length?`<div><div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Sent via goods invoices</div><div class="space-y-1">${dt.invoices.map(i=>`<div class="flex justify-between gap-4 text-[11px] text-slate-600"><span>${i.invoice_no} · ${dpimDate(i.invoice_date)}</span><span class="tabular-nums font-semibold">${nf(i.qty)}u · ${OPS_INR(i.amount)}</span></div>`).join('')}</div></div>`:`<div><div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Sent via goods invoices</div><div class="text-[11px] text-slate-400">Not entered yet — add this SKU’s goods invoice in the Invoices tab.</div></div>`;
+    return `${banner}${recon}${stats}<div class="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-5xl">${spark?`<div>${spark}</div>`:'<div></div>'}<div>${contrib}</div><div>${inv}</div></div>`;
 }
 
 // ─── DocPharma Ledger tab (Receivable / Payable / Net / Outstanding) ─────────

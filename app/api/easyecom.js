@@ -628,6 +628,7 @@ async function fetchEasyecomOrderById(easyecomOrderId) {
 }
 
 module.exports = router;
+module.exports.getEasyecomToken = getEasyecomToken;
 module.exports.syncEasyecomOrders = syncEasyecomOrders;
 module.exports.dbRowToDashboard = dbRowToDashboard;
 module.exports.rawToDbRow = rawToDbRow;

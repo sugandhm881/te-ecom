@@ -37,6 +37,7 @@ const docpharmaReconRoutes = require('./app/api/docpharma_recon');
 const docpharmaInvoiceRoutes = require('./app/api/docpharma_invoices');
 const docpharmaLedgerRoutes = require('./app/api/docpharma_ledger');
 const docpharmaOverviewRoutes = require('./app/api/docpharma_overview');
+const docpharmaInventoryRoutes = require('./app/api/docpharma_inventory');
 const { ingestRecentDocpharmaOrders } = require('./app/api/docpharma_portal');
 const { backfillJourneys } = require('./app/api/delivery_journey');
 const cron = require('node-cron');
@@ -61,6 +62,7 @@ app.use('/api', docpharmaReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
 app.use('/api', docpharmaLedgerRoutes);
 app.use('/api', docpharmaOverviewRoutes);
+app.use('/api', docpharmaInventoryRoutes);
 initAutoReviewCron();
 
 // Delivery-journey gap-fill — every 6h, refresh non-final shipments (webhooks handle real-time;

@@ -68,12 +68,41 @@ function parseGoodsPdf(text) {
     if ((m = text.match(/Taxable Amount\s*([\d.,]+)/i))) inv.taxable_amount = num(m[1]);
     if ((m = text.match(/(?:Total Tax|Add:\s*IGST|IGST)\s*([\d.,]+)/i))) inv.tax_amount = num(m[1]);
     if ((m = text.match(/GRAND TOTAL\s*[Rs.₹\s]*([\d.,]+)/i))) inv.total_value = num(m[1]);
-    // Line items: a HSN (6-8 digits) followed by qty, rate, (disc), tax%, taxable, tax, total. Name precedes it (wrapped).
-    const rowRe = /(\d{6,8})\s+([\d,]+)\s+([\d.,]+)\s+-?\s*(\d+)%\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)/g;
-    let r;
-    while ((r = rowRe.exec(text))) {
-        inv.items.push({ hsn: r[1], qty: num(r[2]), rate: num(r[3]), tax_pct: num(r[4]), taxable: num(r[5]), tax_amt: num(r[6]), amount: num(r[7]), name: '', sku: null });
+
+    // Line items — each block is: wrapped product name → "SKU: <code>" → a numbers row (HSN qty rate [disc tax%] taxable taxAmt total).
+    const isNumTok = t => /^[\d.,]+$/.test(t) && /\d/.test(t);
+    const lines = text.split('\n').map(s => s.replace(/ /g, ' ').trim());
+    let started = false, nameParts = [], sku = null;
+    for (let ln of lines) {
+        if (!ln) continue;
+        if (/PARTICULARS/i.test(ln) && /HSN/i.test(ln)) { started = true; nameParts = []; sku = null; continue; }   // items begin after the table header
+        if (!started) continue;
+        if (/^(Total\s*Quan|Taxable Amount|Add:\s*IGST|Total Tax|GRAND TOTAL|In Words|BANK DETAILS|Authorised)/i.test(ln)) break;   // items end
+        const ms = ln.match(/SKU:?\s*([A-Za-z0-9_\-\/.]+)/i);
+        if (ms) { sku = clean(ms[1]); ln = ln.replace(/SKU:?\s*[A-Za-z0-9_\-\/.]+/i, '').trim(); if (!ln) continue; }
+        const toks = ln.split(/\s+/);
+        const hsnIdx = toks.findIndex(t => /^\d{6,8}$/.test(t));
+        const L = toks.length;
+        const isRow = hsnIdx >= 0 && L - hsnIdx >= 6 && isNumTok(toks[hsnIdx + 1]) && isNumTok(toks[hsnIdx + 2]) && isNumTok(toks[L - 1]) && isNumTok(toks[L - 2]) && isNumTok(toks[L - 3]);
+        if (isRow) {
+            if (hsnIdx > 0) nameParts.push(toks.slice(0, hsnIdx).join(' '));                                          // name text sharing the row line
+            const taxTok = toks.slice(hsnIdx).find(t => /^\d+(\.\d+)?%$/.test(t));
+            inv.items.push({
+                hsn: toks[hsnIdx], qty: num(toks[hsnIdx + 1]), rate: num(toks[hsnIdx + 2]),
+                tax_pct: taxTok ? num(taxTok) : null, taxable: num(toks[L - 3]), tax_amt: num(toks[L - 2]), amount: num(toks[L - 1]),
+                name: nameParts.join(' ').replace(/\s+/g, ' ').trim() || null, sku: sku || null,
+            });
+            nameParts = []; sku = null;
+        } else {
+            nameParts.push(ln);                                                                                       // wrapped product-name line
+        }
     }
+    // Fallback: numbers-only regex if the block parse found nothing.
+    if (!inv.items.length) {
+        const rowRe = /(\d{6,8})\s+([\d,]+)\s+([\d.,]+)\s+-?\s*(\d+)%\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)/g; let r;
+        while ((r = rowRe.exec(text))) inv.items.push({ hsn: r[1], qty: num(r[2]), rate: num(r[3]), tax_pct: num(r[4]), taxable: num(r[5]), tax_amt: num(r[6]), amount: num(r[7]), name: null, sku: null });
+    }
+    if (!inv.total_qty && inv.items.length) inv.total_qty = inv.items.reduce((s, it) => s + (it.qty || 0), 0);
     return inv;
 }
 
