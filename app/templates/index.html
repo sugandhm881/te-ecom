@@ -322,6 +322,34 @@
     
     .view-hidden { display: none !important; }
     .details-row { background-color: #f8fafc; box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.05); }
+
+    /* ─────────────  Responsive: mobile & tablet  ───────────── */
+    #app, #app > main { max-width: 100vw; }
+    /* Below lg (<1024px): sidebar becomes an off-canvas drawer */
+    @media (max-width: 1023.98px) {
+      #app-sidebar { position: fixed; top: 0; bottom: 0; left: 0; transform: translateX(-100%); transition: transform .22s ease; }
+      #app-sidebar.open { transform: translateX(0); box-shadow: 0 12px 40px rgba(0,0,0,.45); }
+      #app > main { min-width: 0; }
+      /* per-view sticky headers must not fight the mobile app bar / eat vertical space */
+      #app main header.sticky { position: static !important; }
+      #app main .overflow-x-auto { -webkit-overflow-scrolling: touch; }
+    }
+    /* Phones (<768px): reclaim the heavy desktop padding & shrink titles */
+    @media (max-width: 767.98px) {
+      #app main .px-8 { padding-left: 1rem !important; padding-right: 1rem !important; }
+      #app main .px-6 { padding-left: 1rem !important; padding-right: 1rem !important; }
+      #app main .py-5 { padding-top: .8rem !important; padding-bottom: .8rem !important; }
+      #app main .p-8 { padding: 1rem !important; }
+      #app main .p-6 { padding: 1rem !important; }
+      #app main .gap-8 { gap: 1rem !important; }
+      #app main .mb-8 { margin-bottom: 1.25rem !important; }
+      #app main h1 { font-size: 1.15rem !important; line-height: 1.6rem; }
+      /* modal panels fit the viewport & scroll */
+      .modal-panel, [id$="-modal"] > div { max-width: 96vw !important; max-height: 92vh !important; overflow-y: auto; }
+      /* login card: breathing room, no edge-to-edge */
+      #login-view { padding: 1rem; }
+      #login-view .card { padding: 1.75rem !important; }
+    }
 </style>
 </head>
 <body class="text-slate-800">
@@ -361,8 +389,11 @@
 </div>
 
 <div id="app" class="flex h-screen overflow-hidden" style="display: none;">
-    
-    <aside class="w-64 bg-[#0f172a] text-slate-300 flex flex-col border-r border-slate-800 transition-all z-30 hidden lg:flex">
+
+    <!-- Drawer backdrop (mobile/tablet) -->
+    <div id="sidebar-backdrop" class="fixed inset-0 bg-black/50 z-40 hidden lg:hidden" aria-hidden="true"></div>
+
+    <aside id="app-sidebar" class="w-64 bg-[#0f172a] text-slate-300 flex flex-col border-r border-slate-800 z-50 shrink-0">
         <div class="h-16 flex items-center px-6 border-b border-slate-800 bg-[#0f172a]">
             <img src="/static/assets/ecom-logo.png" class="w-8 h-8 rounded-lg">
             <span class="ml-3 text-white font-bold text-lg tracking-tight">Ecom Central</span>
@@ -473,6 +504,15 @@
     </aside>
 
     <main class="flex-1 flex flex-col overflow-y-auto bg-[#f8fafc]">
+
+        <!-- Mobile app bar (hamburger + brand) — only below lg -->
+        <div id="app-topbar" class="lg:hidden sticky top-0 z-30 flex items-center gap-3 h-14 px-4 bg-[#0f172a] text-white shadow-md">
+            <button id="sidebar-toggle" type="button" aria-label="Menu" class="p-2 -ml-2 rounded-lg hover:bg-white/10 active:bg-white/20">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+            </button>
+            <img src="/static/assets/ecom-logo.png" class="w-7 h-7 rounded-md">
+            <span class="font-bold tracking-tight">Ecom Central</span>
+        </div>
 
         <div id="orders-dashboard-view">
             <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 flex flex-wrap justify-between items-center shadow-sm gap-4">
@@ -1607,5 +1647,20 @@
 </div>
 
 <script src="/static/app.js"></script>
+<script>
+/* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
+(function () {
+  var mq = window.matchMedia('(max-width: 1023.98px)');
+  function el(id) { return document.getElementById(id); }
+  function openDrawer() { var s = el('app-sidebar'), b = el('sidebar-backdrop'); if (s) s.classList.add('open'); if (b) b.classList.remove('hidden'); }
+  function closeDrawer() { var s = el('app-sidebar'), b = el('sidebar-backdrop'); if (s) s.classList.remove('open'); if (b) b.classList.add('hidden'); }
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('#sidebar-toggle')) { e.preventDefault(); var s = el('app-sidebar'); (s && s.classList.contains('open')) ? closeDrawer() : openDrawer(); return; }
+    if (e.target.closest('#sidebar-backdrop')) { closeDrawer(); return; }
+    if (e.target.closest('#app-sidebar .sidebar-link') && mq.matches) { closeDrawer(); }
+  });
+  window.addEventListener('resize', function () { if (!mq.matches) closeDrawer(); });
+})();
+</script>
 </body>
 </html>
