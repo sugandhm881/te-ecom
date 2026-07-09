@@ -102,21 +102,6 @@ function hideLoader(force) {
   }
 }
 
-// Show the branded ecom-central loader for ANY API request, app-wide — so every view that loads data gets it,
-// not just the ones wired by hand. Pass {noLoader:true} in fetch init to opt a background/polling call out.
-if (typeof window !== 'undefined' && !window.__apiLoaderHooked) {
-  window.__apiLoaderHooked = true;
-  const _origFetch = window.fetch.bind(window);
-  window.fetch = function (input, init) {
-    const url = typeof input === 'string' ? input : (input && input.url) || '';
-    const useLoader = /\/api\//.test(url) && !(init && init.noLoader);
-    if (useLoader) showLoader();
-    const p = _origFetch(input, init);
-    if (useLoader) p.then(() => hideLoader(), () => hideLoader());
-    return p;
-  };
-}
-
 const formatCurrency = (amount) => {
   const value = Math.round(parseFloat(amount) || 0);
   return new Intl.NumberFormat('en-IN', {
@@ -209,12 +194,13 @@ function showApp() {
 function getAuthHeaders() { return authToken ? { "Authorization": `Bearer ${authToken}` } : {}; }
 
 async function fetchApiData(endpoint, errorMessage, options = {}) {
-    showLoader();
-    const headers = { ...getAuthHeaders(), ...options.headers };
-    if (!headers.Authorization) { hideLoader(); logout(); return Promise.reject("Unauthorized"); }
+    const { noLoader, ...fetchOptions } = options;   // noLoader → fetch quietly in the background (no full-screen overlay)
+    if (!noLoader) showLoader();
+    const headers = { ...getAuthHeaders(), ...fetchOptions.headers };
+    if (!headers.Authorization) { if (!noLoader) hideLoader(); logout(); return Promise.reject("Unauthorized"); }
 
     try {
-        const response = await fetch(`/api${endpoint}`, { ...options, headers });
+        const response = await fetch(`/api${endpoint}`, { ...fetchOptions, headers });
         if (response.status === 401) { showNotification("Session expired.", true); logout(); return Promise.reject("Unauthorized"); }
         if (!response.ok) { const e = await response.json(); throw new Error(e.error || `Server error: ${response.status}`); }
         const cType = response.headers.get('Content-Type');
@@ -225,12 +211,13 @@ async function fetchApiData(endpoint, errorMessage, options = {}) {
         showNotification(error.message || errorMessage, true);
         return Promise.reject(error.message);
     } finally {
-        hideLoader();
+        if (!noLoader) hideLoader();
     }
 }
 
 // Shopify order data enriched with EasyEcom order IDs for confirm/approve.
-const fetchOrdersFromServer = () => fetchApiData(`/get-orders`, 'Failed to fetch orders.');
+// noLoader: loads quietly — the home page renders its shell first, and the 60s auto-refresh no longer flashes the overlay.
+const fetchOrdersFromServer = () => fetchApiData(`/get-orders`, 'Failed to fetch orders.', { noLoader: true });
 
 // --- Silent background refresh (auto every 1 min) ---
 async function silentRefreshOrders() {
@@ -309,17 +296,20 @@ function navigate(view) {
     showLoader();
     console.log("Navigating to:", view);
     currentView = view;
-    
+    // Reflect the current view in the URL, so refresh / open-in-new-tab / bookmark reopen the same page.
+    if (view && ('#' + view) !== location.hash) { try { history.replaceState(null, '', '#' + view); } catch (e) {} }
+
     const allLinks = document.querySelectorAll('.sidebar-link');
     allLinks.forEach(link => link.classList.remove('active'));
     
     const mainContainer = document.querySelector('main');
     if (mainContainer) {
         Array.from(mainContainer.children).forEach(child => {
-            if (child.tagName === 'DIV') {
-                child.style.display = 'none';       
-                child.classList.add('view-hidden'); 
-                child.classList.add('hidden');      
+            // Hide the view panels, but never the persistent mobile app bar (hamburger).
+            if (child.tagName === 'DIV' && child.id !== 'app-topbar') {
+                child.style.display = 'none';
+                child.classList.add('view-hidden');
+                child.classList.add('hidden');
             }
         });
     }
@@ -2547,39 +2537,65 @@ function renderInsightCharts(o, s, e) {
 }
 function renderSettings(){const c=document.getElementById('seller-connections');c.innerHTML=connections.map(e=>`<div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between"><div class="flex items-center"><img src="${platformLogos[e.name]}" class="w-10 h-10 mr-4 rounded-lg bg-slate-50 p-1"><div><p class="font-bold text-slate-900">${e.name}</p><p class="text-sm text-slate-500">${e.status==='Connected'?e.user:'Click to connect'}</p></div></div><button data-platform="${e.name}" data-action="${e.status==='Connected'?'disconnect':'connect'}" class="connection-btn ${e.status==='Connected'?'text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100':'text-white bg-indigo-600 hover:bg-indigo-700'} px-4 py-2 rounded-lg text-sm font-medium transition-colors">${e.status==='Connected'?'Disconnect':'Connect'}</button></div>`).join('');document.querySelectorAll('.connection-btn').forEach(b=>b.addEventListener('click',e=>handleConnection(e.currentTarget.dataset.platform,e.currentTarget.dataset.action)))}
 function handleConnection(p,a){if(a==='connect'){showNotification(`Simulating connection to ${p}...`);setTimeout(()=>{showNotification(`Successfully connected to ${p}.`)},1500)}else if(a==='disconnect'){if(confirm(`Are you sure you want to disconnect from ${p}?`)){showNotification(`Disconnected from ${p}.`)}}}
+// ─────────── Deep-linkable views (open-in-new-tab / refresh / bookmark) ───────────
+// Map each nav item to a #hash so its page survives a full page load, not just an in-app click.
+const NAV_HREF = {
+    'nav-orders-dashboard': 'orders-dashboard', 'nav-order-insights': 'order-insights', 'nav-profitability': 'profitability',
+    'nav-customer-segments': 'customer-segments', 'nav-returns-analysis': 'returns-analysis', 'nav-ad-ranking': 'ad-ranking',
+    'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
+    'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
+    'nav-delivery-perf': 'delivery-perf', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon'
+};
+const VALID_VIEWS = new Set(Object.values(NAV_HREF));
+function viewFromHash() { const v = (location.hash || '').replace(/^#/, ''); return VALID_VIEWS.has(v) ? v : null; }
+function applyNavHrefs() { Object.entries(NAV_HREF).forEach(([id, view]) => { const a = document.getElementById(id); if (a) a.setAttribute('href', '#' + view); }); }
+if (document.readyState !== 'loading') applyNavHrefs(); else document.addEventListener('DOMContentLoaded', applyNavHrefs);
+// Ctrl/Cmd/Shift-click a nav item → let the browser open the #hash in a new tab instead of navigating in place.
+document.addEventListener('click', function (e) { const l = e.target.closest && e.target.closest('.sidebar-link'); if (l && (e.ctrlKey || e.metaKey || e.shiftKey)) e.stopPropagation(); }, true);
+// Manual hash edit / browser back-forward → switch view.
+window.addEventListener('hashchange', function () { const v = viewFromHash(); if (v && v !== currentView && typeof navigate === 'function') navigate(v); });
+
 async function loadInitialData() {
-    try {
-        // Show loader while fetching both
-        if(document.getElementById('loading-overlay')) document.getElementById('loading-overlay').classList.remove('hidden');
+    // Render the interactive shell immediately, then load data in the background —
+    // the home page is usable right away instead of blocking on the slow /get-orders call.
+    initializeAllFilters();
+    navigate(viewFromHash() || 'orders-dashboard');   // honor a deep-linked #view on first load
+    const ordersList = document.getElementById('orders-list');
+    // Branded ecom-central logo + spinner shown right in the table area while orders load (non-blocking).
+    if (ordersList) ordersList.innerHTML = `<tr><td colspan="11" class="py-16"><div class="flex flex-col items-center justify-center gap-3"><span class="relative inline-flex items-center justify-center w-14 h-14"><span class="absolute w-14 h-14 rounded-full border-[3px] border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/ecom-logo.png" class="w-9 h-9 rounded-lg"></span><span class="text-slate-400 text-sm font-medium">Loading latest orders…</span></div></td></tr>`;
 
-        // Fetch Orders AND COD Data in parallel
-        const [ordersData, _] = await Promise.all([
-            fetchOrdersFromServer(),
-            fetchCodConfirmations()
-        ]);
-        
-        allOrders = ordersData;
-        
-        initializeAllFilters();
-        navigate('orders-dashboard');
+    // Background load — orders FIRST (render as soon as they arrive); COD & EDD fill their columns in after,
+    // so a slow /cod-confirmations or /edd-batch can never delay the orders table.
+    (async () => {
+        try {
+            allOrders = (await fetchOrdersFromServer()) || [];
+            if (currentView === 'orders-dashboard') renderAllDashboard();
+            else if (currentView === 'order-insights') renderAllInsights();
+            updateLastSyncedLabel();
+        } catch (error) {
+            console.error("Critical Error loading orders:", error);
+            if (ordersList && currentView === 'orders-dashboard' && !(allOrders && allOrders.length)) {
+                ordersList.innerHTML = '<tr><td colspan="11" class="py-12 text-center text-rose-400 text-sm">Could not load orders — tap Refresh to retry.</td></tr>';
+            }
+        }
+        // COD status fills its column when ready — independent of the orders table render.
+        fetchCodConfirmations().then(() => {
+            if (currentView === 'orders-dashboard') renderAllDashboard();
+            else if (currentView === 'order-insights') renderAllInsights();
+        }).catch(() => {});
+    })();
 
-        // --- COD status refresh every 1 minute ---
-        setInterval(async () => {
-            try {
-                await fetchCodConfirmations();
-                if (currentView === 'orders-dashboard') renderAllDashboard();
-                else if (currentView === 'order-insights') renderAllInsights();
-            } catch (e) { console.error('COD refresh failed:', e); }
-        }, 60000);
+    // --- COD status refresh every 1 minute (quiet) ---
+    setInterval(async () => {
+        try {
+            await fetchCodConfirmations();
+            if (currentView === 'orders-dashboard') renderAllDashboard();
+            else if (currentView === 'order-insights') renderAllInsights();
+        } catch (e) { console.error('COD refresh failed:', e); }
+    }, 60000);
 
-        // --- Full orders + COD refresh every 1 minute ---
-        setInterval(() => silentRefreshOrders(), 60000);
-
-    } catch (error) {
-        console.error("Critical Error loading initial data:", error);
-    } finally {
-        if(document.getElementById('loading-overlay')) document.getElementById('loading-overlay').classList.add('hidden');
-    }
+    // --- Full orders + COD refresh every 1 minute (quiet) ---
+    setInterval(() => silentRefreshOrders(), 60000);
 }
 function initializeAllFilters() {
     // 1. Status Filters

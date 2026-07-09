@@ -214,6 +214,8 @@ app.get('/api/cod-confirmations', async (req, res) => {
 
 // --- Serve Frontend ---
 app.get('/', (req, res) => {
+    // Never cache the app shell — otherwise browsers/phones keep showing an old index.html after a deploy.
+    res.set('Cache-Control', 'no-store, must-revalidate');
     res.sendFile(path.join(__dirname, 'app/templates/index.html'));
 });
 
