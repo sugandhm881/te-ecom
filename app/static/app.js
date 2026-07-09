@@ -102,6 +102,21 @@ function hideLoader(force) {
   }
 }
 
+// Show the branded ecom-central loader for ANY API request, app-wide — so every view that loads data gets it,
+// not just the ones wired by hand. Pass {noLoader:true} in fetch init to opt a background/polling call out.
+if (typeof window !== 'undefined' && !window.__apiLoaderHooked) {
+  window.__apiLoaderHooked = true;
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const useLoader = /\/api\//.test(url) && !(init && init.noLoader);
+    if (useLoader) showLoader();
+    const p = _origFetch(input, init);
+    if (useLoader) p.then(() => hideLoader(), () => hideLoader());
+    return p;
+  };
+}
+
 const formatCurrency = (amount) => {
   const value = Math.round(parseFloat(amount) || 0);
   return new Intl.NumberFormat('en-IN', {
@@ -3475,7 +3490,7 @@ function opsPrTable(){ const c=document.getElementById('ops-pr-table'); const d=
 }
 
 // ─── DocPharma Reconciliation ────────────────────────────────────────────────
-let _dpreFrom=null,_dpreTo=null,_dpreData=null,_dpreWired=false,_dpreStatus=[],_dprePayment='all',_dpreSort={k:'orderDate',d:'desc'},_dpreOpen=null,_dpreDFrom='',_dpreDTo='',_dpreCustomer='',_dpreTab='recon'; const _dpreScan={};
+let _dpreFrom=null,_dpreTo=null,_dpreData=null,_dpreWired=false,_dpreStatus=[],_dprePayment='all',_dpreSort={k:'orderDate',d:'desc'},_dpreOpen=null,_dpreDFrom='',_dpreDTo='',_dpreCustomer='',_dpreTab='recon',_dprePayDD=null; const _dpreScan={};
 // DocPharma workspace tab switcher (Reconciliation / Ledger / Invoices / Payments / Inventory Match)
 function dpreTab(name){
     const v=document.getElementById('docpharma-recon-view'); if(!v) return;
@@ -3531,8 +3546,7 @@ function dpreInit(){
             <input type="date" id="dpre-to" value="${_dpreTo}" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
             <button id="dpre-apply" class="text-sm px-4 py-2 bg-slate-800 text-white rounded-lg">Apply</button>
             <div id="dpre-status-multi" class="dpre-multi"><button type="button" class="dpre-multi-btn"><span class="text-slate-400">All status</span> <span class="text-slate-400">▾</span></button><div class="dpre-multi-panel hidden"></div></div>
-            <select id="dpre-payment" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
-              <option value="all">All payment</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select>
+            <div id="dpre-payment-multi" class="dpre-multi"><button type="button" class="dpre-multi-btn"><span class="text-slate-400">All payment</span> <span class="text-slate-400">▾</span></button><div class="dpre-multi-panel hidden"></div></div>
             <input type="text" id="dpre-customer" placeholder="Customer name" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 min-w-[150px]">
             <input type="text" id="dpre-search" placeholder="Search order / AWB / courier" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 flex-1 min-w-[160px]">
           </div>
@@ -3578,7 +3592,10 @@ function dpreInit(){
         v.querySelector('#dpre-apply').addEventListener('click',()=>{ _dpreFrom=v.querySelector('#dpre-from').value; _dpreTo=v.querySelector('#dpre-to').value; dpreLoad(); });
         v.querySelector('#dpre-refresh').addEventListener('click',()=>dpreLoad());
         dpreBuildStatusPanel();
-        v.querySelector('#dpre-payment').addEventListener('change',e=>{ _dprePayment=e.target.value; dpreLoad(); });
+        _dprePayDD=dpreDropdown(v.querySelector('#dpre-payment-multi'),{ options:[['cod','COD'],['prepaid','Prepaid']],
+            get:()=>_dprePayment==='all'?['cod','prepaid']:[_dprePayment],
+            set:sel=>{ _dprePayment=(sel.length===0||sel.length>=2)?'all':sel[0]; dpreLoad(); },
+            label:sel=>(sel.length>=2||sel.length===0)?'<span class="text-slate-400">All payment</span>':(sel[0]==='cod'?'COD':'Prepaid') });
         v.querySelector('#dpre-search').addEventListener('input',()=>dpreTable());
         v.querySelector('#dpre-dfrom').addEventListener('change',e=>{ _dpreDFrom=e.target.value; dpreLoad(); });
         v.querySelector('#dpre-dto').addEventListener('change',e=>{ _dpreDTo=e.target.value; dpreLoad(); });
@@ -3612,9 +3629,35 @@ function dpreBuildStatusPanel(){
         sync(); dpreLoad(); }));
     panel.querySelector('.dpre-multi-all').addEventListener('click',()=>{ _dpreStatus=DPRE_STATUS_OPTS.map(o=>o[0]); sync(); dpreLoad(); });
     panel.querySelector('.dpre-multi-clear').addEventListener('click',()=>{ _dpreStatus=[]; sync(); dpreLoad(); });
-    btn.addEventListener('click',e=>{ e.stopPropagation(); panel.classList.toggle('hidden'); });
+    btn.addEventListener('click',e=>{ e.stopPropagation(); document.querySelectorAll('#docpharma-recon-view .dpre-multi-panel').forEach(p=>{ if(p!==panel) p.classList.add('hidden'); }); panel.classList.toggle('hidden'); });
     document.addEventListener('click',e=>{ if(!wrap.contains(e.target)) panel.classList.add('hidden'); });
     sync();
+}
+// Reusable styled dropdown matching the status multi-select look (checkbox panel + Select all/Clear all).
+// wrap = the .dpre-multi container. opts: { options:[[value,label]], multi (default true),
+//   get:()=>selection (array when multi, else a scalar), set:(sel)=>void, label:(sel)=>innerHTML for the button }.
+function dpreDropdown(wrap, opts){
+    if(!wrap) return null;
+    const multi = opts.multi!==false;
+    const btn=wrap.querySelector('.dpre-multi-btn'), panel=wrap.querySelector('.dpre-multi-panel');
+    const paint=()=>{ const sel=opts.get();
+        btn.innerHTML = opts.label(sel)+' <span class="text-slate-400">▾</span>';
+        panel.querySelectorAll('.dpre-multi-item').forEach(it=>{ const cb=it.querySelector('input'); const on=multi?sel.includes(cb.value):String(sel)===cb.value; cb.checked=on; it.classList.toggle('is-sel',!multi&&on); });
+    };
+    panel.innerHTML = (multi?`<div class="dpre-multi-actions"><button type="button" class="dpre-multi-all">Select all</button><button type="button" class="dpre-multi-clear">Clear all</button></div>`:'')
+        + opts.options.map(([v,l])=>`<label class="dpre-multi-item"><input type="checkbox" value="${v}"><span>${l}</span></label>`).join('');
+    panel.querySelectorAll('input').forEach(cb=>cb.addEventListener('change',()=>{
+        if(multi){ let cur=opts.get().slice(); if(cb.checked){ if(!cur.includes(cb.value)) cur.push(cb.value); } else cur=cur.filter(x=>x!==cb.value); opts.set(cur); paint(); }
+        else { opts.set(cb.value); paint(); panel.classList.add('hidden'); }
+    }));
+    if(multi){
+        panel.querySelector('.dpre-multi-all').addEventListener('click',()=>{ opts.set(opts.options.map(o=>o[0])); paint(); });
+        panel.querySelector('.dpre-multi-clear').addEventListener('click',()=>{ opts.set([]); paint(); });
+    }
+    btn.addEventListener('click',e=>{ e.stopPropagation(); document.querySelectorAll('#docpharma-recon-view .dpre-multi-panel').forEach(p=>{ if(p!==panel) p.classList.add('hidden'); }); panel.classList.toggle('hidden'); });
+    document.addEventListener('click',e=>{ if(!wrap.contains(e.target)) panel.classList.add('hidden'); });
+    paint();
+    return { paint };
 }
 async function dpreLoad(){
     const k=document.getElementById('dpre-kpis'); if(k) k.innerHTML=ecSkelCards(6);
@@ -3904,7 +3947,7 @@ function dpreOverviewDrill(statuses,payment){
     const v=document.getElementById('docpharma-recon-view');
     if(v){ const ff=v.querySelector('#dpre-from'); if(ff)ff.value=_dpreFrom; const tf=v.querySelector('#dpre-to'); if(tf)tf.value=_dpreTo;
         const df=v.querySelector('#dpre-dfrom'); if(df)df.value=''; const dto=v.querySelector('#dpre-dto'); if(dto)dto.value='';
-        const pay=v.querySelector('#dpre-payment'); if(pay)pay.value=_dprePayment;
+        if(_dprePayDD)_dprePayDD.paint();
         const wrap=v.querySelector('#dpre-status-multi'); if(wrap){ wrap.querySelectorAll('.dpre-multi-panel input[type=checkbox]').forEach(cb=>cb.checked=_dpreStatus.includes(cb.value)); const btn=wrap.querySelector('.dpre-multi-btn'); if(btn) btn.innerHTML=(_dpreStatus.length===0?'<span class="text-slate-400">All status</span>':_dpreStatus.length===1?((DPRE_STATUS[_dpreStatus[0]]||[_dpreStatus[0]])[0]):`Status: ${_dpreStatus.length}`)+' <span class="text-slate-400">▾</span>'; } }
     dpreLoad();
 }
@@ -3993,7 +4036,7 @@ function dpreOverviewRender(d){
     const th='px-3 py-2 text-right text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap',thl=th.replace('text-right','text-left');
     const td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100 text-right tabular-nums whitespace-nowrap';
     const drate=r=>r>=0.7?'text-emerald-600':r>=0.5?'text-amber-600':'text-rose-600';
-    const mrows=[...tr].reverse().map(m=>`<tr class="hover:bg-slate-50"><td class="${td} text-left font-semibold">${dpledMonLabel(m.month)}${m.incomplete?' <span class="text-amber-600" title="cohort still in transit — delivery rate will rise">⏳</span>':''}</td><td class="${td}">${nfmt(m.orders)}</td><td class="${td} text-indigo-600">${nfmt(m.dispatched)}</td><td class="${td} text-emerald-700">${nfmt(m.delivered)}</td><td class="${td} text-rose-600">${nfmt(m.rto)}</td><td class="${td}">${m.lost||0}</td><td class="${td} text-slate-500">${nfmt(m.rejected)}</td><td class="${td} text-slate-500">${nfmt(m.cancelled)}</td><td class="${td} text-sky-600">${nfmt(m.inTransit)}</td><td class="${td} font-semibold ${drate(m.deliveryRate)}">${pc(m.deliveryRate)}</td><td class="${td}">${INR(m.handedValue)}</td><td class="${td} text-emerald-700">${INR(m.deliveredValue)}</td></tr>`).join('');
+    const mrows=[...tr].reverse().map(m=>`<tr class="hover:bg-slate-50"><td class="${td.replace('text-right','text-left')} font-semibold">${dpledMonLabel(m.month)}${m.incomplete?' <span class="text-amber-600" title="cohort still in transit — delivery rate will rise">⏳</span>':''}</td><td class="${td}">${nfmt(m.orders)}</td><td class="${td} text-indigo-600">${nfmt(m.dispatched)}</td><td class="${td} text-emerald-700">${nfmt(m.delivered)}</td><td class="${td} text-rose-600">${nfmt(m.rto)}</td><td class="${td}">${m.lost||0}</td><td class="${td} text-slate-500">${nfmt(m.rejected)}</td><td class="${td} text-slate-500">${nfmt(m.cancelled)}</td><td class="${td} text-sky-600">${nfmt(m.inTransit)}</td><td class="${td} font-semibold ${drate(m.deliveryRate)}">${pc(m.deliveryRate)}</td><td class="${td}">${INR(m.handedValue)}</td><td class="${td} text-emerald-700">${INR(m.deliveredValue)}</td></tr>`).join('');
     const monthlyHtml=tr.length?`<div class="card p-0 overflow-hidden"><div class="px-5 py-3 border-b border-slate-100"><h3 class="text-sm font-bold text-slate-700">Monthly cohort detail</h3><p class="text-[11px] text-slate-400">Each order counted in the month it was handed to DocPharma · ⏳ = still in transit (delivery rate will rise)</p></div><div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr><th class="${thl}">Month</th><th class="${th}">Handed</th><th class="${th}">Dispatched</th><th class="${th}">Delivered</th><th class="${th}">RTO</th><th class="${th}">Lost</th><th class="${th}">Rej</th><th class="${th}">Cancel</th><th class="${th}">In-transit</th><th class="${th}">Delivery %</th><th class="${th}">GMV handed</th><th class="${th}">Delivered GMV</th></tr></thead><tbody>${mrows}</tbody></table></div></div>`:'';
     box.innerHTML=effHtml
         +`<div class="grid grid-cols-1 lg:grid-cols-3 gap-4"><div class="lg:col-span-2">${funnelHtml}</div>${valueHtml}</div>`
@@ -4003,7 +4046,14 @@ function dpreOverviewRender(d){
 }
 
 // ─── DocPharma Inventory / SKU Match tab (goods sent vs delivered/RTO/lost) ──
-let _dpimWired=false, _dpimData=null, _dpimFilter='all', _dpimLead=15, _dpimOpen=null, _dpimDetail={};
+let _dpimWired=false, _dpimData=null, _dpimFilter='all', _dpimLead=15, _dpimOpen=null, _dpimDetail={}, _dpimFrom='', _dpimTo='', _dpimLeadDD=null, _dpimDateDD=null, _dpimDatePreset='all';
+const DPIM_DATE_OPTS=[['all','All time'],['last7','Last 7 days'],['last30','Last 30 days'],['last90','Last 90 days'],['thismonth','This month'],['lastmonth','Last month'],['thisquarter','This quarter'],['custom','Custom date…']];
+function dpimPresetRange(preset){ const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; const t=new Date(), today=fmt(t), ago=n=>{ const d=new Date(); d.setDate(d.getDate()-n); return fmt(d); };
+    switch(preset){ case 'last7': return [ago(6),today]; case 'last30': return [ago(29),today]; case 'last90': return [ago(89),today];
+        case 'thismonth': return [fmt(new Date(t.getFullYear(),t.getMonth(),1)),today];
+        case 'lastmonth': return [fmt(new Date(t.getFullYear(),t.getMonth()-1,1)),fmt(new Date(t.getFullYear(),t.getMonth(),0))];
+        case 'thisquarter': return [fmt(new Date(t.getFullYear(),Math.floor(t.getMonth()/3)*3,1)),today];
+        default: return ['','']; } }
 const DPIM_ST={ ok:['In stock','bg-emerald-100 text-emerald-700'], low:['Low','bg-amber-100 text-amber-700'], reorder:['Reorder','bg-orange-100 text-orange-700'], short:['Short','bg-rose-100 text-rose-700'], 'no-invoice':['No invoice','bg-slate-100 text-slate-500'] };
 const dpimDate=s=>s?String(s).slice(0,10).split('-').reverse().join('-'):'—';
 function dpimSeg(){ document.querySelectorAll('#dpim-seg button').forEach(b=>{ const on=b.dataset.f===_dpimFilter; b.classList.toggle('bg-indigo-600',on); b.classList.toggle('text-white',on); b.classList.toggle('text-slate-600',!on); }); }
@@ -4012,7 +4062,10 @@ function dpreInvMatchInit(){ const sec=document.getElementById('dpre-tab-invento
         <div class="flex items-center justify-between flex-wrap gap-2">
           <div><h2 class="text-sm font-bold text-slate-700">Inventory / SKU match · 3-source reconciliation</h2><p class="text-[11px] text-slate-400">Implied (our books) vs <b>DocPharma</b> (their system) vs EasyEcom · <span id="dpim-synced">not synced yet</span> · click a SKU to drill in</p></div>
           <div class="flex items-center gap-2 text-xs flex-wrap justify-end">
-            <label class="text-slate-400">Lead</label><input id="dpim-lead" type="number" min="1" value="${_dpimLead}" class="w-14 border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700 text-right"><span class="text-slate-400 -ml-1">days</span>
+            <div id="dpim-lead-dd" class="dpre-multi compact"><button type="button" class="dpre-multi-btn">Lead ${_dpimLead}d <span class="text-slate-400">▾</span></button><div class="dpre-multi-panel hidden"></div></div>
+            <input id="dpim-lead-custom" type="number" min="1" placeholder="days" class="hidden w-16 border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700 text-right">
+            <div id="dpim-date-dd" class="dpre-multi compact"><button type="button" class="dpre-multi-btn"><span class="text-slate-400">All time</span> <span class="text-slate-400">▾</span></button><div class="dpre-multi-panel hidden"></div></div>
+            <input id="dpim-from" type="date" class="hidden border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700"><span id="dpim-dsep" class="hidden text-slate-400">→</span><input id="dpim-to" type="date" class="hidden border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700">
             <div id="dpim-seg" class="inline-flex rounded-lg border border-slate-200 overflow-hidden text-slate-600">
               <button data-f="all" class="px-3 py-1.5">All</button>
               <button data-f="invoiced" class="px-3 py-1.5 border-l border-slate-200">Invoiced</button>
@@ -4022,15 +4075,33 @@ function dpreInvMatchInit(){ const sec=document.getElementById('dpre-tab-invento
             <button id="dpim-sync-dp" class="px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">↻ Sync DocPharma</button>
             <button id="dpim-sync" class="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 hover:border-indigo-400">↻ EasyEcom</button>
             <button id="dpim-refresh" class="px-3 py-1.5 bg-slate-800 text-white rounded-lg">↻ Refresh</button>
+            <button id="dpim-dl-pdf" class="hidden px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 hover:border-indigo-400">⬇ PDF</button>
+            <button id="dpim-dl-xlsx" class="hidden px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 hover:border-indigo-400">⬇ Excel</button>
           </div>
         </div>
         <div id="dpim-kpis" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3"></div>
-        <div class="card p-0 overflow-hidden"><div class="px-5 py-3 border-b border-slate-100"><h2 class="text-sm font-bold text-slate-700">Per-SKU reconciliation</h2><p class="text-[11px] text-slate-400">Days-cover = on-hand ÷ recent run-rate · <b>Reorder</b> when cover &lt; lead time · “Short/No invoice” = enter that SKU’s goods invoice</p></div><div id="dpim-table" class="overflow-x-auto"></div></div>
+        <div class="card p-0 overflow-hidden"><div class="px-5 py-3 border-b border-slate-100"><h2 class="text-sm font-bold text-slate-700">Per-SKU reconciliation</h2><p class="text-[11px] text-slate-400" id="dpim-tablenote">Days-cover = on-hand ÷ recent run-rate · <b>Reorder</b> when cover &lt; lead time · “Short/No invoice” = enter that SKU’s goods invoice</p></div><div id="dpim-table" class="overflow-x-auto"></div></div>
+        <div id="dpim-report"></div>
       </div>`;
         sec.querySelector('#dpim-refresh').addEventListener('click',()=>dpreInvMatchLoad());
         sec.querySelector('#dpim-sync-dp').addEventListener('click',()=>dpimSync('docpharma'));
         sec.querySelector('#dpim-sync').addEventListener('click',()=>dpimSync('easyecom'));
-        { let t; sec.querySelector('#dpim-lead').addEventListener('input',e=>{ clearTimeout(t); const v=parseInt(e.target.value,10); t=setTimeout(()=>{ if(v>0){ _dpimLead=v; dpreInvMatchLoad(); } },400); }); }
+        const leadCustom=sec.querySelector('#dpim-lead-custom');
+        const LEAD_OPTS=[7,15,21,30,45,60,90].map(v=>[String(v),`Lead ${v}d`]).concat([['custom','Custom…']]);
+        _dpimLeadDD=dpreDropdown(sec.querySelector('#dpim-lead-dd'),{ multi:false, options:LEAD_OPTS,
+            get:()=>String(_dpimLead),
+            set:v=>{ if(v==='custom'){ leadCustom.classList.remove('hidden'); leadCustom.value=_dpimLead; leadCustom.focus(); } else { leadCustom.classList.add('hidden'); _dpimLead=parseInt(v,10)||15; dpreInvMatchLoad(); } },
+            label:()=>`Lead ${_dpimLead}d` });
+        { let t; leadCustom.addEventListener('input',e=>{ clearTimeout(t); const v=parseInt(e.target.value,10); t=setTimeout(()=>{ if(v>0){ _dpimLead=v; if(_dpimLeadDD)_dpimLeadDD.paint(); dpreInvMatchLoad(); } },400); }); }
+        const fromI=sec.querySelector('#dpim-from'), toI=sec.querySelector('#dpim-to'), dsep=sec.querySelector('#dpim-dsep');
+        const showDates=on=>[fromI,dsep,toI].forEach(el=>el.classList.toggle('hidden',!on));
+        _dpimDateDD=dpreDropdown(sec.querySelector('#dpim-date-dd'),{ multi:false, options:DPIM_DATE_OPTS,
+            get:()=>_dpimDatePreset,
+            set:v=>{ _dpimDatePreset=v; if(v==='custom'){ showDates(true); if(!fromI.value){ const [f,t]=dpimPresetRange('last30'); fromI.value=f; toI.value=t; } _dpimFrom=fromI.value; _dpimTo=toI.value; dpreInvMatchLoad(); } else { showDates(false); const [f,t]=dpimPresetRange(v); _dpimFrom=f; _dpimTo=t; dpreInvMatchLoad(); } },
+            label:v=>{ const o=DPIM_DATE_OPTS.find(x=>x[0]===v); return v==='all'?'<span class="text-slate-400">All time</span>':(o?o[1]:'All time'); } });
+        [fromI,toI].forEach(el=>el.addEventListener('change',()=>{ _dpimFrom=fromI.value; _dpimTo=toI.value; if(_dpimFrom&&_dpimTo) dpreInvMatchLoad(); }));
+        sec.querySelector('#dpim-dl-pdf').addEventListener('click',()=>dpimDownloadReport('pdf'));
+        sec.querySelector('#dpim-dl-xlsx').addEventListener('click',()=>dpimDownloadReport('xlsx'));
         sec.querySelectorAll('#dpim-seg button').forEach(b=>b.addEventListener('click',()=>{ _dpimFilter=b.dataset.f; dpimSeg(); dpimRenderTable(); }));
         _dpimWired=true; dpimSeg();
     }
@@ -4038,9 +4109,12 @@ function dpreInvMatchInit(){ const sec=document.getElementById('dpre-tab-invento
 }
 async function dpreInvMatchLoad(){ const k=document.getElementById('dpim-kpis'); if(k)k.innerHTML=ecSkelCards(6);
     const tbl=document.getElementById('dpim-table'); if(tbl)tbl.innerHTML='<div class="p-4 space-y-2">'+Array.from({length:6}).map(()=>'<div class="skl" style="height:34px;width:100%"></div>').join('')+'</div>';
-    try{ const r=await fetch('/api/docpharma-inventory?lead='+_dpimLead,{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
-        _dpimData=d; _dpimDetail={}; dpimRenderKpis(); dpimRenderTable(); ecFade('dpim-kpis','dpim-table');
+    const dq=(_dpimFrom&&_dpimTo)?`&from=${_dpimFrom}&to=${_dpimTo}`:'';
+    try{ const r=await fetch('/api/docpharma-inventory?lead='+_dpimLead+dq,{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+        _dpimData=d; _dpimDetail={}; dpimRenderKpis(); dpimRenderTable(); dpimRenderReport(); ecFade('dpim-kpis','dpim-table');
+        const showDl=!!d.period; ['dpim-dl-pdf','dpim-dl-xlsx'].forEach(id=>{ const b=document.getElementById(id); if(b)b.classList.toggle('hidden',!showDl); });
         const sy=document.getElementById('dpim-synced'); if(sy) sy.innerHTML = (d.dpSyncedAt?`DocPharma ${dpimDate(d.dpSyncedAt)}`:'<b class="text-amber-600">DocPharma not synced</b>')+' · '+(d.eeSyncedAt?`EasyEcom ${dpimDate(d.eeSyncedAt)}`:'EasyEcom not synced');
+        const nt=document.getElementById('dpim-tablenote'); if(nt&&d.period) nt.innerHTML=`Sent &amp; Delivered columns show <b>${dpimDate(d.period.from)} → ${dpimDate(d.period.to)}</b> movement · on-hand / actuals are current`;
     }catch(e){ if(k)k.innerHTML='<div class="col-span-6 text-xs text-rose-500 p-4">'+e.message+'</div>'; }
 }
 function dpimRenderKpis(){ const k=document.getElementById('dpim-kpis'); if(!k||!_dpimData)return; const s=_dpimData.summary, nf=x=>Number(x||0).toLocaleString('en-IN');
@@ -4075,11 +4149,37 @@ function dpimRenderTable(){ const c=document.getElementById('dpim-table'); if(!c
         const dcC=x.daysCover==null?'text-slate-300':x.daysCover<lead?'text-rose-600 font-bold':x.daysCover<lead*2?'text-amber-600':'text-slate-700';
         const varC=x.variance==null?'text-slate-300':x.discrepancy?(x.variance<0?'text-rose-600':'text-amber-600'):'text-emerald-600';
         const dpC=x.dpStock==null?'text-slate-300':x.dpStock<0?'text-rose-600 font-bold':'font-bold text-indigo-700';
-        const row=`<tr class="dpim-row hover:bg-slate-50 cursor-pointer" data-sku="${x.sku}"><td class="${td} text-left font-semibold"><span class="inline-block w-3 text-slate-400">${open?'▾':'▸'}</span>${x.sku}<div class="text-[11px] text-slate-400 font-normal ml-3">${(x.name||'').slice(0,42)}</div></td><td class="${td}">${x.invoiced?nf(x.sent):dash}</td><td class="${td} text-emerald-700">${nf(x.delivered)}</td><td class="${td} font-semibold ${!x.invoiced?'text-slate-300':x.onHand<0?'text-rose-600':'text-slate-800'}">${x.invoiced?nf(x.onHand):dash}</td><td class="${td} ${dpC}">${x.dpStock!=null?nf(x.dpStock):dash}</td><td class="${td} text-slate-500">${x.eeStock!=null?nf(x.eeStock):dash}</td><td class="${td} font-semibold ${varC}">${x.variance==null?dash:(x.discrepancy?'⚠ ':'')+(x.variance>0?'+':'')+nf(x.variance)}</td><td class="${td}">${x.actualValue!=null?OPS_INR(x.actualValue):dash}</td><td class="${td} ${dcC}">${x.daysCover==null?dash:x.daysCover+'d'}</td><td class="${td} text-center"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${st[1]}">${st[0]}</span></td></tr>`;
+        const per=_dpimData.period&&x.period;
+        const sentCell=per?nf(x.period.sent):(x.invoiced?nf(x.sent):dash);
+        const delivCell=per?nf(x.period.delivered):nf(x.delivered);
+        const row=`<tr class="dpim-row hover:bg-slate-50 cursor-pointer" data-sku="${x.sku}"><td class="${td.replace('text-right','text-left')} font-semibold"><span class="inline-block w-3 text-slate-400">${open?'▾':'▸'}</span>${x.sku}<div class="text-[11px] text-slate-400 font-normal ml-3">${(x.name||'').slice(0,42)}</div></td><td class="${td}">${sentCell}</td><td class="${td} text-emerald-700">${delivCell}</td><td class="${td} font-semibold ${!x.invoiced?'text-slate-300':x.onHand<0?'text-rose-600':'text-slate-800'}">${x.invoiced?nf(x.onHand):dash}</td><td class="${td} ${dpC}">${x.dpStock!=null?nf(x.dpStock):dash}</td><td class="${td} text-slate-500">${x.eeStock!=null?nf(x.eeStock):dash}</td><td class="${td} font-semibold ${varC}">${x.variance==null?dash:(x.discrepancy?'⚠ ':'')+(x.variance>0?'+':'')+nf(x.variance)}</td><td class="${td}">${x.actualValue!=null?OPS_INR(x.actualValue):dash}</td><td class="${td} ${dcC}">${x.daysCover==null?dash:x.daysCover+'d'}</td><td class="${td} text-center"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${st[1]}">${st[0]}</span></td></tr>`;
         const det=open?`<tr class="dpim-det ec-fade bg-slate-50/60"><td colspan="10" class="px-8 py-4 border-b border-slate-100">${dpimDrillHtml(x,_dpimDetail[x.sku])}</td></tr>`:'';
         return row+det; }).join('');
-    c.innerHTML=`<table class="w-full border-collapse"><thead><tr><th class="${thl}">SKU / Product</th><th class="${th}">Sent</th><th class="${th}">Delivered</th><th class="${th}">Implied</th><th class="${th}">DocPharma</th><th class="${th}">EasyEcom</th><th class="${th}">Variance</th><th class="${th}">Value ₹</th><th class="${th}">Days cover</th><th class="${th} text-center">Status</th></tr></thead><tbody>${body||'<tr><td colspan="10" class="p-6 text-center text-xs text-slate-400">No SKUs</td></tr>'}</tbody></table>`;
+    c.innerHTML=`<table class="w-full border-collapse"><thead><tr><th class="${thl}">SKU / Product</th><th class="${th}">Sent</th><th class="${th}">Delivered</th><th class="${th}">Implied</th><th class="${th}">DocPharma</th><th class="${th}">EasyEcom</th><th class="${th}" title="EasyEcom − Implied">Variance (EE)</th><th class="${th}">Value ₹</th><th class="${th}">Days cover</th><th class="${th} text-center">Status</th></tr></thead><tbody>${body||'<tr><td colspan="10" class="p-6 text-center text-xs text-slate-400">No SKUs</td></tr>'}</tbody></table>`;
     c.querySelectorAll('.dpim-row').forEach(tr=>tr.addEventListener('click',()=>dpimToggle(tr.dataset.sku)));
+}
+function dpimRenderReport(){ const c=document.getElementById('dpim-report'); if(!c) return;
+    const p=_dpimData&&_dpimData.period; if(!p){ c.innerHTML=''; return; }
+    const nf=x=>Number(x||0).toLocaleString('en-IN'), t=p.totals;
+    const rows=(_dpimData.skus||[]).map(x=>x.period?Object.assign({sku:x.sku,name:x.name},x.period):null).filter(x=>x&&(x.sent||x.delivered||x.rto||x.lost)).sort((a,b)=>b.delivered-a.delivered);
+    const th='px-3 py-2 text-right text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap',thl=th.replace('text-right','text-left');
+    const td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100 text-right tabular-nums whitespace-nowrap';
+    const dash='<span class="text-slate-300">—</span>';
+    const body=rows.map(r=>`<tr class="hover:bg-slate-50"><td class="${td.replace('text-right','text-left')} font-semibold">${r.sku}<div class="text-[11px] text-slate-400 font-normal">${(r.name||'').slice(0,40)}</div></td><td class="${td}">${nf(r.sent)}</td><td class="${td} text-emerald-700">${nf(r.delivered)}</td><td class="${td} text-rose-600">${nf(r.rto)}</td><td class="${td}">${r.lost?nf(r.lost):dash}</td><td class="${td} font-semibold ${r.net<0?'text-rose-600':'text-slate-700'}">${(r.net>0?'+':'')+nf(r.net)}</td><td class="${td} text-emerald-700">${r.deliveredValue!=null?OPS_INR(r.deliveredValue):dash}</td><td class="${td} text-rose-600">${r.rtoValue!=null?OPS_INR(r.rtoValue):dash}</td></tr>`).join('');
+    const total=`<tr class="bg-slate-50 font-bold"><td class="${td.replace('text-right','text-left')}">TOTAL</td><td class="${td}">${nf(t.sent)}</td><td class="${td}">${nf(t.delivered)}</td><td class="${td}">${nf(t.rto)}</td><td class="${td}">${nf(t.lost)}</td><td class="${td}">${nf(t.net)}</td><td class="${td}">${OPS_INR(t.deliveredValue)}</td><td class="${td}">${OPS_INR(t.rtoValue)}</td></tr>`;
+    c.innerHTML=`<div class="card p-0 overflow-hidden">
+      <div class="px-5 py-3 border-b border-slate-100">
+        <h2 class="text-sm font-bold text-slate-700">Movement report · ${dpimDate(p.from)} → ${dpimDate(p.to)}</h2>
+        <p class="text-[11px] text-slate-500 mt-0.5">Sent <b>${nf(t.sent)}</b> (${OPS_INR(t.sentValue)}) · Delivered <b>${nf(t.delivered)}</b> (${OPS_INR(t.deliveredValue)}) · RTO <b>${nf(t.rto)}</b> (${OPS_INR(t.rtoValue)}) · Lost <b>${nf(t.lost)}</b> (${OPS_INR(t.lostValue)})</p>
+      </div>
+      <div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr><th class="${thl}">SKU / Product</th><th class="${th}">Sent</th><th class="${th}">Delivered</th><th class="${th}">RTO</th><th class="${th}">Lost</th><th class="${th}">Net → DP</th><th class="${th}">Deliv ₹</th><th class="${th}">RTO ₹</th></tr></thead><tbody>${body||'<tr><td colspan="8" class="p-6 text-center text-xs text-slate-400">No movement in this period</td></tr>'}${rows.length?total:''}</tbody></table></div>
+    </div>`;
+    ecFade('dpim-report');
+}
+async function dpimDownloadReport(fmt){ if(!(_dpimFrom&&_dpimTo)){ showNotification&&showNotification('Pick a date range first',true); return; }
+    try{ const r=await fetch(`/api/docpharma-inventory/report.${fmt}?from=${_dpimFrom}&to=${_dpimTo}&lead=${_dpimLead}`,{headers:getAuthHeaders()}); if(!r.ok)throw new Error('server '+r.status);
+        const blob=await r.blob(); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`inventory-report_${_dpimFrom}_to_${_dpimTo}.${fmt}`; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+    }catch(e){ showNotification&&showNotification('Download failed: '+e.message,true); }
 }
 async function dpimToggle(sku){
     if(_dpimOpen===sku){ _dpimOpen=null; dpimRenderTable(); return; }
@@ -4092,7 +4192,7 @@ async function dpimToggle(sku){
 function dpimDrillHtml(x,dt){ const nf=n=>Number(n||0).toLocaleString('en-IN'), lead=_dpimData.lead||_dpimLead;
     const chip=(l,v,c)=>`<span class="inline-flex items-baseline gap-1 mr-5"><span class="text-[10px] text-slate-400 uppercase tracking-wide">${l}</span><span class="text-sm font-semibold ${c||'text-slate-700'} tabular-nums">${v}</span></span>`;
     const banner=x.reorder?`<div class="mb-3 p-2.5 rounded-lg bg-orange-50 border border-orange-200 text-xs text-orange-800">⚠ <b>Reorder now</b> — only ${x.daysCover} days of cover left at ${x.runRate}/day. Suggested order: <b>${nf(x.suggestedQty)} units</b> (to ~${lead*2}-day cover).</div>`:'';
-    const recon=`<div class="mb-2 flex flex-wrap gap-y-1 items-center">${chip('Implied',nf(x.onHand),'text-slate-700')}${chip('DocPharma',x.dpStock==null?'—':nf(x.dpStock),x.dpStock<0?'text-rose-600':'text-indigo-700')}${chip('EasyEcom',x.eeStock==null?'—':nf(x.eeStock),'text-slate-600')}${chip('Variance',x.variance==null?'—':(x.variance>0?'+':'')+nf(x.variance),x.discrepancy?'text-amber-600':'text-emerald-600')}${x.dpExpiry?chip('Expiry',dpimDate(x.dpExpiry)+(x.expiryDays!=null?` (${x.expiryDays}d)`:''),x.expiryDays!=null&&x.expiryDays<120?'text-rose-600':'text-slate-600'):''}${x.sourcesDisagree?'<span class="text-[11px] text-amber-600 font-semibold">⚠ sources disagree — check which is right</span>':''}</div>`;
+    const recon=`<div class="mb-2 flex flex-wrap gap-y-1 items-center">${chip('Implied',nf(x.onHand),'text-slate-700')}${chip('DocPharma',x.dpStock==null?'—':nf(x.dpStock),x.dpStock<0?'text-rose-600':'text-indigo-700')}${chip('EasyEcom',x.eeStock==null?'—':nf(x.eeStock),'text-slate-600')}${chip('Variance (EE−Impl)',x.variance==null?'—':(x.variance>0?'+':'')+nf(x.variance),x.discrepancy?'text-amber-600':'text-emerald-600')}${x.dpExpiry?chip('Expiry',dpimDate(x.dpExpiry)+(x.expiryDays!=null?` (${x.expiryDays}d)`:''),x.expiryDays!=null&&x.expiryDays<120?'text-rose-600':'text-slate-600'):''}${x.sourcesDisagree?'<span class="text-[11px] text-amber-600 font-semibold">⚠ sources disagree — check which is right</span>':''}</div>`;
     const stats=`<div class="mb-3 flex flex-wrap gap-y-1">${chip('Run-rate',(x.runRate||0)+'/day')}${chip('Days cover',x.daysCover==null?'—':x.daysCover+'d')}${chip('RTO rate',(x.rtoRate*100).toFixed(0)+'%',x.rtoRate>0.35?'text-rose-600':'text-slate-700')}${chip('RTO value',OPS_INR(x.rtoValue||0),'text-rose-600')}${chip('Lost',nf(x.lost))}${chip('In-transit',nf(x.inTransit),'text-sky-600')}${chip('Unit rate',OPS_INR(x.unitRate||0))}</div>`;
     if(!dt) return `${banner}${recon}${stats}<div class="text-xs text-slate-400">Loading detail…</div>`;
     const maxV=Math.max(1,...dt.monthly.map(m=>m.delivered)), maxH=34;
@@ -4157,7 +4257,7 @@ function dpledDrill(statuses,payment){
     _dpreDFrom=_dpledFrom?`${_dpledFrom}-01`:''; _dpreDTo=_dpledTo?dpledMonthEnd(_dpledTo):'';
     dpreTab('recon');
     const v=document.getElementById('docpharma-recon-view');
-    if(v){ const df=v.querySelector('#dpre-dfrom'); if(df)df.value=_dpreDFrom; const dto=v.querySelector('#dpre-dto'); if(dto)dto.value=_dpreDTo; const pay=v.querySelector('#dpre-payment'); if(pay)pay.value=_dprePayment;
+    if(v){ const df=v.querySelector('#dpre-dfrom'); if(df)df.value=_dpreDFrom; const dto=v.querySelector('#dpre-dto'); if(dto)dto.value=_dpreDTo; if(_dprePayDD)_dprePayDD.paint();
         const wrap=v.querySelector('#dpre-status-multi'); if(wrap){ wrap.querySelectorAll('.dpre-multi-panel input[type=checkbox]').forEach(cb=>cb.checked=_dpreStatus.includes(cb.value)); const btn=wrap.querySelector('.dpre-multi-btn'); if(btn) btn.innerHTML=(_dpreStatus.length===0?'<span class="text-slate-400">All status</span>':_dpreStatus.length===1?((DPRE_STATUS[_dpreStatus[0]]||[_dpreStatus[0]])[0]):`Status: ${_dpreStatus.length}`)+' <span class="text-slate-400">▾</span>'; } }
     dpreLoad();
 }
@@ -4344,7 +4444,7 @@ function dpledRender(){
             +`<div class="mt-2">${m.settled==='na'?'':`<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold ${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[1]}">${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[0]}</span>`}</div>`;
         const det=open?`<tr class="dpled-det ec-fade bg-slate-50/60"><td colspan="14" class="px-8 py-4 border-b border-slate-100"><div class="grid grid-cols-1 md:grid-cols-3 gap-x-10 gap-y-1 max-w-4xl">
             <div>${col1}</div><div>${col2}</div><div>${col3}</div></div></td></tr>`:'';
-        return `<tr class="dpled-row hover:bg-slate-50 cursor-pointer" data-m="${m.month}"><td class="${td} text-left font-semibold">${car} ${dpledMonLabel(m.month)}</td><td class="${td} font-semibold text-slate-700">${(m.totalOrders||0).toLocaleString('en-IN')}</td><td class="${td}">${m.delivered}</td><td class="${td}">${m.rto}</td><td class="${td}">${m.rejected?`<span class="text-slate-500">${m.rejected}</span>`:'<span class="text-slate-300">0</span>'}</td><td class="${td}">${OPS_INR(Math.round(m.expCharges))}</td><td class="${td}">${m.invoices?OPS_INR(Math.round(m.invCharges)):dash}</td><td class="${td}">${varTxt}</td><td class="${td} text-emerald-700">${OPS_INR(Math.round(m.codCollected))}</td><td class="${td}">${m.lostComp?`<span class="text-emerald-700">${OPS_INR(Math.round(m.lostComp))}</span>${m.lost?` <span class="text-slate-400">(${m.lost})</span>`:''}`:dash}</td><td class="${td}">${OPS_INR(Math.round(m.remitExpected))}</td><td class="${td} text-emerald-700">${m.paidNet?OPS_INR(Math.round(m.paidNet)):dash}</td><td class="${td} text-center">${m.settled==='na'?dash:`<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[1]}">${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[0]}</span>`}</td><td class="${td} font-bold ${m.outstanding>0?'text-amber-600':m.outstanding<0?'text-rose-600':'text-slate-400'}">${OPS_INR(Math.round(m.outstanding))}</td></tr>${det}`;}).join('');
+        return `<tr class="dpled-row hover:bg-slate-50 cursor-pointer" data-m="${m.month}"><td class="${td.replace('text-right','text-left')} font-semibold">${car} ${dpledMonLabel(m.month)}</td><td class="${td} font-semibold text-slate-700">${(m.totalOrders||0).toLocaleString('en-IN')}</td><td class="${td}">${m.delivered}</td><td class="${td}">${m.rto}</td><td class="${td}">${m.rejected?`<span class="text-slate-500">${m.rejected}</span>`:'<span class="text-slate-300">0</span>'}</td><td class="${td}">${OPS_INR(Math.round(m.expCharges))}</td><td class="${td}">${m.invoices?OPS_INR(Math.round(m.invCharges)):dash}</td><td class="${td}">${varTxt}</td><td class="${td} text-emerald-700">${OPS_INR(Math.round(m.codCollected))}</td><td class="${td}">${m.lostComp?`<span class="text-emerald-700">${OPS_INR(Math.round(m.lostComp))}</span>${m.lost?` <span class="text-slate-400">(${m.lost})</span>`:''}`:dash}</td><td class="${td}">${OPS_INR(Math.round(m.remitExpected))}</td><td class="${td} text-emerald-700">${m.paidNet?OPS_INR(Math.round(m.paidNet)):dash}</td><td class="${td} text-center">${m.settled==='na'?dash:`<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[1]}">${(DPLED_SETTLE[m.settled]||DPLED_SETTLE.na)[0]}</span>`}</td><td class="${td} font-bold ${m.outstanding>0?'text-amber-600':m.outstanding<0?'text-rose-600':'text-slate-400'}">${OPS_INR(Math.round(m.outstanding))}</td></tr>${det}`;}).join('');
     document.getElementById('dpled-table').innerHTML=`<table class="w-full border-collapse"><thead><tr><th class="${thl}">Month</th><th class="${th}">Total</th><th class="${th}">Deliv</th><th class="${th}">RTO</th><th class="${th}">Rej</th><th class="${th}">Exp charges</th><th class="${th}">Invoiced</th><th class="${th}">Variance</th><th class="${th}">COD collected</th><th class="${th}">Lost comp</th><th class="${th}">Net remit</th><th class="${th}">Paid (FIFO)</th><th class="${th} text-center">Status</th><th class="${th}">Outstanding</th></tr></thead><tbody>${body||'<tr><td colspan="14" class="p-6 text-center text-xs text-slate-400">No data</td></tr>'}</tbody></table>`;
     document.querySelectorAll('#dpled-table .dpled-row').forEach(tr=>tr.addEventListener('click',()=>{ const mk=tr.getAttribute('data-m'); _dpledOpen[mk]=!_dpledOpen[mk]; dpledRender(); }));
 }
