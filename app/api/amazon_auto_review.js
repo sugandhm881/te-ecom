@@ -30,6 +30,23 @@ function isExcluded(order) {
            s.includes('return') || s.includes('replac');
 }
 
+// A 4xx solicitation failure (esp. 403) is PERMANENT — Amazon already requested the review or the window
+// is closed, so retrying always returns the same error. Only 429/5xx/network are worth re-attempting.
+const isPermanentCode = c => [400, 403, 404, 405].includes(Number(c));
+
+// Human-readable reason for a solicitation failure (instead of a bare "HTTP 403").
+function failReason(code, body) {
+    let msg = '';
+    try { const b = typeof body === 'string' ? JSON.parse(body) : body; msg = (b && b.errors && b.errors[0] && b.errors[0].message) || ''; } catch (_) {}
+    const c = Number(code);
+    if (c === 403) return 'Not eligible — Amazon already sent a review request or the review window is closed';
+    if (c === 400) return msg || 'Ineligible / bad request';
+    if (c === 404) return 'Order not found at Amazon';
+    if (c === 429) return 'Rate-limited — will retry next run';
+    if (c >= 500) return 'Amazon server error — will retry next run';
+    return msg || `HTTP ${c}`;
+}
+
 // failedOnly=true → retry ONLY orders whose previous request failed (manual button).
 // failedOnly=false → normal cron behaviour: every eligible order not yet successfully sent.
 async function getEligibleOrders(failedOnly = false) {
@@ -47,35 +64,37 @@ async function getEligibleOrders(failedOnly = false) {
 
         supabase
             .from('amazon_review_requests')
-            .select('order_id, solicitation_status')
+            .select('order_id, solicitation_status, response_code')
     ]);
 
     if (ordersRes.error) throw new Error('Orders query failed: ' + ordersRes.error.message);
 
-    const sentIds   = new Set(
-        (requestsRes.data || [])
-            .filter(r => r.solicitation_status === 'sent')
-            .map(r => r.order_id)
-    );
-    const failedIds = new Set(
-        (requestsRes.data || [])
-            .filter(r => r.solicitation_status === 'failed')
-            .map(r => r.order_id)
-    );
-    const allOrders = ordersRes.data || [];
-    const excluded  = allOrders.filter(o => isExcluded(o));
-    const alreadySent = allOrders.filter(o => !isExcluded(o) && sentIds.has(o.amazon_order_id));
-    let eligible    = allOrders.filter(o => !isExcluded(o) && !sentIds.has(o.amazon_order_id));
+    const reqs = requestsRes.data || [];
+    const sentIds = new Set(reqs.filter(r => r.solicitation_status === 'sent').map(r => r.order_id));
+    const ineligibleIds = new Set(reqs.filter(r => r.solicitation_status === 'ineligible').map(r => r.order_id));
+    // Split failures: permanent (4xx → never retry) vs transient (429/5xx → retryable).
+    const permanentFailIds = new Set(reqs.filter(r => r.solicitation_status === 'failed' &&  isPermanentCode(r.response_code)).map(r => r.order_id));
+    const transientFailIds = new Set(reqs.filter(r => r.solicitation_status === 'failed' && !isPermanentCode(r.response_code)).map(r => r.order_id));
+    // Orders Amazon won't accept a solicitation for → sent, 4xx-failed, or already marked ineligible.
+    const permanentIds = id => permanentFailIds.has(id) || ineligibleIds.has(id);
 
-    // Manual retry mode: keep only orders that previously failed.
+    const allOrders   = ordersRes.data || [];
+    const excluded    = allOrders.filter(o => isExcluded(o));
+    const alreadySent = allOrders.filter(o => !isExcluded(o) && sentIds.has(o.amazon_order_id));
+    // Permanently not-eligible (403 / ineligible) orders still in the window — reported as a count, never re-attempted.
+    const skippedPermanent = allOrders.filter(o => !isExcluded(o) && !sentIds.has(o.amazon_order_id) && permanentIds(o.amazon_order_id));
+    // Eligible = not excluded, not already sent, and NOT permanently ineligible → the same 403s stop reappearing every run.
+    let eligible = allOrders.filter(o => !isExcluded(o) && !sentIds.has(o.amazon_order_id) && !permanentIds(o.amazon_order_id));
+
+    // Manual retry mode: only the genuinely retryable (transient) failures.
     if (failedOnly) {
-        eligible = eligible.filter(o => failedIds.has(o.amazon_order_id));
+        eligible = eligible.filter(o => transientFailIds.has(o.amazon_order_id));
     }
 
     const prepaid = eligible.filter(o => !isCOD(o));
     const cod     = eligible.filter(o =>  isCOD(o));
 
-    return { ordered: [...prepaid, ...cod], prepaid, cod, alreadySent, excluded, failedOnly };
+    return { ordered: [...prepaid, ...cod], prepaid, cod, alreadySent, excluded, skippedPermanent, failedOnly };
 }
 
 // ─────────────────────────────────────────────────────
@@ -213,7 +232,8 @@ async function runAutoReviewCheck(failedOnly = false) {
                         { type: 'mrkdwn', text: `💵 *COD:*\n${result.cod.length} orders` },
                         { type: 'mrkdwn', text: `✅ *Total to Send:*\n${result.ordered.length} orders` },
                         { type: 'mrkdwn', text: `⏭ *Already Sent (skip):*\n${result.alreadySent.length} orders` },
-                        { type: 'mrkdwn', text: `❌ *Excluded (RTO/Return/Cancel):*\n${result.excluded.length} orders` }
+                        { type: 'mrkdwn', text: `❌ *Excluded (RTO/Return/Cancel):*\n${result.excluded.length} orders` },
+                        { type: 'mrkdwn', text: `🚫 *Not eligible (403 · won't retry):*\n${result.skippedPermanent.length} orders` }
                     ]
                 },
                 { type: 'divider' },
@@ -270,7 +290,7 @@ async function runBulkSend(orders) {
                 order_id: order.amazon_order_id, solicitation_status: 'failed',
                 attempted_at: new Date().toISOString(), response_code: code, response_body: body
             }, { onConflict: 'order_id' });
-            failures.push({ id: order.amazon_order_id, code });
+            failures.push({ id: order.amazon_order_id, code, body });
             failed++;
             console.error(`[AutoReview] ✗ ${order.amazon_order_id} — HTTP ${code}`);
         }
@@ -291,7 +311,14 @@ async function runBulkSend(orders) {
             },
             ...(failures.length ? [{
                 type: 'section',
-                text: { type: 'mrkdwn', text: `*Failed orders:*\n${failures.map(f => `• \`${f.id}\` — HTTP ${f.code}`).join('\n')}` }
+                text: { type: 'mrkdwn', text: '*Failed — grouped by reason:*\n' + (() => {
+                    const byReason = {};
+                    failures.forEach(f => { const r = failReason(f.code, f.body); (byReason[r] = byReason[r] || []).push(f.id); });
+                    return Object.entries(byReason)
+                        .sort((a, b) => b[1].length - a[1].length)
+                        .map(([r, ids]) => `• *${ids.length}* — ${r}${ids.length <= 6 ? '\n   ' + ids.map(i => '`' + i + '`').join('  ') : ''}`)
+                        .join('\n');
+                })() }
             }] : []),
             { type: 'context', elements: [{ type: 'mrkdwn', text: `Completed at ${new Date().toLocaleString('en-IN')}` }] }
         ]

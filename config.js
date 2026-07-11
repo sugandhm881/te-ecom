@@ -1,10 +1,13 @@
-require('dotenv').config();
+// Load .env and keep the file's own values. A stray machine/user-level env var (e.g. PORT=4000 set by
+// another tool) would otherwise win over .env, since dotenv never overrides an existing env var — so for
+// PORT we prefer the .env file value to keep this app on its configured port.
+const _envFile = require('dotenv').config().parsed || {};
 const path = require('path');
 
 const CACHE_DIR = process.env.CACHE_DIR || '.';
 
 module.exports = {
-    PORT: process.env.PORT || 5001,
+    PORT: _envFile.PORT || process.env.PORT || 5001,
     SECRET_KEY: process.env.JWT_SECRET,
 
     // --- Dashboard Login ---

@@ -10,6 +10,22 @@ const avgOf = a => (a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.leng
 const hoursBetween = (a, b) => { if (!a || !b) return null; const t1 = new Date(a).getTime(), t2 = new Date(b).getTime(); if (isNaN(t1) || isNaN(t2) || t2 < t1) return null; return (t2 - t1) / 3600000; };
 const daysBetween = (a, b) => { const h = hoursBetween(a, b); return h == null ? null : h / 24; };
 
+// ── Response cache — these analytics endpoints re-scan the journey table, so cache the JSON per-URL
+// for a few minutes. Skips the mutable /actions endpoints; ?fresh=1 recomputes (used by the Refresh button).
+const _opsRespCache = new Map();
+const OPS_CACHE_TTL = 5 * 60 * 1000;
+router.use((req, res, next) => {
+    if (req.method !== 'GET' || /\/actions?(\/|$)/.test(req.path)) return next();
+    const key = req.originalUrl.replace(/([?&])fresh=1(&|$)/, '$1').replace(/[?&]$/, '');
+    if (!req.query.fresh) {
+        const hit = _opsRespCache.get(key);
+        if (hit && Date.now() - hit.t < OPS_CACHE_TTL) { res.set('X-Ops-Cache', 'hit'); return res.json(hit.v); }
+    }
+    const orig = res.json.bind(res);
+    res.json = (body) => { if (body && body.success) _opsRespCache.set(key, { t: Date.now(), v: body }); return orig(body); };
+    next();
+});
+
 // GET /api/ops-control/ndr-queue?days=45
 router.get('/ops-control/ndr-queue', async (req, res) => {
     try {
@@ -59,7 +75,8 @@ router.get('/ops-control/ndr-queue', async (req, res) => {
 
         const recoverable = list.reduce((s, r) => s + (r.value || 0), 0);
         const aged = list.filter(r => (r.daysInNdr || 0) >= 3).length;
-        const avgDays = list.length ? Math.round(list.reduce((s, r) => s + (r.daysInNdr || 0), 0) / list.length * 10) / 10 : 0;
+        const agedVals = list.filter(r => r.daysInNdr != null);   // exclude unknown-age rows so the average isn't diluted by 0s
+        const avgDays = agedVals.length ? Math.round(agedVals.reduce((s, r) => s + r.daysInNdr, 0) / agedVals.length * 10) / 10 : 0;
         const codValue = list.filter(r => /cod/i.test(r.payment || '')).reduce((s, r) => s + (r.value || 0), 0);
 
         res.json({
@@ -78,33 +95,15 @@ router.get('/ops-control/ndr-queue', async (req, res) => {
 router.get('/ops-control/courier-scorecard', async (req, res) => {
     try {
         const days = parseInt(req.query.days || '90', 10) || 90;
-        const since = new Date(Date.now() - days * 86400000).toISOString();
-        const rows = [];
-        for (let off = 0; ; off += 1000) {
-            const { data, error } = await supabase.from('shipment_journey_ecom')
-                .select('courier, outcome, ndr_count, rto_no_attempt, dispatched_at, order_date, delivered_at')
-                .gte('order_date', since).range(off, off + 999);
-            if (error) throw new Error(error.message);
-            rows.push(...(data || []));
-            if (!data || data.length < 1000) break;
-        }
-        const m = {};
-        rows.forEach(r => {
-            const c = r.courier || 'Unknown';
-            const x = m[c] || (m[c] = { shipped: 0, rto: 0, delivered: 0, ndr: 0, ndrRec: 0, silent: 0, otd: [], dtd: [] });
-            const resolved = r.outcome === 'rto' || r.outcome === 'delivered';
-            if (resolved) { x.shipped++; if (r.outcome === 'rto') x.rto++; else x.delivered++; }
-            if ((r.ndr_count || 0) > 0) { x.ndr++; if (r.outcome === 'delivered') x.ndrRec++; }
-            if (r.outcome === 'rto' && r.rto_no_attempt) x.silent++;
-            const o = hoursBetween(r.order_date, r.dispatched_at); if (o != null) x.otd.push(o);
-            const d = daysBetween(r.dispatched_at, r.delivered_at); if (d != null) x.dtd.push(d);
-        });
-        const list = Object.entries(m).filter(([, x]) => x.shipped >= 20).map(([c, x]) => ({
-            courier: c, shipped: x.shipped, rto: x.rto, delivered: x.delivered,
-            rtoPct: pct(x.rto, x.shipped), ndrRecovery: pct(x.ndrRec, x.ndr),
-            silent: x.silent, silentPct: pct(x.silent, x.rto),
-            otdAvg: avgOf(x.otd), dtdAvg: avgOf(x.dtd),
-        })).sort((a, b) => b.shipped - a.shipped);
+        // Aggregated in SQL (see public.ops_courier_scorecard) instead of scanning the whole journey table.
+        const { data, error } = await supabase.rpc('ops_courier_scorecard', { p_days: days });
+        if (error) throw new Error(error.message);
+        const list = (data || []).map(r => ({
+            courier: r.courier, shipped: Number(r.shipped), rto: Number(r.rto), delivered: Number(r.delivered),
+            rtoPct: Number(r.rto_pct), ndrRecovery: Number(r.ndr_recovery),
+            silent: Number(r.silent), silentPct: Number(r.silent_pct),
+            otdAvg: Number(r.otd_avg), dtdAvg: Number(r.dtd_avg),
+        }));
         res.json({ success: true, days, list });
     } catch (e) { console.error('[OpsControl Courier]', e.message); res.status(500).json({ success: false, error: e.message }); }
 });
@@ -155,13 +154,28 @@ router.get('/ops-control/risk', async (req, res) => {
         const cityRto = {};
         (cityRows || []).forEach(c => { if (c.city && c.resolved >= 15) cityRto[c.city] = pct(c.rto, c.resolved); });
 
+        // 1b. Historical RTO rate per PINCODE — more precise than city where we have volume (≥10 shipments).
+        const { data: pinRows } = await supabase.from('journey_pincode_rto').select('pincode, resolved, rto');
+        const pinRto = {};
+        (pinRows || []).forEach(p => { if (p.pincode && p.resolved >= 10) pinRto[String(p.pincode)] = pct(p.rto, p.resolved); });
+
+        // 1c. Serviceability per delivery pincode — is it deliverable at all, how many couriers, how slow.
+        const svc = {};
+        for (let off = 0; ; off += 1000) {
+            const { data, error } = await supabase.from('serviceability_edd_ecom')
+                .select('delivery_pincode, serviceable, courier_count, slowest_days').range(off, off + 999);
+            if (error) break;
+            (data || []).forEach(s => { if (s.delivery_pincode) svc[String(s.delivery_pincode)] = s; });
+            if (!data || data.length < 1000) break;
+        }
+
         // 2. Not-yet-dispatched, non-cancelled orders in the pipeline (recent).
         const PIPELINE = ['Open', 'Confirmed', 'Printed', 'Ready to dispatch', 'Assigned', 'On Hold'];
         const since = new Date(Date.now() - 20 * 86400000).toISOString();
         const orders = [];
         for (let off = 0; ; off += 1000) {
             const { data, error } = await supabase.from('b2c_order_easycom')
-                .select('reference_code, order_status, payment_mode, order_total, shipping_city, shipping_state, order_date, raw_data')
+                .select('reference_code, order_status, payment_mode, order_total, shipping_city, shipping_state, shipping_pincode, order_date, raw_data')
                 .ilike('reference_code', 'TE%').in('order_status', PIPELINE).gte('order_date', since)
                 .range(off, off + 999);
             if (error) throw new Error(error.message);
@@ -181,30 +195,46 @@ router.get('/ops-control/risk', async (req, res) => {
         // 4. Score each order.
         const scored = orders.map(o => {
             const city = String(o.shipping_city || (o.raw_data && o.raw_data.city) || '').trim().toUpperCase();
+            const pin = String(o.shipping_pincode || (o.raw_data && (o.raw_data.pincode || o.raw_data.zip)) || '').trim();
             const isCOD = /cod/i.test(o.payment_mode || '');
             const isNew = !repeat.has(o.reference_code);
-            const cr = cityRto[city] != null ? cityRto[city] : null;
-            let score = 0; const reasons = [];
+            // Prefer pincode-level RTO (precise) where we have volume; else fall back to city-level.
+            const pr = (pin && pinRto[pin] != null) ? pinRto[pin] : null;
+            const cr = pr != null ? pr : (cityRto[city] != null ? cityRto[city] : null);
+            const rtoLbl = pr != null ? `Pincode RTO ${pr}%` : null;
+            const s = pin ? svc[pin] : null;
+            let score = 0; const reasons = []; let block = false;
             if (isCOD) { score += 40; reasons.push('COD'); }
             if (isNew) { score += 20; reasons.push('First-time buyer'); }
             if (cr != null) {
-                if (cr >= 30) { score += 30; reasons.push(`High-RTO city ${cr}%`); }
-                else if (cr >= 20) { score += 20; reasons.push(`Elevated-RTO city ${cr}%`); }
-                else if (cr >= 12) { score += 10; reasons.push(`City RTO ${cr}%`); }
+                if (cr >= 30) { score += 30; reasons.push(rtoLbl || `High-RTO city ${cr}%`); }
+                else if (cr >= 20) { score += 20; reasons.push(rtoLbl || `Elevated-RTO city ${cr}%`); }
+                else if (cr >= 12) { score += 10; reasons.push(rtoLbl || `City RTO ${cr}%`); }
             }
-            const band = score >= 60 ? 'High' : score >= 35 ? 'Medium' : 'Low';
+            // ── Pincode serviceability gate (pre-dispatch) ──
+            if (s && s.serviceable === false) { score += 50; block = true; reasons.unshift('🛑 Pincode NOT serviceable — hold'); }
+            else if (s && s.courier_count != null && s.courier_count <= 1) { score += 15; reasons.push('Only 1 courier serves this pincode'); }
+            if (s && s.slowest_days != null && s.slowest_days >= 8) { score += 10; reasons.push(`Slow lane (~${s.slowest_days}d)`); }
+            const val = o.order_total != null ? Math.round(Number(o.order_total)) : null;
+            if (val != null && val >= 1500) { score += 10; reasons.push(`High value ₹${val.toLocaleString('en-IN')}`); }  // a lost/RTO'd high-value order hurts most
+            if (!city && !pin) { score += 15; reasons.push('Incomplete address'); }                                       // no destination → top RTO driver
+            const band = block ? 'High' : score >= 60 ? 'High' : score >= 35 ? 'Medium' : 'Low';
             return {
                 order: o.reference_code, status: o.order_status, payment: o.payment_mode || null,
-                value: o.order_total != null ? Math.round(Number(o.order_total)) : null,
+                value: val,
                 city: o.shipping_city || (o.raw_data && o.raw_data.city) || '—', state: o.shipping_state || (o.raw_data && o.raw_data.state) || '—',
+                pincode: pin || null, serviceable: s ? s.serviceable : null, courierCount: s ? (s.courier_count != null ? s.courier_count : null) : null, block,
                 type: isNew ? 'new' : 'repeat', cityRto: cr, score, band, reasons,
             };
-        }).filter(o => o.band !== 'Low').sort((a, b) => b.score - a.score);
+        }).filter(o => o.band !== 'Low').sort((a, b) => (b.block ? 1 : 0) - (a.block ? 1 : 0) || b.score - a.score);   // non-serviceable first
 
         const highValue = scored.filter(o => o.band === 'High').reduce((s, o) => s + (o.value || 0), 0);
         res.json({
             success: true,
-            summary: { flagged: scored.length, high: scored.filter(o => o.band === 'High').length, atRiskValue: Math.round(highValue) },
+            summary: {
+                flagged: scored.length, high: scored.filter(o => o.band === 'High').length,
+                unserviceable: scored.filter(o => o.block).length, atRiskValue: Math.round(highValue),
+            },
             list: scored,
         });
     } catch (e) { console.error('[OpsControl Risk]', e.message); res.status(500).json({ success: false, error: e.message }); }
@@ -289,6 +319,7 @@ router.get('/ops-control/exceptions', async (req, res) => {
                 redispatchCount: sum(r => r.action === 'redispatch', 0), redispatchValue: sum(r => r.action === 'redispatch', 1),
                 monitorCount: sum(r => r.action === 'monitor', 0),
                 slaBreachCount: sum(r => r.slaDelay != null, 0), slaBreachValue: sum(r => r.slaDelay != null, 1),
+                eddCoverage: pct(rows.filter(r => r.first_edd).length, rows.length),   // % of shipments with an EDD on record (SLA-breach detection coverage)
                 byType,
             },
             list,
@@ -410,6 +441,36 @@ router.get('/ops-control/prepaid-risk', async (req, res) => {
             list: scored,
         });
     } catch (e) { console.error('[OpsControl PrepaidRisk]', e.message); res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── Row action state — mark items handled so worked rows drop off & the team can coordinate ──────
+// GET /api/ops-control/actions[?tab=ndr]  → current action state for merging into the tab lists.
+router.get('/ops-control/actions', async (req, res) => {
+    try {
+        let q = supabase.from('ops_actions_ecom').select('order_name, tab, status, note, snooze_until, updated_at');
+        if (req.query.tab) q = q.eq('tab', String(req.query.tab));
+        const { data, error } = await q;
+        if (error) throw new Error(error.message);
+        res.json({ success: true, actions: data || [] });
+    } catch (e) { console.error('[OpsControl Actions GET]', e.message); res.status(500).json({ success: false, error: e.message }); }
+});
+// POST /api/ops-control/action  { order_name, tab, status, note?, snooze_until? }   (status:'clear' removes it)
+router.post('/ops-control/action', async (req, res) => {
+    try {
+        const { order_name, tab, status, note, snooze_until } = req.body || {};
+        const on = String(order_name || '').replace('#', '').trim();
+        if (!on || !tab) return res.status(400).json({ success: false, error: 'order_name and tab are required' });
+        if (!status || status === 'clear') {
+            const { error } = await supabase.from('ops_actions_ecom').delete().eq('order_name', on).eq('tab', String(tab));
+            if (error) throw new Error(error.message);
+            return res.json({ success: true, cleared: true });
+        }
+        const row = { order_name: on, tab: String(tab), status: String(status), note: note || null,
+                      snooze_until: snooze_until || null, updated_at: new Date().toISOString() };
+        const { error } = await supabase.from('ops_actions_ecom').upsert(row, { onConflict: 'order_name,tab' });
+        if (error) throw new Error(error.message);
+        res.json({ success: true });
+    } catch (e) { console.error('[OpsControl Action POST]', e.message); res.status(500).json({ success: false, error: e.message }); }
 });
 
 module.exports = router;

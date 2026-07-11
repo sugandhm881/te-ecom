@@ -126,9 +126,9 @@
     #docpharma-recon-view input:focus, #docpharma-recon-view select:focus { outline:none; border-color:#a5b4fc; box-shadow:0 0 0 3px rgba(99,102,241,.15); }
     /* DocPharma Recon — styled filter dropdowns (status, payment, lead, date) */
     #docpharma-recon-view .dpre-multi { position:relative; }
-    #docpharma-recon-view .dpre-multi-btn { height:38px; min-width:140px; text-align:left; font-size:.875rem; padding:0 .8rem; border:1px solid #e2e8f0; border-radius:.5rem; background:#fff; color:#334155; display:flex; align-items:center; justify-content:space-between; gap:.4rem; cursor:pointer; white-space:nowrap; }
-    #docpharma-recon-view .dpre-multi-btn:hover { border-color:#a5b4fc; }
-    #docpharma-recon-view .dpre-multi-panel { position:absolute; z-index:40; top:calc(100% + 4px); left:0; min-width:190px; background:#fff; border:1px solid #e2e8f0; border-radius:.5rem; box-shadow:0 12px 30px -10px rgba(15,23,42,.25); padding:4px; }
+    #docpharma-recon-view .dpre-multi-btn { height:38px; min-width:140px; text-align:left; font-size:.875rem; padding:0 .8rem; border:1px solid #e2e8f0; border-radius:.6rem; background:#fff; color:#334155; display:flex; align-items:center; justify-content:space-between; gap:.4rem; cursor:pointer; white-space:nowrap; }
+    #docpharma-recon-view .dpre-multi-btn:hover { border-color:#c7d2fe; }
+    #docpharma-recon-view .dpre-multi-panel { position:absolute; z-index:40; top:calc(100% + 4px); left:0; min-width:190px; background:#fff; border:1px solid #e2e8f0; border-radius:.6rem; box-shadow:0 12px 30px -10px rgba(15,23,42,.25); padding:4px; }
     #docpharma-recon-view .dpre-multi-panel.hidden { display:none; }
     #docpharma-recon-view .dpre-multi-item { display:flex; align-items:center; gap:.5rem; padding:.4rem .5rem; border-radius:.4rem; font-size:.82rem; color:#334155; cursor:pointer; }
     #docpharma-recon-view .dpre-multi-item:hover { background:#f1f5f9; }
@@ -150,7 +150,7 @@
     #ops-control-view .card { transition: box-shadow .18s ease, transform .18s ease, border-color .18s ease; }
     #ops-control-view .ops-kpi { position: relative; overflow: hidden; }
     #ops-control-view .ops-kpi:hover { transform: translateY(-3px); box-shadow: 0 16px 34px -16px rgba(15,23,42,.22); border-color:#e0e7ff; }
-    #ops-control-view select, #ops-control-view input[type=text], #ops-control-view input[type=number] { transition: border-color .15s, box-shadow .15s; height:36px; }
+    #ops-control-view select, #ops-control-view input[type=text], #ops-control-view input[type=number] { transition: border-color .15s, box-shadow .15s; height:38px; }
     #ops-control-view select:focus, #ops-control-view input:focus { outline:none; border-color:#a5b4fc; box-shadow:0 0 0 3px rgba(99,102,241,.15); }
     #ops-control-view select { appearance:none; -webkit-appearance:none; padding:0 2rem 0 .8rem; font-weight:500; color:#334155; cursor:pointer; border-radius:.6rem; background-color:#fff;
         background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%2394a3b8' stroke-width='2.2' viewBox='0 0 24 24'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right .55rem center; }
@@ -190,69 +190,62 @@
     /* --- NEW UI: Pill Shaped Filters & Inputs --- */
     
     /* Dropdown Styling */
+    /* ── Filter dropdowns & date inputs — one consistent rounded style app-wide ── */
     .filter-select {
         -webkit-appearance: none;
         -moz-appearance: none;
         appearance: none;
+        height: 38px;
+        padding: 0 2.25rem 0 0.8rem;
+        border: 1px solid #e2e8f0;
+        border-radius: 0.6rem;
         background-color: #ffffff;
-        /* Cleaner Chevron Icon */
         background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%2364748b' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
-        background-position: right 1rem center;
+        background-position: right 0.7rem center;
         background-repeat: no-repeat;
-        background-size: 1em 1em;
-        
-        /* Pill Shape & Size */
-        padding: 0.6rem 2.5rem 0.6rem 1.25rem;
-        border: 1px solid #e2e8f0;
-        border-radius: 9999px; /* This makes it pill shaped */
-        
-        /* Typography */
+        background-size: 1.05em 1.05em;
         color: #334155;
         font-size: 0.875rem;
         font-weight: 500;
-        line-height: 1.25;
-        
-        /* Interaction */
-        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        line-height: 1.2;
         cursor: pointer;
-        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        white-space: nowrap;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
+    .filter-select:hover { border-color: #c7d2fe; }
+    .filter-select:focus { outline: none; border-color: #a5b4fc; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
 
-    .filter-select:hover {
-        border-color: #cbd5e1;
-        background-color: #f8fafc;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
-        transform: translateY(-1px); /* Subtle lift effect */
-    }
+    /* Custom-styled dropdown — a native <select class="filter-select"> is progressively enhanced into this so
+       the OPEN option list matches the app's panel look. The native select stays hidden as the value/events source. */
+    .csel { position: relative; display: inline-block; vertical-align: middle; }
+    .csel > select { display: none; }
+    .csel-btn { width: 100%; height: 38px; min-width: 120px; padding: 0 .7rem 0 .85rem; border: 1px solid #e2e8f0; border-radius: .6rem; background: #fff; color: #334155; font-size: .875rem; font-weight: 500; display: inline-flex; align-items: center; justify-content: space-between; gap: .4rem; cursor: pointer; white-space: nowrap; transition: border-color .15s ease, box-shadow .15s ease; }
+    .csel-btn:hover { border-color: #c7d2fe; }
+    .csel-btn:focus-visible { outline: none; border-color: #a5b4fc; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
+    .csel-val { overflow: hidden; text-overflow: ellipsis; }
+    .csel-chev { width: 1.05em; height: 1.05em; color: #64748b; flex-shrink: 0; }
+    .csel-panel { position: absolute; z-index: 50; top: calc(100% + 4px); left: 0; min-width: 100%; width: max-content; max-width: 320px; max-height: 300px; overflow-y: auto; background: #fff; border: 1px solid #e2e8f0; border-radius: .6rem; box-shadow: 0 12px 30px -10px rgba(15,23,42,.25); padding: 4px; }
+    .csel-panel.hidden { display: none; }
+    .csel-item { padding: .45rem .6rem; border-radius: .4rem; font-size: .82rem; color: #334155; cursor: pointer; white-space: nowrap; }
+    .csel-item:hover { background: #f1f5f9; }
+    .csel-item.is-sel { background: #eef2ff; color: #4338ca; font-weight: 600; }
 
-    .filter-select:focus {
-        outline: none;
-        border-color: #6366f1;
-        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); /* Soft Indigo Ring */
-    }
-
-    /* Date Input Styling */
+    /* Date inputs match the dropdowns */
     .date-input {
+        height: 38px;
+        padding: 0 0.8rem;
         background-color: #ffffff;
         border: 1px solid #e2e8f0;
-        border-radius: 9999px; /* Pill shape */
-        padding: 0.55rem 1.25rem;
+        border-radius: 0.6rem;
         color: #334155;
         font-size: 0.875rem;
         font-weight: 500;
         outline: none;
-        transition: all 0.2s ease;
-        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        cursor: pointer;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
-    .date-input:hover {
-        border-color: #cbd5e1;
-        background-color: #f8fafc;
-        transform: translateY(-1px);
-    }
-    .date-input:focus {
-        border-color: #6366f1;
-        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
-    }
+    .date-input:hover { border-color: #c7d2fe; }
+    .date-input:focus { border-color: #a5b4fc; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
 
     /* Buttons */
     .btn-pill {
@@ -1263,7 +1256,7 @@
               <div class="flex flex-wrap gap-4 items-end mb-4">
                 <div class="flex flex-col gap-1">
                   <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Date range</label>
-                  <select id="fops-date-preset" onchange="fopsOnPresetChange()" class="text-xs px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 w-40">
+                  <select id="fops-date-preset" onchange="fopsOnPresetChange()" class="filter-select w-40">
                     <option value="today">Today</option>
                     <option value="yesterday">Yesterday</option>
                     <option value="last7">Last 7 days</option>
@@ -1281,19 +1274,19 @@
                 </div>
                 <div class="flex flex-col gap-1">
                   <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Payment</label>
-                  <select id="fops-f-pay" onchange="fopsPage=1;fopsRenderTable()" class="text-xs px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 w-36">
+                  <select id="fops-f-pay" onchange="fopsPage=1;fopsRenderTable()" class="filter-select w-36">
                     <option value="">All</option><option value="prepaid">Prepaid</option><option value="cod">COD</option>
                   </select>
                 </div>
                 <div class="flex flex-col gap-1">
                   <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Carrier</label>
-                  <select id="fops-f-carrier" onchange="fopsPage=1;fopsRenderTable()" class="text-xs px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 w-40">
+                  <select id="fops-f-carrier" onchange="fopsPage=1;fopsRenderTable()" class="filter-select w-40">
                     <option value="">All carriers</option><option value="Delhivery">Delhivery</option><option value="Ekart">Ekart</option><option value="Amazon">Amazon</option>
                   </select>
                 </div>
                 <div class="flex flex-col gap-1">
                   <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Sort by</label>
-                  <select id="fops-f-sort" onchange="fopsPage=1;fopsRenderTable()" class="text-xs px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700 w-40">
+                  <select id="fops-f-sort" onchange="fopsPage=1;fopsRenderTable()" class="filter-select w-40">
                     <option value="date-desc">Date — newest</option>
                     <option value="date-asc">Date — oldest</option>
                     <option value="amount-desc">Amount ↓</option>
@@ -1558,10 +1551,8 @@
               <div class="flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200" id="ops-tabs">
                 <button data-t="ndr" class="px-3 py-1.5 bg-indigo-600 text-white">NDR Queue</button>
                 <button data-t="risk" class="px-3 py-1.5 text-slate-600">Risk Orders</button>
-                <button data-t="courier" class="px-3 py-1.5 text-slate-600">Courier Scorecard</button>
-                <button data-t="exceptions" class="px-3 py-1.5 text-slate-600">Exceptions &amp; Claims</button>
-                <button data-t="prepaidrisk" class="px-3 py-1.5 text-slate-600">Prepaid Risk</button>
-                <button data-t="cost" class="px-3 py-1.5 text-slate-600">Cost &amp; Hotspots</button>
+                <button data-t="recover" class="px-3 py-1.5 text-slate-600">Claims &amp; Recovery</button>
+                <button data-t="insights" class="px-3 py-1.5 text-slate-600">Insights</button>
               </div>
               <button id="ops-refresh" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-400 flex items-center gap-1.5">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
@@ -1570,6 +1561,7 @@
             </div>
           </header>
           <div class="p-8 space-y-6">
+            <div id="ops-subtabs" class="hidden mb-1"></div>
             <!-- NDR Action Queue -->
             <div id="ops-ndr" class="ops-pane">
               <div id="ops-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6"></div>
@@ -1585,7 +1577,7 @@
             </div>
             <!-- Pre-dispatch Risk -->
             <div id="ops-risk" class="ops-pane hidden">
-              <div id="ops-risk-kpis" class="grid grid-cols-2 lg:grid-cols-3 gap-5 mb-6"></div>
+              <div id="ops-risk-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6"></div>
               <div class="flex items-center gap-2 mb-3 flex-wrap">
                 <h2 class="text-sm font-bold text-slate-700 mr-1">Verify / convert these before they ship</h2>
                 <select id="ops-rf-band" class="text-sm border border-slate-200 rounded-lg bg-white"><option value="all">All risk</option><option value="High">High only</option><option value="Medium">Medium only</option></select>

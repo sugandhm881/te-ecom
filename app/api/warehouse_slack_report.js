@@ -312,6 +312,25 @@ async function recordDpChecks(checks) {
     if (error) console.warn(`[WH Report] dp-check cache write failed: ${error.message}`);
 }
 
+// Authoritative DocPharma status from the synced `docpharma_orders` table (partner_order_id carries NO
+// leading "#"). This reflects DocPharma's REAL state (cancelled / rejected / delivered / rto / …) and is
+// immune to the live-check ingestion-lag/timing AND the sticky "not-found" cache — so a genuinely
+// cancelled/rejected order is never suppressed. Returns { normalizedName: order_status }.
+async function fetchDpOrderStatuses(names) {
+    const uniq = [...new Set(names.map(normName).filter(Boolean))];
+    const map = {};
+    const CHUNK = 200;
+    for (let i = 0; i < uniq.length; i += CHUNK) {
+        const { data, error } = await supabase
+            .from('docpharma_orders')
+            .select('partner_order_id, order_status')
+            .in('partner_order_id', uniq.slice(i, i + CHUNK));
+        if (error) { console.warn(`[WH Report] docpharma_orders lookup failed: ${error.message}`); continue; }
+        (data || []).forEach(r => { if (r.partner_order_id) map[normName(r.partner_order_id)] = r.order_status; });
+    }
+    return map;
+}
+
 // Check DocPharma for the given orders. Returns { rejected:[{name,status}], checks:[{name,found,status}] }.
 async function findDocpharmaRejected(orders) {
     const rejected = [], checks = [];
@@ -518,25 +537,47 @@ async function getDpRejectedOrders(groups, rsMap, handledSet, awbByName = {}) {
     }
     if (!noRsPending.length) return [];
 
-    // Skip orders DocPharma already said it doesn't have (cached "not found", fresh within TTL).
-    // This is what stops re-checking ~100 non-DocPharma orders every run — they're checked ONCE.
-    const cache = await fetchDpCheckCache(noRsPending.map(o => o.name));
-    const toCheck = noRsPending.filter(o => {
-        const c = cache[normName(o.name)];
-        if (c && c.found === false && c.checked_at && (Date.now() - new Date(c.checked_at).getTime()) < DP_NOT_FOUND_TTL_MS) {
-            return false; // known non-DocPharma order — don't re-check
+    // ── PRIMARY (authoritative): the synced docpharma_orders table. Holds DocPharma's REAL status and is
+    // immune to the live-check ingestion-lag/timing and the sticky "not-found" cache — so a genuinely
+    // cancelled/rejected order can never be suppressed (the bug that hid e.g. TE25-35181, which DocPharma
+    // ingested 38s AFTER the report's live check cached it as "not found" for 7 days).
+    const rejected = [];
+    const dpStatus = await fetchDpOrderStatuses(noRsPending.map(o => o.name));
+    const notInSyncedTable = [];
+    for (const o of noRsPending) {
+        const st = dpStatus[normName(o.name)];
+        if (st && /reject|cancel/i.test(st)) rejected.push({ name: o.name, status: String(st).toUpperCase() });
+        else if (!st) notInSyncedTable.push(o); // synced table doesn't have it yet → live-check fallback
+        // else: DocPharma has it in a non-rejected state (delivered/rto/shipped/lost/…) → not a rejection
+    }
+    if (rejected.length) console.log(`[WH Report] ${rejected.length} DocPharma cancelled/rejected via synced docpharma_orders (authoritative)`);
+
+    // ── FALLBACK: live-check ONLY orders the synced table doesn't have yet (freshly created / sync gaps).
+    // Uses the "not-found" cache so genuine non-DocPharma orders are checked once, not every run.
+    if (notInSyncedTable.length) {
+        const cache = await fetchDpCheckCache(notInSyncedTable.map(o => o.name));
+        const toCheck = notInSyncedTable.filter(o => {
+            const c = cache[normName(o.name)];
+            if (c && c.found === false && c.checked_at && (Date.now() - new Date(c.checked_at).getTime()) < DP_NOT_FOUND_TTL_MS) {
+                return false; // known non-DocPharma order — don't re-check
+            }
+            return true;
+        });
+        const skipped = notInSyncedTable.length - toCheck.length;
+        if (skipped) console.log(`[WH Report] Skipped ${skipped} order(s) cached as not-in-DocPharma`);
+        if (toCheck.length) {
+            console.log(`[WH Report] Live DocPharma-checking ${toCheck.length} order(s) not in synced table…`);
+            const { rejected: liveRej, checks } = await findDocpharmaRejected(toCheck);
+            await recordDpChecks(checks); // remember found/not-found so we don't re-check next run
+            rejected.push(...liveRej);
+        } else {
+            console.log('[WH Report] No new live DocPharma checks needed');
         }
-        return true;
-    });
-    const skipped = noRsPending.length - toCheck.length;
-    if (skipped) console.log(`[WH Report] Skipped ${skipped} order(s) cached as not-in-DocPharma`);
+    }
 
-    if (!toCheck.length) { console.log('[WH Report] No new DocPharma checks needed'); return []; }
-    console.log(`[WH Report] DocPharma-checking ${toCheck.length} order(s) (new / known-DocPharma)…`);
-
-    const { rejected, checks } = await findDocpharmaRejected(toCheck);
-    await recordDpChecks(checks); // remember found/not-found so we don't re-check next run
-    return rejected;
+    // Dedupe by normalized name (an order can't be in both paths, but guard anyway).
+    const seen = new Set();
+    return rejected.filter(r => { const k = normName(r.name); if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
 // Warehouse ops report → warehouse-ops channel only. Last-30-day window (cutoff −offset).

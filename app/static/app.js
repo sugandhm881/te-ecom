@@ -448,7 +448,7 @@ function renderDashboardFilters() {
     }
 
     codFilterContainer.innerHTML = `
-        <select id="cod-filter-select" class="filter-select pl-3 pr-8 py-1.5 text-sm font-medium text-slate-600 focus:outline-none cursor-pointer bg-white border border-slate-200 rounded-full shadow-sm hover:border-indigo-300 transition-colors">
+        <select id="cod-filter-select" class="filter-select">
             <option value="All">All COD Status</option>
             <option value="Confirmed">✓ Confirmed</option>
             <option value="Waiting">Waiting...</option>
@@ -2555,6 +2555,76 @@ document.addEventListener('click', function (e) { const l = e.target.closest && 
 // Manual hash edit / browser back-forward → switch view.
 window.addEventListener('hashchange', function () { const v = viewFromHash(); if (v && v !== currentView && typeof navigate === 'function') navigate(v); });
 
+// ── Custom-styled dropdowns ───────────────────────────────────────────────────
+// Progressively enhance a native <select class="filter-select"> so its OPEN option list matches the app's
+// panel style (native selects can't style the open list). The native <select> stays the source of truth —
+// its value + `change` events fire exactly as before, so every existing handler keeps working unchanged.
+function ecEnhanceSelect(sel) {
+    try {
+        if (!sel || sel.multiple || sel.dataset.cselDone) return;
+        sel.dataset.cselDone = '1';
+        const wrap = document.createElement('div');
+        wrap.className = 'csel';
+        const wcls = sel.className.match(/\bw-(?:full|\d+)\b/g) || [];
+        if (wcls.length) { wrap.classList.add(...wcls); if (wcls.includes('w-full')) wrap.style.display = 'block'; }
+        sel.parentNode.insertBefore(wrap, sel);
+        wrap.appendChild(sel);
+        const btn = document.createElement('button');
+        btn.type = 'button'; btn.className = 'csel-btn';
+        const panel = document.createElement('div');
+        panel.className = 'csel-panel hidden';
+        wrap.appendChild(btn); wrap.appendChild(panel);
+        const CHEV = `<svg class="csel-chev" viewBox="0 0 20 20" fill="none"><path d="M6 8l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+        const esc = s => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+        const syncBtn = () => { const o = sel.options[sel.selectedIndex]; btn.innerHTML = `<span class="csel-val">${o ? esc(o.text) : '&nbsp;'}</span>${CHEV}`; };
+        const close = () => panel.classList.add('hidden');
+        const open = () => {
+            panel.innerHTML = Array.from(sel.options).map((o, i) =>
+                `<div class="csel-item${i === sel.selectedIndex ? ' is-sel' : ''}" data-i="${i}">${esc(o.text)}</div>`).join('');
+            document.querySelectorAll('.csel-panel').forEach(p => { if (p !== panel) p.classList.add('hidden'); });
+            panel.classList.remove('hidden');
+            const cur = panel.querySelector('.is-sel'); if (cur) cur.scrollIntoView({ block: 'nearest' });
+        };
+        btn.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); panel.classList.contains('hidden') ? open() : close(); });
+        panel.addEventListener('click', e => {
+            const it = e.target.closest('.csel-item'); if (!it) return;
+            const i = +it.dataset.i;
+            if (i !== sel.selectedIndex) { sel.selectedIndex = i; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+            syncBtn(); close();
+        });
+        document.addEventListener('click', e => { if (!wrap.contains(e.target)) close(); });
+        sel.addEventListener('change', syncBtn);
+        // Options populated later (dynamic filters) or value set programmatically → keep the label correct.
+        try { new MutationObserver(syncBtn).observe(sel, { childList: true, attributes: true, attributeFilter: ['value'] }); } catch (_) {}
+        syncBtn();
+    } catch (e) { console.warn('[csel] enhance failed', e); }
+}
+function ecEnhanceFilterSelects() {
+    // Delivery / Ops / Fops selects don't carry .filter-select but should match too.
+    document.querySelectorAll('#delivery-perf-view header select, #ops-control-view select, #fulfillment-ops-view select').forEach(s => { if (!s.multiple) s.classList.add('filter-select'); });
+    document.querySelectorAll('select.filter-select').forEach(ecEnhanceSelect);
+}
+(function () {
+    let mo = null;
+    const run = () => {
+        if (mo) mo.disconnect();
+        try { ecEnhanceFilterSelects(); } catch (_) {}
+        const main = document.querySelector('main');
+        if (mo && main) mo.observe(main, { childList: true, subtree: true });
+    };
+    const init = () => {
+        const main = document.querySelector('main');
+        if (!main) { setTimeout(init, 200); return; }
+        mo = new MutationObserver(muts => {
+            for (const m of muts) for (const n of m.addedNodes) {
+                if (n.nodeType === 1 && ((n.matches && n.matches('select')) || (n.querySelector && n.querySelector('select')))) { run(); return; }
+            }
+        });
+        run(); // enhances now + (re)starts observing at the end of run
+    };
+    if (document.readyState !== 'loading') init(); else document.addEventListener('DOMContentLoaded', init);
+})();
+
 async function loadInitialData() {
     // Render the interactive shell immediately, then load data in the background —
     // the home page is usable right away instead of blocking on the slow /get-orders call.
@@ -3193,9 +3263,76 @@ function opsSortBy(list,st){ const {k,d}=st; return [...list].sort((a,b)=>{ let 
     if(typeof x==='string'&&typeof y==='string') return d==='asc'? x.localeCompare(y): y.localeCompare(x);
     return d==='asc'? x-y : y-x; }); }
 function opsArrow(st,k){ if(st.k!==k) return '<span class="arw opacity-30">↕</span>'; return `<span class="arw">${st.d==='asc'?'▲':'▼'}</span>`; }
+
+// ── Row actions (mark handled/verified/claimed/snoozed), per-tab window, hide-handled, CSV export ──
+let _opsActions = {};                                            // `${tab}|${order}` → {status,note,snooze_until}
+let _opsHideHandled = { ndr:true, risk:true, exceptions:true, prepaidrisk:true };
+let _opsDays = { ndr:45, courier:90, exceptions:90, cost:90 };   // per-tab window (prepaid keeps its own #ops-pr-days)
+const OPS_ACTS = {
+    ndr:         [['called','✓ Called'],['reattempt','Reattempt asked'],['snoozed','Snooze 3d']],
+    risk:        [['verified','✓ Verified'],['hold','Hold'],['converted','→ Prepaid']],
+    exceptions:  [['claimed','✓ Claim filed'],['redispatched','Redispatched'],['refunded','Refunded']],
+    prepaidrisk: [['redispatched','✓ Redispatched'],['contacted','Contacted'],['snoozed','Snooze 3d']],
+};
+const _opsEsc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const opsActKey = (tab,order) => tab+'|'+String(order||'').replace('#','').trim();
+const opsActOf  = (tab,order) => _opsActions[opsActKey(tab,order)] || null;
+function opsIsHidden(tab,order){ const a=opsActOf(tab,order); if(!a) return false;
+    if(a.status==='snoozed') return a.snooze_until ? new Date(a.snooze_until) > new Date() : false;
+    return true;                                                 // any non-snooze status = handled
+}
+const opsFilterHandled = (tab,list) => _opsHideHandled[tab] ? list.filter(r=>!opsIsHidden(tab,r.order)) : list;
+async function opsLoadActions(){
+    try{ const r=await fetch('/api/ops-control/actions',{headers:getAuthHeaders()}); const d=await r.json();
+        if(d.success){ _opsActions={}; (d.actions||[]).forEach(a=>{ _opsActions[a.tab+'|'+a.order_name]=a; }); } }catch(e){}
+}
+async function opsSetAction(tab,order,status,note,snooze){
+    const on=String(order||'').replace('#','').trim(), key=opsActKey(tab,on);
+    if(!status||status==='clear') delete _opsActions[key];
+    else _opsActions[key]={order_name:on,tab,status,note:note||null,snooze_until:snooze||null,updated_at:new Date().toISOString()};
+    try{ await fetch('/api/ops-control/action',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({order_name:on,tab,status,note,snooze_until:snooze})}); }
+    catch(e){ showNotification&&showNotification('Save failed',true); }
+}
+function opsActionCell(tab,order){ const a=opsActOf(tab,order);
+    if(a&&a.status&&!(a.status==='snoozed'&&!(a.snooze_until&&new Date(a.snooze_until)>new Date()))){
+        const lbl=a.status==='snoozed'?'Snoozed':a.status;
+        return `<div class="flex items-center gap-1 whitespace-nowrap"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700">✓ ${_opsEsc(lbl)}</span><button class="ops-act text-xs text-slate-400 hover:text-rose-600" data-tab="${tab}" data-o="${_opsEsc(order)}" data-s="clear" title="Undo">✕</button></div>`;
+    }
+    return `<div class="flex items-center gap-1 whitespace-nowrap">`+(OPS_ACTS[tab]||[]).map(([s,l])=>`<button class="ops-act text-[11px] px-1.5 py-0.5 rounded border border-slate-200 text-slate-600 hover:border-indigo-400 hover:text-indigo-600" data-tab="${tab}" data-o="${_opsEsc(order)}" data-s="${s}">${l}</button>`).join('')+`</div>`;
+}
+function opsToolbar(tab,total,count){
+    const dcfg={ndr:45,courier:90,exceptions:90,cost:90}[tab];
+    const dsel=dcfg?`<select class="ops-days text-xs border border-slate-200 rounded-md bg-white px-2 py-1 text-slate-600" data-tab="${tab}">${[7,15,30,45,60,90,120].map(v=>`<option value="${v}" ${(_opsDays[tab]||dcfg)==v?'selected':''}>Last ${v}d</option>`).join('')}</select>`:'';
+    const hh=_opsHideHandled[tab]!=null;
+    const handled=(total!=null&&count!=null)?total-count:0;
+    const hhCtl=hh?`<label class="text-slate-500 flex items-center gap-1.5 cursor-pointer select-none"><input type="checkbox" class="ops-hh w-3.5 h-3.5" data-tab="${tab}" ${_opsHideHandled[tab]?'checked':''}> Hide handled${handled>0?` (${handled})`:''}</label>`:'';
+    return `<div class="flex items-center gap-3 flex-wrap px-3 py-2 border-b border-slate-100 bg-slate-50/40 text-xs">${dsel}${hhCtl}<button class="ops-export ml-auto px-2 py-1 rounded border border-slate-200 text-slate-600 hover:border-indigo-400 hover:text-indigo-600" data-tab="${tab}">⬇ Export CSV</button></div>`;
+}
+const _opsRerender = tab => ({ndr:opsTable,risk:opsRiskTable,courier:opsCourierTable,exceptions:opsExcTable,prepaidrisk:opsPrTable,cost:opsCitiesTable}[tab]||(()=>{}))();
+function opsExport(tab){
+    const C={
+        ndr:[()=>_opsData&&_opsData.list,[['order','Order'],['awb','AWB'],['phone','Phone'],['value','Value'],['payment','Payment'],['type','Type'],['courier','Courier'],['zone','Zone'],['ndrs','NDRs'],['daysInNdr','Days in NDR'],['reasons','Reasons']]],
+        risk:[()=>_opsRisk&&_opsRisk.list,[['order','Order'],['band','Band'],['score','Score'],['value','Value'],['payment','Payment'],['type','Type'],['city','City'],['state','State'],['cityRto','City RTO%'],['reasons','Why']]],
+        courier:[()=>_opsCourier&&_opsCourier.list,[['courier','Courier'],['shipped','Shipped'],['rto','RTO'],['rtoPct','RTO%'],['ndrRecovery','NDR recovery%'],['silent','Silent RTO'],['silentPct','Silent%'],['otdAvg','O->Dispatch h'],['dtdAvg','Dispatch->Del d']]],
+        exceptions:[()=>_opsExc&&_opsExc.list,[['order','Order'],['awb','AWB'],['type','Type'],['action','Action'],['value','Value'],['payment','Payment'],['courier','Courier'],['zone','Zone'],['phone','Phone'],['slaDelay','SLA delay d'],['rto_at','Date']]],
+        prepaidrisk:[()=>_opsPr&&_opsPr.list,[['order','Order'],['awb','AWB'],['risk','Risk%'],['band','Band'],['value','Value'],['courier','Courier'],['zone','Zone'],['dest_city','City'],['dest_state','State'],['daysInTransit','Days in transit'],['phone','Phone'],['reasons','Why']]],
+        cost:[()=>_opsCost&&_opsCost.topCities,[['city','City'],['state','State'],['resolved','Resolved'],['rto','RTO'],['rtoPct','RTO%']]],
+    }[tab];
+    if(!C){ return; } const rows=C[0](); if(!rows||!rows.length){ showNotification&&showNotification('Nothing to export',true); return; }
+    const cell=v=>{ v=v==null?'':Array.isArray(v)?v.join('; '):String(v); return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; };
+    const csv=[C[1].map(c=>c[1]).join(',')].concat(rows.map(r=>C[1].map(c=>cell(r[c[0]])).join(','))).join('\n');
+    const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'})); a.download=`ops-${tab}-${new Date().toISOString().slice(0,10)}.csv`; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+}
+// Make a KPI card clickable → apply a filter (dispatched change also updates the enhanced dropdown).
+function opsKpiClick(containerId, idx, selId, val){
+    const el=document.getElementById(containerId), card=el&&el.children[idx], sel=document.getElementById(selId);
+    if(!card||!sel) return;
+    card.style.cursor='pointer'; card.title='Click to filter';
+    card.onclick=()=>{ sel.value=val; sel.dispatchEvent(new Event('change',{bubbles:true})); };
+}
 function opsInit(){
     if(!_opsWired){ _opsWired = true;
-        document.getElementById('ops-refresh')?.addEventListener('click', ()=>{ _opsLoaded[_opsTab]=false; opsLoadTab(_opsTab); });
+        document.getElementById('ops-refresh')?.addEventListener('click', ()=>{ opsLoadActions().then(()=>{ const p=opsActivePane(); _opsLoaded[p]=false; opsSwitchTab(_opsTab); }); });
         ['ops-search','ops-f-age','ops-f-pay','ops-f-type'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-search'?'input':'change', ()=>opsTable()); });
         ['ops-risk-search','ops-rf-band','ops-rf-pay'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-risk-search'?'input':'change', ()=>opsRiskTable()); });
         ['ops-exc-search','ops-ef-action','ops-ef-type'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-exc-search'?'input':'change', ()=>opsExcTable()); });
@@ -3214,21 +3351,58 @@ function opsInit(){
         wireSort('ops-exc-table', _opsSortExc, ()=>opsExcTable());
         wireSort('ops-pr-table', _opsSortPr, ()=>opsPrTable());
         wireSort('ops-cities', _opsSortCity, ()=>opsCitiesTable());
+        // Row actions · export · hide-handled · per-tab window — event delegation (containers re-render).
+        const view=document.getElementById('ops-control-view');
+        view?.addEventListener('click', async e=>{
+            const sub=e.target.closest('#ops-subtabs button[data-sub]'); if(sub){ opsSubSwitch(sub.dataset.tab, sub.dataset.sub); return; }
+            const act=e.target.closest('.ops-act'); if(act){ e.preventDefault(); const {tab,o,s}=act.dataset; let sn=null; if(s==='snoozed') sn=new Date(Date.now()+3*86400000).toISOString(); await opsSetAction(tab,o,s,null,sn); _opsRerender(tab); return; }
+            const exp=e.target.closest('.ops-export'); if(exp){ opsExport(exp.dataset.tab); return; }
+        });
+        view?.addEventListener('change', e=>{
+            const hh=e.target.closest('.ops-hh'); if(hh){ _opsHideHandled[hh.dataset.tab]=hh.checked; _opsRerender(hh.dataset.tab); return; }
+            const dd=e.target.closest('.ops-days'); if(dd){ _opsDays[dd.dataset.tab]=parseInt(dd.value,10)||_opsDays[dd.dataset.tab]; ({ndr:opsLoad,courier:opsLoadCourier,exceptions:opsLoadExceptions,cost:opsLoadCost}[dd.dataset.tab]||(()=>{}))(); return; }
+        });
     }
+    opsLoadActions().then(()=>_opsRerender(opsActivePane()));   // hide already-handled rows once actions arrive
     opsSwitchTab('ndr');
 }
-function opsSwitchTab(t){ _opsTab=t;
-    ['ndr','risk','courier','exceptions','prepaidrisk','cost'].forEach(p=>document.getElementById('ops-'+p)?.classList.toggle('hidden', p!==t));
-    opsLoadTab(t);
+// Merged tabs show ONE section at a time via a sub-toggle (no long scroll):
+//   'recover'  = Claims (exceptions) | Predicted prepaid loss (prepaidrisk)
+//   'insights' = Courier scorecard (courier) | Cost & hotspots (cost)
+const OPS_TAB_PANES={ ndr:['ndr'], risk:['risk'], recover:['exceptions','prepaidrisk'], insights:['courier','cost'] };
+const OPS_SUBTABS={
+    recover:  [['exceptions','Claims — courier owes you'], ['prepaidrisk','Predicted prepaid loss']],
+    insights: [['courier','Courier scorecard'], ['cost','Cost & hotspots']],
+};
+let _opsSub={ recover:'exceptions', insights:'courier' };
+const OPS_PANE_LOADER={ ndr:()=>opsLoad(), risk:()=>opsLoadRisk(), exceptions:()=>opsLoadExceptions(), prepaidrisk:()=>opsLoadPrepaidRisk(), courier:()=>opsLoadCourier(), cost:()=>opsLoadCost() };
+const opsActivePane=()=> OPS_SUBTABS[_opsTab] ? _opsSub[_opsTab] : _opsTab;
+function opsLoadPane(p){ if(_opsLoaded[p] && p!=='ndr') return; (OPS_PANE_LOADER[p]||(()=>{}))(); _opsLoaded[p]=true; }
+function opsRenderSubtabs(t){
+    const bar=document.getElementById('ops-subtabs'); if(!bar) return;
+    const subs=OPS_SUBTABS[t];
+    if(!subs){ bar.classList.add('hidden'); bar.innerHTML=''; return; }
+    bar.classList.remove('hidden');
+    bar.innerHTML=`<div class="inline-flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200">`+
+        subs.map(([k,l])=>`<button data-sub="${k}" data-tab="${t}" class="px-3.5 py-1.5 transition-colors ${_opsSub[t]===k?'bg-white text-indigo-700 font-semibold shadow-sm':'text-slate-600 hover:text-slate-800'}">${l}</button>`).join('')+`</div>`;
 }
-function opsLoadTab(t){ if(_opsLoaded[t] && t!=='ndr') return;
-    if(t==='ndr') opsLoad(); else if(t==='risk') opsLoadRisk(); else if(t==='courier') opsLoadCourier(); else if(t==='exceptions') opsLoadExceptions(); else if(t==='prepaidrisk') opsLoadPrepaidRisk(); else if(t==='cost') opsLoadCost();
-    _opsLoaded[t]=true;
+function opsSwitchTab(t){ _opsTab=t;
+    const active=OPS_SUBTABS[t]?_opsSub[t]:t;
+    ['ndr','risk','courier','exceptions','prepaidrisk','cost'].forEach(p=>document.getElementById('ops-'+p)?.classList.toggle('hidden', p!==active));
+    opsRenderSubtabs(t);
+    opsLoadPane(active);
+}
+function opsSubSwitch(t, sub){
+    _opsSub[t]=sub;
+    if(_opsTab!==t) return;
+    (OPS_TAB_PANES[t]||[]).forEach(p=>document.getElementById('ops-'+p)?.classList.toggle('hidden', p!==sub));
+    opsRenderSubtabs(t);
+    opsLoadPane(sub);
 }
 async function opsLoad(){
     const kpi=document.getElementById('ops-kpis'); if(kpi) kpi.innerHTML='<div class="text-slate-400 text-sm p-6">Loading NDR queue…</div>';
     try{
-        const r=await fetch('/api/ops-control/ndr-queue?days=45', { headers: getAuthHeaders() });
+        const r=await fetch('/api/ops-control/ndr-queue?days='+(_opsDays.ndr||45), { headers: getAuthHeaders() });
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsData=d; opsRender(d);
     }catch(e){ if(kpi) kpi.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
@@ -3246,6 +3420,7 @@ function opsRender(d){
         opsKpi('Aged ≥ 3 days','#e11d48','#fff1f2',DP_ICONS.bolt, s.aged||0, 'urgent — about to auto-RTO')+
         opsKpi('Recoverable value','#059669','#ecfdf5',DP_ICONS.hash, inr(s.recoverable), `${inr(s.codValue)} of it COD`)+
         opsKpi('Avg time in NDR','#0891b2','#ecfeff',DP_ICONS.hash, (s.avgDays||0)+'d', 'since first failed attempt');
+    opsKpiClick('ops-kpis',1,'ops-f-age','urgent');
     opsTable();
 }
 function opsTable(){ const c=document.getElementById('ops-table'); const d=_opsData; if(!d||!c) return;
@@ -3257,8 +3432,9 @@ function opsTable(){ const c=document.getElementById('ops-table'); const d=_opsD
     if(fType!=='all') list=list.filter(r=>r.type===fType);
     if(q) list=list.filter(r=>(r.order||'').toLowerCase().includes(q)||(r.phone||'').toLowerCase().includes(q));
     list=opsSortBy(list,_opsSortNdr);
+    const _tot=list.length; list=opsFilterHandled('ndr',list);
     const cnt=document.getElementById('ops-count'); if(cnt) cnt.textContent=`${list.length} order${list.length===1?'':'s'}`;
-    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">Nothing matches — queue is clear 🎉</div>'; return; }
+    if(!list.length){ c.innerHTML=opsToolbar('ndr',_tot,0)+'<div class="text-slate-400 text-sm p-10 text-center">Nothing matches — queue is clear 🎉</div>'; return; }
     const td=OPS_TD;
     const H=(k,lbl,extra)=>`<th data-k="${k}" class="${OPS_TH} cursor-pointer ${extra||''}">${lbl}${opsArrow(_opsSortNdr,k)}</th>`;
     const Hp=lbl=>`<th class="${OPS_TH}">${lbl}</th>`;
@@ -3278,9 +3454,10 @@ function opsTable(){ const c=document.getElementById('ops-table'); const d=_opsD
           `<td class="${td}">${r.courier||'—'}<div class="text-xs text-slate-400">Zone ${r.zone||'—'}</div></td>`+
           `<td class="${td} text-right tabular-nums">${r.ndrs}</td>`+
           `<td class="${td} text-slate-500 text-xs">${(r.reasons||[]).join('; ')||'—'}</td>`+
+          `<td class="${td}">${opsActionCell('ndr',r.order)}</td>`+
         `</tr>`; }).join('');
     const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
-    c.innerHTML=`<table class="w-full"><thead><tr>${H('daysInNdr','Aging')}${H('order','Order / AWB')}${Hp('Customer')}${H('value','Value')}${Hp('Pay / Type')}${H('courier','Courier')}${H('ndrs','NDRs','text-right')}${Hp('Reasons')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+    c.innerHTML=opsToolbar('ndr',_tot,list.length)+`<table class="w-full"><thead><tr>${H('daysInNdr','Aging')}${H('order','Order / AWB')}${Hp('Customer')}${H('value','Value')}${Hp('Pay / Type')}${H('courier','Courier')}${H('ndrs','NDRs','text-right')}${Hp('Reasons')}${Hp('Action')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
 }
 const OPS_TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
 const OPS_TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
@@ -3293,7 +3470,9 @@ async function opsLoadRisk(){
         k.innerHTML =
             opsKpi('Flagged to verify','#e11d48','#fff1f2',DP_ICONS.bolt, s.flagged||0, 'medium + high risk, not yet shipped')+
             opsKpi('High risk','#b91c1c','#fef2f2',DP_ICONS.uturn, s.high||0, 'verify or convert to prepaid')+
+            opsKpi('🛑 Not serviceable','#7c2d12','#fff7ed',DP_ICONS.bolt, s.unserviceable||0, 'undeliverable pincode — hold / cancel')+
             opsKpi('At-risk value (high)','#059669','#ecfdf5',DP_ICONS.hash, OPS_INR(s.atRiskValue), 'order value on high-risk orders');
+        opsKpiClick('ops-risk-kpis',1,'ops-rf-band','High');
         opsRiskTable();
     }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
 }
@@ -3305,8 +3484,9 @@ function opsRiskTable(){ const c=document.getElementById('ops-risk-table'); cons
     if(fPay!=='all') list=list.filter(r=> fPay==='cod'? /cod/i.test(r.payment||'') : (r.payment&&!/cod/i.test(r.payment)));
     if(q) list=list.filter(r=> (r.order||'').toLowerCase().includes(q) || (r.city||'').toLowerCase().includes(q));
     list=opsSortBy(list,_opsSortRisk);
+    const _tot=list.length; list=opsFilterHandled('risk',list);
     const cnt=document.getElementById('ops-risk-count'); if(cnt) cnt.textContent=`${list.length} order${list.length===1?'':'s'}`;
-    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">No risky orders match 🎉</div>'; return; }
+    if(!list.length){ c.innerHTML=opsToolbar('risk',_tot,0)+'<div class="text-slate-400 text-sm p-10 text-center">No risky orders match 🎉</div>'; return; }
     const H=(k,lbl)=>`<th data-k="${k}" class="${OPS_TH} bg-slate-50">${lbl}${opsArrow(_opsSortRisk,k)}</th>`;
     const Hp=lbl=>`<th class="${OPS_TH} bg-slate-50">${lbl}</th>`;
     const rows=list.slice(0,500).map(r=>{
@@ -3318,22 +3498,23 @@ function opsRiskTable(){ const c=document.getElementById('ops-risk-table'); cons
           `<td class="${OPS_TD} font-semibold">${r.order||'—'}<div class="text-xs text-slate-400 font-normal">${r.status||''}</div></td>`+
           `<td class="${OPS_TD} font-semibold tabular-nums">${r.value!=null?OPS_INR(r.value):'—'}</td>`+
           `<td class="${OPS_TD}">${pay} ${typ}</td>`+
-          `<td class="${OPS_TD}">${r.city||'—'}<div class="text-xs text-slate-400">${r.state||''}${r.cityRto!=null?` · ${r.cityRto}% RTO`:''}</div></td>`+
+          `<td class="${OPS_TD}">${r.city||'—'}${r.serviceable===false?' <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-700 align-middle">🛑 NOT SERVICEABLE</span>':''}<div class="text-xs text-slate-400">${r.pincode?r.pincode+' · ':''}${r.state||''}${r.cityRto!=null?` · ${r.cityRto}% RTO`:''}${r.courierCount!=null&&r.courierCount<=1?' · 1 courier':''}</div></td>`+
           `<td class="${OPS_TD} text-slate-500 text-xs">${(r.reasons||[]).join(' · ')||'—'}</td>`+
+          `<td class="${OPS_TD}">${opsActionCell('risk',r.order)}</td>`+
         `</tr>`; }).join('');
     const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
-    c.innerHTML=`<table class="w-full"><thead><tr>${H('score','Risk')}${H('order','Order')}${H('value','Value')}${Hp('Pay / Type')}${H('city','Destination')}${Hp('Why flagged')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+    c.innerHTML=opsToolbar('risk',_tot,list.length)+`<table class="w-full"><thead><tr>${H('score','Risk')}${H('order','Order')}${H('value','Value')}${Hp('Pay / Type')}${H('city','Destination')}${Hp('Why flagged')}${Hp('Action')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
 }
 
 // ── Courier Scorecard ──
 async function opsLoadCourier(){
     const c=document.getElementById('ops-courier-table'); if(c) c.innerHTML='<div class="text-slate-400 text-sm p-6">Loading courier scorecard…</div>';
-    try{ const r=await fetch('/api/ops-control/courier-scorecard?days=90',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    try{ const r=await fetch('/api/ops-control/courier-scorecard?days='+(_opsDays.courier||90),{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsCourier=d; opsCourierTable();
     }catch(e){ if(c) c.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
 }
 function opsCourierTable(){ const c=document.getElementById('ops-courier-table'); const d=_opsCourier; if(!d||!c) return;
-    let list=(d.list||[]).slice(); if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-6">No courier data</div>'; return; }
+    let list=(d.list||[]).slice(); if(!list.length){ c.innerHTML=opsToolbar('courier')+'<div class="text-slate-400 text-sm p-6">No courier data</div>'; return; }
     list=opsSortBy(list,_opsSortCourier);
     const pctCell=(v,badHigh)=>{ const cls=(badHigh? (v>=25?'text-red-600':v>=15?'text-amber-600':'text-emerald-600') : (v>=45?'text-emerald-600':v>=30?'text-amber-600':'text-red-600')); return `<span class="font-bold ${cls} tabular-nums">${v}%</span>`; };
     const H=(k,lbl,r)=>`<th data-k="${k}" class="${OPS_TH} bg-slate-50 ${r?'text-right':''}">${lbl}${opsArrow(_opsSortCourier,k)}</th>`;
@@ -3346,13 +3527,13 @@ function opsCourierTable(){ const c=document.getElementById('ops-courier-table')
         `<td class="${OPS_TD} text-right tabular-nums">${r.otdAvg}h</td>`+
         `<td class="${OPS_TD} text-right tabular-nums">${r.dtdAvg}d</td>`+
       `</tr>`).join('');
-    c.innerHTML=`<table class="w-full"><thead><tr>${H('courier','Courier')}${H('shipped','Shipped',1)}${H('rtoPct','RTO %',1)}${H('ndrRecovery','NDR recovery',1)}${H('silentPct','Silent RTO',1)}${H('otdAvg','O→Dispatch',1)}${H('dtdAvg','Dispatch→Del',1)}</tr></thead><tbody>${rows}</tbody></table>`;
+    c.innerHTML=opsToolbar('courier')+`<table class="w-full"><thead><tr>${H('courier','Courier')}${H('shipped','Shipped',1)}${H('rtoPct','RTO %',1)}${H('ndrRecovery','NDR recovery',1)}${H('silentPct','Silent RTO',1)}${H('otdAvg','O→Dispatch',1)}${H('dtdAvg','Dispatch→Del',1)}</tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 // ── Cost & Hotspots ──
 async function opsLoadCost(){
     const k=document.getElementById('ops-cost-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Loading…</div>';
-    try{ const r=await fetch('/api/ops-control/hotspots?days=90',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    try{ const r=await fetch('/api/ops-control/hotspots?days='+(_opsDays.cost||90),{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsCost=d; opsCostRender();
     }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
 }
@@ -3374,25 +3555,26 @@ function opsCostRender(){ const d=_opsCost; if(!d) return;
     opsCitiesTable();
 }
 function opsCitiesTable(){ const el=document.getElementById('ops-cities'); const d=_opsCost; if(!el||!d) return;
-    let cities=(d.topCities||[]).slice(); if(!cities.length){ el.innerHTML='<div class="text-slate-400 text-sm p-6">No city data</div>'; return; }
+    let cities=(d.topCities||[]).slice(); if(!cities.length){ el.innerHTML=opsToolbar('cost')+'<div class="text-slate-400 text-sm p-6">No city data</div>'; return; }
     cities=opsSortBy(cities,_opsSortCity);
     const H=(k,lbl,r)=>`<th data-k="${k}" class="${OPS_TH} bg-slate-50 ${r?'text-right':''}">${lbl}${opsArrow(_opsSortCity,k)}</th>`;
     const crows=cities.map(r=>{ const c=r.rtoPct>=30?'text-red-600':r.rtoPct>=20?'text-amber-600':'text-slate-700';
         return `<tr><td class="${OPS_TD} font-semibold">${r.city}</td><td class="${OPS_TD} text-slate-500">${r.state||'—'}</td><td class="${OPS_TD} text-right tabular-nums">${r.resolved}</td><td class="${OPS_TD} text-right tabular-nums">${r.rto}</td><td class="${OPS_TD} text-right"><span class="font-bold ${c} tabular-nums">${r.rtoPct}%</span></td></tr>`; }).join('');
-    el.innerHTML=`<table class="w-full"><thead><tr>${H('city','City')}${H('state','State')}${H('resolved','Shipped',1)}${H('rto','RTO',1)}${H('rtoPct','RTO %',1)}</tr></thead><tbody>${crows}</tbody></table>`;
+    el.innerHTML=opsToolbar('cost')+`<table class="w-full"><thead><tr>${H('city','City')}${H('state','State')}${H('resolved','Shipped',1)}${H('rto','RTO',1)}${H('rtoPct','RTO %',1)}</tr></thead><tbody>${crows}</tbody></table>`;
 }
 
 // ── Exceptions & Claims ──
 async function opsLoadExceptions(){
     const k=document.getElementById('ops-exc-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Loading exceptions…</div>';
-    try{ const r=await fetch('/api/ops-control/exceptions?days=90',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    try{ const r=await fetch('/api/ops-control/exceptions?days='+(_opsDays.exceptions||90),{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsExc=d; const s=d.summary||{};
         k.innerHTML =
             opsKpi('Claim from couriers','#e11d48','#fff1f2',DP_ICONS.uturn, OPS_INR(s.claimValue), `${s.claimCount||0} orders · lost / damaged / silent-RTO`)+
-            opsKpi('Late-delivery claims','#7c3aed','#f5f3ff',DP_ICONS.bolt, s.slaBreachCount||0, `>5 days past first EDD${s.slaBreachValue?` · ${OPS_INR(s.slaBreachValue)}`:''}`)+
+            opsKpi('Late-delivery claims','#7c3aed','#f5f3ff',DP_ICONS.bolt, s.slaBreachCount||0, `>5d past EDD · EDD on ${s.eddCoverage||0}% of shipments${s.slaBreachValue?` · ${OPS_INR(s.slaBreachValue)}`:''}`)+
             opsKpi('Redispatch / refund','#4f46e5','#eef2ff',DP_ICONS.refresh, OPS_INR(s.redispatchValue), `${s.redispatchCount||0} prepaid — customer paid, didn't get it`)+
             opsKpi('Misrouted · watch','#d97706','#fffbeb',DP_ICONS.bolt, s.monitorCount||0, 'in transit but off-route');
         const tf=document.getElementById('ops-ef-type'); if(tf){ const cur=tf.value; tf.innerHTML='<option value="all">All types</option>'+Object.keys(s.byType||{}).sort().map(t=>`<option value="${t}">${t} (${s.byType[t]})</option>`).join(''); tf.value=cur; if(tf.value!==cur) tf.value='all'; }
+        opsKpiClick('ops-exc-kpis',0,'ops-ef-action','claim');
         opsExcTable();
     }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
 }
@@ -3404,8 +3586,9 @@ function opsExcTable(){ const c=document.getElementById('ops-exc-table'); const 
     if(fT!=='all') list=list.filter(r=>r.type===fT);
     if(q) list=list.filter(r=>(r.order||'').toLowerCase().includes(q)||(r.courier||'').toLowerCase().includes(q));
     list=opsSortBy(list,_opsSortExc);
+    const _tot=list.length; list=opsFilterHandled('exceptions',list);
     const cnt=document.getElementById('ops-exc-count'); if(cnt) cnt.textContent=`${list.length} · ${OPS_INR(list.reduce((s,r)=>s+(r.value||0),0))}`;
-    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">No exceptions match 🎉</div>'; return; }
+    if(!list.length){ c.innerHTML=opsToolbar('exceptions',_tot,0)+'<div class="text-slate-400 text-sm p-10 text-center">No exceptions match 🎉</div>'; return; }
     const H=(k,lbl,r)=>`<th data-k="${k}" class="${OPS_TH} bg-slate-50 ${r?'text-right':''}">${lbl}${opsArrow(_opsSortExc,k)}</th>`;
     const Hp=lbl=>`<th class="${OPS_TH} bg-slate-50">${lbl}</th>`;
     const tb=t=>{ const m={'Silent RTO':'bg-rose-100 text-rose-700','Lost':'bg-red-100 text-red-700','Damaged':'bg-red-100 text-red-700','Disposed':'bg-red-100 text-red-700','Missing':'bg-red-100 text-red-700','Prepaid RTO':'bg-indigo-100 text-indigo-700','Misrouted':'bg-amber-100 text-amber-700'}; return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${m[t]||'bg-slate-100 text-slate-600'}">${t}</span>`; };
@@ -3422,9 +3605,10 @@ function opsExcTable(){ const c=document.getElementById('ops-exc-table'); const 
           `<td class="${OPS_TD}">${r.courier||'—'}<div class="text-xs text-slate-400">Zone ${r.zone||'—'}</div></td>`+
           `<td class="${OPS_TD}">${ph}</td>`+
           `<td class="${OPS_TD} text-slate-400 tabular-nums">${r.rto_at||'—'}</td>`+
+          `<td class="${OPS_TD}">${opsActionCell('exceptions',r.order)}</td>`+
         `</tr>`; }).join('');
     const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
-    c.innerHTML=`<table class="w-full"><thead><tr>${Hp('Type')}${Hp('Action')}${H('order','Order')}${H('value','Value',1)}${Hp('Pay')}${H('courier','Courier')}${Hp('Customer')}${H('rto_at','Date')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+    c.innerHTML=opsToolbar('exceptions',_tot,list.length)+`<table class="w-full"><thead><tr>${Hp('Type')}${Hp('Action')}${H('order','Order')}${H('value','Value',1)}${Hp('Pay')}${H('courier','Courier')}${Hp('Customer')}${H('rto_at','Date')}${Hp('Handle')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
 }
 
 // ── Prepaid loss/misroute predictor ──
@@ -3437,6 +3621,7 @@ async function opsLoadPrepaidRisk(){
             opsKpi('High-risk prepaid','#e11d48','#fff1f2',DP_ICONS.bolt, s.high||0, 'likely lost/misrouted — redispatch now')+
             opsKpi('At-risk value (high)','#059669','#ecfdf5',DP_ICONS.hash, OPS_INR(s.atRiskValue), 'prepaid value that may never arrive')+
             opsKpi('Prepaid in transit','#4f46e5','#eef2ff',DP_ICONS.refresh, s.prepaidInTransit||0, `${s.flagged||0} flagged medium+high`);
+        opsKpiClick('ops-pr-kpis',0,'ops-prf-band','High');
         opsPrTable();
     }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
 }
@@ -3453,7 +3638,7 @@ function opsPrDetail(r){ const sc=_opsPrScan[r.awb];
     else if(sc.error) scanHtml=`<div class="text-rose-400 text-xs py-3">Couldn’t load: ${sc.error}</div>`;
     else if(!sc.scans||!sc.scans.length) scanHtml='<div class="text-slate-400 text-xs py-3">No scan log available.</div>';
     else scanHtml=`<div class="space-y-1 max-h-56 overflow-auto pr-1">${sc.scans.map(s=>`<div class="flex gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${s.desc}${s.code?` <span class="text-slate-400">(${s.code})</span>`:''}${s.location?` <span class="text-slate-400">· ${s.location}</span>`:''}</span></div>`).join('')}</div>`+(sc.live?'<div class="text-[10px] text-emerald-500 mt-1">● fetched live from courier</div>':'');
-    return `<tr class="ops-pr-detail"><td colspan="7" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
+    return `<tr class="ops-pr-detail"><td colspan="8" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
         <div class="grid md:grid-cols-3 gap-6">
           <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Risk ${r.risk}% · ${r.band}</div>
             <div class="mb-2">${reasons}</div>
@@ -3478,8 +3663,9 @@ function opsPrTable(){ const c=document.getElementById('ops-pr-table'); const d=
     if(fB!=='all') list=list.filter(r=>r.band===fB);
     if(q) list=list.filter(r=>(r.order||'').toLowerCase().includes(q)||(r.courier||'').toLowerCase().includes(q));
     list=opsSortBy(list,_opsSortPr);
+    const _tot=list.length; list=opsFilterHandled('prepaidrisk',list);
     const cnt=document.getElementById('ops-pr-count'); if(cnt) cnt.textContent=`${list.length} · ${OPS_INR(list.reduce((s,r)=>s+(r.value||0),0))}`;
-    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">No at-risk prepaid orders 🎉</div>'; return; }
+    if(!list.length){ c.innerHTML=opsToolbar('prepaidrisk',_tot,0)+'<div class="text-slate-400 text-sm p-10 text-center">No at-risk prepaid orders 🎉</div>'; return; }
     const H=(k,lbl,r)=>`<th data-k="${k}" class="${OPS_TH} bg-slate-50 ${r?'text-right':''}">${lbl}${opsArrow(_opsSortPr,k)}</th>`;
     const Hp=lbl=>`<th class="${OPS_TH} bg-slate-50">${lbl}</th>`;
     const rows=list.slice(0,500).map(r=>{
@@ -3494,12 +3680,13 @@ function opsPrTable(){ const c=document.getElementById('ops-pr-table'); const d=
           `<td class="${OPS_TD} text-right tabular-nums">${r.daysInTransit!=null?r.daysInTransit+'d':'—'}</td>`+
           `<td class="${OPS_TD}">${ph}</td>`+
           `<td class="${OPS_TD} text-slate-500 text-xs">${(r.reasons||[]).join(' · ')||'—'}</td>`+
+          `<td class="${OPS_TD}">${opsActionCell('prepaidrisk',r.order)}</td>`+
         `</tr>`;
         if(open) out+=opsPrDetail(r);
         return out; }).join('');
     const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
-    c.innerHTML=`<table class="w-full"><thead><tr>${H('risk','Risk')}${H('order','Order')}${H('value','Value',1)}${H('courier','Courier')}${H('daysInTransit','In transit',1)}${Hp('Customer')}${Hp('Why')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
-    c.querySelectorAll('.ops-pr-row').forEach(row=>row.addEventListener('click',e=>{ if(e.target.closest('a')) return;   // let phone links work
+    c.innerHTML=opsToolbar('prepaidrisk',_tot,list.length)+`<table class="w-full"><thead><tr>${H('risk','Risk')}${H('order','Order')}${H('value','Value',1)}${H('courier','Courier')}${H('daysInTransit','In transit',1)}${Hp('Customer')}${Hp('Why')}${Hp('Action')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+    c.querySelectorAll('.ops-pr-row').forEach(row=>row.addEventListener('click',e=>{ if(e.target.closest('a, .ops-act')) return;   // let phone links + action buttons work
         const awb=row.dataset.awb; if(!awb) return;
         _opsPrOpen=(_opsPrOpen===awb)?null:awb; opsPrTable();
         if(_opsPrOpen && !_opsPrScan[awb]) opsPrLoadScans(awb); }));
