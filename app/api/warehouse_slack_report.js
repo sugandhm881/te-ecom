@@ -257,6 +257,13 @@ function buildPayload(groups, start, end) {
 
 let DRY_RUN = false; // CLI "dry" flag — print the report instead of posting to Slack
 
+const { postTeams } = require('./teams');
+function _teamsUrlFor(channel) {
+    if (channel === WH_CHANNEL) return config.TEAMS_WEBHOOK_WAREHOUSE;
+    if (channel === DP_CHANNEL) return config.TEAMS_WEBHOOK_DP;
+    if (channel === HOLD_CHANNEL) return config.TEAMS_WEBHOOK_HOLD;
+    return null;
+}
 async function postSlack(payload, channel = WH_CHANNEL) {
     if (DRY_RUN) {
         let preview = payload.text || '';
@@ -273,8 +280,11 @@ async function postSlack(payload, channel = WH_CHANNEL) {
         console.log(`\n════ DRY RUN — would post to ${channel} (no Slack message sent) ════\n${preview}\n════════════════════════════════════════════════════════════\n`);
         return true;
     }
+    // Teams — sent alongside Slack during the transition; becomes the only target once SLACK_BOT_TOKEN is cleared.
+    const teamsUrl = _teamsUrlFor(channel);
+    if (teamsUrl) postTeams(teamsUrl, payload).catch(() => {});
     const token = config.SLACK_BOT_TOKEN;
-    if (!token) { console.warn('[WH Report] SLACK_BOT_TOKEN not configured'); return; }
+    if (!token) { if (!teamsUrl) console.warn('[WH Report] no SLACK_BOT_TOKEN and no Teams webhook set'); return; }
     const res = await axios.post(
         'https://slack.com/api/chat.postMessage',
         { channel, ...payload },

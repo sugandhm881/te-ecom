@@ -1,5 +1,21 @@
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const config = require('../config');
+
+// --- Password hashing (Node built-in scrypt; no external dependency) ---
+function hashPassword(pw) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    return 'scrypt$' + salt + '$' + crypto.scryptSync(String(pw), salt, 64).toString('hex');
+}
+function verifyPassword(pw, stored) {
+    try {
+        const [scheme, salt, hash] = String(stored).split('$');
+        if (scheme !== 'scrypt' || !salt || !hash) return false;
+        const a = Buffer.from(hash, 'hex');
+        const b = crypto.scryptSync(String(pw), salt, 64);
+        return a.length === b.length && crypto.timingSafeEqual(a, b);
+    } catch (_) { return false; }
+}
 
 // Refuse to operate with a missing or weak/guessable signing secret.
 // A weak secret lets anyone forge valid tokens, which is equivalent to no auth.
@@ -15,13 +31,13 @@ function assertStrongSecret() {
     return s;
 }
 
-function generateToken(email) {
+// Accepts an email string (legacy/env-admin bootstrap → admin) or a { email, role, permissions } object.
+function generateToken(user) {
     try {
-        return jwt.sign(
-            { sub: email },
-            assertStrongSecret(),
-            { expiresIn: '1d' }
-        );
+        const claims = typeof user === 'string'
+            ? { sub: user, role: 'admin', permissions: ['*'] }
+            : { sub: user.email, role: user.role || 'user', permissions: user.permissions || [] };
+        return jwt.sign(claims, assertStrongSecret(), { expiresIn: '1d' });
     } catch (e) {
         console.error('[Auth] Cannot generate token:', e.message);
         return null;
@@ -54,4 +70,9 @@ function tokenRequired(req, res, next) {
     }
 }
 
-module.exports = { generateToken, tokenRequired };
+function requireAdmin(req, res, next) {
+    if (req.user && req.user.role === 'admin') return next();
+    return res.status(403).json({ message: 'Admin access required.' });
+}
+
+module.exports = { generateToken, tokenRequired, requireAdmin, hashPassword, verifyPassword };

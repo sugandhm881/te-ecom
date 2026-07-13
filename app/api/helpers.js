@@ -149,7 +149,8 @@ function signRequest(config, options, accessToken) {
         `${encodeURIComponent(key)}=${encodeURIComponent(queryParams[key])}`
     ).join('&');
 
-    const payloadHash = crypto.createHash('sha256').update('').digest('hex');
+    // Hash the request body when present (POST createReport etc.); empty string for GET — same as before.
+    const payloadHash = crypto.createHash('sha256').update(options.body || '').digest('hex');
     const canonicalRequest = `${method}\n${pathUrl}\n${canonicalQuerystring}\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
 
     const algorithm = 'AWS4-HMAC-SHA256';
@@ -185,7 +186,8 @@ async function makeSignedApiRequest(options, maxRetries = 5) {
                 method: options.method,
                 url: url,
                 headers: headers,
-                params: options.queryParams
+                params: options.queryParams,
+                ...(options.body != null ? { data: options.body } : {})
             });
             return response.data;
         } catch (e) {

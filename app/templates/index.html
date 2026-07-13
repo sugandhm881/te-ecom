@@ -163,6 +163,55 @@
     #ops-control-view th[data-k] { cursor:pointer; user-select:none; white-space:nowrap; transition:color .12s; }
     #ops-control-view th[data-k]:hover { color:#4f46e5; }
     #ops-control-view th .arw { font-size:9px; margin-left:2px; }
+
+    /* ── Amazon FBA — scoped styling (mirrors Ops Control) ── */
+    #amazon-fba-view { background:
+        radial-gradient(1200px 400px at 100% -5%, rgba(245,158,11,.06), transparent 60%),
+        radial-gradient(900px 360px at -5% 0%, rgba(99,102,241,.05), transparent 55%),
+        #f8fafc; }
+    #amazon-fba-view header { background: rgba(255,255,255,.85); backdrop-filter: saturate(1.4) blur(8px); }
+    #amazon-fba-view .card { transition: box-shadow .18s ease, transform .18s ease, border-color .18s ease; }
+    #amazon-fba-view .fba-kpi { position: relative; overflow: hidden; }
+    #amazon-fba-view .fba-kpi:hover { transform: translateY(-3px); box-shadow: 0 16px 34px -16px rgba(15,23,42,.22); border-color:#e0e7ff; }
+    #amazon-fba-view select, #amazon-fba-view input[type=text], #amazon-fba-view input[type=number] { transition: border-color .15s, box-shadow .15s; height:38px; }
+    #amazon-fba-view select:focus, #amazon-fba-view input:focus { outline:none; border-color:#a5b4fc; box-shadow:0 0 0 3px rgba(99,102,241,.15); }
+    #amazon-fba-view select { appearance:none; -webkit-appearance:none; padding:0 2rem 0 .8rem; font-weight:500; color:#334155; cursor:pointer; border-radius:.6rem; background-color:#fff;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%2394a3b8' stroke-width='2.2' viewBox='0 0 24 24'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right .55rem center; }
+    #amazon-fba-view select:hover { border-color:#c7d2fe; }
+    #amazon-fba-view #fba-tabs { padding:3px; gap:2px; border-radius:.7rem; background:#f1f5f9; height:38px; align-items:center; overflow:visible; }
+    #amazon-fba-view #fba-tabs button { border-radius:.5rem; font-weight:600; padding:4px 12px; transition:all .15s ease; }
+    #amazon-fba-view #fba-tabs button.bg-indigo-600 { box-shadow:0 1px 3px rgba(79,70,229,.35); }
+    #amazon-fba-view table { font-variant-numeric: tabular-nums; }
+    #amazon-fba-view table tbody tr { transition: background .12s; }
+    #amazon-fba-view table tbody tr:hover { background:#f8fafc; }
+    #amazon-fba-view th[data-k] { cursor:pointer; user-select:none; white-space:nowrap; transition:color .12s; }
+    #amazon-fba-view th[data-k]:hover { color:#4f46e5; }
+    #amazon-fba-view th .arw { font-size:9px; margin-left:2px; }
+    .fba-band { display:inline-flex; align-items:center; gap:4px; padding:2px 9px; border-radius:9999px; font-size:11px; font-weight:700; white-space:nowrap; }
+    .fba-band-stockout,.fba-band-critical { background:#fef2f2; color:#b91c1c; }
+    .fba-band-reorder { background:#fffbeb; color:#b45309; }
+    .fba-band-ok { background:#ecfdf5; color:#047857; }
+    .fba-band-overstock { background:#eff6ff; color:#1d4ed8; }
+    .fba-band-inactive { background:#f1f5f9; color:#64748b; }
+    .fba-bar { height:6px; border-radius:9999px; background:#eef2f7; overflow:hidden; }
+    .fba-bar > i { display:block; height:100%; border-radius:9999px; }
+
+    /* Users & Permissions — permission chips */
+    #users-view .card { transition: box-shadow .18s ease, border-color .18s ease; }
+    #users-view .card:hover { box-shadow: 0 10px 28px -18px rgba(15,23,42,.25); }
+    .perm-chip { display:inline-flex; align-items:center; gap:6px; padding:6px 11px; border-radius:9px; border:1px solid #e2e8f0; background:#fff; color:#475569; font-size:12px; font-weight:500; cursor:pointer; transition:all .12s ease; user-select:none; line-height:1; }
+    .perm-chip:hover { border-color:#c7d2fe; }
+    .perm-chip .pc-box { width:15px; height:15px; border-radius:4px; border:1.5px solid #cbd5e1; display:inline-flex; align-items:center; justify-content:center; transition:all .12s; flex-shrink:0; }
+    .perm-chip .pc-box svg { opacity:0; width:11px; height:11px; color:#fff; transition:opacity .12s; }
+    .perm-chip.is-on { background:#eef2ff; border-color:#a5b4fc; color:#3730a3; }
+    .perm-chip.is-on .pc-box { background:#4f46e5; border-color:#4f46e5; }
+    .perm-chip.is-on .pc-box svg { opacity:1; }
+
+    /* Hide the sidebar nav until permissions are computed, so a restricted user never even flashes
+       dashboards they don't have access to. applyPermissions() sets data-perms="ready" when done. */
+    #app-sidebar nav { transition: opacity .12s ease; }
+    #app-sidebar:not([data-perms="ready"]) nav { opacity: 0; pointer-events: none; }
+
     #delivery-perf-view .dp-cr:hover { background:#f8fafc; }
     #delivery-perf-view #dp-table tbody tr:hover { background:#f8fafc; }
     #delivery-perf-view #dp-table tbody tr { transition: background .12s; }
@@ -374,11 +423,18 @@
             <h1 class="text-2xl font-bold text-slate-900">Sign in to Ecom Central</h1>
             <p class="text-slate-500 text-sm mt-2">One Stop Solution</p>
         </div>
-        <form class="space-y-5" onsubmit="return false;">
+        <form id="login-form" class="space-y-5" onsubmit="return false;">
             <input type="email" id="login-email" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="name@company.com" autocomplete="email">
             <input type="password" id="login-password" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="Password" autocomplete="current-password">
             <button id="login-btn" type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5">Continue</button>
         </form>
+        <form id="signup-form" class="space-y-5 hidden" onsubmit="return false;">
+            <input type="email" id="signup-email" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="name@company.com" autocomplete="email">
+            <input type="password" id="signup-password" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="Choose a password (min 6 characters)" autocomplete="new-password">
+            <button id="signup-btn" type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5">Create account</button>
+        </form>
+        <p id="auth-msg" class="text-sm text-center mt-4 hidden"></p>
+        <p class="text-sm text-center text-slate-500 mt-6"><span id="auth-toggle" class="text-indigo-600 font-semibold cursor-pointer hover:underline">Create an account</span></p>
     </div>
 </div>
 
@@ -420,6 +476,10 @@
                     <a href="#" id="nav-docpharma-recon" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m-6 4h6m-6 4h4M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"></path></svg>
                         <span class="ml-3 text-sm font-medium">DocPharma Recon</span>
+                    </a>
+                    <a href="#" id="nav-amazon-fba" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Amazon FBA</span>
                     </a>
                 </div>
             </div>
@@ -486,6 +546,10 @@
             <a href="#" id="nav-settings" class="sidebar-link flex items-center px-3 py-2">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-1.066 2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                 <span class="ml-3 text-sm font-medium">Settings</span>
+            </a>
+            <a href="#" id="nav-users" class="sidebar-link flex items-center px-3 py-2" style="display:none">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
+                <span class="ml-3 text-sm font-medium">Users</span>
             </a>
         </nav>
 
@@ -1625,6 +1689,122 @@
             </div>
           </div>
         </div><!-- /ops-control-view -->
+
+        <div id="amazon-fba-view" class="view-hidden">
+          <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h1 class="text-xl font-bold text-slate-800">Amazon FBA</h1>
+              <p class="text-sm text-slate-400 mt-0.5">Demand, live FBA stock, and a forecast that tells you what to send — before you run out</p>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200" id="fba-tabs">
+                <button data-t="insights" class="px-3 py-1.5 bg-indigo-600 text-white">Insights</button>
+                <button data-t="inventory" class="px-3 py-1.5 text-slate-600">Inventory</button>
+                <button data-t="forecast" class="px-3 py-1.5 text-slate-600">Restock Plan</button>
+                <button data-t="locations" class="px-3 py-1.5 text-slate-600">By Location</button>
+              </div>
+              <span id="fba-updated" class="text-xs text-slate-400 tabular-nums"></span>
+              <button id="fba-refresh" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-400 flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                Refresh
+              </button>
+            </div>
+          </header>
+          <div class="p-8 space-y-6">
+
+            <!-- INSIGHTS -->
+            <div id="fba-insights" class="fba-pane">
+              <div class="flex items-center gap-2 mb-4 flex-wrap">
+                <h2 class="text-sm font-bold text-slate-700 mr-1">FBA demand</h2>
+                <select id="fba-ins-days" class="text-sm border border-slate-200 rounded-lg bg-white">
+                  <option value="7">Last 7 days</option>
+                  <option value="30" selected>Last 30 days</option>
+                  <option value="60">Last 60 days</option>
+                  <option value="90">Last 90 days</option>
+                </select>
+              </div>
+              <div id="fba-ins-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6"></div>
+              <div class="card p-5 mb-6">
+                <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+                  <h3 class="text-sm font-bold text-slate-700">Daily trend</h3>
+                  <div class="flex bg-slate-100 rounded-lg overflow-hidden text-xs border border-slate-200" id="fba-trend-metric">
+                    <button data-m="units" class="px-3 py-1 bg-indigo-600 text-white font-semibold">Units</button>
+                    <button data-m="orders" class="px-3 py-1 text-slate-600 font-semibold">Orders</button>
+                    <button data-m="revenue" class="px-3 py-1 text-slate-600 font-semibold">Revenue</button>
+                  </div>
+                </div>
+                <div class="relative h-72"><canvas id="fba-trend-chart"></canvas></div>
+              </div>
+              <h3 class="text-sm font-bold text-slate-700 mb-3">Top products <span class="font-normal text-slate-400">— velocity, momentum &amp; share of FBA units</span></h3>
+              <div class="card p-0 overflow-x-auto" id="fba-top-table"></div>
+            </div>
+
+            <!-- INVENTORY -->
+            <div id="fba-inventory" class="fba-pane hidden">
+              <div id="fba-inv-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6"></div>
+              <div class="flex items-center gap-2 mb-3 flex-wrap">
+                <h2 class="text-sm font-bold text-slate-700 mr-1">Live FBA stock <span class="font-normal text-slate-400">— straight from Amazon</span></h2>
+                <select id="fba-inv-filter" class="text-sm border border-slate-200 rounded-lg bg-white">
+                  <option value="active">Active only</option>
+                  <option value="all">All SKUs</option>
+                  <option value="oos">Out of stock</option>
+                </select>
+                <input id="fba-inv-search" type="text" placeholder="Search product / SKU / ASIN…" class="text-sm px-3 border border-slate-200 rounded-lg bg-white text-slate-700 w-56">
+                <span id="fba-inv-count" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
+              </div>
+              <div class="card p-0 overflow-x-auto" id="fba-inv-table"></div>
+            </div>
+
+            <!-- RESTOCK PLAN -->
+            <div id="fba-forecast" class="fba-pane hidden">
+              <div class="flex items-center gap-2 mb-4 flex-wrap">
+                <h2 class="text-sm font-bold text-slate-700 mr-1">Restock plan</h2>
+                <label class="text-xs text-slate-500 flex items-center gap-1.5">Target cover
+                  <input id="fba-cover" type="number" min="7" max="180" value="45" class="w-16 text-sm px-2 border border-slate-200 rounded-lg bg-white text-slate-700"> days</label>
+                <label class="text-xs text-slate-500 flex items-center gap-1.5">Lead time
+                  <input id="fba-lead" type="number" min="1" max="90" value="14" class="w-14 text-sm px-2 border border-slate-200 rounded-lg bg-white text-slate-700"> days</label>
+                <button id="fba-plan-apply" class="text-sm px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Apply</button>
+                <div class="ml-auto flex items-center gap-2">
+                  <button id="fba-plan-copy" class="text-sm px-3 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-400">Copy plan</button>
+                  <button id="fba-plan-csv" class="text-sm px-3 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-400">Export CSV</button>
+                </div>
+              </div>
+              <div id="fba-fc-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6"></div>
+              <p class="text-xs text-slate-400 mb-3">Velocity = 30-day daily sell-through. On-hand cover drives urgency (inbound isn't sellable yet); send-qty already nets out what's inbound.</p>
+              <div class="card p-0 overflow-x-auto" id="fba-fc-table"></div>
+            </div>
+
+            <!-- BY LOCATION -->
+            <div id="fba-locations" class="fba-pane hidden">
+              <div class="flex items-center gap-2 mb-4 flex-wrap">
+                <h2 class="text-sm font-bold text-slate-700 mr-1">Stock &amp; demand by fulfillment center <span class="font-normal text-slate-400">— last 30 days</span></h2>
+                <button id="fba-loc-sync" class="text-sm px-3 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-400 flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                  Sync now
+                </button>
+                <span id="fba-loc-status" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
+              </div>
+              <div id="fba-loc-fcs" class="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6"></div>
+              <h3 class="text-sm font-bold text-slate-700 mb-3">Product &times; FC <span class="font-normal text-slate-400">— on-hand &middot; sold &middot; days cover; &#9888; = rebalance</span></h3>
+              <div class="card p-0 overflow-x-auto" id="fba-loc-matrix"></div>
+            </div>
+
+          </div>
+        </div><!-- /amazon-fba-view -->
+
+        <div id="users-view" class="view-hidden">
+          <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h1 class="text-xl font-bold text-slate-800">Users &amp; Permissions</h1>
+              <p class="text-sm text-slate-400 mt-0.5">Approve sign-ups and choose which dashboards each person can access</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <button id="users-add" class="text-sm px-3 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">+ Add user</button>
+              <button id="users-refresh" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-400">Refresh</button>
+            </div>
+          </header>
+          <div class="p-8"><div id="users-list" class="space-y-4"></div></div>
+        </div><!-- /users-view -->
 
     </main>
 </div>

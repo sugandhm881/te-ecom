@@ -1,0 +1,31 @@
+# ── HTTPS for Ecom Central (fixes the "plain HTTP" vulnerability) ──────────────
+# Caddy gives you automatic, auto-renewing Let's Encrypt TLS with ~4 lines.
+#
+# STEPS (run on the VPS 72.60.97.42):
+#   1. Point a domain's DNS A-record at 72.60.97.42  (e.g. dashboard.theelement.in)
+#   2. Install Caddy:   sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+#                       curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+#                       curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+#                       sudo apt update && sudo apt install caddy
+#   3. Put this file (edited) at /etc/caddy/Caddyfile, then:  sudo systemctl reload caddy
+#   4. In .env set:   DASHBOARD_URL=https://dashboard.theelement.in
+#                     CORS_ORIGINS=https://dashboard.theelement.in
+#      then:          pm2 restart <app>
+#   5. Optional but recommended: firewall off port 5002 from the public
+#      (ufw deny 5002) so the app is only reachable through HTTPS.
+#
+# Replace dashboard.theelement.in with your real domain.
+
+dashboard.theelement.in {
+    reverse_proxy 127.0.0.1:5002
+    encode gzip
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options     "nosniff"
+        X-Frame-Options            "SAMEORIGIN"
+        Referrer-Policy            "strict-origin-when-cross-origin"
+        -Server
+    }
+}

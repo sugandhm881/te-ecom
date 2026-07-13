@@ -65,6 +65,12 @@ module.exports = {
     // --- Amazon Auto Review ---
     SLACK_BOT_TOKEN:   process.env.SLACK_BOT_TOKEN,
     SLACK_CHANNEL_ID:  process.env.SLACK_CHANNEL_ID || 'C0BDDKPE3PS',
+
+    // --- Microsoft Teams (report webhooks) — Workflows "incoming webhook" URLs, one per channel ---
+    TEAMS_WEBHOOK_WAREHOUSE: process.env.TEAMS_WEBHOOK_WAREHOUSE,
+    TEAMS_WEBHOOK_DP:        process.env.TEAMS_WEBHOOK_DP,
+    TEAMS_WEBHOOK_HOLD:      process.env.TEAMS_WEBHOOK_HOLD,
+    TEAMS_WEBHOOK_AMAZON:    process.env.TEAMS_WEBHOOK_AMAZON,
     DASHBOARD_URL:     process.env.DASHBOARD_URL || 'http://72.60.97.42:5002',
     AUTO_REVIEW_CRON:  process.env.AUTO_REVIEW_CRON || '0 10 * * *',
 

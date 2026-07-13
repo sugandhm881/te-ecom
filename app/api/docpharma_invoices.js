@@ -161,6 +161,7 @@ router.get('/docpharma-invoices/goods', async (req, res) => {
     try {
         const { data: invs, error } = await supabase.from('docpharma_goods_invoices').select('*').order('invoice_date', { ascending: false }).limit(500);
         if (error) throw new Error(error.message);
+        res.set('Cache-Control', 'no-store');
         res.json({ success: true, invoices: invs || [] });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -194,6 +195,7 @@ router.get('/docpharma-invoices/charge', async (req, res) => {
     try {
         const { data, error } = await supabase.from('docpharma_charge_invoices').select('*').order('invoice_date', { ascending: false }).limit(500);
         if (error) throw new Error(error.message);
+        res.set('Cache-Control', 'no-store');
         res.json({ success: true, invoices: data || [] });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });

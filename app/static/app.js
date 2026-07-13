@@ -15,6 +15,30 @@ let adsetDatePreset = 'last_7_days';
 let profitDatePreset = 'last_7_days';
 let returnsDatePreset = 'last_month';
 let authToken = null;
+// Security: attach the JWT to every same-origin /api request so the server can require auth on ALL
+// data routes. Also force re-login on 401 (expired/invalid token). Covers every fetch() call app-wide.
+(function () {
+    const _fetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+        init = init || {};
+        let isApi = false;
+        try {
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            isApi = url.startsWith('/api') || (location.origin && url.indexOf(location.origin + '/api') === 0);
+            if (isApi && authToken) {
+                const h = new Headers(init.headers || {});
+                if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + authToken);
+                init.headers = h;
+            }
+        } catch (_) {}
+        return _fetch(input, init).then(function (res) {
+            if (res.status === 401 && isApi && authToken) {
+                try { authToken = null; localStorage.removeItem('authToken'); if (typeof showLogin === 'function') showLogin(); } catch (_) {}
+            }
+            return res;
+        });
+    };
+})();
 let currentSortKey = null;
 let currentSortOrder = "asc";
 let adRankingChartInstance = null;
@@ -182,16 +206,75 @@ function logout() {
 function showLogin() {
     if (loginView) loginView.style.display = 'flex';
     if (appView) appView.style.display = 'none';
+    // Re-hide the nav so the next user who logs in never sees the previous user's dashboards.
+    document.getElementById('app-sidebar')?.removeAttribute('data-perms');
 }
 
 function showApp() {
     if (loginView) loginView.style.display = 'none';
     if (appView) appView.style.display = 'flex';
+    applyPermissions();
     loadInitialData();
+    if (currentUser && !currentUser.isAdmin) {
+        const target = canView('orders-dashboard') ? 'orders-dashboard' : (currentUser.permissions[0] || null);
+        if (target) navigate(target);
+    }
 }
 
 // --- API ---
 function getAuthHeaders() { return authToken ? { "Authorization": `Bearer ${authToken}` } : {}; }
+
+// --- Roles & permissions (client-side nav gating; server enforces the admin routes) ---
+let currentUser = null;
+function parseJwt(t) { try { const b = String(t).split('.')[1].replace(/-/g, '+').replace(/_/g, '/'); return JSON.parse(atob(b + '='.repeat((4 - b.length % 4) % 4))); } catch (_) { return {}; } }
+function applyPermissions() {
+    const c = parseJwt(authToken);
+    // A legacy token (no role/permissions claim) belongs only to the bootstrap admin → treat as full access.
+    const legacy = (c.role === undefined && c.permissions === undefined);
+    const isAdmin = legacy || c.role === 'admin' || (Array.isArray(c.permissions) && c.permissions.includes('*'));
+    const perms = new Set(Array.isArray(c.permissions) ? c.permissions : []);
+    currentUser = { email: c.sub, role: isAdmin ? 'admin' : (c.role || 'user'), isAdmin, permissions: [...perms] };
+    try {
+        document.querySelectorAll('#app-sidebar .sidebar-link').forEach(a => {
+            if (a.id === 'nav-users') { a.style.display = isAdmin ? '' : 'none'; return; }
+            const key = (typeof NAV_HREF !== 'undefined') ? NAV_HREF[a.id] : null;
+            a.style.display = (isAdmin || (key && perms.has(key))) ? '' : 'none';
+        });
+        // Collapse nav groups whose links are all hidden.
+        document.querySelectorAll('#app-sidebar .nav-group').forEach(g => {
+            const any = [...g.querySelectorAll('.sidebar-link')].some(l => l.style.display !== 'none');
+            g.style.display = any ? '' : 'none';
+        });
+    } finally {
+        // Reveal the nav now that only the permitted items are visible.
+        const sb = document.getElementById('app-sidebar'); if (sb) sb.setAttribute('data-perms', 'ready');
+    }
+}
+function canView(view) { return !currentUser || currentUser.isAdmin || (currentUser.permissions || []).includes(view); }
+
+async function handleSignup() {
+    const email = (document.getElementById('signup-email') || {}).value;
+    const password = (document.getElementById('signup-password') || {}).value;
+    const msg = document.getElementById('auth-msg');
+    showLoader();
+    try {
+        const r = await fetch('/api/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.message || 'Sign up failed');
+        _authToggle(false);
+        if (msg) { msg.textContent = d.message || 'Account created — pending admin approval.'; msg.className = 'text-sm text-center mt-4 text-emerald-600'; }
+    } catch (e) { if (msg) { msg.textContent = e.message; msg.className = 'text-sm text-center mt-4 text-rose-500'; } }
+    finally { hideLoader(); }
+}
+function _authToggle(toSignup) {
+    const lf = document.getElementById('login-form'), sf = document.getElementById('signup-form');
+    const tg = document.getElementById('auth-toggle'), msg = document.getElementById('auth-msg'), h = document.querySelector('#login-view h1');
+    if (!lf || !sf) return;
+    lf.classList.toggle('hidden', toSignup); sf.classList.toggle('hidden', !toSignup);
+    if (tg) tg.textContent = toSignup ? 'Already have an account? Sign in' : 'Create an account';
+    if (h) h.textContent = toSignup ? 'Create your account' : 'Sign in to Ecom Central';
+    if (msg) msg.classList.add('hidden');
+}
 
 async function fetchApiData(endpoint, errorMessage, options = {}) {
     const { noLoader, ...fetchOptions } = options;   // noLoader → fetch quietly in the background (no full-screen overlay)
@@ -293,6 +376,12 @@ async function downloadShipmentLabel(awb) {
 
 // --- UI RENDERING ---
 function navigate(view) {
+    // Permission gate — non-admins can only open dashboards they've been granted ('users' is admin-only).
+    if (currentUser && !currentUser.isAdmin && !canView(view)) {
+        const first = (currentUser.permissions || [])[0];
+        if (!first) return;
+        view = first;
+    }
     showLoader();
     console.log("Navigating to:", view);
     currentView = view;
@@ -396,6 +485,16 @@ function navigate(view) {
             activeLinkElement = document.getElementById('nav-docpharma-recon');
             activeViewElement = document.getElementById('docpharma-recon-view');
             if (typeof dpreInit === 'function') dpreInit();
+            break;
+        case 'amazon-fba':
+            activeLinkElement = document.getElementById('nav-amazon-fba');
+            activeViewElement = document.getElementById('amazon-fba-view');
+            if (typeof fbaInit === 'function') fbaInit();
+            break;
+        case 'users':
+            activeLinkElement = document.getElementById('nav-users');
+            activeViewElement = document.getElementById('users-view');
+            if (typeof usersInit === 'function') usersInit();
             break;
     }
 
@@ -2544,7 +2643,8 @@ const NAV_HREF = {
     'nav-customer-segments': 'customer-segments', 'nav-returns-analysis': 'returns-analysis', 'nav-ad-ranking': 'ad-ranking',
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
-    'nav-delivery-perf': 'delivery-perf', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon'
+    'nav-delivery-perf': 'delivery-perf', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon',
+    'nav-amazon-fba': 'amazon-fba', 'nav-users': 'users'
 };
 const VALID_VIEWS = new Set(Object.values(NAV_HREF));
 function viewFromHash() { const v = (location.hash || '').replace(/^#/, ''); return VALID_VIEWS.has(v) ? v : null; }
@@ -3251,6 +3351,695 @@ document.getElementById('nav-docpharma-recon')?.addEventListener('click', (e) =>
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
 document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
+document.getElementById('nav-amazon-fba')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-fba'); });
+document.getElementById('nav-users')?.addEventListener('click', (e) => { e.preventDefault(); navigate('users'); });
+
+// ═══════════════ USERS & PERMISSIONS (admin) ═══════════════
+const PERM_GROUPS = [
+  ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['ops-control','Ops Control'],['docpharma-recon','DocPharma Recon'],['amazon-fba','Amazon FBA']]],
+  ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
+  ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
+  ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]]
+];
+const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
+const PERM_TOTAL = PERM_CATALOG.length;
+const _PC_CHECK = '<svg viewBox="0 0 20 20" fill="none"><path d="M5 10l3 3 7-7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const _AVCOLORS = ['bg-indigo-500','bg-emerald-500','bg-rose-500','bg-amber-500','bg-sky-500','bg-violet-500','bg-teal-500','bg-fuchsia-500'];
+function _avatar(email){ const local=(email||'?').split('@')[0]; const parts=local.split(/[.\-_]+/).filter(Boolean);
+  const initials=(parts.length>1?parts[0][0]+parts[1][0]:local.slice(0,2)).toUpperCase();
+  let h=0; for(const c of (email||'')) h=(h*31+c.charCodeAt(0))>>>0; return {initials, color:_AVCOLORS[h%_AVCOLORS.length]}; }
+function _permGroupOf(key){ for(const [g,items] of PERM_GROUPS) if(items.some(p=>p[0]===key)) return g; return ''; }
+function _usersUpdateCount(card){ const n=card.querySelectorAll('.perm-chip.is-on').length; const el=card.querySelector('.dpu-count'); if(el) el.textContent=n; }
+function ecEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+let _usersWired = false;
+function usersInit(){
+  if(!_usersWired){
+    document.getElementById('users-refresh')?.addEventListener('click', loadUsers);
+    document.getElementById('users-add')?.addEventListener('click', usersAddPrompt);
+    document.getElementById('users-list')?.addEventListener('click', usersListClick);
+    _usersWired = true;
+  }
+  loadUsers();
+}
+async function loadUsers(){
+  const box=document.getElementById('users-list'); if(box) box.innerHTML='<p class="text-sm text-slate-400">Loading…</p>';
+  try{
+    const r=await fetch('/api/admin/users',{headers:getAuthHeaders()});
+    const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed to load users');
+    renderUsers(d.users||[]);
+  }catch(e){ if(box) box.innerHTML='<p class="text-sm text-rose-500">'+ecEsc(e.message)+'</p>'; }
+}
+function renderUsers(users){
+  const box=document.getElementById('users-list'); if(!box) return;
+  const rank={pending:0,active:1,disabled:2};
+  users=[...users].sort((a,b)=>(a.role==='admin'?9:(rank[a.status]??3))-(b.role==='admin'?9:(rank[b.status]??3)));
+  const pending=users.filter(u=>u.status==='pending'&&u.role!=='admin').length;
+  const badge=st=>({active:'bg-emerald-50 text-emerald-700 ring-emerald-200',pending:'bg-amber-50 text-amber-700 ring-amber-200',disabled:'bg-slate-100 text-slate-500 ring-slate-200'}[st]||'bg-slate-100 text-slate-500 ring-slate-200');
+  const summary=`<div class="flex items-center gap-2 mb-4 text-sm"><span class="text-slate-500"><b class="text-slate-800">${users.length}</b> user${users.length!==1?'s':''}</span>${pending?`<span class="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-xs font-semibold ring-1 ring-amber-200">${pending} pending approval</span>`:''}</div>`;
+  box.innerHTML = summary + (users.map(u=>{
+    const isAdmin=(u.role==='admin');
+    const av=_avatar(u.email);
+    const all=(u.permissions&&u.permissions.includes('*'));
+    const perms=new Set(all?PERM_CATALOG.map(p=>p[0]):(u.permissions||[]));
+    const granted=isAdmin?PERM_TOTAL:perms.size;
+    const collapsed = u.status !== 'pending';   // pending users open (need action); active collapsed by default
+    const head=`<div class="flex items-start justify-between gap-3 flex-wrap">
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="w-10 h-10 rounded-full ${av.color} text-white flex items-center justify-center font-bold text-sm shrink-0">${av.initials}</div>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 flex-wrap"><span class="font-semibold text-slate-800 break-all">${ecEsc(u.email)}</span>
+            <span class="text-[11px] px-2 py-0.5 rounded-full ring-1 ${badge(u.status)}">${ecEsc(u.status)}</span>
+            ${isAdmin?'<span class="text-[11px] px-2 py-0.5 rounded-full ring-1 bg-indigo-50 text-indigo-700 ring-indigo-200">admin</span>':''}</div>
+          <div class="text-xs text-slate-400 mt-0.5">${isAdmin?'Full access — signs in with the app credentials':`<span class="dpu-count font-semibold text-slate-500">${granted}</span> of ${PERM_TOTAL} dashboards`}</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        ${!isAdmin?`<button data-act="toggle" class="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1.5">Manage access <svg class="dpu-chev w-3.5 h-3.5 transition-transform ${collapsed?'':'rotate-180'}" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg></button>`:''}
+        ${(u.status==='active'&&!isAdmin)?'<button data-act="disable" class="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">Disable</button>':''}
+        ${!isAdmin?'<button data-act="delete" title="Delete user" class="text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg w-8 h-8 flex items-center justify-center"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>':''}
+      </div>
+    </div>`;
+    if(isAdmin) return `<div class="card p-5">${head}</div>`;
+    const groups=PERM_GROUPS.map(([gname,items])=>{
+      const chips=items.map(([k,label])=>`<button type="button" data-perm="${k}" class="perm-chip ${perms.has(k)?'is-on':''}"><span class="pc-box">${_PC_CHECK}</span>${ecEsc(label)}</button>`).join('');
+      return `<div><div class="flex items-center justify-between mb-1.5"><span class="text-[11px] font-bold uppercase tracking-wide text-slate-400">${gname}</span><button type="button" data-group="${gname}" class="text-[11px] text-indigo-500 hover:text-indigo-700 font-medium">toggle all</button></div><div class="flex flex-wrap gap-1.5">${chips}</div></div>`;
+    }).join('');
+    const primary=(u.status==='active')
+      ? '<button data-act="save" class="text-xs px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 shadow-sm">Save access</button>'
+      : '<button data-act="approve" class="text-xs px-4 py-2 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700 shadow-sm">✓ Approve &amp; grant</button>';
+    return `<div class="card p-5 ${u.status==='pending'?'ring-1 ring-amber-200':''}" data-uid="${u.id}" data-email="${ecEsc(u.email)}">
+      ${head}
+      <div class="dpu-perms ${collapsed?'hidden':''}">
+        <div class="mt-4 grid sm:grid-cols-2 gap-x-8 gap-y-4">${groups}</div>
+        <div class="flex items-center justify-between mt-4 pt-3 border-t border-slate-100 flex-wrap gap-2">
+          <div class="flex items-center gap-3 text-xs"><button type="button" data-all="1" class="text-indigo-600 font-medium hover:underline">Select all</button><span class="text-slate-300">·</span><button type="button" data-all="0" class="text-slate-500 hover:underline">Clear</button></div>
+          ${primary}
+        </div>
+      </div>
+    </div>`;
+  }).join('') || '<p class="text-sm text-slate-400">No users yet.</p>');
+}
+async function usersUpdate(id, patch, okMsg){
+  try{ const r=await fetch('/api/admin/users/'+id,{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify(patch)});
+    const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed'); showNotification(okMsg||'Saved'); loadUsers();
+  }catch(e){ showNotification(e.message,true); }
+}
+function usersListClick(e){
+  const card=e.target.closest('[data-uid]'); if(!card) return;
+  const chip=e.target.closest('.perm-chip');
+  if(chip){ chip.classList.toggle('is-on'); _usersUpdateCount(card); return; }
+  const grp=e.target.closest('[data-group]');
+  if(grp){ const name=grp.dataset.group; const chips=[...card.querySelectorAll('.perm-chip')].filter(c=>_permGroupOf(c.dataset.perm)===name);
+    const anyOff=chips.some(c=>!c.classList.contains('is-on')); chips.forEach(c=>c.classList.toggle('is-on',anyOff)); _usersUpdateCount(card); return; }
+  const all=e.target.closest('[data-all]');
+  if(all){ const on=all.dataset.all==='1'; card.querySelectorAll('.perm-chip').forEach(c=>c.classList.toggle('is-on',on)); _usersUpdateCount(card); return; }
+  const btn=e.target.closest('button[data-act]'); if(!btn) return;
+  const id=card.dataset.uid, act=btn.dataset.act;
+  if(act==='toggle'){ const sec=card.querySelector('.dpu-perms'), chev=btn.querySelector('.dpu-chev'); if(sec){ sec.classList.toggle('hidden'); if(chev) chev.classList.toggle('rotate-180', !sec.classList.contains('hidden')); } return; }
+  const perms=()=>[...card.querySelectorAll('.perm-chip.is-on')].map(c=>c.dataset.perm);
+  if(act==='approve') usersUpdate(id,{status:'active',permissions:perms()},'Approved & access granted');
+  else if(act==='disable') usersUpdate(id,{status:'disabled'},'Disabled');
+  else if(act==='save') usersUpdate(id,{permissions:perms()},'Access updated');
+  else if(act==='delete'){ if(!confirm('Delete '+card.dataset.email+'? This cannot be undone.')) return;
+    fetch('/api/admin/users/'+id,{method:'DELETE',headers:getAuthHeaders()}).then(r=>r.json()).then(d=>{ showNotification(d.success?'Deleted':(d.message||'Failed'),!d.success); loadUsers(); }); }
+}
+async function usersAddPrompt(){
+  const email=prompt('New user email:'); if(!email) return;
+  const password=prompt('Temporary password (min 6 characters):'); if(!password) return;
+  try{ const r=await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({email,password,permissions:[]})});
+    const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed'); showNotification('User added — now grant dashboards below.'); loadUsers();
+  }catch(e){ showNotification(e.message,true); }
+}
+
+// ═══════════════ AMAZON FBA (Insights · Live inventory · Restock forecast) ═══════════════
+let _fbaWired=false, _fbaTab='insights', _fbaIns=null, _fbaInv=null, _fbaFc=null, _fbaLoc=null, _fbaLocPoll=null, _fbaOrd=null, _fbaTrendChart=null, _fbaTrendMetric='units';
+let _fbaInvSort={k:'fulfillable',d:'desc'}, _fbaFcSort={k:'band',d:'asc'};
+const _fbaBandRank={stockout:0,critical:1,reorder:2,ok:3,overstock:4,inactive:5};
+const _fbaBandLabel={stockout:'🛑 Out of stock',critical:'🔴 Order now',reorder:'🟡 Reorder',ok:'🟢 Healthy',overstock:'🔵 Overstock',inactive:'⚪ Inactive'};
+const FBA = {
+  $: id => document.getElementById(id),
+  inr: n => '₹'+Math.round(n||0).toLocaleString('en-IN'),
+  inrk: n => { n=Math.round(n||0); if(n>=1e7)return '₹'+(n/1e7).toFixed(2)+'Cr'; if(n>=1e5)return '₹'+(n/1e5).toFixed(2)+'L'; if(n>=1e3)return '₹'+(n/1e3).toFixed(1)+'k'; return '₹'+n; },
+  nf: n => (Math.round(n||0)).toLocaleString('en-IN'),
+  esc: s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])),
+  fdate: s => { if(!s) return '—'; const d=new Date(s+'T00:00:00'); if(isNaN(d)) return '—'; return d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'}); },
+  ftime: ms => { if(!ms) return ''; const d=new Date(ms); return 'Updated '+d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}); }
+};
+function _fbaMomentum(pct){
+  if(pct===999) return '<span class="text-emerald-600 font-semibold">new</span>';
+  if(pct==null||pct===0) return '<span class="text-slate-400">—</span>';
+  const up=pct>0, c=up?'text-emerald-600':'text-rose-500', a=up?'▲':'▼';
+  return `<span class="${c} font-semibold">${a} ${Math.abs(pct)}%</span>`;
+}
+function _fbaKpi(label,value,sub,accent){
+  return `<div class="fba-kpi card p-4 bg-white rounded-xl border border-slate-200 shadow-sm">
+    <p class="text-xs text-slate-400 font-medium">${label}</p>
+    <p class="text-2xl font-bold ${accent||'text-slate-800'} mt-1 tabular-nums">${value}</p>
+    ${sub?`<p class="text-xs text-slate-400 mt-1">${sub}</p>`:''}</div>`;
+}
+function _fbaBar(frac,color){ const w=Math.max(2,Math.min(100,Math.round(frac*100))); return `<div class="fba-bar" style="width:64px"><i style="width:${w}%;background:${color}"></i></div>`; }
+// Sub-line under a product name: master SKU (bold) + Amazon SKU (muted).
+function _fbaSkuLine(master,amz){
+  if(master&&amz) return `<div class="text-xs"><span class="font-semibold text-slate-500">${FBA.esc(master)}</span> <span class="text-slate-300">· amz ${FBA.esc(amz)}</span></div>`;
+  return `<div class="text-xs text-slate-400">${FBA.esc(master||amz||'')}</div>`;
+}
+function _fbaSortList(list,st){ const {k,d}=st; return [...list].sort((a,b)=>{ let x=a[k],y=b[k];
+  if(k==='band'){ x=_fbaBandRank[x]; y=_fbaBandRank[y]; }
+  const na=(x==null||(typeof x==='number'&&isNaN(x))), nb=(y==null||(typeof y==='number'&&isNaN(y)));
+  if(na&&nb)return 0; if(na)return 1; if(nb)return -1;
+  if(typeof x==='string'||typeof y==='string'){ x=String(x).toLowerCase(); y=String(y).toLowerCase(); return d==='asc'?x.localeCompare(y):y.localeCompare(x); }
+  return d==='asc'?x-y:y-x; }); }
+function _fbaArrow(st,k){ return st.k===k?`<span class="arw">${st.d==='asc'?'▲':'▼'}</span>`:''; }
+
+function fbaInit(){
+  if(!_fbaWired){ _fbaWireEvents(); _fbaWired=true; }
+  _fbaSwitchTab(_fbaTab);
+}
+function _fbaWireEvents(){
+  const view=FBA.$('amazon-fba-view'); if(!view) return;
+  FBA.$('fba-tabs')?.addEventListener('click',e=>{ const b=e.target.closest('button[data-t]'); if(b) _fbaSwitchTab(b.dataset.t); });
+  FBA.$('fba-refresh')?.addEventListener('click',()=>_fbaRefreshCurrent());
+  FBA.$('fba-ins-days')?.addEventListener('change',()=>_fbaLoadInsights(false));
+  FBA.$('fba-trend-metric')?.addEventListener('click',e=>{ const b=e.target.closest('button[data-m]'); if(!b)return;
+    _fbaTrendMetric=b.dataset.m;
+    FBA.$('fba-trend-metric').querySelectorAll('button').forEach(x=>{ const on=x.dataset.m===_fbaTrendMetric; x.classList.toggle('bg-indigo-600',on); x.classList.toggle('text-white',on); x.classList.toggle('text-slate-600',!on); });
+    _fbaDrawTrend(); });
+  FBA.$('fba-inv-filter')?.addEventListener('change',()=>_fbaRenderInv());
+  FBA.$('fba-inv-search')?.addEventListener('input',()=>_fbaRenderInv());
+  FBA.$('fba-plan-apply')?.addEventListener('click',()=>_fbaLoadForecast(false));
+  FBA.$('fba-plan-copy')?.addEventListener('click',()=>_fbaCopyPlan());
+  FBA.$('fba-plan-csv')?.addEventListener('click',()=>_fbaExportCsv());
+  FBA.$('fba-loc-sync')?.addEventListener('click',()=>_fbaSyncLoc());
+  // Sortable headers (inventory + forecast)
+  view.addEventListener('click',e=>{ const th=e.target.closest('th[data-k]'); if(!th)return;
+    const tbl=th.dataset.tbl, k=th.dataset.k;
+    const st=tbl==='inv'?_fbaInvSort:_fbaFcSort;
+    st.d=(st.k===k&&st.d==='desc')?'asc':'desc'; st.k=k;
+    tbl==='inv'?_fbaRenderInv():_fbaRenderForecast(); });
+}
+function _fbaSwitchTab(t){
+  _fbaTab=t;
+  if(t!=='locations') _fbaStopPollLoc();
+  FBA.$('fba-tabs')?.querySelectorAll('button').forEach(b=>{ const on=b.dataset.t===t; b.classList.toggle('bg-indigo-600',on); b.classList.toggle('text-white',on); b.classList.toggle('text-slate-600',!on); });
+  ['insights','inventory','forecast','locations'].forEach(p=>{ const el=FBA.$('fba-'+p); if(el) el.classList.toggle('hidden',p!==t); });
+  if(t==='insights'){ if(!_fbaIns)_fbaLoadInsights(false); }
+  else if(t==='inventory'){ if(!_fbaInv)_fbaLoadInventory(false); }
+  else if(t==='forecast'){ if(!_fbaFc)_fbaLoadForecast(false); }
+  else if(t==='locations'){ if(!_fbaLoc)_fbaLoadLocations(); }
+}
+function _fbaRefreshCurrent(){
+  if(_fbaTab==='insights')_fbaLoadInsights(true);
+  else if(_fbaTab==='inventory')_fbaLoadInventory(true);
+  else if(_fbaTab==='forecast')_fbaLoadForecast(true);
+  else if(_fbaTab==='locations')_fbaSyncLoc();
+}
+function _fbaSetUpdated(ms,stale){
+  const el=FBA.$('fba-updated'); if(!el)return;
+  el.innerHTML = (ms?FBA.ftime(ms):'') + (stale?' <span class="text-amber-600 font-semibold">· cached (Amazon busy)</span>':'');
+}
+
+// ── INSIGHTS ──
+async function _fbaLoadInsights(fresh){
+  const days=parseInt(FBA.$('fba-ins-days')?.value||'30',10);
+  FBA.$('fba-ins-kpis').innerHTML='<div class="col-span-full text-sm text-slate-400 py-6 text-center">Loading…</div>';
+  try{
+    const r=await fetch(`/api/fba/insights?days=${days}`+(fresh?'&fresh=1':''),{headers:getAuthHeaders()});
+    const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    _fbaIns=d; _fbaRenderInsights();
+  }catch(e){ FBA.$('fba-ins-kpis').innerHTML=`<div class="col-span-full text-sm text-rose-500 py-6 text-center">${FBA.esc(e.message)}</div>`; }
+}
+function _fbaRenderInsights(){
+  const d=_fbaIns, s=d.summary, days=d.days;
+  FBA.$('fba-ins-kpis').innerHTML=[
+    _fbaKpi('Revenue · '+days+'d', FBA.inrk(s.revenue), 'AOV '+FBA.inr(s.aov), 'text-indigo-600'),
+    _fbaKpi('Orders', FBA.nf(s.orders), s.cancelRate+'% canceled ('+s.canceled+')'),
+    _fbaKpi('Units sold', FBA.nf(s.units), s.unitsPerOrder+' units / order'),
+    _fbaKpi('Active FBA SKUs', FBA.nf(s.activeSkus), s.businessOrders+' business orders')
+  ].join('');
+  _fbaDrawTrend();
+  // Top products (velocity reflects the selected window).
+  const key={7:'u7',30:'u30',60:'u60',90:'u90'}[days]||'u30';
+  const rows=(d.topAsins||[]).map(a=>({...a, uSel:a[key]||0}));
+  const totSel=rows.reduce((x,a)=>x+a.uSel,0)||1;
+  const maxVel=Math.max(...rows.map(a=>a.uSel/days),0.001);
+  rows.sort((a,b)=>b.uSel-a.uSel);
+  const body=rows.map(a=>{
+    const vel=Math.round((a.uSel/days)*10)/10;
+    return `<tr class="border-t border-slate-100">
+      <td class="px-4 py-3"><div class="font-medium text-slate-800 text-sm">${FBA.esc((a.title||'').slice(0,52))}</div>${_fbaSkuLine(a.masterSku,a.sku||a.asin)}</td>
+      <td class="px-4 py-3 text-right"><div class="flex items-center justify-end gap-2"><span class="font-semibold text-slate-700 tabular-nums">${vel}/d</span>${_fbaBar((a.uSel/days)/maxVel,'#6366f1')}</div></td>
+      <td class="px-4 py-3 text-center text-sm">${_fbaMomentum(a.trendPct)}</td>
+      <td class="px-4 py-3 text-right tabular-nums text-slate-700">${FBA.nf(a.uSel)}</td>
+      <td class="px-4 py-3 text-right tabular-nums text-slate-500">${a.sharePct!=null?Math.round((a.uSel/totSel)*100):0}%</td>
+      <td class="px-4 py-3 text-right tabular-nums text-slate-500">${FBA.inrk(a.uSel*a.unitPrice)}</td>
+    </tr>`;
+  }).join('');
+  FBA.$('fba-top-table').innerHTML=`<table class="w-full text-sm"><thead class="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
+    <tr><th class="px-4 py-3 text-left font-semibold">Product</th><th class="px-4 py-3 text-right font-semibold">Velocity</th><th class="px-4 py-3 text-center font-semibold">7d vs 30d</th><th class="px-4 py-3 text-right font-semibold">Units</th><th class="px-4 py-3 text-right font-semibold">Share</th><th class="px-4 py-3 text-right font-semibold">Est. revenue</th></tr>
+    </thead><tbody>${body||'<tr><td colspan="6" class="px-4 py-6 text-center text-slate-400">No FBA sales in this window</td></tr>'}</tbody></table>`;
+}
+function _fbaDrawTrend(){
+  const cv=FBA.$('fba-trend-chart'); if(!cv||!_fbaIns) return;
+  const daily=_fbaIns.daily||[];
+  const labels=daily.map(x=>FBA.fdate(x.d));
+  const metric=_fbaTrendMetric;
+  const data=daily.map(x=>metric==='revenue'?Number(x.revenue||0):(metric==='orders'?Number(x.orders||0):Number(x.units||0)));
+  if(_fbaTrendChart){ _fbaTrendChart.destroy(); _fbaTrendChart=null; }
+  const isRev=metric==='revenue';
+  _fbaTrendChart=new Chart(cv.getContext('2d'),{
+    type:isRev?'line':'bar',
+    data:{labels,datasets:[{
+      label:metric==='units'?'Units':(metric==='orders'?'Orders':'Revenue'),
+      data,
+      backgroundColor:isRev?'rgba(99,102,241,.12)':'rgba(99,102,241,.85)',
+      borderColor:'#6366f1', borderWidth:isRev?2:0, borderRadius:4, fill:isRev, tension:.3,
+      pointRadius:isRev?0:undefined, pointHoverRadius:4
+    }]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>isRev?FBA.inr(c.parsed.y):`${c.parsed.y} ${metric}`}}},
+      scales:{x:{grid:{display:false},ticks:{maxRotation:0,autoSkip:true,maxTicksLimit:10,color:'#94a3b8',font:{size:11}}},
+              y:{beginAtZero:true,grid:{color:'#f1f5f9'},ticks:{color:'#94a3b8',font:{size:11},callback:v=>isRev?FBA.inrk(v):v}}}}
+  });
+}
+
+// ── INVENTORY ──
+async function _fbaLoadInventory(fresh){
+  FBA.$('fba-inv-table').innerHTML='<div class="p-6 text-sm text-slate-400 text-center">Loading live stock from Amazon…</div>';
+  try{
+    const r=await fetch('/api/fba/inventory'+(fresh?'?fresh=1':''),{headers:getAuthHeaders()});
+    const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    _fbaInv=d; _fbaSetUpdated(d.updatedAt,d.stale); _fbaRenderInv();
+  }catch(e){ FBA.$('fba-inv-table').innerHTML=`<div class="p-6 text-sm text-rose-500 text-center">${FBA.esc(e.message)}</div>`; }
+}
+function _fbaRenderInv(){
+  const d=_fbaInv; if(!d) return;
+  const t=d.totals;
+  FBA.$('fba-inv-kpis').innerHTML=[
+    _fbaKpi('Sellable now', FBA.nf(t.fulfillable), 'across '+t.skus+' SKUs','text-emerald-600'),
+    _fbaKpi('Inbound', FBA.nf(t.inbound), 'in Amazon’s pipeline','text-indigo-600'),
+    _fbaKpi('Reserved', FBA.nf(t.reserved), 'pending customer orders'),
+    _fbaKpi('Out of stock', FBA.nf(t.outOfStock), 'selling SKUs at zero', t.outOfStock>0?'text-rose-600':'text-slate-800')
+  ].join('');
+  const filt=FBA.$('fba-inv-filter')?.value||'active';
+  const q=(FBA.$('fba-inv-search')?.value||'').trim().toLowerCase();
+  let rows=d.rows||[];
+  if(filt==='active') rows=rows.filter(r=>r.fulfillable>0||r.inbound>0||r.u30>0);
+  else if(filt==='oos') rows=rows.filter(r=>r.fulfillable===0);
+  if(q) rows=rows.filter(r=>((r.title||'')+' '+(r.masterSku||'')+' '+(r.sku||'')+' '+(r.asin||'')).toLowerCase().includes(q));
+  rows=_fbaSortList(rows,_fbaInvSort);
+  FBA.$('fba-inv-count').textContent=rows.length+' SKUs';
+  const H=(k,label,cls)=>`<th data-tbl="inv" data-k="${k}" class="px-4 py-3 ${cls||'text-right'} font-semibold">${label}${_fbaArrow(_fbaInvSort,k)}</th>`;
+  const body=rows.map(r=>{
+    const cover=r.vel30>0?Math.round(r.fulfillable/r.vel30):null;
+    const coverTxt=r.vel30>0?(cover+'d'):'—';
+    const coverCls=cover==null?'text-slate-400':(cover<=14?'text-rose-600 font-semibold':(cover<=30?'text-amber-600':'text-slate-500'));
+    const inbTip=`working ${r.inboundWorking} · shipped ${r.inboundShipped} · receiving ${r.inboundReceiving}`;
+    return `<tr class="border-t border-slate-100">
+      <td class="px-4 py-3"><div class="font-medium text-slate-800 text-sm">${FBA.esc((r.title||'').slice(0,50))}</div>${_fbaSkuLine(r.masterSku,r.sku)}</td>
+      <td class="px-4 py-3 text-left text-xs text-slate-400 tabular-nums">${FBA.esc(r.asin||'')}</td>
+      <td class="px-4 py-3 text-right tabular-nums font-semibold ${r.fulfillable===0&&r.u30>0?'text-rose-600':'text-slate-800'}">${FBA.nf(r.fulfillable)}</td>
+      <td class="px-4 py-3 text-right tabular-nums text-slate-600" title="${inbTip}">${FBA.nf(r.inbound)}</td>
+      <td class="px-4 py-3 text-right tabular-nums text-slate-400">${FBA.nf(r.reserved)}</td>
+      <td class="px-4 py-3 text-right tabular-nums ${r.unfulfillable>0?'text-amber-600':'text-slate-400'}">${FBA.nf(r.unfulfillable)}</td>
+      <td class="px-4 py-3 text-right tabular-nums text-slate-500">${r.vel30>0?r.vel30+'/d':'—'}</td>
+      <td class="px-4 py-3 text-right tabular-nums ${coverCls}">${coverTxt}</td>
+    </tr>`;
+  }).join('');
+  FBA.$('fba-inv-table').innerHTML=`<table class="w-full text-sm"><thead class="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide"><tr>
+    <th class="px-4 py-3 text-left font-semibold">Product</th><th class="px-4 py-3 text-left font-semibold">ASIN</th>
+    ${H('fulfillable','Sellable')}${H('inbound','Inbound')}${H('reserved','Reserved')}${H('unfulfillable','Unfulfil.')}${H('vel30','Vel/day')}${H('u30','Cover')}
+    </tr></thead><tbody>${body||'<tr><td colspan="8" class="px-4 py-6 text-center text-slate-400">No SKUs match</td></tr>'}</tbody></table>`;
+}
+
+// ── FORECAST / RESTOCK PLAN ──
+async function _fbaLoadForecast(fresh){
+  const cover=parseInt(FBA.$('fba-cover')?.value||'45',10), lead=parseInt(FBA.$('fba-lead')?.value||'14',10);
+  FBA.$('fba-fc-table').innerHTML='<div class="p-6 text-sm text-slate-400 text-center">Building restock plan…</div>';
+  try{
+    const r=await fetch(`/api/fba/forecast?coverDays=${cover}&leadDays=${lead}`+(fresh?'&fresh=1':''),{headers:getAuthHeaders()});
+    const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    _fbaFc=d; _fbaSetUpdated(d.updatedAt,d.stale); _fbaRenderForecast();
+  }catch(e){ FBA.$('fba-fc-table').innerHTML=`<div class="p-6 text-sm text-rose-500 text-center">${FBA.esc(e.message)}</div>`; }
+}
+function _fbaRenderForecast(){
+  const d=_fbaFc; if(!d) return;
+  const s=d.summary;
+  FBA.$('fba-fc-kpis').innerHTML=[
+    _fbaKpi('Order now', FBA.nf(s.stockout+s.critical), 'out-of-stock + critical SKUs', (s.stockout+s.critical)>0?'text-rose-600':'text-slate-800'),
+    _fbaKpi('Reorder soon', FBA.nf(s.reorder), 'below target cover', s.reorder>0?'text-amber-600':'text-slate-800'),
+    _fbaKpi('Units to send', FBA.nf(s.suggestUnits), '≈ '+FBA.inrk(s.suggestValue)+' at retail','text-indigo-600'),
+    _fbaKpi('Overstocked', FBA.nf(s.overstock), 'hold replenishment')
+  ].join('');
+  const rows=_fbaSortList(d.rows||[],_fbaFcSort);
+  const H=(k,label,cls)=>`<th data-tbl="fc" data-k="${k}" class="px-4 py-3 ${cls||'text-right'} font-semibold">${label}${_fbaArrow(_fbaFcSort,k)}</th>`;
+  const body=rows.map(r=>{
+    const cover=r.daysCover, coverCls=cover==null?'text-slate-400':(cover<=14?'text-rose-600':(cover<=30?'text-amber-600':'text-slate-500'));
+    const send=r.suggestQty>0?`<span class="font-bold text-slate-800">${FBA.nf(r.suggestQty)}</span><div class="text-xs text-slate-400">${FBA.inrk(r.suggestValue)}</div>`:'<span class="text-slate-300">—</span>';
+    return `<tr class="border-t border-slate-100">
+      <td class="px-4 py-3"><div class="font-medium text-slate-800 text-sm">${FBA.esc((r.title||'').slice(0,46))}</div>${_fbaSkuLine(r.masterSku,r.sku||r.asin)}</td>
+      <td class="px-4 py-3 text-center"><span class="fba-band fba-band-${r.band}">${_fbaBandLabel[r.band]||r.band}</span></td>
+      <td class="px-4 py-3 text-right"><span class="tabular-nums font-semibold text-slate-800">${FBA.nf(r.fulfillable)}</span><div class="text-xs ${coverCls}">${cover!=null?cover+'d cover':'—'}</div></td>
+      <td class="px-4 py-3 text-right"><span class="tabular-nums text-slate-600">${FBA.nf(r.inbound)}</span>${r.daysCoverInbound!=null?`<div class="text-xs text-slate-400">${r.daysCoverInbound}d w/ inb.</div>`:''}</td>
+      <td class="px-4 py-3 text-right"><span class="tabular-nums text-slate-600">${r.vel30>0?r.vel30+'/d':'—'}</span><div class="text-xs">${_fbaMomentum(r.trendPct)}</div></td>
+      <td class="px-4 py-3 text-center text-sm ${cover!=null&&cover<=14?'text-rose-600 font-semibold':'text-slate-500'}">${FBA.fdate(r.stockoutDate)}</td>
+      <td class="px-4 py-3 text-center text-sm text-slate-600">${FBA.fdate(r.reorderByDate)}</td>
+      <td class="px-4 py-3 text-right">${send}</td>
+      <td class="px-4 py-3 text-xs text-slate-500 max-w-xs">${FBA.esc(r.action)}</td>
+    </tr>`;
+  }).join('');
+  FBA.$('fba-fc-table').innerHTML=`<table class="w-full text-sm"><thead class="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide"><tr>
+    <th class="px-4 py-3 text-left font-semibold">Product</th>${H('band','Status','text-center')}${H('fulfillable','On hand')}${H('inbound','Inbound')}${H('vel30','Velocity')}
+    <th class="px-4 py-3 text-center font-semibold">Runs out</th><th class="px-4 py-3 text-center font-semibold">Order by</th>${H('suggestQty','Send')}
+    <th class="px-4 py-3 text-left font-semibold">What to do</th></tr></thead>
+    <tbody>${body||'<tr><td colspan="9" class="px-4 py-6 text-center text-slate-400">No FBA SKUs</td></tr>'}</tbody></table>`;
+}
+function _fbaCopyPlan(){
+  if(!_fbaFc){ showNotification('Load the plan first'); return; }
+  const act=(_fbaFc.rows||[]).filter(r=>r.suggestQty>0&&['stockout','critical','reorder'].includes(r.band));
+  if(!act.length){ showNotification('Nothing to reorder right now 🎉'); return; }
+  const lines=['Amazon FBA restock plan — '+new Date().toLocaleDateString('en-IN'),
+    'Target cover '+_fbaFc.params.coverDays+'d · lead '+_fbaFc.params.leadDays+'d',''];
+  act.forEach(r=>lines.push(`${r.masterSku||r.sku||r.asin} (amz ${r.sku||r.asin}) — send ${r.suggestQty} (${r.title.slice(0,40)}) — order by ${r.reorderByDate||'now'} — ${r.daysCover}d on hand`));
+  lines.push('', 'Total units to send: '+act.reduce((a,r)=>a+r.suggestQty,0));
+  navigator.clipboard.writeText(lines.join('\n')).then(()=>showNotification('Restock plan copied ✓'),()=>showNotification('Copy failed'));
+}
+function _fbaExportCsv(){
+  if(!_fbaFc){ showNotification('Load the plan first'); return; }
+  const cols=['status','master_sku','amazon_sku','asin','title','on_hand','cover_days','inbound','velocity_per_day','trend_pct','runs_out','order_by','send_qty','send_value','action'];
+  const esc=v=>{ v=String(v==null?'':v); return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; };
+  const lines=[cols.join(',')];
+  (_fbaFc.rows||[]).forEach(r=>lines.push([r.band,r.masterSku,r.sku,r.asin,r.title,r.fulfillable,r.daysCover,r.inbound,r.vel30,r.trendPct,r.stockoutDate,r.reorderByDate,r.suggestQty,r.suggestValue,r.action].map(esc).join(',')));
+  const blob=new Blob([lines.join('\n')],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='fba-restock-plan-'+new Date().toISOString().slice(0,10)+'.csv'; a.click(); URL.revokeObjectURL(a.href);
+  showNotification('CSV exported ✓');
+}
+
+// ── BY LOCATION (per-FC inventory + demand) ──
+function _fbaPollLoc(){ if(_fbaLocPoll) return; _fbaLocPoll=setInterval(()=>_fbaLoadLocations(), 15000); }
+function _fbaStopPollLoc(){ if(_fbaLocPoll){ clearInterval(_fbaLocPoll); _fbaLocPoll=null; } }
+function _fbaLocPending(d){
+  FBA.$('fba-loc-fcs').innerHTML='';
+  FBA.$('fba-loc-matrix').innerHTML='<div class="p-8 text-center text-sm text-slate-500"><div class="inline-block w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mb-2"></div><div>Generating the location report from Amazon… this takes ~1–2 minutes.</div></div>';
+  FBA.$('fba-loc-status').textContent = (d&&d.error)?('Last error: '+d.error):'Generating…';
+}
+async function _fbaLoadLocations(){
+  if(!_fbaLoc) FBA.$('fba-loc-matrix').innerHTML='<div class="p-6 text-sm text-slate-400 text-center">Loading…</div>';
+  try{
+    const r=await fetch('/api/fba/locations?window=30',{headers:getAuthHeaders()});
+    const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    _fbaLoc=d;
+    if(d.pending||d.running){ _fbaLocPending(d); _fbaPollLoc(); }
+    else { _fbaStopPollLoc(); _fbaRenderLocations(); }
+  }catch(e){ _fbaStopPollLoc(); FBA.$('fba-loc-matrix').innerHTML=`<div class="p-6 text-sm text-rose-500 text-center">${FBA.esc(e.message)}</div>`; }
+}
+async function _fbaSyncLoc(){
+  try{
+    const r=await fetch('/api/fba/locations/sync?window=30',{method:'POST',headers:getAuthHeaders()});
+    const d=await r.json();
+    if(d.cooldown){ showNotification('Just synced — try again in a minute'); return; }
+    showNotification('Location sync started — refreshing in ~1–2 min');
+    _fbaLoc={pending:true,running:true}; _fbaLocPending(_fbaLoc); _fbaPollLoc();
+  }catch(e){ showNotification('Sync failed'); }
+}
+function _fbaRenderLocations(){
+  const d=_fbaLoc; if(!d) return;
+  FBA.$('fba-loc-status').textContent = d.syncedAt ? ('Snapshot '+new Date(d.syncedAt).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})) : '';
+  FBA.$('fba-loc-fcs').innerHTML=(d.fcSummary||[]).map(f=>{
+    const cover=f.coverDays, cc=cover==null?'text-slate-800':(cover<=14?'text-rose-600':(cover<=30?'text-amber-600':'text-emerald-600'));
+    return _fbaKpi(f.fc+' · sellable', FBA.nf(f.onHand), `${FBA.nf(f.shipped)} sold/30d · <span class="${cc}">${cover!=null?cover+'d cover':'—'}</span>`, cc);
+  }).join('') || '<div class="col-span-full text-sm text-slate-400 py-4 text-center">No FC data</div>';
+  const fcs=d.fcs||[];
+  const H=fcs.map(fc=>`<th class="px-4 py-3 text-center font-semibold">${FBA.esc(fc)}</th>`).join('');
+  const body=(d.products||[]).map(p=>{
+    const cells=fcs.map(fc=>{ const c=p.cells[fc];
+      if(!c||(c.onHand===0&&c.shipped===0)) return '<td class="px-4 py-3 text-center text-slate-300">—</td>';
+      const cd=c.coverDays, tight=cd!=null&&c.shipped>0&&cd<14, reb=p.rebalance===fc;
+      return `<td class="px-4 py-3 text-center ${reb?'bg-rose-50':''}">
+        <div class="font-semibold ${tight?'text-rose-600':'text-slate-800'} tabular-nums">${FBA.nf(c.onHand)}<span class="text-slate-300 font-normal"> on</span></div>
+        <div class="text-xs text-slate-500 tabular-nums">${FBA.nf(c.shipped)} sold${cd!=null?' · '+cd+'d':''}</div></td>`;
+    }).join('');
+    const tot=p.total||{onHand:0,shipped:0};
+    const action=p.rebalance?`<span class="fba-band fba-band-critical">⚠ Send to ${FBA.esc(p.rebalance)}</span>`:'<span class="text-slate-300 text-xs">balanced</span>';
+    return `<tr class="border-t border-slate-100">
+      <td class="px-4 py-3"><div class="font-medium text-slate-800 text-sm">${FBA.esc((p.title||'').slice(0,40))}</div>${_fbaSkuLine(p.masterSku,p.msku)}</td>
+      ${cells}
+      <td class="px-4 py-3 text-center"><div class="font-semibold text-slate-700 tabular-nums">${FBA.nf(tot.onHand)}</div><div class="text-xs text-slate-400">${FBA.nf(tot.shipped)} sold</div></td>
+      <td class="px-4 py-3 text-center">${action}</td>
+    </tr>`;
+  }).join('');
+  FBA.$('fba-loc-matrix').innerHTML=`<table class="w-full text-sm"><thead class="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide"><tr>
+    <th class="px-4 py-3 text-left font-semibold">Product</th>${H}<th class="px-4 py-3 text-center font-semibold">Total</th><th class="px-4 py-3 text-center font-semibold">Action</th></tr></thead>
+    <tbody>${body||'<tr><td class="px-4 py-6 text-center text-slate-400" colspan="'+(fcs.length+3)+'">No location data yet — hit “Sync now”.</td></tr>'}</tbody></table>`;
+}
+
+// ── FBA INBOUND WIZARD (create shipment → placement → packing → carrier/appointment → labels) ──
+let _fbaInb=null;
+const _FBA_STEPS=['Items','Placement','Packing','Carrier','Labels'];
+const _FBA_FCS=['DEL4','DEL5'];
+function _fbaInbOpen(){
+  const sug=((_fbaFc&&_fbaFc.rows)||[]).filter(r=>r.suggestQty>0 && ['stockout','critical','reorder'].includes(r.band));
+  const rebal={}; ((_fbaLoc&&_fbaLoc.products)||[]).forEach(p=>{ if(p.rebalance) rebal[p.masterSku||p.msku]=p.rebalance; });
+  _fbaInb={ step:0, planId:null, busy:false,
+    items: sug.map(r=>({ msku:r.sku, masterSku:r.masterSku, title:r.title, quantity:r.suggestQty, warehouseId: rebal[r.masterSku]||'DEL4' })),
+    placement:null, shipments:[], transport:null, labels:null };
+  const m=FBA.$('fba-inbound-modal'); m.classList.remove('hidden','view-hidden'); m.style.display='flex';
+  _fbaInbRender();
+}
+function _fbaInbClose(){
+  const m=FBA.$('fba-inbound-modal'); if(m){ m.classList.add('hidden'); m.style.display=''; }
+  // Clean up an abandoned DRAFT (plan created but shipment not yet confirmed at step 3) so drafts don't pile up.
+  if(_fbaInb && _fbaInb.planId && _fbaInb.step<3){ const pid=_fbaInb.planId; _fbaInb.planId=null; _fbaInb.placement=null;
+    fetch('/api/fba/inbound/'+pid+'/cancel',{method:'POST',headers:getAuthHeaders()}).catch(()=>{}); }
+  if(_fbaTab==='orders') setTimeout(()=>_fbaLoadOrders(),400);
+}
+async function _fbaInbCall(path, method, body){
+  _fbaInb.busy=true; _fbaInbFoot();
+  try{
+    const r=await fetch('/api/fba/inbound'+path,{method:method||'GET',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:body?JSON.stringify(body):undefined});
+    const d=await r.json(); if(!d.success) throw new Error(d.error||'request failed');
+    return d;
+  }catch(e){ showNotification('✗ '+e.message); throw e; }
+  finally{ _fbaInb.busy=false; }
+}
+function _fbaInbRender(){
+  FBA.$('fba-inb-steps').innerHTML='<div class="flex items-center gap-1 text-xs mb-2">'+_FBA_STEPS.map((s,i)=>{
+    const st=i===_fbaInb.step?'text-indigo-600 font-bold':(i<_fbaInb.step?'text-emerald-600':'text-slate-300');
+    const bd=i===_fbaInb.step?'border-indigo-600':(i<_fbaInb.step?'border-emerald-500 bg-emerald-50':'border-slate-300');
+    return `<div class="flex items-center gap-1 ${st}"><span class="w-5 h-5 rounded-full border ${bd} flex items-center justify-center text-[10px]">${i<_fbaInb.step?'✓':i+1}</span>${s}</div>${i<_FBA_STEPS.length-1?'<span class="w-4 h-px bg-slate-200"></span>':''}`;
+  }).join('')+'</div>';
+  FBA.$('fba-inb-sub').textContent=_fbaInb.planId?('Plan '+_fbaInb.planId):'Seeded from your restock plan';
+  [_fbaInbItems,_fbaInbPlacement,_fbaInbPacking,_fbaInbCarrier,_fbaInbLabels][_fbaInb.step]();
+}
+function _fbaInbFoot(html){ if(html!==undefined) FBA.$('fba-inb-foot')._h=html; FBA.$('fba-inb-foot').innerHTML=(_fbaInb.busy?'<span class="text-xs text-slate-400">Working… Amazon operations can take up to a minute.</span>':'')+ (FBA.$('fba-inb-foot')._h||''); }
+function _fbaInbBtn(id,label,cls){ return `<button id="${id}" ${_fbaInb.busy?'disabled':''} class="text-sm px-4 py-2 rounded-lg font-semibold ${cls} ${_fbaInb.busy?'opacity-50 cursor-not-allowed':''}">${label}</button>`; }
+
+// Step 1 — items
+function _fbaInbItems(){
+  const rows=_fbaInb.items.map((it,i)=>`<tr class="border-t border-slate-100">
+    <td class="px-3 py-2"><div class="font-medium text-slate-800 text-sm">${FBA.esc((it.title||'').slice(0,34))}</div>${_fbaSkuLine(it.masterSku,it.msku)}</td>
+    <td class="px-3 py-2 text-right"><input type="number" min="1" value="${it.quantity}" data-i="${i}" class="fba-inb-qty w-20 text-sm text-right px-2 py-1 border border-slate-200 rounded-lg"></td>
+    <td class="px-3 py-2 text-center"><select data-i="${i}" class="fba-inb-fc text-sm px-2 py-1 border border-slate-200 rounded-lg">${_FBA_FCS.map(f=>`<option ${it.warehouseId===f?'selected':''}>${f}</option>`).join('')}</select></td>
+    <td class="px-3 py-2 text-center"><button data-i="${i}" class="fba-inb-del text-rose-400 hover:text-rose-600">&times;</button></td></tr>`).join('');
+  FBA.$('fba-inb-body').innerHTML = _fbaInb.items.length
+    ? `${_fbaInb.planId?'<p class="text-xs text-amber-600 mb-2">Editing replaces the current draft — no duplicate shipment is created.</p>':''}<p class="text-sm text-slate-500 mb-3">Review quantities and destination FC. Ship-from: <b>Gurgaon 122001</b>. <button id="fba-inb-additem" class="text-indigo-600 hover:underline">+ add SKU</button></p>
+       <table class="w-full text-sm"><thead class="text-xs text-slate-400 uppercase"><tr><th class="px-3 py-2 text-left">Product</th><th class="px-3 py-2 text-right">Units</th><th class="px-3 py-2 text-center">Send to</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : '<p class="text-sm text-slate-500 py-8 text-center">No restock suggestions to send. Open the <b>Restock Plan</b> tab first (nothing is critical / reorder right now).</p>';
+  _fbaInbFoot(`${_fbaInbBtn('fba-inb-cancel','Cancel','border border-slate-200 text-slate-600')}<div>${_fbaInb.items.length?_fbaInbBtn('fba-inb-create',_fbaInb.planId?'Update plan →':'Create plan →','bg-indigo-600 text-white hover:bg-indigo-700'):''}</div>`);
+  FBA.$('fba-inb-body').querySelectorAll('.fba-inb-qty').forEach(el=>el.addEventListener('change',e=>{ _fbaInb.items[+e.target.dataset.i].quantity=Math.max(1,parseInt(e.target.value||'1',10)); }));
+  FBA.$('fba-inb-body').querySelectorAll('.fba-inb-fc').forEach(el=>el.addEventListener('change',e=>{ _fbaInb.items[+e.target.dataset.i].warehouseId=e.target.value; }));
+  FBA.$('fba-inb-body').querySelectorAll('.fba-inb-del').forEach(el=>el.addEventListener('click',e=>{ _fbaInb.items.splice(+e.target.dataset.i,1); _fbaInbItems(); }));
+  FBA.$('fba-inb-cancel').addEventListener('click',_fbaInbClose);
+  FBA.$('fba-inb-create')?.addEventListener('click',_fbaInbCreatePlan);
+  FBA.$('fba-inb-additem')?.addEventListener('click',_fbaInbAddItem);
+}
+function _fbaInbAddItem(){
+  const have=new Set(_fbaInb.items.map(i=>i.msku));
+  const cands=((_fbaFc&&_fbaFc.rows)||[]).filter(r=>r.sku && !have.has(r.sku));
+  if(!cands.length){ showNotification('No more FBA SKUs to add'); return; }
+  const sel=document.createElement('select');
+  sel.className='text-sm px-2 py-1 border border-slate-200 rounded-lg ml-1';
+  sel.innerHTML='<option value="">choose SKU…</option>'+cands.map(r=>`<option value="${FBA.esc(r.sku)}">${FBA.esc((r.title||r.sku).slice(0,42))}</option>`).join('');
+  sel.addEventListener('change',()=>{ const r=cands.find(x=>x.sku===sel.value); if(r){ _fbaInb.items.push({ msku:r.sku, masterSku:r.masterSku, title:r.title, quantity:r.suggestQty>0?r.suggestQty:1, warehouseId:(r.rebalance||'DEL4') }); _fbaInbItems(); } });
+  const btn=FBA.$('fba-inb-additem'); if(btn){ btn.replaceWith(sel); sel.focus(); }
+}
+async function _fbaInbCreatePlan(){
+  if(!_fbaInb.items.length){ showNotification('Add at least one item'); return; }
+  try{
+    // Editing after a draft already exists → cancel the old draft first so we never leave duplicate plans.
+    if(_fbaInb.planId){ const old=_fbaInb.planId; _fbaInb.planId=null; _fbaInb.placement=null;
+      try{ await fetch('/api/fba/inbound/'+old+'/cancel',{method:'POST',headers:getAuthHeaders()}); }catch(_){} }
+    const d=await _fbaInbCall('/plan','POST',{ items:_fbaInb.items });
+    _fbaInb.planId=d.inboundPlanId; _fbaInb.step=1; _fbaInbRender();
+    _fbaInbGenPlacement();
+  }catch(e){ _fbaInbItems(); }
+}
+// Step 2 — placement
+function _fbaInbPlacement(){
+  const p=_fbaInb.placement;
+  if(!p){ FBA.$('fba-inb-body').innerHTML='<p class="text-sm text-slate-400 py-8 text-center">Generating placement (Amazon assigns the shipment)…</p>'; _fbaInbFoot(_fbaInbBtn('fba-inb-back','← Back','border border-slate-200 text-slate-600')); FBA.$('fba-inb-back')?.addEventListener('click',()=>{_fbaInb.step=0;_fbaInbRender();}); return; }
+  const fee=(p.fees||[]).reduce((a,f)=>a+((f.value&&f.value.amount)||0),0);
+  FBA.$('fba-inb-body').innerHTML=`<div class="rounded-xl border border-slate-200 p-4">
+    <div class="flex items-center justify-between mb-2"><span class="text-sm font-bold text-slate-700">Placement option</span><span class="text-xs px-2 py-0.5 rounded-full ${fee>0?'bg-amber-50 text-amber-700':'bg-emerald-50 text-emerald-700'}">Placement fee ${fee>0?FBA.inr(fee):'₹0'}</span></div>
+    <p class="text-sm text-slate-500">Amazon will create <b>${(p.shipmentIds||[]).length}</b> shipment(s). Next: enter box details, then confirm to create them.</p>
+  </div>`;
+  _fbaInbFoot(`${_fbaInbBtn('fba-inb-back','← Edit items','border border-slate-200 text-slate-600')}${_fbaInbBtn('fba-inb-to-pack','Continue to packing →','bg-indigo-600 text-white hover:bg-indigo-700')}`);
+  FBA.$('fba-inb-back').addEventListener('click',()=>{_fbaInb.step=0;_fbaInbRender();});
+  FBA.$('fba-inb-to-pack').addEventListener('click',()=>{ _fbaInb.step=2; _fbaInbRender(); });
+}
+async function _fbaInbGenPlacement(){
+  try{ const d=await _fbaInbCall('/'+_fbaInb.planId+'/placement','POST',{}); _fbaInb.placement=(d.placementOptions||[])[0]||null; _fbaInbPlacement(); }
+  catch(e){ _fbaInbPlacement(); }
+}
+// Step 3 — packing (box details). India requires this BEFORE the shipment is confirmed.
+function _fbaInbPacking(){
+  FBA.$('fba-inb-body').innerHTML=`<p class="text-sm text-slate-500 mb-3">Enter box details (one box per shipment assumed). Amazon requires packing info before creating the shipment.</p>
+    <div class="grid grid-cols-3 gap-3">
+      <label class="text-xs text-slate-500">Weight/box (kg)<input id="fba-inb-wt" type="number" min="0.1" step="0.1" value="3" class="w-full mt-1 text-sm px-2 py-1.5 border border-slate-200 rounded-lg"></label>
+      <div class="col-span-2"></div>
+      <label class="text-xs text-slate-500">Length (cm)<input id="fba-inb-l" type="number" min="1" value="30" class="w-full mt-1 text-sm px-2 py-1.5 border border-slate-200 rounded-lg"></label>
+      <label class="text-xs text-slate-500">Width (cm)<input id="fba-inb-w" type="number" min="1" value="30" class="w-full mt-1 text-sm px-2 py-1.5 border border-slate-200 rounded-lg"></label>
+      <label class="text-xs text-slate-500">Height (cm)<input id="fba-inb-h" type="number" min="1" value="30" class="w-full mt-1 text-sm px-2 py-1.5 border border-slate-200 rounded-lg"></label>
+    </div>`;
+  _fbaInbFoot(`${_fbaInbBtn('fba-inb-back','← Back (edit)','border border-slate-200 text-slate-600')}${_fbaInbBtn('fba-inb-pack','Set packing & create shipment →','bg-emerald-600 text-white hover:bg-emerald-700')}`);
+  FBA.$('fba-inb-back').addEventListener('click',()=>{_fbaInb.step=0;_fbaInbRender();});
+  FBA.$('fba-inb-pack').addEventListener('click',_fbaInbPackAndConfirm);
+}
+async function _fbaInbPackAndConfirm(){
+  const box={ weightKg:+FBA.$('fba-inb-wt').value||3, length:+FBA.$('fba-inb-l').value||30, width:+FBA.$('fba-inb-w').value||30, height:+FBA.$('fba-inb-h').value||30 };
+  if(!confirm('Create the shipment(s) in your Amazon account now?')) return;
+  try{
+    await _fbaInbCall('/'+_fbaInb.planId+'/packing','POST',{ box });
+    const d=await _fbaInbCall('/'+_fbaInb.planId+'/placement/confirm','POST',{ placementOptionId:_fbaInb.placement.placementOptionId, fee:(_fbaInb.placement.fees||[]).reduce((a,f)=>a+((f.value&&f.value.amount)||0),0) });
+    _fbaInb.shipments=d.shipments||[]; _fbaInb.step=3; _fbaInbRender(); _fbaInbGenTransport();
+  }catch(e){ _fbaInbPacking(); }
+}
+// Step 4 — carrier (own-carrier small parcel). Confirming is MANDATORY before labels (Amazon rule).
+function _fbaInbCarrier(){
+  const opts=_fbaInb.transport;
+  if(!opts){ FBA.$('fba-inb-body').innerHTML='<p class="text-sm text-slate-400 py-8 text-center">Fetching carrier options from Amazon…</p>'; _fbaInbFoot(''); return; }
+  if(!opts.length){
+    FBA.$('fba-inb-body').innerHTML='<p class="text-sm text-slate-500 py-6 text-center">No carrier options returned yet. Amazon requires a confirmed carrier before labels.</p>';
+    _fbaInbFoot(_fbaInbBtn('fba-inb-retry-tr','Retry','bg-indigo-600 text-white hover:bg-indigo-700'));
+    FBA.$('fba-inb-retry-tr').addEventListener('click',_fbaInbGenTransport); return;
+  }
+  FBA.$('fba-inb-body').innerHTML=`<p class="text-sm text-slate-500 mb-2">Pick your carrier (you arrange pickup/drop). Required before labels.</p>
+    <div class="space-y-2 max-h-72 overflow-y-auto">${opts.map((o,i)=>`<label class="flex items-center gap-3 p-3 border border-slate-200 rounded-lg cursor-pointer hover:border-indigo-400"><input type="radio" name="fba-tr" value="${i}" ${i===0?'checked':''}><div><div class="text-sm font-semibold text-slate-700">${FBA.esc((o.carrier&&o.carrier.name)||'Option '+(i+1))}</div><div class="text-xs text-slate-400">${FBA.esc((o.shippingMode||'').replace(/_/g,' '))}</div></div></label>`).join('')}</div>`;
+  _fbaInbFoot(_fbaInbBtn('fba-inb-conf-tr','Confirm carrier →','bg-emerald-600 text-white hover:bg-emerald-700'));
+  FBA.$('fba-inb-conf-tr').addEventListener('click',_fbaInbConfirmTransport);
+}
+async function _fbaInbGenTransport(){
+  _fbaInb.transport=null; _fbaInbCarrier();
+  try{ const d=await _fbaInbCall('/'+_fbaInb.planId+'/transportation','POST',{}); _fbaInb.transport=d.transportationOptions||[]; _fbaInbCarrier(); }
+  catch(e){ _fbaInb.transport=[]; _fbaInbCarrier(); }
+}
+async function _fbaInbConfirmTransport(){
+  const i=+((FBA.$('fba-inb-body').querySelector('input[name=fba-tr]:checked')||{}).value||0);
+  const chosen=_fbaInb.transport[i]; if(!chosen) return;
+  // One selection per shipment — prefer the chosen carrier for each, else that shipment's first option.
+  const fallbackSid=(_fbaInb.shipments[0]||{}).shipmentId;
+  const byShip={};
+  _fbaInb.transport.forEach(o=>{ const sid=o.shipmentId||fallbackSid; if(!sid) return;
+    if(!byShip[sid]) byShip[sid]=o;
+    if(chosen.carrier&&o.carrier&&o.carrier.name===chosen.carrier.name) byShip[sid]=o; });
+  const selections=Object.values(byShip).map(o=>({ shipmentId:o.shipmentId||fallbackSid, transportationOptionId:o.transportationOptionId }));
+  try{ await _fbaInbCall('/'+_fbaInb.planId+'/transportation/confirm','POST',{ transportationSelections:selections }); _fbaInb.step=4; _fbaInbRender(); _fbaInbGetLabels(); }
+  catch(e){ _fbaInbCarrier(); }
+}
+// Step 5 — labels
+function _fbaInbLabels(){
+  FBA.$('fba-inb-body').innerHTML=`<p class="text-sm text-emerald-600 font-semibold mb-1">Shipment confirmed ✓</p>
+    <p class="text-sm text-slate-600 mb-3">Download the FBA box labels (2D barcode) and stick one on each box.</p>
+    <div id="fba-inb-label-out" class="text-sm text-slate-500">Fetching labels…</div>`;
+  _fbaInbFoot(`${_fbaInbBtn('fba-inb-getlabels','Re-fetch labels','border border-slate-200 text-slate-600')}${_fbaInbBtn('fba-inb-done','Done','bg-indigo-600 text-white hover:bg-indigo-700')}`);
+  FBA.$('fba-inb-getlabels').addEventListener('click',_fbaInbGetLabels);
+  FBA.$('fba-inb-done').addEventListener('click',()=>{ _fbaInbClose(); showNotification('Inbound complete ✓'); });
+}
+async function _fbaInbGetLabels(){
+  const out=FBA.$('fba-inb-label-out'); if(out) out.innerHTML='Fetching labels…';
+  try{ const d=await _fbaInbCall('/'+_fbaInb.planId+'/labels','GET'); const labels=d.labels||[];
+    const el=FBA.$('fba-inb-label-out'); if(!el) return;
+    el.innerHTML = labels.length ? labels.map(l=>l.url
+      ? `<a href="${l.url}" target="_blank" class="block text-indigo-600 font-semibold underline py-1">⬇ Download box labels${l.fc?' — '+FBA.esc(l.fc):''} <span class="text-slate-400 font-normal">(${FBA.esc(l.shipmentConfirmationId)})</span></a>`
+      : `<div class="text-rose-500 py-1">${FBA.esc(l.shipmentConfirmationId||'')}: ${FBA.esc(l.error||'no label')}</div>`).join('') : '<span class="text-amber-600">No labels returned.</span>';
+  }catch(e){ const el=FBA.$('fba-inb-label-out'); if(el) el.innerHTML='<span class="text-rose-500">'+FBA.esc(e.message)+'</span>'; }
+}
+
+// ── INBOUND ORDERS (management dashboard) ──
+function _fbaOrdStatusBadge(o){
+  if(o.ourStatus==='CANCELLED'||o.amzStatus==='VOIDED'||o.amzStatus==='CANCELLED') return {t:'Cancelled',c:'inactive'};
+  if(o.ourStatus==='LABELS_READY'||(o.labels&&o.labels.length)) return {t:'Labels ready',c:'ok'};
+  if(o.ourStatus==='TRANSPORT_CONFIRMED') return {t:'Carrier set',c:'ok'};
+  if(o.ourStatus==='PLACEMENT_CONFIRMED'||(o.shipments&&o.shipments.length)) return {t:'Shipment created',c:'reorder'};
+  if(o.amzStatus==='SHIPPED') return {t:'Shipped',c:'ok'};
+  return {t:'Draft',c:'reorder'};
+}
+async function _fbaLoadOrders(){
+  FBA.$('fba-ord-table').innerHTML='<div class="p-6 text-sm text-slate-400 text-center">Loading orders…</div>';
+  try{ const r=await fetch('/api/fba/inbound',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    _fbaOrd=d; _fbaRenderOrders();
+  }catch(e){ FBA.$('fba-ord-table').innerHTML=`<div class="p-6 text-sm text-rose-500 text-center">${FBA.esc(e.message)}</div>`; }
+}
+function _fbaRenderOrders(){
+  const d=_fbaOrd; if(!d) return; const s=d.summary||{};
+  FBA.$('fba-ord-kpis').innerHTML=[
+    _fbaKpi('Orders', FBA.nf(s.total), (s.drafts||0)+' draft · '+(s.confirmed||0)+' confirmed'),
+    _fbaKpi('Drafts', FBA.nf(s.drafts), 'not yet confirmed', s.drafts>0?'text-amber-600':'text-slate-800'),
+    _fbaKpi('Confirmed', FBA.nf(s.confirmed), (s.labelsReady||0)+' with labels','text-emerald-600'),
+    _fbaKpi('Units in pipeline', FBA.nf(s.units), 'across active orders','text-indigo-600')
+  ].join('');
+  const orders=d.orders||[];
+  FBA.$('fba-ord-count').textContent=orders.length+' orders';
+  const clr=FBA.$('fba-ord-clear'); if(clr){ if(s.drafts>0){ clr.classList.remove('hidden'); clr.textContent='Clear '+s.drafts+' drafts'; } else clr.classList.add('hidden'); }
+  const body=orders.map(o=>{
+    const st=_fbaOrdStatusBadge(o), cancelled=st.c==='inactive';
+    const canLabels=(o.shipments&&o.shipments.length)||o.ourStatus==='LABELS_READY'||o.ourStatus==='TRANSPORT_CONFIRMED';
+    const created=o.createdAt?new Date(o.createdAt).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'2-digit'}):'—';
+    const itemsTxt=(o.items||[]).slice(0,3).map(i=>`${FBA.esc(i.masterSku||i.msku)}×${i.quantity}`).join(', ')+((o.items||[]).length>3?'…':'');
+    return `<tr class="border-t border-slate-100">
+      <td class="px-4 py-3 text-slate-500 tabular-nums whitespace-nowrap">${created}</td>
+      <td class="px-4 py-3"><div class="font-medium text-slate-800 text-sm">${FBA.esc(o.name||'Inbound')}</div><div class="text-xs text-slate-400">${FBA.esc((o.planId||'').replace(/^wf/,'').slice(0,10))}…${o.tracked?'':' · <span class="text-amber-500">untracked</span>'}</div></td>
+      <td class="px-4 py-3 text-center text-sm text-slate-600">${o.fcs&&o.fcs.length?FBA.esc(o.fcs.join(', ')):FBA.esc(o.ship||'—')}</td>
+      <td class="px-4 py-3 text-sm text-slate-600">${o.units?`<b class="text-slate-800">${o.units}</b> units${itemsTxt?' <span class="text-xs text-slate-400">· '+itemsTxt+'</span>':''}`:'<span class="text-slate-300">—</span>'}</td>
+      <td class="px-4 py-3 text-center"><span class="fba-band fba-band-${st.c}">${st.t}</span></td>
+      <td class="px-4 py-3 text-right whitespace-nowrap">
+        ${canLabels?`<button data-act="labels" data-plan="${o.planId}" class="text-xs px-2 py-1 rounded-lg bg-indigo-50 text-indigo-600 font-semibold hover:bg-indigo-100">Labels</button>`:''}
+        ${!cancelled?`<button data-act="cancel" data-plan="${o.planId}" class="text-xs px-2 py-1 rounded-lg text-rose-500 hover:bg-rose-50 ml-1">Cancel</button>`:''}
+      </td></tr>`;
+  }).join('');
+  FBA.$('fba-ord-table').innerHTML=`<table class="w-full text-sm"><thead class="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide"><tr>
+    <th class="px-4 py-3 text-left font-semibold">Created</th><th class="px-4 py-3 text-left font-semibold">Order</th><th class="px-4 py-3 text-center font-semibold">Dest</th><th class="px-4 py-3 text-left font-semibold">Items</th><th class="px-4 py-3 text-center font-semibold">Status</th><th class="px-4 py-3 text-right font-semibold">Actions</th></tr></thead>
+    <tbody>${body||'<tr><td colspan="6" class="px-4 py-8 text-center text-slate-400">No inbound orders yet. Hit “New inbound”.</td></tr>'}</tbody></table>`;
+}
+async function _fbaOrdAction(act, planId, btn){
+  if(act==='labels'){
+    if(btn){ btn.disabled=true; btn.textContent='…'; }
+    try{ const r=await fetch('/api/fba/inbound/'+planId+'/labels',{headers:getAuthHeaders()}); const d=await r.json();
+      if(!d.success) throw new Error(d.error||'failed');
+      const urls=(d.labels||[]).map(l=>l.url).filter(Boolean);
+      if(!urls.length) showNotification('No labels available yet');
+      else { urls.forEach(u=>window.open(u,'_blank')); showNotification('Opened '+urls.length+' label PDF(s)'); }
+    }catch(e){ showNotification('✗ '+e.message); }
+    finally{ if(btn){ btn.disabled=false; btn.textContent='Labels'; } }
+  } else if(act==='cancel'){
+    if(!confirm('Cancel this inbound order in your Amazon account?')) return;
+    try{ const r=await fetch('/api/fba/inbound/'+planId+'/cancel',{method:'POST',headers:getAuthHeaders()}); const d=await r.json();
+      if(!d.success) throw new Error(d.error||'failed');
+      showNotification('Order cancelled'); _fbaLoadOrders();
+    }catch(e){ showNotification('✗ '+e.message); }
+  }
+}
+async function _fbaOrdClearDrafts(){
+  const n=(_fbaOrd&&_fbaOrd.summary&&_fbaOrd.summary.drafts)||0;
+  if(!n){ showNotification('No drafts to clear'); return; }
+  if(!confirm('Cancel all '+n+' draft orders? Confirmed shipments are kept.')) return;
+  const btn=FBA.$('fba-ord-clear'); if(btn){ btn.disabled=true; btn.textContent='Clearing…'; }
+  try{ const r=await fetch('/api/fba/inbound/cancel-drafts',{method:'POST',headers:getAuthHeaders()}); const d=await r.json();
+    if(!d.success) throw new Error(d.error||'failed');
+    showNotification('Cancelled '+d.cancelled+' drafts'+(d.failed?' ('+d.failed+' failed)':''));
+  }catch(e){ showNotification('✗ '+e.message); }
+  finally{ if(btn) btn.disabled=false; _fbaLoadOrders(); }
+}
 
 // ═══════════════ OPS CONTROL (NDR queue · Risk · Courier scorecard · Cost) ═══════════════
 let _opsData = null, _opsWired = false, _opsTab = 'ndr', _opsLoaded = {}, _opsRisk = null, _opsCourier = null, _opsCost = null, _opsCostPerRto = 150;
@@ -4049,7 +4838,7 @@ function dpinvOpenModal(){ const m=document.getElementById('dpinv-modal'); m.cla
 function dpinvCloseModal(){ const m=document.getElementById('dpinv-modal'); m.classList.add('hidden'); m.classList.remove('flex'); }
 const _th='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60', _td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100';
 async function dpinvLoadGoods(){ const el=document.getElementById('dpinv-goods-list'); if(!el)return; el.innerHTML='<div class="p-4 text-xs text-slate-400">Loading…</div>';
-    try{ const r=await fetch('/api/docpharma-invoices/goods',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+    try{ const r=await fetch('/api/docpharma-invoices/goods?_='+Date.now(),{headers:getAuthHeaders(),cache:'no-store'}); const d=await r.json(); if(!d.success)throw new Error(d.error);
         const invs=d.invoices||[]; if(!invs.length){ el.innerHTML='<div class="p-6 text-center text-xs text-slate-400">No goods invoices yet — Add or Upload one.</div>'; return; }
         el.innerHTML=`<table class="w-full"><thead><tr><th class="${_th}">Invoice</th><th class="${_th}">Date</th><th class="${_th}">PO</th><th class="${_th} text-right">Qty</th><th class="${_th} text-right">Value</th><th class="${_th}"></th></tr></thead><tbody>${invs.map(iv=>`<tr class="hover:bg-slate-50"><td class="${_td} font-semibold">${iv.invoice_no||'—'}</td><td class="${_td} tabular-nums">${dpreDMY(iv.invoice_date)||'—'}</td><td class="${_td}">${iv.po_number||'—'}</td><td class="${_td} text-right tabular-nums">${iv.total_qty||0}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.total_value||0)}</td><td class="${_td} text-right whitespace-nowrap"><button class="dpinv-gv text-indigo-600 text-xs" data-id="${iv.id}">View</button> <button class="dpinv-gd text-rose-500 text-xs ml-2" data-id="${iv.id}" data-no="${iv.invoice_no||''}">Delete</button></td></tr>`).join('')}</tbody></table>`;
         el.querySelectorAll('.dpinv-gv').forEach(b=>b.addEventListener('click',()=>dpinvGoodsView(b.dataset.id)));
@@ -4057,7 +4846,7 @@ async function dpinvLoadGoods(){ const el=document.getElementById('dpinv-goods-l
     }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+e.message+'</div>'; }
 }
 async function dpinvLoadCharge(){ const el=document.getElementById('dpinv-charge-list'); if(!el)return; el.innerHTML='<div class="p-4 text-xs text-slate-400">Loading…</div>';
-    try{ const r=await fetch('/api/docpharma-invoices/charge',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+    try{ const r=await fetch('/api/docpharma-invoices/charge?_='+Date.now(),{headers:getAuthHeaders(),cache:'no-store'}); const d=await r.json(); if(!d.success)throw new Error(d.error);
         const invs=d.invoices||[]; if(!invs.length){ el.innerHTML='<div class="p-6 text-center text-xs text-slate-400">No charge invoices yet — Add or Upload one.</div>'; return; }
         el.innerHTML=`<table class="w-full"><thead><tr><th class="${_th}">Invoice</th><th class="${_th}">Date</th><th class="${_th}">Subject</th><th class="${_th} text-right">Service</th><th class="${_th} text-right">RTO</th><th class="${_th} text-right">COD</th><th class="${_th} text-right">Grand Total</th><th class="${_th}"></th></tr></thead><tbody>${invs.map(iv=>`<tr class="hover:bg-slate-50"><td class="${_td} font-semibold">${iv.invoice_no||'—'}</td><td class="${_td} tabular-nums">${dpreDMY(iv.invoice_date)||'—'}</td><td class="${_td} text-slate-500">${iv.subject||'—'}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.service_total||0)}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.rto_total||0)}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.cod_fee_total||0)}</td><td class="${_td} text-right tabular-nums font-bold">${OPS_INR(iv.grand_total||iv.total_charges||0)}</td><td class="${_td} text-right whitespace-nowrap"><button class="dpinv-cv text-indigo-600 text-xs" data-id="${iv.id}">Edit</button> <button class="dpinv-cd text-rose-500 text-xs ml-2" data-id="${iv.id}" data-no="${iv.invoice_no||''}">Delete</button></td></tr>`).join('')}</tbody></table>`;
         el.querySelectorAll('.dpinv-cv').forEach(b=>b.addEventListener('click',()=>dpinvChargeForm(invs.find(x=>String(x.id)===b.dataset.id))));
@@ -4313,7 +5102,7 @@ function dpreInvMatchInit(){ const sec=document.getElementById('dpre-tab-invento
 async function dpreInvMatchLoad(){ const k=document.getElementById('dpim-kpis'); if(k)k.innerHTML=ecSkelCards(6);
     const tbl=document.getElementById('dpim-table'); if(tbl)tbl.innerHTML='<div class="p-4 space-y-2">'+Array.from({length:6}).map(()=>'<div class="skl" style="height:34px;width:100%"></div>').join('')+'</div>';
     const dq=(_dpimFrom&&_dpimTo)?`&from=${_dpimFrom}&to=${_dpimTo}`:'';
-    try{ const r=await fetch('/api/docpharma-inventory?lead='+_dpimLead+dq,{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
+    try{ const r=await fetch('/api/docpharma-inventory?lead='+_dpimLead+dq+'&_='+Date.now(),{headers:getAuthHeaders(),cache:'no-store'}); const d=await r.json(); if(!d.success)throw new Error(d.error);
         _dpimData=d; _dpimDetail={}; dpimRenderKpis(); dpimRenderTable(); dpimRenderReport(); ecFade('dpim-kpis','dpim-table');
         const showDl=!!d.period; ['dpim-dl-pdf','dpim-dl-xlsx'].forEach(id=>{ const b=document.getElementById(id); if(b)b.classList.toggle('hidden',!showDl); });
         const sy=document.getElementById('dpim-synced'); if(sy) sy.innerHTML = (d.dpSyncedAt?`DocPharma ${dpimDate(d.dpSyncedAt)}`:'<b class="text-amber-600">DocPharma not synced</b>')+' · '+(d.eeSyncedAt?`EasyEcom ${dpimDate(d.eeSyncedAt)}`:'EasyEcom not synced');
@@ -5244,6 +6033,9 @@ document.addEventListener('DOMContentLoaded', () => {
     loginBtn?.addEventListener('click', handleLogin);
     loginEmailEl?.addEventListener('keypress', e => { if (e.key === 'Enter') handleLogin(); });
     loginPasswordEl?.addEventListener('keypress', e => { if (e.key === 'Enter') handleLogin(); });
+    document.getElementById('signup-btn')?.addEventListener('click', handleSignup);
+    document.getElementById('signup-password')?.addEventListener('keypress', e => { if (e.key === 'Enter') handleSignup(); });
+    document.getElementById('auth-toggle')?.addEventListener('click', () => { const sf = document.getElementById('signup-form'); _authToggle(!!(sf && sf.classList.contains('hidden'))); });
     logoutBtn?.addEventListener('click', logout);
     
     navOrdersDashboard?.addEventListener('click', (e) => { e.preventDefault(); navigate('orders-dashboard'); });

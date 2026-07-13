@@ -101,11 +101,15 @@ async function getEligibleOrders(failedOnly = false) {
 // Slack helpers
 // ─────────────────────────────────────────────────────
 
+const { postTeams } = require('./teams');
 async function postToSlack(payload) {
+    // Teams — approvals moved to the dashboard, so the card links there instead of asking for a yes/no reply.
+    const teamsUrl = config.TEAMS_WEBHOOK_AMAZON;
+    if (teamsUrl) postTeams(teamsUrl, payload, { actionUrl: config.DASHBOARD_URL, actionTitle: 'Review & approve in dashboard', footer: '➡️ Approve & send review requests from the Amazon Review page in the dashboard (Teams can’t take a yes/no reply).' }).catch(() => {});
     const token   = config.SLACK_BOT_TOKEN;
     const channel = config.SLACK_CHANNEL_ID;
     if (!token || !channel) {
-        console.warn('[AutoReview] SLACK_BOT_TOKEN or SLACK_CHANNEL_ID not set');
+        if (!teamsUrl) console.warn('[AutoReview] no Slack + no Teams webhook set');
         return null;
     }
     const res = await axios.post(

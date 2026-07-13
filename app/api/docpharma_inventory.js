@@ -207,6 +207,7 @@ router.get('/docpharma-inventory', async (req, res) => {
         const lead = req.query.lead != null ? Math.max(1, num(req.query.lead)) : 15;
         const lowThreshold = req.query.low != null ? num(req.query.low) : 20;
         const out = await computeInventory(lead, lowThreshold, req.query.from || '', req.query.to || '');
+        res.set('Cache-Control', 'no-store');
         res.json({ success: true, ...out });
     } catch (e) { console.error('[DP Inventory]', e.message); res.status(500).json({ success: false, error: e.message }); }
 });

@@ -7,9 +7,22 @@ const { supabase } = require('./app/supabase');
 const app = express();
 
 // Middleware
-app.use(cors());
+// CORS restricted to the app's own origin(s). Same-origin dashboard calls send no Origin header and are
+// unaffected; this blocks other websites from calling the API from a victim's browser. Override via CORS_ORIGINS.
+const CORS_ALLOW = (process.env.CORS_ORIGINS || config.DASHBOARD_URL || '')
+    .split(',').map(s => s.trim()).filter(Boolean)
+    .concat(['http://localhost:5002', 'http://127.0.0.1:5002']);
+app.use(cors({ origin: (origin, cb) => cb(null, !origin || CORS_ALLOW.includes(origin)), credentials: true }));
 app.use(express.json());
 app.enable('trust proxy');
+
+// Security headers — clickjacking + MIME-sniffing protection (defense against XSS impact).
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+});
 
 // Static Files
 app.use('/static', express.static(path.join(__dirname, 'app/static')));
@@ -33,6 +46,7 @@ const serviceabilityRoutes = require('./app/api/serviceability');
 const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom } = require('./app/api/warehouse_slack_report');
 const deliveryReportsRoutes = require('./app/api/delivery_reports');
 const opsControlRoutes = require('./app/api/ops_control');
+const { router: amazonFbaRoutes, initFbaLocationCron } = require('./app/api/amazon_fba');
 const docpharmaReconRoutes = require('./app/api/docpharma_recon');
 const docpharmaInvoiceRoutes = require('./app/api/docpharma_invoices');
 const docpharmaLedgerRoutes = require('./app/api/docpharma_ledger');
@@ -44,6 +58,16 @@ const cron = require('node-cron');
 
 // --- Register Routes ---
 app.use('/api', authRoutes);
+app.use('/api/admin', require('./app/api/users'));
+
+// --- Require a valid JWT for ALL data APIs below. Public: login/signup (handled above) + external webhooks. ---
+const { tokenRequired: _apiAuth } = require('./app/auth');
+const PUBLIC_API = [/^\/login$/, /^\/signup$/, /^\/webhook(\/|$)/];
+app.use('/api', (req, res, next) => {
+    if (req.method === 'OPTIONS') return next();
+    if (PUBLIC_API.some(rx => rx.test(req.path))) return next();
+    return _apiAuth(req, res, next);
+});
 app.use('/api', ordersRoutes);
 app.use('/api', adsetRoutes);
 app.use('/api', adRoutes);
@@ -58,12 +82,15 @@ app.use('/api/fulfillment-ops', fulfillmentOpsRoutes);
 app.use('/api/serviceability', serviceabilityRoutes);
 app.use('/api', deliveryReportsRoutes);
 app.use('/api', opsControlRoutes);
+app.use('/api', amazonFbaRoutes);
+app.use('/api', require('./app/api/teams').router);
 app.use('/api', docpharmaReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
 app.use('/api', docpharmaLedgerRoutes);
 app.use('/api', docpharmaOverviewRoutes);
 app.use('/api', docpharmaInventoryRoutes);
 initAutoReviewCron();
+initFbaLocationCron();
 
 // Delivery-journey gap-fill — every 6h, refresh non-final shipments (webhooks handle real-time;
 // this catches any misses). Skips shipments already delivered/RTO (is_final) → minimal API.
