@@ -28,6 +28,8 @@ router.post('/rapidshyp', async (req, res) => {
 
             // Normalize ID for searching: Remove #
             const cleanId = String(orderId).replace('#', '');
+            // Guard against PostgREST filter injection (this webhook is unauthenticated): safe order-id chars only.
+            if (!/^[\w-]+$/.test(cleanId)) { console.warn('[Webhook] skipped unsafe seller_order_id:', orderId); continue; }
 
             // Update enriched_orders_ecom where name matches
             const updateFields = {
@@ -40,7 +42,7 @@ router.post('/rapidshyp', async (req, res) => {
             const { data: updated, error } = await supabase
                 .from('enriched_orders_ecom')
                 .update(updateFields)
-                .or(`name.eq.${cleanId},name.eq.#${cleanId}`)
+                .in('name', [cleanId, '#' + cleanId])
                 .select('shopify_id');
 
             if (!error && updated && updated.length > 0) {

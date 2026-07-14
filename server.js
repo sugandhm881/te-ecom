@@ -17,10 +17,27 @@ app.use(express.json());
 app.enable('trust proxy');
 
 // Security headers — clickjacking + MIME-sniffing protection (defense against XSS impact).
+// CSP is defense-in-depth for the (now-escaped) XSS: even if a payload slips through, connect-src 'self'
+// blocks exfiltration via fetch/XHR/beacon, and object-src/base-uri/frame-ancestors/form-action are locked
+// down. script/style keep only 'unsafe-inline' for the SPA's inline handlers; 'unsafe-eval' and the CDN
+// sources were removed once Tailwind was pre-built and Chart.js self-hosted (no external scripts remain).
+const CSP = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' data: https:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "frame-ancestors 'self'",
+    "form-action 'self'",
+].join('; ');
 app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Content-Security-Policy', CSP);
     next();
 });
 
@@ -61,12 +78,30 @@ app.use('/api', authRoutes);
 app.use('/api/admin', require('./app/api/users'));
 
 // --- Require a valid JWT for ALL data APIs below. Public: login/signup (handled above) + external webhooks. ---
-const { tokenRequired: _apiAuth } = require('./app/auth');
+const { tokenRequired: _apiAuth, requirePermission } = require('./app/auth');
 const PUBLIC_API = [/^\/login$/, /^\/signup$/, /^\/webhook(\/|$)/];
 app.use('/api', (req, res, next) => {
     if (req.method === 'OPTIONS') return next();
     if (PUBLIC_API.some(rx => rx.test(req.path))) return next();
     return _apiAuth(req, res, next);
+});
+
+// Server-side per-dashboard authorization for view-specific API groups (UI hiding alone is not enough).
+// Admins ('*') pass everything. SHARED endpoints (orders, easyecom, serviceability/EDD, reports, ad/adset)
+// are intentionally NOT gated here — multiple dashboards consume them, so gating would break legit access.
+const _VIEW_PERMS = [
+    [/^\/docpharma/i, 'docpharma-recon'],
+    [/^\/fba\//i, 'amazon-fba'],
+    [/^\/ops-control/i, 'ops-control'],
+    [/^\/delivery-performance/i, 'delivery-perf'],
+];
+app.use('/api', (req, res, next) => {
+    const perms = (req.user && req.user.permissions) || [];
+    if (perms.includes('*')) return next();
+    for (const [rx, need] of _VIEW_PERMS) {
+        if (rx.test(req.path)) return perms.includes(need) ? next() : res.status(403).json({ message: 'You do not have access to this section.' });
+    }
+    next();
 });
 app.use('/api', ordersRoutes);
 app.use('/api', adsetRoutes);
@@ -76,9 +111,9 @@ app.use('/api', excelRoutes);
 app.use('/api', pdfRoutes);
 app.use('/api/webhook', webhookRoutes);
 app.use('/api/easyecom', easyecomRoutes);
-app.use('/api/amazon', amazonReviewRoutes);
-app.use('/api/amazon', amazonAutoReviewRoutes);
-app.use('/api/fulfillment-ops', fulfillmentOpsRoutes);
+app.use('/api/amazon', requirePermission('amazon-review'), amazonReviewRoutes);
+app.use('/api/amazon', requirePermission('amazon-review'), amazonAutoReviewRoutes);
+app.use('/api/fulfillment-ops', requirePermission('fulfillment-ops'), fulfillmentOpsRoutes);
 app.use('/api/serviceability', serviceabilityRoutes);
 app.use('/api', deliveryReportsRoutes);
 app.use('/api', opsControlRoutes);
@@ -197,6 +232,11 @@ setTimeout(() => { syncRsCacheEasyecom().catch(e => console.error('[RS-EC Sync] 
 
 // Slack trigger — typing "rejected" in #dp-to-mwh-orders runs the MTD DocPharma report.
 initDpSlackTrigger();
+
+// Teams keyword listener (Graph) — the Teams-native replacement for the Slack inbound triggers:
+// "rejected" in the DP channel runs the DocPharma check; "yes"/"no" in the Amazon channel
+// approves/cancels the pending review send. No-op unless TEAMS_REFRESH_TOKEN + channel IDs are set.
+require('./app/api/teams_listener').initTeamsListener();
 
 // --- COD Confirmation Data (FROM SUPABASE) ---
 // Page past Supabase's 1000-row select cap so ALL confirmations are returned (the old table has ~17k).

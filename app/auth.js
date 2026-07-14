@@ -75,4 +75,15 @@ function requireAdmin(req, res, next) {
     return res.status(403).json({ message: 'Admin access required.' });
 }
 
-module.exports = { generateToken, tokenRequired, requireAdmin, hashPassword, verifyPassword };
+// Gate a route group by dashboard permission(s). Admins / '*' always pass; otherwise the user must
+// hold at least one of the listed view keys. Enforces server-side what the UI only hides client-side.
+function requirePermission(perm) {
+    const need = Array.isArray(perm) ? perm : [perm];
+    return (req, res, next) => {
+        const perms = (req.user && req.user.permissions) || [];
+        if (perms.includes('*') || need.some(p => perms.includes(p))) return next();
+        return res.status(403).json({ message: 'You do not have access to this section.' });
+    };
+}
+
+module.exports = { generateToken, tokenRequired, requireAdmin, requirePermission, hashPassword, verifyPassword };

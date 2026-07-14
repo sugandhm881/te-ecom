@@ -10,13 +10,21 @@ const norm = e => String(e || '').toLowerCase().trim();
 const _attempts = new Map(); // ip -> { count, first }
 const RL_MAX = 10, RL_WINDOW = 15 * 60 * 1000;
 function rateLimit(req, res, next) {
-    const ip = String(req.headers['x-forwarded-for'] || req.ip || 'unknown').split(',')[0].trim();
     const now = Date.now();
-    let a = _attempts.get(ip);
-    if (!a || now - a.first > RL_WINDOW) { a = { count: 0, first: now }; _attempts.set(ip, a); }
-    a.count++;
+    // Use Express-resolved req.ip (respects trust-proxy) instead of the raw, client-spoofable
+    // X-Forwarded-For header. Also limit per-account, so brute force is blunted even if the attacker
+    // rotates IPs — the env bootstrap admin is exempt from the account limit (it must never lock out).
+    const ip = req.ip || 'unknown';
+    const email = norm((req.body || {}).email);
+    const keys = ['ip:' + ip];
+    if (email && email !== norm(config.APP_USER_EMAIL)) keys.push('em:' + email);
+    for (const key of keys) {
+        let a = _attempts.get(key);
+        if (!a || now - a.first > RL_WINDOW) { a = { count: 0, first: now }; _attempts.set(key, a); }
+        a.count++;
+        if (a.count > RL_MAX) return res.status(429).json({ message: 'Too many attempts. Please wait a few minutes and try again.' });
+    }
     if (_attempts.size > 5000) { for (const [k, v] of _attempts) if (now - v.first > RL_WINDOW) _attempts.delete(k); }
-    if (a.count > RL_MAX) return res.status(429).json({ message: 'Too many attempts. Please wait a few minutes and try again.' });
     next();
 }
 

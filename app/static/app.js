@@ -157,15 +157,27 @@ function createFallbackImage(itemName) {
     return `https://placehold.co/100x100/f1f5f9/94a3b8?text=${initials}`;
 }
 
+// Debounce: run fn only after `ms` of quiet — keeps typing smooth on heavy table re-renders.
+function debounce(fn, ms) {
+    let t;
+    return function (...args) { clearTimeout(t); t = setTimeout(() => fn.apply(this, args), ms); };
+}
+
+// Escape HTML — prevents stored XSS when injecting server/customer data into innerHTML.
+function escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
 // --- NEW HELPER: CUSTOMER BADGE ---
-function getCustomerBadge(email, phone, currentOrderId) {
+function getCustomerBadge(email, phone, currentOrderId, precount) {
     if (!email && !phone) return '';
-    const customerOrders = allOrders.filter(o => {
+    // precount (prebuilt once in renderOrders) avoids an O(n) scan per row; falls back to a live scan.
+    const count = (precount !== undefined) ? precount : allOrders.filter(o => {
         const matchEmail = email && o.email && o.email.toLowerCase() === email.toLowerCase();
         const matchPhone = phone && (o.phone || '').includes(phone);
         return matchEmail || matchPhone;
-    });
-    const count = customerOrders.length;
+    }).length;
     if (count === 1) {
         return `<span class="ml-2 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-600 bg-emerald-100 rounded border border-emerald-200">New</span>`;
     } else if (count > 5) {
@@ -311,7 +323,7 @@ async function silentRefreshOrders() {
             fetchCodConfirmations()
         ]);
         if (currentView === 'orders-dashboard') renderAllDashboard();
-        else renderAllInsights();
+        else renderAllInsights(true); // silent: update stats but don't rebuild charts (no flash on auto-refresh)
         updateLastSyncedLabel();
     } catch (e) {
         console.error('Auto-refresh failed:', e);
@@ -722,23 +734,25 @@ function renderSearchInput() {
         // Restore focus/value if re-rendering
         if (typeof currentSearchTerm !== 'undefined') inputEl.value = currentSearchTerm;
         
+        let _searchDebounce;
         inputEl.addEventListener('input', (e) => {
             currentSearchTerm = e.target.value.toLowerCase().trim();
-            renderAllDashboard(); // Re-render table on type
-            
-            // Keep focus after re-render (trick)
-            setTimeout(() => {
+            clearTimeout(_searchDebounce);
+            _searchDebounce = setTimeout(() => {
+                renderAllDashboard(); // Re-render table (debounced ~250ms so typing stays smooth)
+                // Keep focus/caret after re-render (trick)
                 const newInput = document.getElementById('global-order-search');
                 if (newInput) {
                     newInput.focus();
                     newInput.setSelectionRange(newInput.value.length, newInput.value.length);
                 }
-            }, 0);
+            }, 250);
         });
     }
 }
 
 // --- ORDER LIST RENDERING (Trusts Shopify Tags + Local History) ---
+let _ordersRenderToken = 0; // cancels an in-flight progressive render when a newer one starts
 function renderOrders(o) {
     ordersListEl.innerHTML = '';
     updateBulkActionBar(); 
@@ -762,12 +776,34 @@ function renderOrders(o) {
         return String(p).replace(/\D/g, '').slice(-10);
     };
 
-    o.forEach(order => {
+    // --- Prebuild lookup maps ONCE (was O(n) scan per row → O(n²) total; now O(1) per row) ---
+    const emailCountNoTrim = new Map(); // email.toLowerCase() -> count (matches getCustomerBadge)
+    const phoneToOrders = new Map();    // last-10-digit phone -> [orders]
+    const emailToOrders = new Map();    // email.toLowerCase().trim() -> [orders]
+    for (const x of allOrders) {
+        const xeb = x.email ? x.email.toLowerCase() : '';
+        if (xeb) emailCountNoTrim.set(xeb, (emailCountNoTrim.get(xeb) || 0) + 1);
+        const xp = cleanPhone(x.phone);
+        if (xp) { let a = phoneToOrders.get(xp); if (!a) phoneToOrders.set(xp, a = []); a.push(x); }
+        const xe = x.email ? x.email.toLowerCase().trim() : '';
+        if (xe) { let a = emailToOrders.get(xe); if (!a) emailToOrders.set(xe, a = []); a.push(x); }
+    }
+    const codByNum = new Map();         // extractNum(order number/name) -> first matching COD row
+    if (Array.isArray(codConfirmations)) {
+        for (const c of codConfirmations) {
+            const n1 = extractNum(c['Order Number']);
+            const n2 = extractNum(c['Order Name']);
+            if (n1 && !codByNum.has(n1)) codByNum.set(n1, c);
+            if (n2 && !codByNum.has(n2)) codByNum.set(n2, c);
+        }
+    }
+
+    const buildRow = (order) => {
         const displayName = (order.name === 'N/A' && order.buyerName) ? order.buyerName : order.name;
         const uniqueId = order.id.replace(/\W/g, ''); 
         const isSelected = selectedOrders.has(order.originalId);
         
-        const custBadge = getCustomerBadge(order.email, null, order.id);
+        const custBadge = getCustomerBadge(order.email, null, order.id, emailCountNoTrim.get((order.email || '').toLowerCase()) || 0);
 
         const mainRow = document.createElement('tr');
         mainRow.className = `order-row border-b border-slate-100 hover:bg-slate-50 transition-colors ${isSelected ? 'bg-indigo-50/50' : ''}`;
@@ -784,13 +820,12 @@ function renderOrders(o) {
         const currentPhone = cleanPhone(order.phone);
         const currentEmail = order.email ? order.email.toLowerCase().trim() : '';
 
-        const history = allOrders.filter(x => {
-            const xPhone = cleanPhone(x.phone);
-            const phoneMatch = currentPhone && xPhone && (currentPhone === xPhone);
-            const xEmail = x.email ? x.email.toLowerCase().trim() : '';
-            const emailMatch = currentEmail && xEmail && (currentEmail === xEmail);
-            return phoneMatch || emailMatch;
-        });
+        // Union of phone-matched and email-matched orders (deduped) — from prebuilt maps, O(1) per row.
+        const _phMatch = currentPhone ? phoneToOrders.get(currentPhone) : null;
+        const _emMatch = currentEmail ? emailToOrders.get(currentEmail) : null;
+        let history;
+        if (_phMatch && _emMatch) { const seen = new Set(_phMatch); history = _phMatch.concat(_emMatch.filter(x => !seen.has(x))); }
+        else { history = _phMatch || _emMatch || []; }
 
         // =========================================================================
         // 2. DETERMINE STATUS FLAGS
@@ -837,11 +872,7 @@ function renderOrders(o) {
         let rawPhone = order.phone || (order.shipping_address ? order.shipping_address.phone : '') || '';
         let displayPhone = String(rawPhone).replace(/^(\+91|91)/, ''); 
 
-        const codData = codConfirmations?.find(c => {
-            const sheetNum1 = extractNum(c['Order Number']);
-            const sheetNum2 = extractNum(c['Order Name']);
-            return (sheetNum1 === dashNum) || (sheetNum2 === dashNum);
-        });
+        const codData = codByNum.get(dashNum);
 
         if (codData) {
             // Try multiple possible column names for confirmation field (match sheet header exactly)
@@ -881,24 +912,24 @@ function renderOrders(o) {
                     value="${order.originalId}" ${isSelected ? 'checked' : ''}
                     onclick="toggleOrderSelection('${order.originalId}', this)">
             </td>
-            <td class="p-4"><img src="${platformLogos[order.platform]||''}" class="w-6 h-6 grayscale hover:grayscale-0 transition-all" alt="${order.platform}"></td>
+            <td class="p-4"><img src="${platformLogos[order.platform]||''}" class="w-6 h-6 grayscale hover:grayscale-0 transition-all" alt="${escapeHtml(order.platform)}"></td>
             <td class="p-4 text-slate-500 text-sm font-medium">${order.date}</td>
             <td class="p-4 font-semibold text-slate-900 group relative">
-                <span title="${hoverText}" class="cursor-help border-b border-dotted border-slate-400">${order.id}</span>
-                <div class="text-[10px] text-slate-400 font-normal mt-0.5">${order.awb ? 'AWB: ' + order.awb : 'Unfulfilled'}</div>
+                <span title="${escapeHtml(hoverText)}" class="cursor-help border-b border-dotted border-slate-400">${escapeHtml(order.id)}</span>
+                <div class="text-[10px] text-slate-400 font-normal mt-0.5">${order.awb ? 'AWB: ' + escapeHtml(order.awb) : 'Unfulfilled'}</div>
             </td>
             <td class="p-4 font-medium text-slate-800">
                 <div class="flex flex-col">
                     <div class="flex items-center">
-                        ${displayName}
+                        ${escapeHtml(displayName)}
                         ${custBadge}
                     </div>
                     <div class="text-[11px] text-slate-500 mt-1 flex items-center gap-2">
-                        <span class="font-semibold text-slate-600 uppercase text-[10px] tracking-wide">${order.paymentMethod || 'Unknown'}</span>
+                        <span class="font-semibold text-slate-600 uppercase text-[10px] tracking-wide">${escapeHtml(order.paymentMethod || 'Unknown')}</span>
                         <span class="text-slate-300">|</span>
                         <span class="font-mono text-slate-600 flex items-center gap-1">
                             <svg class="w-3 h-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path></svg>
-                            ${displayPhone}
+                            ${escapeHtml(displayPhone)}
                         </span>
                     </div>
                 </div>
@@ -933,7 +964,7 @@ function renderOrders(o) {
             return `
                 <div class="flex items-center gap-3 p-2 bg-white rounded border border-slate-100 mb-1">
                     <img src="${createFallbackImage(itemName)}" class="w-8 h-8 rounded object-cover">
-                    <div class="flex-1 text-sm text-slate-700 truncate">${itemName}</div>
+                    <div class="flex-1 text-sm text-slate-700 truncate">${escapeHtml(itemName)}</div>
                     <div class="text-xs font-bold text-slate-500">x${itemQty}</div>
                 </div>`;
         }).join('');
@@ -960,8 +991,8 @@ function renderOrders(o) {
                             <div class="flex justify-between items-center">
                                 <div>
                                     <p class="text-sm font-semibold text-slate-800">Confirm Order</p>
-                                    <p class="text-[10px] text-slate-400 mt-0.5">${hasEasyecomId ? 'EasyEcom ID: ' + order.easyecomOrderId : 'EasyEcom ID not mapped yet'}</p>
-                                    ${order.easyecomStatus ? `<p class="text-[10px] text-slate-500 mt-0.5">EasyEcom Status: <span class="font-semibold">${order.easyecomStatus}</span></p>` : ''}
+                                    <p class="text-[10px] text-slate-400 mt-0.5">${hasEasyecomId ? 'EasyEcom ID: ' + escapeHtml(order.easyecomOrderId) : 'EasyEcom ID not mapped yet'}</p>
+                                    ${order.easyecomStatus ? `<p class="text-[10px] text-slate-500 mt-0.5">EasyEcom Status: <span class="font-semibold">${escapeHtml(order.easyecomStatus)}</span></p>` : ''}
                                 </div>
                                 ${ isConfirmed ?
                                     `<span class="px-3 py-1 bg-emerald-100 text-emerald-700 text-xs font-bold rounded border border-emerald-200">Confirmed</span>` :
@@ -974,7 +1005,7 @@ function renderOrders(o) {
                             <div class="flex justify-between items-center pt-2 border-t border-slate-100">
                                 <div>
                                     <p class="text-sm font-semibold text-slate-800">Shipping</p>
-                                    <p class="text-[10px] text-slate-400 font-mono">${order.courier || ''} ${order.awb}</p>
+                                    <p class="text-[10px] text-slate-400 font-mono">${escapeHtml(order.courier || '')} ${escapeHtml(order.awb)}</p>
                                 </div>
                                 <span class="text-xs font-bold text-emerald-600">Assigned</span>
                             </div>` : ''}
@@ -991,9 +1022,9 @@ function renderOrders(o) {
                         <div>
                             <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Customer Details</h4>
                             <div class="bg-white p-3 rounded border border-slate-200 text-sm">
-                                <p class="font-bold text-slate-800">${displayName}</p>
-                                <p class="text-slate-500 mt-1 leading-relaxed">${detailedAddress}</p>
-                                <p class="text-slate-400 text-xs mt-1 border-t border-slate-100 pt-1">${order.email || ''}</p>
+                                <p class="font-bold text-slate-800">${escapeHtml(displayName)}</p>
+                                <p class="text-slate-500 mt-1 leading-relaxed">${escapeHtml(detailedAddress)}</p>
+                                <p class="text-slate-400 text-xs mt-1 border-t border-slate-100 pt-1">${escapeHtml(order.email || '')}</p>
                             </div>
                         </div>
                         <div>
@@ -1006,11 +1037,23 @@ function renderOrders(o) {
             </td>
         `;
 
-        ordersListEl.appendChild(mainRow);
-        ordersListEl.appendChild(detailsRow);
-    });
+        return [mainRow, detailsRow];
+    };
 
-    eddEnrichVisible();
+    // Progressive render: the first chunk paints now (so the click returns instantly), the rest fill in
+    // across animation frames so the main thread never blocks. All rows still render; a newer render cancels this.
+    const token = ++_ordersRenderToken;
+    let _ri = 0;
+    const step = (chunkSize) => {
+        if (token !== _ordersRenderToken) return; // superseded by a newer render (filter/nav/refresh)
+        const frag = document.createDocumentFragment();
+        const end = Math.min(_ri + chunkSize, o.length);
+        for (; _ri < end; _ri++) { const r = buildRow(o[_ri]); frag.appendChild(r[0]); frag.appendChild(r[1]); }
+        ordersListEl.appendChild(frag);
+        if (_ri < o.length) requestAnimationFrame(() => step(150));
+        else eddEnrichVisible();
+    };
+    step(40); // tiny first chunk fills the viewport instantly; the rest stream in at 150/frame
 }
 
 // ─── EDD (Estimated Delivery Date) column ──────────────────────────────────
@@ -2201,7 +2244,7 @@ function renderSourceFilters() {
 
 
 function renderInsightsPlatformFilters(){insightsPlatformFiltersEl.innerHTML=['All','Amazon','Shopify'].map(p=>`<button data-filter="${p}" class="filter-btn px-3 py-1 text-sm rounded-md ${insightsPlatformFilter===p?'active':''}">${p}</button>`).join('');insightsPlatformFiltersEl.querySelectorAll('.filter-btn').forEach(b=>{b.addEventListener('click',()=>{insightsPlatformFilter=b.dataset.filter;renderAllInsights()})})}
-function renderAllInsights() {
+function renderAllInsights(silent) {
     const [s, e] = calculateDateRange(insightsDatePreset, insightsStartDateFilterEl.value, insightsEndDateFilterEl.value);
     let o = [...allOrders];
 
@@ -2225,7 +2268,7 @@ function renderAllInsights() {
     const t = calculateComparisonMetrics(o, allOrders, insightsDatePreset, s, e);
     
     updateInsightsKpis(o, t);
-    renderInsightCharts(o, s, e);
+    if (!silent) renderInsightCharts(o, s, e); // skip chart rebuild on the quiet 60s refresh → no flash
 }
 function calculateDateRange(p, s, e) {
     // 1. Get Current Time in Browser (Local Time)
@@ -2755,17 +2798,13 @@ async function loadInitialData() {
         }).catch(() => {});
     })();
 
-    // --- COD status refresh every 1 minute (quiet) ---
-    setInterval(async () => {
-        try {
-            await fetchCodConfirmations();
-            if (currentView === 'orders-dashboard') renderAllDashboard();
-            else if (currentView === 'order-insights') renderAllInsights();
-        } catch (e) { console.error('COD refresh failed:', e); }
+    // --- Quiet auto-refresh: ONE timer (orders + COD + re-render), paused when the tab is hidden ---
+    // silentRefreshOrders() already fetches COD, so the separate COD-only timer was redundant (double-fetch
+    // + double re-render every minute). Collapsing to one and skipping hidden tabs removes the periodic jank.
+    setInterval(() => {
+        if (document.hidden) return; // don't churn CPU/network in a background tab
+        silentRefreshOrders();       // fetches orders + COD, then re-renders the current view
     }, 60000);
-
-    // --- Full orders + COD refresh every 1 minute (quiet) ---
-    setInterval(() => silentRefreshOrders(), 60000);
 }
 function initializeAllFilters() {
     // 1. Status Filters
@@ -3525,7 +3564,7 @@ function _fbaWireEvents(){
     FBA.$('fba-trend-metric').querySelectorAll('button').forEach(x=>{ const on=x.dataset.m===_fbaTrendMetric; x.classList.toggle('bg-indigo-600',on); x.classList.toggle('text-white',on); x.classList.toggle('text-slate-600',!on); });
     _fbaDrawTrend(); });
   FBA.$('fba-inv-filter')?.addEventListener('change',()=>_fbaRenderInv());
-  FBA.$('fba-inv-search')?.addEventListener('input',()=>_fbaRenderInv());
+  FBA.$('fba-inv-search')?.addEventListener('input',debounce(()=>_fbaRenderInv(),250));
   FBA.$('fba-plan-apply')?.addEventListener('click',()=>_fbaLoadForecast(false));
   FBA.$('fba-plan-copy')?.addEventListener('click',()=>_fbaCopyPlan());
   FBA.$('fba-plan-csv')?.addEventListener('click',()=>_fbaExportCsv());
@@ -4122,10 +4161,10 @@ function opsKpiClick(containerId, idx, selId, val){
 function opsInit(){
     if(!_opsWired){ _opsWired = true;
         document.getElementById('ops-refresh')?.addEventListener('click', ()=>{ opsLoadActions().then(()=>{ const p=opsActivePane(); _opsLoaded[p]=false; opsSwitchTab(_opsTab); }); });
-        ['ops-search','ops-f-age','ops-f-pay','ops-f-type'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-search'?'input':'change', ()=>opsTable()); });
-        ['ops-risk-search','ops-rf-band','ops-rf-pay'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-risk-search'?'input':'change', ()=>opsRiskTable()); });
-        ['ops-exc-search','ops-ef-action','ops-ef-type'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-exc-search'?'input':'change', ()=>opsExcTable()); });
-        ['ops-pr-search','ops-prf-band'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-pr-search'?'input':'change', ()=>opsPrTable()); });
+        ['ops-search','ops-f-age','ops-f-pay','ops-f-type'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-search'?'input':'change', id==='ops-search'?debounce(()=>opsTable(),250):()=>opsTable()); });
+        ['ops-risk-search','ops-rf-band','ops-rf-pay'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-risk-search'?'input':'change', id==='ops-risk-search'?debounce(()=>opsRiskTable(),250):()=>opsRiskTable()); });
+        ['ops-exc-search','ops-ef-action','ops-ef-type'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-exc-search'?'input':'change', id==='ops-exc-search'?debounce(()=>opsExcTable(),250):()=>opsExcTable()); });
+        ['ops-pr-search','ops-prf-band'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-pr-search'?'input':'change', id==='ops-pr-search'?debounce(()=>opsPrTable(),250):()=>opsPrTable()); });
         document.getElementById('ops-pr-days')?.addEventListener('change', ()=>opsLoadPrepaidRisk());
         document.getElementById('ops-tabs')?.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return;
             [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
@@ -4194,7 +4233,7 @@ async function opsLoad(){
         const r=await fetch('/api/ops-control/ndr-queue?days='+(_opsDays.ndr||45), { headers: getAuthHeaders() });
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsData=d; opsRender(d);
-    }catch(e){ if(kpi) kpi.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+    }catch(e){ if(kpi) kpi.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
 }
 function opsKpi(label,accent,tint,icon,val,foot){ return `<div class="ops-kpi card p-5" style="border-top:3px solid ${accent}">
     <div class="w-10 h-10 rounded-xl flex items-center justify-center mb-3" style="background:${tint};color:${accent}">${icon}</div>
@@ -4263,7 +4302,7 @@ async function opsLoadRisk(){
             opsKpi('At-risk value (high)','#059669','#ecfdf5',DP_ICONS.hash, OPS_INR(s.atRiskValue), 'order value on high-risk orders');
         opsKpiClick('ops-risk-kpis',1,'ops-rf-band','High');
         opsRiskTable();
-    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
 }
 function opsRiskTable(){ const c=document.getElementById('ops-risk-table'); const d=_opsRisk; if(!d||!c) return;
     const q=(document.getElementById('ops-risk-search')?.value||'').trim().toLowerCase();
@@ -4300,7 +4339,7 @@ async function opsLoadCourier(){
     const c=document.getElementById('ops-courier-table'); if(c) c.innerHTML='<div class="text-slate-400 text-sm p-6">Loading courier scorecard…</div>';
     try{ const r=await fetch('/api/ops-control/courier-scorecard?days='+(_opsDays.courier||90),{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsCourier=d; opsCourierTable();
-    }catch(e){ if(c) c.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+    }catch(e){ if(c) c.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
 }
 function opsCourierTable(){ const c=document.getElementById('ops-courier-table'); const d=_opsCourier; if(!d||!c) return;
     let list=(d.list||[]).slice(); if(!list.length){ c.innerHTML=opsToolbar('courier')+'<div class="text-slate-400 text-sm p-6">No courier data</div>'; return; }
@@ -4324,7 +4363,7 @@ async function opsLoadCost(){
     const k=document.getElementById('ops-cost-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Loading…</div>';
     try{ const r=await fetch('/api/ops-control/hotspots?days='+(_opsDays.cost||90),{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsCost=d; opsCostRender();
-    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
 }
 function opsCostRender(){ const d=_opsCost; if(!d) return;
     const cost=d.rtoCount*_opsCostPerRto;
@@ -4365,7 +4404,7 @@ async function opsLoadExceptions(){
         const tf=document.getElementById('ops-ef-type'); if(tf){ const cur=tf.value; tf.innerHTML='<option value="all">All types</option>'+Object.keys(s.byType||{}).sort().map(t=>`<option value="${t}">${t} (${s.byType[t]})</option>`).join(''); tf.value=cur; if(tf.value!==cur) tf.value='all'; }
         opsKpiClick('ops-exc-kpis',0,'ops-ef-action','claim');
         opsExcTable();
-    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
 }
 function opsExcTable(){ const c=document.getElementById('ops-exc-table'); const d=_opsExc; if(!d||!c) return;
     const q=(document.getElementById('ops-exc-search')?.value||'').trim().toLowerCase();
@@ -4412,7 +4451,7 @@ async function opsLoadPrepaidRisk(){
             opsKpi('Prepaid in transit','#4f46e5','#eef2ff',DP_ICONS.refresh, s.prepaidInTransit||0, `${s.flagged||0} flagged medium+high`);
         opsKpiClick('ops-pr-kpis',0,'ops-prf-band','High');
         opsPrTable();
-    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
 }
 // Prepaid-risk click-to-expand: risk breakdown + timeline + scan log (reuses the DP shipment endpoint).
 let _opsPrOpen=null; const _opsPrScan={};
@@ -4588,7 +4627,7 @@ function dpreInit(){
             get:()=>_dprePayment==='all'?['cod','prepaid']:[_dprePayment],
             set:sel=>{ _dprePayment=(sel.length===0||sel.length>=2)?'all':sel[0]; dpreLoad(); },
             label:sel=>(sel.length>=2||sel.length===0)?'<span class="text-slate-400">All payment</span>':(sel[0]==='cod'?'COD':'Prepaid') });
-        v.querySelector('#dpre-search').addEventListener('input',()=>dpreTable());
+        v.querySelector('#dpre-search').addEventListener('input',debounce(()=>dpreTable(),250));
         v.querySelector('#dpre-dfrom').addEventListener('change',e=>{ _dpreDFrom=e.target.value; dpreLoad(); });
         v.querySelector('#dpre-dto').addEventListener('change',e=>{ _dpreDTo=e.target.value; dpreLoad(); });
         v.querySelector('#dpre-dclear').addEventListener('click',()=>{ _dpreDFrom=''; _dpreDTo=''; v.querySelector('#dpre-dfrom').value=''; v.querySelector('#dpre-dto').value=''; dpreLoad(); });
@@ -4658,7 +4697,7 @@ async function dpreLoad(){
         const r=await fetch(`/api/docpharma-recon?from=${_dpreFrom}&to=${_dpreTo}&status=${encodeURIComponent(_dpreStatus.join(','))}&payment=${_dprePayment}&dfrom=${_dpreDFrom}&dto=${_dpreDTo}&customer=${encodeURIComponent(_dpreCustomer)}`,{headers:getAuthHeaders()});
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _dpreData=d; dpreRender(d); ecFade('dpre-kpis','dpre-table');
-    }catch(e){ if(k) k.innerHTML='<div class="col-span-6 text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+    }catch(e){ if(k) k.innerHTML='<div class="col-span-6 text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
 }
 function dpreRender(d){
     const rc=d.rateCard||{}, k=d.kpis||{};
@@ -4843,7 +4882,7 @@ async function dpinvLoadGoods(){ const el=document.getElementById('dpinv-goods-l
         el.innerHTML=`<table class="w-full"><thead><tr><th class="${_th}">Invoice</th><th class="${_th}">Date</th><th class="${_th}">PO</th><th class="${_th} text-right">Qty</th><th class="${_th} text-right">Value</th><th class="${_th}"></th></tr></thead><tbody>${invs.map(iv=>`<tr class="hover:bg-slate-50"><td class="${_td} font-semibold">${iv.invoice_no||'—'}</td><td class="${_td} tabular-nums">${dpreDMY(iv.invoice_date)||'—'}</td><td class="${_td}">${iv.po_number||'—'}</td><td class="${_td} text-right tabular-nums">${iv.total_qty||0}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.total_value||0)}</td><td class="${_td} text-right whitespace-nowrap"><button class="dpinv-gv text-indigo-600 text-xs" data-id="${iv.id}">View</button> <button class="dpinv-gd text-rose-500 text-xs ml-2" data-id="${iv.id}" data-no="${iv.invoice_no||''}">Delete</button></td></tr>`).join('')}</tbody></table>`;
         el.querySelectorAll('.dpinv-gv').forEach(b=>b.addEventListener('click',()=>dpinvGoodsView(b.dataset.id)));
         el.querySelectorAll('.dpinv-gd').forEach(b=>b.addEventListener('click',()=>dpinvDelete('goods',b.dataset.id,b.dataset.no)));
-    }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+e.message+'</div>'; }
+    }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+escapeHtml(e.message)+'</div>'; }
 }
 async function dpinvLoadCharge(){ const el=document.getElementById('dpinv-charge-list'); if(!el)return; el.innerHTML='<div class="p-4 text-xs text-slate-400">Loading…</div>';
     try{ const r=await fetch('/api/docpharma-invoices/charge?_='+Date.now(),{headers:getAuthHeaders(),cache:'no-store'}); const d=await r.json(); if(!d.success)throw new Error(d.error);
@@ -4851,7 +4890,7 @@ async function dpinvLoadCharge(){ const el=document.getElementById('dpinv-charge
         el.innerHTML=`<table class="w-full"><thead><tr><th class="${_th}">Invoice</th><th class="${_th}">Date</th><th class="${_th}">Subject</th><th class="${_th} text-right">Service</th><th class="${_th} text-right">RTO</th><th class="${_th} text-right">COD</th><th class="${_th} text-right">Grand Total</th><th class="${_th}"></th></tr></thead><tbody>${invs.map(iv=>`<tr class="hover:bg-slate-50"><td class="${_td} font-semibold">${iv.invoice_no||'—'}</td><td class="${_td} tabular-nums">${dpreDMY(iv.invoice_date)||'—'}</td><td class="${_td} text-slate-500">${iv.subject||'—'}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.service_total||0)}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.rto_total||0)}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.cod_fee_total||0)}</td><td class="${_td} text-right tabular-nums font-bold">${OPS_INR(iv.grand_total||iv.total_charges||0)}</td><td class="${_td} text-right whitespace-nowrap"><button class="dpinv-cv text-indigo-600 text-xs" data-id="${iv.id}">Edit</button> <button class="dpinv-cd text-rose-500 text-xs ml-2" data-id="${iv.id}" data-no="${iv.invoice_no||''}">Delete</button></td></tr>`).join('')}</tbody></table>`;
         el.querySelectorAll('.dpinv-cv').forEach(b=>b.addEventListener('click',()=>dpinvChargeForm(invs.find(x=>String(x.id)===b.dataset.id))));
         el.querySelectorAll('.dpinv-cd').forEach(b=>b.addEventListener('click',()=>dpinvDelete('charge',b.dataset.id,b.dataset.no)));
-    }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+e.message+'</div>'; }
+    }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+escapeHtml(e.message)+'</div>'; }
 }
 async function dpinvGoodsView(id){ try{ const r=await fetch('/api/docpharma-invoices/goods/'+id,{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error); dpinvGoodsForm({...d.invoice, items:d.items}); }catch(e){ showNotification(e.message,true); } }
 function dpinvField(label,id,val,type){ return `<div><label class="block text-[11px] text-slate-500 mb-0.5">${label}</label><input id="${id}" type="${type||'text'}" value="${val==null?'':String(val).replace(/"/g,'&quot;')}" class="${DPINV_IN} w-full"></div>`; }
@@ -4976,7 +5015,7 @@ async function dpreOverviewLoad(){ const box=document.getElementById('dpov-body'
     try{ const r=await fetch(`/api/docpharma-overview?from=${from}&to=${to}`,{headers:getAuthHeaders()});
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _dpovData=d; dpreOverviewRender(d); ecFade('dpov-body');
-    }catch(e){ box.innerHTML='<div class="text-xs text-rose-500 p-4">'+e.message+'</div>'; }
+    }catch(e){ box.innerHTML='<div class="text-xs text-rose-500 p-4">'+escapeHtml(e.message)+'</div>'; }
 }
 function dpreOverviewRender(d){
     const box=document.getElementById('dpov-body'); if(!box) return;
@@ -5107,7 +5146,7 @@ async function dpreInvMatchLoad(){ const k=document.getElementById('dpim-kpis');
         const showDl=!!d.period; ['dpim-dl-pdf','dpim-dl-xlsx'].forEach(id=>{ const b=document.getElementById(id); if(b)b.classList.toggle('hidden',!showDl); });
         const sy=document.getElementById('dpim-synced'); if(sy) sy.innerHTML = (d.dpSyncedAt?`DocPharma ${dpimDate(d.dpSyncedAt)}`:'<b class="text-amber-600">DocPharma not synced</b>')+' · '+(d.eeSyncedAt?`EasyEcom ${dpimDate(d.eeSyncedAt)}`:'EasyEcom not synced');
         const nt=document.getElementById('dpim-tablenote'); if(nt&&d.period) nt.innerHTML=`Sent &amp; Delivered columns show <b>${dpimDate(d.period.from)} → ${dpimDate(d.period.to)}</b> movement · on-hand / actuals are current`;
-    }catch(e){ if(k)k.innerHTML='<div class="col-span-6 text-xs text-rose-500 p-4">'+e.message+'</div>'; }
+    }catch(e){ if(k)k.innerHTML='<div class="col-span-6 text-xs text-rose-500 p-4">'+escapeHtml(e.message)+'</div>'; }
 }
 function dpimRenderKpis(){ const k=document.getElementById('dpim-kpis'); if(!k||!_dpimData)return; const s=_dpimData.summary, nf=x=>Number(x||0).toLocaleString('en-IN');
     const card=(l,v,sub,acc)=>`<div class="card p-4 lift"><div class="text-xs text-slate-400 uppercase tracking-wide">${l}</div><div class="text-2xl font-bold ${acc||'text-slate-800'} tabular-nums mt-1">${v}</div><div class="text-xs text-slate-400 mt-0.5">${sub||''}</div></div>`;
@@ -5236,7 +5275,7 @@ async function dpreLedgerLoad(){ const k=document.getElementById('dpled-kpis'); 
     try{ const r=await fetch('/api/docpharma-ledger',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
         _dpledRows=d.rows||[]; _dpledCharges=d.charges||[]; _dpledPayments=d.payments||[]; _dpledFifo=(d.summary||{}).fifo||null; _dpledRate=d.rateCard||{}; dpledRender();
         ecFade('dpled-kpis','dpled-ops','dpled-table');
-    }catch(e){ if(k)k.innerHTML='<div class="col-span-6 text-xs text-rose-500 p-4">'+e.message+'</div>'; }
+    }catch(e){ if(k)k.innerHTML='<div class="col-span-6 text-xs text-rose-500 p-4">'+escapeHtml(e.message)+'</div>'; }
 }
 const dpledInRange=mk=>{ if(!mk)return false; if(mk==='unknown')return !_dpledFrom&&!_dpledTo; if(_dpledFrom&&mk<_dpledFrom)return false; if(_dpledTo&&mk>_dpledTo)return false; return true; };
 function dpledVisibleRows(){ return _dpledRows.filter(m=>{ if(m.month==='unknown') return !_dpledFrom&&!_dpledTo; if(_dpledFrom&&m.month<_dpledFrom)return false; if(_dpledTo&&m.month>_dpledTo)return false; return true; }); }
@@ -5460,7 +5499,7 @@ async function dprePayLoad(){ const el=document.getElementById('dppay-list'); if
         const th='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60',td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100';
         el.innerHTML=`<table class="w-full"><thead><tr><th class="${th}">Date</th><th class="${th}">Direction</th><th class="${th} text-right">Amount</th><th class="${th}">Reference</th><th class="${th}">Period</th><th class="${th}">Notes</th><th class="${th}"></th></tr></thead><tbody>${ps.map(p=>`<tr class="hover:bg-slate-50"><td class="${td} tabular-nums">${dpreDMY(p.payment_date)||'—'}</td><td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${p.direction==='paid'?'bg-rose-100 text-rose-700':'bg-emerald-100 text-emerald-700'}">${p.direction==='paid'?'Paid out':'Received'}</span></td><td class="${td} text-right tabular-nums font-semibold">${OPS_INR(p.amount||0)}</td><td class="${td}">${p.reference||'—'}</td><td class="${td} text-slate-500">${p.period_from?dpreDMY(p.period_from):'—'}</td><td class="${td} text-slate-500">${p.notes||''}</td><td class="${td} text-right"><button class="dppay-del text-rose-500 text-xs" data-id="${p.id}">Delete</button></td></tr>`).join('')}</tbody></table>`;
         el.querySelectorAll('.dppay-del').forEach(b=>b.addEventListener('click',()=>dprePayDelete(b.dataset.id)));
-    }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+e.message+'</div>'; }
+    }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+escapeHtml(e.message)+'</div>'; }
 }
 function dprePayForm(){ const box=document.getElementById('dppay-box'); const f=(l,id,v,t)=>`<div><label class="block text-[11px] text-slate-500 mb-0.5">${l}</label><input id="${id}" type="${t||'text'}" value="${v||''}" class="${DPINV_IN} w-full"></div>`;
     box.innerHTML=`<div class="flex items-center justify-between mb-4"><h3 class="text-lg font-bold text-slate-800">Record payment</h3><button id="dppay-x" class="text-slate-400 text-xl">✕</button></div>
@@ -5564,7 +5603,7 @@ function dpInit(){
             b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
             _dpOrderType=b.dataset.o; dpLoad(); });
         document.getElementById('dp-state')?.addEventListener('change', ()=>dpTableRender());
-        document.getElementById('dp-search')?.addEventListener('input', ()=>dpTableRender());
+        document.getElementById('dp-search')?.addEventListener('input', debounce(()=>dpTableRender(),250));
     }
     dpLoad();
 }
@@ -5574,7 +5613,7 @@ async function dpLoad(){
         const r=await fetch(`/api/delivery-performance?from=${_dpFrom}&to=${_dpTo}&source=${_dpSource}&payment=${_dpPayment}&zone=${encodeURIComponent(_dpZone.join(','))}&state=${encodeURIComponent(_dpState.join(','))}&order_type=${_dpOrderType}&compare=1`, { headers: getAuthHeaders() });
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _dpData=d; dpRender(d);
-    }catch(e){ if(kpi) kpi.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+e.message+'</div>'; }
+    }catch(e){ if(kpi) kpi.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
 }
 const DP_ICONS={
   bolt:'<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>',
@@ -6483,11 +6522,11 @@ function fopsRenderTable() {
       ? '<span class="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-600">Cancelled</span>'
       : '<span class="text-slate-300 text-[10px]">—</span>';
     return `<tr>
-      <td class="font-semibold text-slate-700">${o.name}</td>
+      <td class="font-semibold text-slate-700">${escapeHtml(o.name)}</td>
       <td class="text-slate-400 text-[11px]">${dateStr}</td>
-      <td title="${o.customer?.displayName||''}${phone?' · '+phone:''}" class="text-slate-600">
-        ${o.customer?.displayName||'<span class="text-slate-300">Guest</span>'}
-        ${phone?`<br><span class="text-[10px] text-slate-400">${phone}</span>`:''}
+      <td title="${escapeHtml((o.customer?.displayName||'')+(phone?' · '+phone:''))}" class="text-slate-600">
+        ${o.customer?.displayName?escapeHtml(o.customer.displayName):'<span class="text-slate-300">Guest</span>'}
+        ${phone?`<br><span class="text-[10px] text-slate-400">${escapeHtml(phone)}</span>`:''}
       </td>
       <td class="font-semibold text-slate-700">₹${Math.round(amt).toLocaleString('en-IN')}</td>
       <td>${payBadge}</td>

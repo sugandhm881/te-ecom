@@ -71,6 +71,13 @@ module.exports = {
     TEAMS_WEBHOOK_DP:        process.env.TEAMS_WEBHOOK_DP,
     TEAMS_WEBHOOK_HOLD:      process.env.TEAMS_WEBHOOK_HOLD,
     TEAMS_WEBHOOK_AMAZON:    process.env.TEAMS_WEBHOOK_AMAZON,
+    // --- Teams keyword listener (Graph delegated) ---
+    TEAMS_TENANT_ID:     process.env.TEAMS_TENANT_ID,
+    TEAMS_CLIENT_ID:     process.env.TEAMS_CLIENT_ID,
+    TEAMS_REFRESH_TOKEN: process.env.TEAMS_REFRESH_TOKEN,
+    TEAMS_TEAM_ID:       process.env.TEAMS_TEAM_ID,
+    TEAMS_CHANNEL_DP:     process.env.TEAMS_CHANNEL_DP,
+    TEAMS_CHANNEL_AMAZON: process.env.TEAMS_CHANNEL_AMAZON,
     DASHBOARD_URL:     process.env.DASHBOARD_URL || 'http://72.60.97.42:5002',
     AUTO_REVIEW_CRON:  process.env.AUTO_REVIEW_CRON || '0 10 * * *',
 

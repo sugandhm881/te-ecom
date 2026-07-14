@@ -251,10 +251,10 @@ async function runAutoReviewCheck(failedOnly = false) {
             ]
         });
 
-        if (ts) {
-            pendingRun = { orders: result.ordered, ts, expiry: Date.now() + 24 * 60 * 60 * 1000 };
-            startPolling(ts, result.ordered);
-        }
+        // Set the pending run regardless of Slack — the Teams listener approves it via "yes"
+        // when there's no Slack ts (Teams-only mode). The Slack yes/no poll runs only if Slack is on.
+        pendingRun = { orders: result.ordered, ts: ts || null, expiry: Date.now() + 24 * 60 * 60 * 1000 };
+        if (ts) startPolling(ts, result.ordered);
 
         console.log(`[AutoReview] Report sent — ${result.ordered.length} eligible (${result.prepaid.length} prepaid, ${result.cod.length} COD). Polling for reply...`);
 
@@ -362,4 +362,23 @@ function initAutoReviewCron() {
     console.log(`[AutoReview] Cron scheduled: "${schedule}" (IST)`);
 }
 
-module.exports = { router, initAutoReviewCron };
+// ── Teams-triggered approval (the Teams listener calls these in place of the Slack yes/no reply) ──
+async function approvePendingReview() {
+    if (!pendingRun) return { ok: false, reason: 'no pending review run' };
+    if (Date.now() > pendingRun.expiry) { pendingRun = null; return { ok: false, reason: 'pending run expired' }; }
+    const orders = pendingRun.orders;
+    pendingRun = null;
+    stopPolling();
+    await runBulkSend(orders);
+    return { ok: true, sent: orders.length };
+}
+
+async function cancelPendingReview() {
+    if (!pendingRun) return { ok: false, reason: 'no pending review run' };
+    pendingRun = null;
+    stopPolling();
+    await postToSlack({ text: '❌ *Auto review cancelled.* No requests have been sent.' }).catch(() => {});
+    return { ok: true };
+}
+
+module.exports = { router, initAutoReviewCron, runAutoReviewCheck, approvePendingReview, cancelPendingReview };

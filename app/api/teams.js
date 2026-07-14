@@ -24,7 +24,16 @@ function slackToCardBody(payload) {
         for (const b of payload.blocks) {
             if (b.type === 'header' && b.text) push({ type: 'TextBlock', text: b.text.text, weight: 'Bolder', size: 'Large', wrap: true });
             else if (b.type === 'section' && b.text) push({ type: 'TextBlock', text: mrkdwn(b.text.text), wrap: true });
-            else if (b.type === 'section' && Array.isArray(b.fields)) push({ type: 'TextBlock', text: b.fields.map(f => mrkdwn(f.text)).join('\n\n'), wrap: true });
+            else if (b.type === 'section' && Array.isArray(b.fields)) {
+                // Slack renders `fields` in a 2-column grid (filled left→right, top→bottom). Mirror that with a ColumnSet.
+                const toBlocks = idxs => idxs.map(i => ({ type: 'TextBlock', text: mrkdwn(b.fields[i].text), wrap: true, spacing: 'Small' }));
+                const left = [], right = [];
+                b.fields.forEach((f, i) => (i % 2 === 0 ? left : right).push(i));
+                push({ type: 'ColumnSet', columns: [
+                    { type: 'Column', width: 'stretch', items: toBlocks(left) },
+                    { type: 'Column', width: 'stretch', items: toBlocks(right) },
+                ] });
+            }
             else if (b.type === 'context' && Array.isArray(b.elements)) push({ type: 'TextBlock', text: mrkdwn(b.elements.map(e => e.text || '').join('  ')), isSubtle: true, size: 'Small', wrap: true });
             else if (b.type === 'divider') pendingSep = true;
         }
@@ -45,8 +54,8 @@ function slackToCardActions(payload) {
     return actions;
 }
 
-// Build the Teams Workflows message envelope (Adaptive Card) from a Slack-style payload. opts: { footer, actionUrl, actionTitle }
-function buildCard(payload, opts = {}) {
+// Build just the Adaptive Card object from a Slack-style payload. opts: { footer, actionUrl, actionTitle }
+function buildAdaptiveCard(payload, opts = {}) {
     const body = slackToCardBody(payload);
     if (opts.footer) body.push({ type: 'TextBlock', text: mrkdwn(opts.footer), isSubtle: true, size: 'Small', wrap: true, separator: true });
     if (!body.length) return null;
@@ -54,16 +63,24 @@ function buildCard(payload, opts = {}) {
     if (opts.actionUrl && opts.actionTitle) actions.push({ type: 'Action.OpenUrl', title: opts.actionTitle, url: opts.actionUrl });
     const card = { type: 'AdaptiveCard', $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', version: '1.4', body };
     if (actions.length) card.actions = actions;
+    return card;
+}
+
+// Build the Teams message envelope (Adaptive Card attachment) — kept for compatibility.
+function buildCard(payload, opts = {}) {
+    const card = buildAdaptiveCard(payload, opts);
+    if (!card) return null;
     return { type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] };
 }
 
-// Post a Slack-style payload to a Teams Workflows webhook as an Adaptive Card.
+// Post a Slack-style payload to a Teams Workflow webhook as a native Adaptive Card.
+// The Workflow's "Post card in a chat or channel" reads triggerBody()?['card'] — a JSON string of the card.
 async function postTeams(webhookUrl, payload, opts = {}) {
     if (!webhookUrl) return false;
-    const envelope = buildCard(payload, opts);
-    if (!envelope) return false;
+    const card = buildAdaptiveCard(payload, opts);
+    if (!card) return false;
     try {
-        const res = await axios.post(webhookUrl, envelope, { headers: { 'Content-Type': 'application/json' }, timeout: 15000, validateStatus: () => true });
+        const res = await axios.post(webhookUrl, { card: JSON.stringify(card) }, { headers: { 'Content-Type': 'application/json' }, timeout: 15000, validateStatus: () => true });
         if (res.status >= 200 && res.status < 300) return true;
         console.error('[Teams] webhook', res.status, JSON.stringify(res.data).slice(0, 200));
         return false;
