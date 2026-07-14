@@ -70,12 +70,13 @@ const docpharmaLedgerRoutes = require('./app/api/docpharma_ledger');
 const docpharmaOverviewRoutes = require('./app/api/docpharma_overview');
 const docpharmaInventoryRoutes = require('./app/api/docpharma_inventory');
 const { ingestRecentDocpharmaOrders } = require('./app/api/docpharma_portal');
-const { backfillJourneys } = require('./app/api/delivery_journey');
+const { backfillJourneys, syncChargesBatch } = require('./app/api/delivery_journey');
 const cron = require('node-cron');
 
 // --- Register Routes ---
 app.use('/api', authRoutes);
 app.use('/api/admin', require('./app/api/users'));
+app.use('/api/admin', require('./app/api/email_settings').router);   // admin-only email/SMTP settings
 
 // --- Require a valid JWT for ALL data APIs below. Public: login/signup (handled above) + external webhooks. ---
 const { tokenRequired: _apiAuth, requirePermission } = require('./app/auth');
@@ -94,6 +95,8 @@ const _VIEW_PERMS = [
     [/^\/fba\//i, 'amazon-fba'],
     [/^\/ops-control/i, 'ops-control'],
     [/^\/delivery-performance/i, 'delivery-perf'],
+    [/^\/silent-rto-claims/i, 'claims-sla'],
+    [/^\/late-deliveries/i, 'claims-sla'],
 ];
 app.use('/api', (req, res, next) => {
     const perms = (req.user && req.user.permissions) || [];
@@ -132,6 +135,15 @@ initFbaLocationCron();
 cron.schedule('45 */6 * * *', async () => {
     console.log('[Journey] 6-hr gap-fill — refreshing non-final shipment journeys…');
     await backfillJourneys(30).catch(e => console.error('[Journey] gap-fill error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// RapidShyp charges sync — nightly at 3:15 AM IST. Fetches freight (final_freights) + invoice value
+// via the shipment_details API for FINAL shipments that haven't been priced yet, and backfills the
+// promise EDD when missing. Drains the backlog in nightly batches and prices each new delivered/RTO.
+cron.schedule('15 3 * * *', async () => {
+    console.log('[Charges] 3:15 AM IST — syncing RapidShyp freight/value for newly-final shipments…');
+    const r = await syncChargesBatch(2500).catch(e => { console.error('[Charges] nightly error:', e.message); return null; });
+    if (r) console.log(`[Charges] nightly done — processed ${r.processed}, updated ${r.updated}`);
 }, { timezone: 'Asia/Kolkata' });
 
 // DocPharma portal INGESTION — DocPharma doesn't webhook us (webhook_url is null), so every 3h we pull
@@ -219,6 +231,23 @@ cron.schedule('0 8-19 * * *', async () => {
 cron.schedule('0 11 * * *', async () => {
     console.log('[Hold Report] 11 AM IST — sending EasyEcom On-Hold report…');
     await sendEasyecomHoldReport().catch(e => console.error('[Hold Report] Error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// Silent-RTO claim mail → RapidShyp — weekly, Monday 9:30 AM IST, previous 7 days ending yesterday.
+// Lists shipments RTO'd with no delivery attempt + their forward/RTO freight (disputable). No-op if
+// there are none or the RapidShyp recipient isn't set in Settings.
+cron.schedule('30 9 * * 1', async () => {
+    console.log('[Silent-RTO] Mon 9:30 AM IST — sending weekly silent-RTO claim report to RapidShyp…');
+    try { const r = await deliveryReportsRoutes.sendSilentRtoReport({ days: 7 }); console.log('[Silent-RTO]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
+    catch (e) { console.error('[Silent-RTO] error:', e.message); }
+}, { timezone: 'Asia/Kolkata' });
+
+// Late-delivery report (promise date exceeded, delivered only) — weekly, Monday 9:45 AM IST, last 30
+// days ending yesterday. Sent to the configured internal recipients.
+cron.schedule('45 9 * * 1', async () => {
+    console.log('[Late-Del] Mon 9:45 AM IST — sending weekly late-delivery report…');
+    try { const r = await deliveryReportsRoutes.sendLateDeliveriesReport({ days: 30 }); console.log('[Late-Del]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
+    catch (e) { console.error('[Late-Del] error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
 // RapidShyp cache sync for EasyEcom-shipped orders — every 3 hours + once at startup. Keeps the

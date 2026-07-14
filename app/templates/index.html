@@ -472,6 +472,10 @@
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM20 17a2 2 0 11-4 0 2 2 0 014 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1"></path></svg>
                         <span class="ml-3 text-sm font-medium">Delivery Performance</span>
                     </a>
+                    <a href="#" id="nav-claims-sla" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Silent-RTO &amp; SLA</span>
+                    </a>
                     <a href="#" id="nav-ops-control" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                         <span class="ml-3 text-sm font-medium">Ops Control</span>
@@ -1037,14 +1041,161 @@
             </div>
         </div>
 
+        <div id="claims-sla-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm">
+                <div class="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                        <h1 class="text-xl font-bold text-slate-800">Silent-RTO &amp; SLA</h1>
+                        <p class="text-sm text-slate-500 mt-0.5">Claimable RTO freight and orders delivered past their promise date.</p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <input id="claims-from" type="date" class="px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 outline-none">
+                        <span class="text-slate-400 text-sm">→</span>
+                        <input id="claims-to" type="date" class="px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 outline-none">
+                        <button id="claims-apply" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors">Apply</button>
+                    </div>
+                </div>
+                <div class="flex items-center gap-1 mt-4 border-b border-slate-200 -mb-5">
+                    <button data-tab="srto" class="claims-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-indigo-600 text-indigo-700">Silent-RTO Claims</button>
+                    <button data-tab="late" class="claims-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">Late Deliveries</button>
+                </div>
+            </header>
+
+            <div class="p-8 w-full">
+                <!-- Shared filters (client-side, apply to the active tab) -->
+                <div class="flex flex-wrap items-center gap-2 mb-6">
+                    <input id="claims-search" type="text" placeholder="Search order / AWB…" class="px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 outline-none w-56">
+                    <select id="claims-f-payment" class="px-3 py-2 rounded-lg border border-slate-200 text-sm bg-white focus:ring-2 focus:ring-indigo-500 outline-none">
+                        <option value="">All payments</option><option value="COD">COD</option><option value="Prepaid">Prepaid</option>
+                    </select>
+                    <select id="claims-f-courier" class="px-3 py-2 rounded-lg border border-slate-200 text-sm bg-white focus:ring-2 focus:ring-indigo-500 outline-none"><option value="">All couriers</option></select>
+                    <select id="claims-f-zone" class="px-3 py-2 rounded-lg border border-slate-200 text-sm bg-white focus:ring-2 focus:ring-indigo-500 outline-none"><option value="">All zones</option></select>
+                    <button id="claims-clear" class="px-3 py-2 rounded-lg border border-slate-200 text-sm text-slate-500 hover:bg-slate-50">Clear</button>
+                    <span id="claims-count" class="text-sm text-slate-400 ml-1"></span>
+                </div>
+                <!-- Silent-RTO panel -->
+                <div id="claims-panel-srto">
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Silent RTOs</p><p id="srto-kpi-count" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Freight (claimable)</p><p id="srto-kpi-freight" class="text-2xl font-bold text-rose-600 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Invoice value</p><p id="srto-kpi-value" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Priced</p><p id="srto-kpi-priced" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
+                    </div>
+                    <div class="flex items-center gap-3 mb-4">
+                        <button id="srto-send" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700 transition-colors inline-flex items-center gap-2" style="display:none">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                            Email claim to RapidShyp
+                        </button>
+                        <span id="srto-status" class="text-sm"></span>
+                    </div>
+                    <div class="card overflow-hidden">
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead class="bg-slate-50 text-slate-500 select-none"><tr>
+                                    <th data-sort="order_name" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Order <span class="claims-caret"></span></th>
+                                    <th data-sort="awb" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">AWB <span class="claims-caret"></span></th>
+                                    <th data-sort="courier" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Courier <span class="claims-caret"></span></th>
+                                    <th data-sort="order_date" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Order date <span class="claims-caret"></span></th>
+                                    <th data-sort="zone" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Zone <span class="claims-caret"></span></th>
+                                    <th data-sort="freight_total" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Shipping cost <span class="claims-caret"></span></th>
+                                    <th data-sort="shipment_value" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Invoice value <span class="claims-caret"></span></th>
+                                </tr></thead>
+                                <tbody id="srto-tbody"><tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Late-deliveries panel -->
+                <div id="claims-panel-late" style="display:none">
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Late deliveries</p><p id="late-kpi-count" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Avg days late</p><p id="late-kpi-avg" class="text-2xl font-bold text-amber-600 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Worst</p><p id="late-kpi-max" class="text-2xl font-bold text-rose-600 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">4+ days late</p><p id="late-kpi-severe" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
+                    </div>
+                    <div class="flex items-center gap-3 mb-4">
+                        <button id="late-send" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-amber-600 hover:bg-amber-700 transition-colors inline-flex items-center gap-2" style="display:none">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                            Email report
+                        </button>
+                        <span id="late-status" class="text-sm"></span>
+                    </div>
+                    <div class="card overflow-hidden">
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead class="bg-slate-50 text-slate-500 select-none"><tr>
+                                    <th data-sort="order_name" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Order <span class="claims-caret"></span></th>
+                                    <th data-sort="awb" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">AWB <span class="claims-caret"></span></th>
+                                    <th data-sort="courier" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Courier <span class="claims-caret"></span></th>
+                                    <th data-sort="first_edd" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Promised (EDD) <span class="claims-caret"></span></th>
+                                    <th data-sort="delivered_at" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Delivered <span class="claims-caret"></span></th>
+                                    <th data-sort="zone" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Zone <span class="claims-caret"></span></th>
+                                    <th data-sort="days_late" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Days late <span class="claims-caret"></span></th>
+                                </tr></thead>
+                                <tbody id="late-tbody"><tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div id="settings-view" class="view-hidden">
             <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm">
                 <h1 class="text-xl font-bold text-slate-800">Settings</h1>
             </header>
-            <div class="p-8 max-w-4xl mx-auto w-full">
+            <div class="p-8 max-w-4xl mx-auto w-full space-y-8">
                 <div class="card p-8">
                     <h2 class="text-lg font-bold text-slate-800 mb-6">Connected Accounts</h2>
                     <div id="seller-connections" class="space-y-4"></div>
+                </div>
+
+                <!-- Email & Reports — admin only (SMTP + recipients for the report mails) -->
+                <div id="email-settings-card" class="card p-8" style="display:none">
+                    <div class="flex items-center justify-between mb-1">
+                        <h2 class="text-lg font-bold text-slate-800">Email &amp; Reports</h2>
+                        <span class="text-[11px] px-2 py-0.5 rounded-full ring-1 bg-indigo-50 text-indigo-700 ring-indigo-200">admin only</span>
+                    </div>
+                    <p class="text-sm text-slate-500 mb-6">SMTP account and recipients used for the scheduled &amp; on-demand report emails. Leave a field blank to fall back to the server default.</p>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5">
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-500 mb-1.5">SMTP Host</label>
+                            <input id="es-smtp-host" type="text" autocomplete="off" class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="smtp.gmail.com">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-500 mb-1.5">SMTP Port</label>
+                            <input id="es-smtp-port" type="number" autocomplete="off" class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="587">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-500 mb-1.5">From address <span class="text-slate-400 font-normal">(also the login)</span></label>
+                            <input id="es-from" type="text" autocomplete="off" class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="you@example.com">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-500 mb-1.5">Password <span class="text-slate-400 font-normal">(encrypted)</span></label>
+                            <input id="es-smtp-pass" type="password" autocomplete="new-password" class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="••••••">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-500 mb-1.5">RapidShyp email <span class="text-slate-400 font-normal">(Silent-RTO claims)</span></label>
+                            <input id="es-rapidshyp" type="text" autocomplete="off" class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="claims@rapidshyp.com">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-500 mb-1.5">To <span class="text-slate-400 font-normal">(comma-separated)</span></label>
+                            <input id="es-to" type="text" autocomplete="off" class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="ops@example.com, lead@example.com">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-500 mb-1.5">CC <span class="text-slate-400 font-normal">(comma-separated)</span></label>
+                            <input id="es-cc" type="text" autocomplete="off" class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="optional">
+                        </div>
+                    </div>
+
+                    <div class="flex flex-wrap items-center gap-3 mt-7">
+                        <button id="es-save" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors">Save settings</button>
+                        <button id="es-test" class="px-4 py-2 rounded-lg text-sm font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors">Send test email</button>
+                        <span id="es-status" class="text-sm"></span>
+                    </div>
+                    <p id="es-meta" class="text-xs text-slate-400 mt-3"></p>
                 </div>
             </div>
         </div>

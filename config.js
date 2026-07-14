@@ -20,6 +20,10 @@ module.exports = {
     EMAIL_USER: process.env.EMAIL_USER,
     EMAIL_PASSWORD: process.env.EMAIL_PASSWORD,
     RECIPIENT_EMAIL: process.env.RECIPIENT_EMAIL,
+    // Key for AES-256-GCM encryption of the SMTP password stored in app_email_settings (portal-managed).
+    // Falls back to a key derived from JWT_SECRET so the feature works without a new env var; set a
+    // dedicated 32-byte (64 hex chars) EMAIL_ENC_KEY in prod for clean key rotation.
+    EMAIL_ENC_KEY: process.env.EMAIL_ENC_KEY,
     
     // --- Shopify ---
     SHOPIFY_TOKEN: process.env.SHOPIFY_TOKEN,

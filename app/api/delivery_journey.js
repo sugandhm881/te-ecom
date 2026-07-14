@@ -150,6 +150,15 @@ function parseRapidshypJourney(scans, currentStatus, courier, zone, statusCode, 
     };
 }
 
+// DocPharma dates come as "YYYY-MM-DD HH:MM:SS" IST wall-clock (no zone) → stamp +05:30 so the stored
+// UTC instant is correct. Falls back to parseScanDate for other shapes.
+function parseDpDate(v) {
+    if (!v) return null;
+    const m = String(v).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}+05:30`;
+    return parseScanDate(v);
+}
+
 // Build a journey from a DocPharma order payload (no scan timeline — summary fields).
 function parseDocpharmaJourney(dp) {
     const so = (dp && dp.suborders && dp.suborders[0]) || {};
@@ -160,11 +169,15 @@ function parseDocpharmaJourney(dp) {
     const dispatched = ld.dispatch_date || ld.manifest_date || ld.pickup_date || ld.shipped_at || so.dispatched_at || null;
     const zone = ld.zone || ld.zone_name || ld.delivery_zone || so.zone || null;
 
-    const delivered = /deliver/.test(status) && !/rto/.test(status);
+    // "delivered" must be an ACTUAL delivery. \bdelivered\b matches "DELIVERED" but NOT "out_for_delivery"
+    // or "delivery_assigned" — those contain "deliver" but are NOT delivered (the old /deliver/ test wrongly
+    // marked them delivered and is_final-locked them). RTO is excluded (RTO_DELIVERED → rto, not delivered).
+    const delivered = /\bdelivered\b/.test(status) && !/rto/.test(status);
     // Boundary BEFORE "rto" only — DocPharma sends "RTO_RECEIVED"/"RTO_INITIATED" where the trailing \b fails.
     const rto       = /\brto|return/.test(status);
     const lost      = /\blost\b|untraceable/.test(status);
-    const reached_delivery = delivered || rto || reattempts > 0 || /out for delivery|ofd/.test(status);
+    // Out-for-delivery is an attempt in progress, NOT terminal → stays in-transit unless a re-attempt was logged.
+    const reached_delivery = delivered || rto || reattempts > 0;
     const outcome   = delivered ? 'delivered' : rto ? 'rto' : lost ? 'lost' : reached_delivery ? 'ndr_pending' : 'in_transit';
 
     return {
@@ -174,11 +187,13 @@ function parseDocpharmaJourney(dp) {
         ndr_count: reattempts,                                 // each re-attempt = a failed attempt
         reached_delivery,
         first_attempt_success: delivered && reattempts === 0,
-        ndr_reasons: reason ? [reason] : [],
+        // Only attach a reason on an actual NDR/RTO — DocPharma leaves a canned "reason" on in-transit rows.
+        ndr_reasons: (reason && (rto || reattempts > 0)) ? [reason] : [],
         out_for_delivery_at: null,
         delivered_at: so.delivered_at || null,
         rto_at: null,
         dispatched_at: dispatched,
+        first_edd: parseDpDate(so.eta || (dp && dp.eta)),   // DocPharma promise date (Promised EDD)
         zone,
         // RTO with zero re-attempts → returned without a delivery attempt. DocPharma has no scan
         // timeline, so this is best-effort (reattempt_count only; no scan-log evidence available).
@@ -234,6 +249,135 @@ async function fetchRsShipment(awb, tries = 3) {
         } catch (e) { if (attempt < tries) { await _sleep(attempt * 1200); continue; } return { found: false, error: e.message }; }
     }
     return { found: false };
+}
+
+const RS_DETAILS_URL = 'https://api.rapidshyp.com/rapidshyp/apis/v1/shipment_details';
+
+// Coerce a RapidShyp numeric field: keep 0, but null out undefined/''/non-numeric.
+function _num(v) { if (v === null || v === undefined || v === '') return null; const n = Number(v); return isNaN(n) ? null : n; }
+
+// Fetch a shipment's freight breakdown + invoice value + promised EDD by AWB (shipment_details API).
+// track_order does NOT carry freight, so this is the only source for shipping cost. Cancelled shipments
+// return an empty final_freights ({}) → freight fields come back null. Returns { found, ... } | { found:false }.
+async function fetchRsShipmentDetails(awb, tries = 3) {
+    if (!awb) return { found: false, definitive: true };
+    for (let attempt = 1; attempt <= tries; attempt++) {
+        try {
+            const r = await axios.get(`${RS_DETAILS_URL}?awb=${encodeURIComponent(awb)}`,
+                { headers: { 'rapidshyp-token': config.RAPIDSHYP_API_KEY }, timeout: 25000, validateStatus: () => true });
+            // 429/5xx = transient → retry, then give up as NON-definitive (nightly cron retries it).
+            if (r.status === 429 || r.status >= 500) { if (attempt < tries) { await _sleep(attempt * 1500); continue; } return { found: false, definitive: false }; }
+            const sd = r.data && r.data.shipment_details;
+            // API answered but has no priceable details (cancelled/unknown AWB) → definitive empty.
+            if (!sd) return { found: false, definitive: true };
+            const ff = sd.final_freights || {};
+            return {
+                found: true,
+                freight_total:   _num(ff.total_freight),
+                freight_forward: _num(ff.total_freight_forward),
+                freight_rto:     _num(ff.total_rto_freight),
+                cod_charges:     _num(ff.total_cod_charges),
+                shipment_value:  _num(sd.total_shipment_value),
+                applied_weight:  _num(sd.applied_weight),
+                edd:             parseScanDate(sd.current_courier_edd),
+                status:          sd.shipment_status || '',
+            };
+        } catch (e) { if (attempt < tries) { await _sleep(attempt * 1200); continue; } return { found: false, definitive: false, error: e.message }; }
+    }
+    return { found: false, definitive: false };
+}
+
+// Fetch + persist freight/value/EDD for one shipment (by AWB). Stamps charges_fetched_at so the
+// backfill/cron skips it next time. opts.backfillEdd → also write first_edd when it's missing (the DB
+// trigger keeps the earliest, so this never clobbers an existing promise date). Returns the detail | null.
+async function syncRsCharges(awb, opts = {}) {
+    if (!awb) return null;
+    const d = await fetchRsShipmentDetails(awb);
+    if (!d.found) {
+        // Definitive empty (cancelled/unknown AWB, no freight) → stamp so the backfill/cron skips it
+        // next time. Transient failures (network/429/5xx) stay unstamped and get retried later.
+        if (d.definitive) await supabase.from('shipment_journey_ecom').update({ charges_fetched_at: new Date().toISOString() }).eq('awb', awb);
+        return null;
+    }
+    const upd = {
+        freight_total: d.freight_total, freight_forward: d.freight_forward,
+        freight_rto: d.freight_rto, cod_charges: d.cod_charges,
+        shipment_value: d.shipment_value, applied_weight: d.applied_weight,
+        charges_fetched_at: new Date().toISOString(),
+    };
+    if (opts.backfillEdd && d.edd) upd.first_edd = d.edd;
+    const { error } = await supabase.from('shipment_journey_ecom').update(upd).eq('awb', awb);
+    if (error) { console.error('[Charges] update error', awb, error.message); return null; }
+    return d;
+}
+
+// Process up to `limit` FINAL RapidShyp shipments that still need a charges fetch (charges_fetched_at
+// NULL). Runs a small concurrency pool with pacing so RapidShyp isn't throttled. Only final shipments
+// are fetched — freight is stable once delivered/RTO'd, and that's all the reports need.
+// Returns { processed, updated }.
+async function syncChargesBatch(limit = 500, concurrency = 4) {
+    const { data, error } = await supabase.from('shipment_journey_ecom')
+        .select('awb, first_edd')
+        .eq('source', 'rapidshyp').eq('is_final', true)
+        .is('charges_fetched_at', null).not('awb', 'is', null)
+        .limit(limit);
+    if (error) { console.error('[Charges] batch select error:', error.message); return { processed: 0, updated: 0 }; }
+    const rows = data || [];
+    let updated = 0, i = 0;
+    async function worker() {
+        while (i < rows.length) {
+            const row = rows[i++];
+            const d = await syncRsCharges(row.awb, { backfillEdd: !row.first_edd });
+            if (d) updated++;
+            await _sleep(250);   // gentle pacing between calls
+        }
+    }
+    await Promise.all(Array.from({ length: Math.min(concurrency, rows.length || 1) }, worker));
+    return { processed: rows.length, updated };
+}
+
+// One-time full backfill of freight/value/EDD across ALL final RapidShyp shipments, in priority order:
+// silent-RTO first (feature #2), then delivered (feature #5 needs their EDD), then the rest. Pages until
+// each pass drains. An attempted-AWB set guards against an infinite loop if a page is all transient fails.
+async function backfillCharges({ concurrency = 4, pageSize = 500, sleepMs = 200 } = {}) {
+    const passes = [
+        { label: 'silent-RTO', apply: q => q.eq('outcome', 'rto').eq('rto_no_attempt', true) },
+        { label: 'delivered', apply: q => q.eq('outcome', 'delivered') },
+        { label: 'remaining', apply: q => q },
+    ];
+    const attempted = new Set();
+    let grand = 0;
+    for (const pass of passes) {
+        let passTotal = 0;
+        for (;;) {
+            let q = supabase.from('shipment_journey_ecom')
+                .select('awb, first_edd')
+                .eq('source', 'rapidshyp').eq('is_final', true)
+                .is('charges_fetched_at', null).not('awb', 'is', null);
+            q = pass.apply(q);
+            const { data, error } = await q.limit(pageSize);
+            if (error) { console.error('[Charges backfill] select error:', error.message); break; }
+            const all = data || [];
+            const rows = all.filter(r => !attempted.has(r.awb));   // skip transient-failed rows seen this run
+            if (!rows.length) break;
+            rows.forEach(r => attempted.add(r.awb));
+            let i = 0, updated = 0;
+            async function worker() {
+                while (i < rows.length) {
+                    const row = rows[i++];
+                    const d = await syncRsCharges(row.awb, { backfillEdd: !row.first_edd });
+                    if (d) updated++;
+                    await _sleep(sleepMs);
+                }
+            }
+            await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
+            passTotal += updated; grand += updated;
+            console.log(`[Charges backfill] ${pass.label}: +${updated}/${rows.length} (pass ${passTotal}, grand ${grand})`);
+        }
+        console.log(`[Charges backfill] ${pass.label} pass complete — ${passTotal} priced.`);
+    }
+    console.log(`[Charges backfill] DONE — ${grand} shipments priced.`);
+    return grand;
 }
 
 // Resolve + save one order's journey: try RapidShyp (by AWB) first, fall back to DocPharma (by order
@@ -447,7 +591,40 @@ async function reprocessFinal(days = 95, opts = {}) {
     console.log(`[Reprocess Final] DONE — ${ok}/${todo.length}`);
 }
 
-module.exports = { classifyScan, parseScanDate, parseRapidshypJourney, parseDocpharmaJourney, saveJourney, fetchRsShipment, updateJourneyForOrder, backfillJourneys, backfillTatZone, reprocessInTransit, reprocessFinal };
+// Re-fetch DocPharma + re-classify rows that may have been mis-finalized by the old /deliver/ bug (which
+// marked "out_for_delivery"/"delivery_assigned" as delivered). Default target: delivered rows with NO
+// delivered_at (the reliable signature — genuine DP deliveries carry a delivered_at). Ignores is_final so
+// stuck rows actually get re-checked. Returns { processed, changed, changes }.
+async function reprocessDocpharma({ concurrency = 4, onlyBadDelivered = true } = {}) {
+    let q = supabase.from('shipment_journey_ecom')
+        .select('awb, order_name, order_date, payment_mode, outcome, delivered_at')
+        .eq('source', 'docpharma');
+    q = onlyBadDelivered ? q.eq('outcome', 'delivered').is('delivered_at', null) : q;
+    const { data, error } = await q.limit(5000);
+    if (error) { console.error('[DP reprocess] select error:', error.message); return { processed: 0, changed: 0 }; }
+    const rows = data || [];
+    console.log(`[DP reprocess] ${rows.length} DocPharma rows to re-check (concurrency ${concurrency})…`);
+    let changed = 0, i = 0; const changes = {};
+    const worker = async () => {
+        while (i < rows.length) {
+            const row = rows[i++];
+            try {
+                const dp = await fetchDocpharmaDetails(String(row.order_name).replace('#', '').trim());
+                if (dp) {
+                    const j = parseDocpharmaJourney(dp);
+                    await saveJourney(row.awb, row.order_name, 'docpharma', j, row.order_date, null, row.payment_mode);
+                    if (j.outcome !== row.outcome) { changed++; const k = `${row.outcome}→${j.outcome}`; changes[k] = (changes[k] || 0) + 1; }
+                }
+            } catch (_e) { /* skip */ }
+            await _sleep(200);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, rows.length || 1) }, worker));
+    console.log(`[DP reprocess] DONE — processed ${rows.length}, changed ${changed}`, JSON.stringify(changes));
+    return { processed: rows.length, changed, changes };
+}
+
+module.exports = { classifyScan, parseScanDate, parseDpDate, parseRapidshypJourney, parseDocpharmaJourney, saveJourney, fetchRsShipment, fetchRsShipmentDetails, syncRsCharges, syncChargesBatch, backfillCharges, updateJourneyForOrder, backfillJourneys, backfillTatZone, reprocessInTransit, reprocessFinal, reprocessDocpharma };
 
 // CLI: node app/api/delivery_journey.js backfill [days] [concurrency] [olderThanDays]
 //   `backfill 90 2 30` → gentle 30–90 day window only (skips the already-done recent 30 days)
@@ -458,6 +635,13 @@ if (require.main === module && process.argv[2] === 'backfill') {
     const olderThanDays = process.argv[5] ? parseInt(process.argv[5], 10) : 0;
     const sleepMs = conc <= 2 ? 450 : 200; // gentler pacing when low-concurrency
     backfillJourneys(days, { concurrency: conc, sleepMs, olderThanDays }).then(() => process.exit(0)).catch(e => { console.error(e.message); process.exit(1); });
+}
+// `charges-backfill [concurrency] [pageSize]` — one-time price of all final RapidShyp shipments
+// (silent-RTO → delivered → rest) via the shipment_details API. Safe to re-run; skips priced rows.
+if (require.main === module && process.argv[2] === 'charges-backfill') {
+    const conc = parseInt(process.argv[3] || '4', 10) || 4;
+    const pageSize = parseInt(process.argv[4] || '500', 10) || 500;
+    backfillCharges({ concurrency: conc, pageSize }).then(() => process.exit(0)).catch(e => { console.error(e.message); process.exit(1); });
 }
 if (require.main === module && process.argv[2] === 'tat-backfill') {
     const days = parseInt(process.argv[3] || '90', 10) || 90;
@@ -477,4 +661,11 @@ if (require.main === module && process.argv[2] === 'reprocess-final') {
     const outcome = process.argv[5] || null;
     const src = process.argv[6] || null;   // e.g. rapidshyp — only these carry scan codes
     reprocessFinal(days, { concurrency: conc, outcome, source: src }).then(() => process.exit(0)).catch(e => { console.error(e.message); process.exit(1); });
+}
+// `fix-docpharma [concurrency] [all]` — re-fetch + re-classify DocPharma rows mis-marked delivered by the
+// old /deliver/ bug (default: delivered with no delivered_at). Pass "all" to re-check every DP row.
+if (require.main === module && process.argv[2] === 'fix-docpharma') {
+    const conc = parseInt(process.argv[3] || '4', 10) || 4;
+    const onlyBadDelivered = process.argv[4] !== 'all';
+    reprocessDocpharma({ concurrency: conc, onlyBadDelivered }).then(() => process.exit(0)).catch(e => { console.error(e.message); process.exit(1); });
 }

@@ -50,44 +50,18 @@ async function generatePdfBuffer(since, until, label) {
 }
 
 async function sendEmailWithAttachments(attachments, since, until) {
-    const emailUser = config.EMAIL_USER || process.env.EMAIL_USER;
-    const emailPass = config.EMAIL_PASSWORD || process.env.EMAIL_PASSWORD;
-    const emailHost = config.EMAIL_HOST || process.env.EMAIL_HOST;
-    const emailPort = parseInt(config.EMAIL_PORT || process.env.EMAIL_PORT || 587);
-    const recipient = config.RECIPIENT_EMAIL || process.env.RECIPIENT_EMAIL;
-
-    if (!emailUser || !emailPass || !emailHost || !recipient) {
-        log("[EMAIL ERROR] Missing environment variables (EMAIL_USER, EMAIL_PASSWORD, EMAIL_HOST, RECIPIENT_EMAIL)");
-        return;
-    }
-
+    // Use the shared portal-aware sender (DB settings over .env, decrypted password).
+    const { sendMail } = require('./app/api/email_settings');
     try {
-        log(`Connecting to SMTP server: ${emailHost}:${emailPort}`);
-
-        const transporter = nodemailer.createTransport({
-            host: emailHost,
-            port: emailPort,
-            secure: emailPort === 465,
-            auth: {
-                user: emailUser,
-                pass: emailPass
-            }
-        });
-
-        const mailOptions = {
-            from: emailUser,
-            to: recipient,
+        const r = await sendMail({
             subject: `Ad Set Performance Report: ${since} to ${until}`,
             text: `Attached are the ad set performance reports:\n\n` +
                   `1️⃣ Month-to-Date (${since} to ${until})\n` +
                   `2️⃣ Last Month\n\n` +
                   `Regards,\nEcom Central`,
-            attachments: attachments
-        };
-
-        const info = await transporter.sendMail(mailOptions);
-        log(`✅ Email sent successfully to ${recipient} (MsgID: ${info.messageId})`);
-
+            attachments,
+        });
+        log(`✅ Email sent successfully to ${r.to.join(', ')} (MsgID: ${r.messageId})`);
     } catch (e) {
         log(`[EMAIL ERROR] ${e.message}`);
     }

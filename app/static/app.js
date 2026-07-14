@@ -462,7 +462,8 @@ function navigate(view) {
         case 'settings': 
             activeLinkElement = document.getElementById('nav-settings'); 
             activeViewElement = document.getElementById('settings-view'); 
-            if(typeof renderSettings === 'function') renderSettings(); 
+            if(typeof renderSettings === 'function') renderSettings();
+            if(typeof renderEmailSettings === 'function') renderEmailSettings();
             break;
         case 'reports-view':
             activeLinkElement = document.getElementById('nav-reports');
@@ -487,6 +488,11 @@ function navigate(view) {
             activeLinkElement = document.getElementById('nav-delivery-perf');
             activeViewElement = document.getElementById('delivery-perf-view');
             if (typeof dpInit === 'function') dpInit();
+            break;
+        case 'claims-sla':
+            activeLinkElement = document.getElementById('nav-claims-sla');
+            activeViewElement = document.getElementById('claims-sla-view');
+            if (typeof claimsInit === 'function') claimsInit();
             break;
         case 'ops-control':
             activeLinkElement = document.getElementById('nav-ops-control');
@@ -2679,6 +2685,236 @@ function renderInsightCharts(o, s, e) {
 }
 function renderSettings(){const c=document.getElementById('seller-connections');c.innerHTML=connections.map(e=>`<div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between"><div class="flex items-center"><img src="${platformLogos[e.name]}" class="w-10 h-10 mr-4 rounded-lg bg-slate-50 p-1"><div><p class="font-bold text-slate-900">${e.name}</p><p class="text-sm text-slate-500">${e.status==='Connected'?e.user:'Click to connect'}</p></div></div><button data-platform="${e.name}" data-action="${e.status==='Connected'?'disconnect':'connect'}" class="connection-btn ${e.status==='Connected'?'text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100':'text-white bg-indigo-600 hover:bg-indigo-700'} px-4 py-2 rounded-lg text-sm font-medium transition-colors">${e.status==='Connected'?'Disconnect':'Connect'}</button></div>`).join('');document.querySelectorAll('.connection-btn').forEach(b=>b.addEventListener('click',e=>handleConnection(e.currentTarget.dataset.platform,e.currentTarget.dataset.action)))}
 function handleConnection(p,a){if(a==='connect'){showNotification(`Simulating connection to ${p}...`);setTimeout(()=>{showNotification(`Successfully connected to ${p}.`)},1500)}else if(a==='disconnect'){if(confirm(`Are you sure you want to disconnect from ${p}?`)){showNotification(`Disconnected from ${p}.`)}}}
+
+// ─────────── Email & Reports settings (admin only) ───────────
+let _emailSettingsWired = false;
+async function renderEmailSettings(){
+  const card = document.getElementById('email-settings-card');
+  if(!card) return;
+  if(!(currentUser && currentUser.isAdmin)){ card.style.display='none'; return; }
+  card.style.display='';
+  // Wire buttons once.
+  if(!_emailSettingsWired){
+    _emailSettingsWired = true;
+    document.getElementById('es-save')?.addEventListener('click', saveEmailSettings);
+    document.getElementById('es-test')?.addEventListener('click', testEmailSettings);
+  }
+  try{
+    const r = await fetch('/api/admin/email-settings',{headers:getAuthHeaders()});
+    const d = await r.json();
+    if(!d.success) throw new Error(d.message||'Load failed');
+    const s = d.settings, f = d.env_fallback || {};
+    const set=(id,v)=>{const el=document.getElementById(id); if(el) el.value = v||'';};
+    set('es-smtp-host', s.smtp_host); set('es-smtp-port', s.smtp_port);
+    set('es-from', s.from_email || s.smtp_user); set('es-rapidshyp', s.rapidshyp_email);
+    set('es-to', s.to_emails); set('es-cc', s.cc_emails);
+    // Password: show a placeholder indicating one is already stored; blank = keep unchanged.
+    const pass=document.getElementById('es-smtp-pass'); if(pass){ pass.value=''; pass.placeholder = s.password_set ? '•••••• (stored — leave blank to keep)' : (f.password_set ? '•••••• (using server default)' : 'not set'); }
+    // Fallback placeholders on blank fields.
+    const ph=(id,v)=>{const el=document.getElementById(id); if(el && v) el.placeholder = el.placeholder && !el.value ? (v+'  (default)') : el.placeholder;};
+    ph('es-smtp-host', f.smtp_host); ph('es-smtp-port', String(f.smtp_port||'')); ph('es-from', f.smtp_user); ph('es-to', f.recipient);
+    const meta=document.getElementById('es-meta');
+    if(meta) meta.textContent = s.updated_at ? `Last updated ${new Date(s.updated_at).toLocaleString()}${s.updated_by?(' by '+s.updated_by):''}` : 'Not configured yet — using server defaults.';
+    const st=document.getElementById('es-status'); if(st) st.textContent='';
+  }catch(e){ const st=document.getElementById('es-status'); if(st){ st.textContent=e.message; st.className='text-sm text-rose-600'; } }
+}
+async function saveEmailSettings(){
+  const st=document.getElementById('es-status');
+  const val=id=>{const el=document.getElementById(id); return el?el.value.trim():'';};
+  const body={
+    smtp_host:val('es-smtp-host'), smtp_port:val('es-smtp-port'),
+    smtp_password:document.getElementById('es-smtp-pass')?.value||'',   // blank = keep existing
+    from_email:val('es-from'), rapidshyp_email:val('es-rapidshyp'), to_emails:val('es-to'), cc_emails:val('es-cc'),
+  };
+  if(st){ st.textContent='Saving…'; st.className='text-sm text-slate-500'; }
+  try{
+    const r=await fetch('/api/admin/email-settings',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(!r.ok||!d.success) throw new Error(d.message||'Save failed');
+    if(st){ st.textContent='Saved ✓'; st.className='text-sm text-emerald-600'; }
+    renderEmailSettings();
+  }catch(e){ if(st){ st.textContent=e.message; st.className='text-sm text-rose-600'; } }
+}
+async function testEmailSettings(){
+  const st=document.getElementById('es-status');
+  const to=(document.getElementById('es-to')?.value||'').split(',')[0].trim();
+  if(st){ st.textContent='Sending test…'; st.className='text-sm text-slate-500'; }
+  try{
+    const r=await fetch('/api/admin/email-settings/test',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify(to?{to}:{})});
+    const d=await r.json();
+    if(!r.ok||!d.success) throw new Error(d.message||'Test failed');
+    if(st){ st.textContent=d.message||'Test sent ✓'; st.className='text-sm text-emerald-600'; }
+  }catch(e){ if(st){ st.textContent=e.message; st.className='text-sm text-rose-600'; } }
+}
+// ─────────── Silent-RTO & SLA (claims-sla) ───────────
+let _claimsWired = false, _claimsTab = 'srto';
+const _claimsState = {
+  srto: { rows: [], sortKey: 'freight_total', dir: -1 },
+  late: { rows: [], sortKey: 'days_late', dir: -1 },
+};
+const _claimsFilter = { q: '', payment: '', courier: '', zone: '' };
+const _inr = n => '₹' + (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+// DD-MM-YYYY in IST (dashboard-wide date format for the new views).
+const _dmy = ts => { if(!ts) return ''; const s = new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); const p = s.split('-'); return p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : s; };
+const _ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function claimsInit(){
+  const from = document.getElementById('claims-from'), to = document.getElementById('claims-to');
+  if(from && !from.value){ const d = new Date(); from.value = _ymd(new Date(d.getFullYear(), d.getMonth(), d.getDate() - 30)); to.value = _ymd(d); }
+  if(!_claimsWired){
+    _claimsWired = true;
+    document.getElementById('claims-apply')?.addEventListener('click', claimsLoad);
+    document.querySelectorAll('.claims-tab').forEach(b => b.addEventListener('click', () => claimsSwitch(b.dataset.tab)));
+    document.getElementById('srto-send')?.addEventListener('click', () => claimsSend('srto'));
+    document.getElementById('late-send')?.addEventListener('click', () => claimsSend('late'));
+    document.getElementById('claims-search')?.addEventListener('input', e => { _claimsFilter.q = e.target.value.trim(); claimsRender(); });
+    document.getElementById('claims-f-payment')?.addEventListener('change', e => { _claimsFilter.payment = e.target.value; claimsRender(); });
+    document.getElementById('claims-f-courier')?.addEventListener('change', e => { _claimsFilter.courier = e.target.value; claimsRender(); });
+    document.getElementById('claims-f-zone')?.addEventListener('change', e => { _claimsFilter.zone = e.target.value; claimsRender(); });
+    document.getElementById('claims-clear')?.addEventListener('click', claimsClearFilters);
+    // Sortable headers (delegated per panel).
+    ['claims-panel-srto', 'claims-panel-late'].forEach(pid => {
+      document.getElementById(pid)?.querySelector('thead')?.addEventListener('click', e => {
+        const th = e.target.closest('th[data-sort]'); if(!th) return;
+        const which = pid === 'claims-panel-srto' ? 'srto' : 'late', st = _claimsState[which], key = th.dataset.sort;
+        if(st.sortKey === key) st.dir *= -1; else { st.sortKey = key; st.dir = ['order_name', 'awb', 'courier', 'zone'].includes(key) ? 1 : -1; }
+        claimsRender();
+      });
+    });
+    if(currentUser && currentUser.isAdmin){ const a = document.getElementById('srto-send'), b = document.getElementById('late-send'); if(a) a.style.display = ''; if(b) b.style.display = ''; }
+  }
+  claimsLoad();
+}
+function claimsClearFilters(){
+  _claimsFilter.q = ''; _claimsFilter.payment = ''; _claimsFilter.courier = ''; _claimsFilter.zone = '';
+  const s = document.getElementById('claims-search'); if(s) s.value = '';
+  ['claims-f-payment', 'claims-f-courier', 'claims-f-zone'].forEach(id => { const el = document.getElementById(id); if(el) el.value = ''; });
+  claimsRender();
+}
+function claimsSwitch(tab){
+  _claimsTab = tab;
+  document.querySelectorAll('.claims-tab').forEach(b => { const on = b.dataset.tab === tab;
+    b.classList.toggle('border-indigo-600', on); b.classList.toggle('text-indigo-700', on);
+    b.classList.toggle('border-transparent', !on); b.classList.toggle('text-slate-500', !on); });
+  document.getElementById('claims-panel-srto').style.display = tab === 'srto' ? '' : 'none';
+  document.getElementById('claims-panel-late').style.display = tab === 'late' ? '' : 'none';
+  claimsRender();
+}
+async function claimsLoad(){
+  const from = document.getElementById('claims-from')?.value, to = document.getElementById('claims-to')?.value;
+  const qs = `?from=${from}&to=${to}`;
+  ['srto-tbody', 'late-tbody'].forEach(id => { const t = document.getElementById(id); if(t) t.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr>'; });
+  try{
+    const [a, b] = await Promise.all([
+      fetch('/api/silent-rto-claims' + qs, { headers: getAuthHeaders() }).then(r => r.json()),
+      fetch('/api/late-deliveries' + qs, { headers: getAuthHeaders() }).then(r => r.json()),
+    ]);
+    _claimsState.srto.rows = (a && a.success && a.rows) ? a.rows : [];
+    _claimsState.late.rows = (b && b.success && b.rows) ? b.rows : [];
+    claimsPopulateFilters();
+    claimsRender();
+  }catch(e){
+    const t = document.getElementById(_claimsTab === 'srto' ? 'srto-tbody' : 'late-tbody');
+    if(t) t.innerHTML = `<tr><td colspan="7" class="px-4 py-8 text-center text-rose-500">${ecEsc(e.message)}</td></tr>`;
+  }
+}
+// Populate courier/zone dropdowns from the union of both datasets (options stable across tabs).
+function claimsPopulateFilters(){
+  const all = [..._claimsState.srto.rows, ..._claimsState.late.rows];
+  const uniq = k => [...new Set(all.map(r => r[k]).filter(Boolean))].sort();
+  const fill = (id, vals, cur) => { const el = document.getElementById(id); if(!el) return;
+    const first = el.querySelector('option'); el.innerHTML = ''; el.appendChild(first);
+    vals.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; el.appendChild(o); });
+    el.value = cur && vals.includes(cur) ? cur : ''; };
+  fill('claims-f-courier', uniq('courier'), _claimsFilter.courier);
+  fill('claims-f-zone', uniq('zone'), _claimsFilter.zone);
+}
+// Apply the shared filters + the tab's sort to a tab's rows.
+function claimsApply(which){
+  const st = _claimsState[which], f = _claimsFilter;
+  const rows = st.rows.filter(r => {
+    if(f.payment && String(r.payment_mode || '').toLowerCase() !== f.payment.toLowerCase()) return false;
+    if(f.courier && (r.courier || '') !== f.courier) return false;
+    if(f.zone && (r.zone || '') !== f.zone) return false;
+    if(f.q){ const q = f.q.toLowerCase(); if(!String(r.order_name || '').toLowerCase().includes(q) && !String(r.awb || '').toLowerCase().includes(q)) return false; }
+    return true;
+  });
+  const k = st.sortKey, dir = st.dir, dateKeys = ['order_date', 'first_edd', 'delivered_at', 'rto_at'], numKeys = ['freight_total', 'shipment_value', 'days_late'];
+  rows.sort((a, b) => {
+    let av = a[k], bv = b[k];
+    if(dateKeys.includes(k)){ av = av ? new Date(av).getTime() : 0; bv = bv ? new Date(bv).getTime() : 0; }
+    else if(numKeys.includes(k)){ av = Number(av) || 0; bv = Number(bv) || 0; }
+    else { av = String(av || '').toLowerCase(); bv = String(bv || '').toLowerCase(); }
+    return av < bv ? -dir : av > bv ? dir : 0;
+  });
+  return rows;
+}
+function claimsCaret(which){
+  const st = _claimsState[which], pid = which === 'srto' ? 'claims-panel-srto' : 'claims-panel-late';
+  document.getElementById(pid)?.querySelectorAll('th[data-sort]').forEach(th => {
+    const active = th.dataset.sort === st.sortKey, c = th.querySelector('.claims-caret');
+    if(c) c.textContent = active ? (st.dir === 1 ? ' ▲' : ' ▼') : '';
+    th.classList.toggle('text-slate-700', active);
+  });
+}
+function claimsRender(){ if(_claimsTab === 'srto') claimsRenderSrto(); else claimsRenderLate(); }
+function claimsRenderSrto(){
+  const rows = claimsApply('srto'), count = rows.length;
+  const freight = rows.reduce((a, r) => a + (Number(r.freight_total) || 0), 0);
+  const value = rows.reduce((a, r) => a + (Number(r.shipment_value) || 0), 0);
+  const priced = rows.filter(r => r.freight_total != null).length;
+  document.getElementById('srto-kpi-count').textContent = count;
+  document.getElementById('srto-kpi-freight').textContent = _inr(freight);
+  document.getElementById('srto-kpi-value').textContent = _inr(value);
+  document.getElementById('srto-kpi-priced').textContent = `${priced}/${count}`;
+  document.getElementById('srto-tbody').innerHTML = count ? rows.map(r => `<tr class="border-t border-slate-100 hover:bg-slate-50">
+    <td class="px-4 py-2.5 font-medium text-slate-700">${ecEsc(r.order_name)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
+    <td class="px-4 py-2.5 text-slate-500">${_dmy(r.order_date)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.zone || '')}</td>
+    <td class="px-4 py-2.5 text-right font-semibold text-rose-600">${r.freight_total != null ? _inr(r.freight_total) : '—'}</td>
+    <td class="px-4 py-2.5 text-right text-slate-600">${r.shipment_value != null ? _inr(r.shipment_value) : '—'}</td></tr>`).join('')
+    : '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">No silent RTOs match.</td></tr>';
+  claimsCaret('srto');
+  const cc = document.getElementById('claims-count'); if(cc) cc.textContent = `${count} shown`;
+}
+function claimsRenderLate(){
+  const rows = claimsApply('late'), count = rows.length;
+  const avg = count ? Math.round(rows.reduce((a, r) => a + r.days_late, 0) / count * 100) / 100 : 0;
+  const max = rows.reduce((m, r) => Math.max(m, r.days_late), 0);
+  const severe = rows.filter(r => r.days_late >= 4).length;
+  document.getElementById('late-kpi-count').textContent = count;
+  document.getElementById('late-kpi-avg').textContent = avg;
+  document.getElementById('late-kpi-max').textContent = max + 'd';
+  document.getElementById('late-kpi-severe').textContent = severe;
+  document.getElementById('late-tbody').innerHTML = count ? rows.map(r => `<tr class="border-t border-slate-100 hover:bg-slate-50">
+    <td class="px-4 py-2.5 font-medium text-slate-700">${ecEsc(r.order_name)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
+    <td class="px-4 py-2.5 text-slate-500">${_dmy(r.first_edd)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${_dmy(r.delivered_at)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.zone || '')}</td>
+    <td class="px-4 py-2.5 text-right font-bold ${r.days_late >= 4 ? 'text-rose-600' : 'text-amber-600'}">${r.days_late}</td></tr>`).join('')
+    : '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">No late deliveries match.</td></tr>';
+  claimsCaret('late');
+  const cc = document.getElementById('claims-count'); if(cc) cc.textContent = `${count} shown`;
+}
+async function claimsSend(which){
+  const from = document.getElementById('claims-from')?.value, to = document.getElementById('claims-to')?.value;
+  const isSrto = which === 'srto';
+  const st = document.getElementById(isSrto ? 'srto-status' : 'late-status');
+  const confirmMsg = isSrto ? 'Email the silent-RTO claim list to RapidShyp for this date range?' : 'Email the late-delivery report to the configured recipients?';
+  if(!confirm(confirmMsg)) return;
+  if(st){ st.textContent = 'Sending…'; st.className = 'text-sm text-slate-500'; }
+  try{
+    const r = await fetch(isSrto ? '/api/silent-rto-claims/send' : '/api/late-deliveries/send',
+      { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ from, to }) });
+    const d = await r.json();
+    if(!r.ok || !d.success) throw new Error(d.message || 'Send failed');
+    if(st){ st.textContent = d.message || 'Sent ✓'; st.className = 'text-sm text-emerald-600'; }
+  }catch(e){ if(st){ st.textContent = e.message; st.className = 'text-sm text-rose-600'; } }
+}
+
 // ─────────── Deep-linkable views (open-in-new-tab / refresh / bookmark) ───────────
 // Map each nav item to a #hash so its page survives a full page load, not just an in-app click.
 const NAV_HREF = {
@@ -2686,7 +2922,7 @@ const NAV_HREF = {
     'nav-customer-segments': 'customer-segments', 'nav-returns-analysis': 'returns-analysis', 'nav-ad-ranking': 'ad-ranking',
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
-    'nav-delivery-perf': 'delivery-perf', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon',
+    'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-users': 'users'
 };
 const VALID_VIEWS = new Set(Object.values(NAV_HREF));
@@ -3389,13 +3625,14 @@ document.getElementById('nav-fulfillment-ops')?.addEventListener('click', (e) =>
 document.getElementById('nav-docpharma-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('docpharma-recon'); });
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
+document.getElementById('nav-claims-sla')?.addEventListener('click', (e) => { e.preventDefault(); navigate('claims-sla'); });
 document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
 document.getElementById('nav-amazon-fba')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-fba'); });
 document.getElementById('nav-users')?.addEventListener('click', (e) => { e.preventDefault(); navigate('users'); });
 
 // ═══════════════ USERS & PERMISSIONS (admin) ═══════════════
 const PERM_GROUPS = [
-  ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['ops-control','Ops Control'],['docpharma-recon','DocPharma Recon'],['amazon-fba','Amazon FBA']]],
+  ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['docpharma-recon','DocPharma Recon'],['amazon-fba','Amazon FBA']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]]
@@ -5889,11 +6126,13 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
 }
 // Expanded detail row — date-log (instant, from stored timeline) + scan-log (fetched on demand).
 function dpRenderDetail(r,td){ const ts=r.ts||{};
+    const sc=_dpScanCache[r.awb];
+    const eddVal=ts.edd||(sc&&sc.edd)||null;   // fall back to the live DocPharma promise EDD
     const step=(label,iso,color)=>{ const on=!!iso; return `<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:${on?color:'#cbd5e1'}"></span><span class="w-28 text-slate-500">${label}</span><span class="tabular-nums ${on?'text-slate-700 font-medium':'text-slate-300'}">${dpFmtTs(iso)}</span></div>`; };
     const timeline=step('Order placed',ts.order,'#6366f1')+step('Picked up',ts.dispatched,'#0ea5e9')+
         step('Out for delivery',ts.ofd,'#f59e0b')+
         (r.state==='rto'?step('RTO',ts.rto,'#ef4444'):step('Delivered',ts.delivered,'#16a34a'))+
-        step('Promised EDD',ts.edd,'#8b5cf6');
+        step('Promised EDD',eddVal,'#8b5cf6');
     const dest=[r.dest_city,r.dest_state].filter(Boolean).join(', ');
     const meta=`<div class="text-xs text-slate-500 mt-2 flex flex-wrap gap-x-4 gap-y-1">
         <span>📍 Destination: <b class="text-slate-700">${dest||'—'}${r.dest_pincode?` · ${r.dest_pincode}`:''}</b>${r.zone?` <span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 font-semibold">Zone ${r.zone}</span>`:''}</span>
@@ -5902,11 +6141,19 @@ function dpRenderDetail(r,td){ const ts=r.ts||{};
         <span>NDRs: <b class="text-slate-700">${r.ndr_count}</b></span>
         ${r.otdHrs!=null?`<span>O→Dispatch: <b class="text-slate-700">${Math.round(r.otdHrs)}h</b></span>`:''}
         ${(r.reasons&&r.reasons.length)?`<span>Reasons: <b class="text-slate-700">${r.reasons.join('; ')}</b></span>`:''}</div>`;
-    const sc=_dpScanCache[r.awb]; let scanHtml;
+    let scanHtml;
+    const scanRows=arr=>`<div class="space-y-1 max-h-64 overflow-auto pr-1">${arr.map(s=>`<div class="flex gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${s.desc}${s.code?` <span class="text-slate-400">(${s.code})</span>`:''}${s.location?` <span class="text-slate-400">· ${s.location}</span>`:''}</span></div>`).join('')}</div>`;
     if(!sc||sc.loading) scanHtml='<div class="text-slate-400 text-xs py-3">Loading scan log…</div>';
     else if(sc.error) scanHtml=`<div class="text-rose-400 text-xs py-3">Couldn’t load scans: ${sc.error}</div>`;
+    else if(sc.dp){ // DocPharma has no scan-by-scan log — show status milestones + a live tracking link.
+        const dp=sc.dp;
+        const badge=dp.current_status?`<span class="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200 text-[11px] font-semibold">${ecEsc(dp.current_status)}</span>`:'';
+        const link=dp.tracking_url?`<a href="${ecEsc(dp.tracking_url)}" target="_blank" rel="noopener" class="text-indigo-600 hover:underline text-xs font-medium">Track on DocPharma ↗</a>`:'';
+        const reason=dp.reason?`<div class="text-xs text-amber-700 mt-2">Reason: ${ecEsc(dp.reason)}</div>`:'';
+        scanHtml=`<div class="flex items-center gap-3 mb-2">${badge}${link}</div>${(sc.scans&&sc.scans.length)?scanRows(sc.scans):''}${reason}<div class="text-[11px] text-slate-400 mt-2">${ecEsc(dp.note||'')}</div>`;
+    }
     else if(!sc.scans||!sc.scans.length) scanHtml='<div class="text-slate-400 text-xs py-3">No scan log available for this shipment.</div>';
-    else scanHtml=`<div class="space-y-1 max-h-64 overflow-auto pr-1">${sc.scans.map(s=>`<div class="flex gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${s.desc}${s.code?` <span class="text-slate-400">(${s.code})</span>`:''}${s.location?` <span class="text-slate-400">· ${s.location}</span>`:''}</span></div>`).join('')}</div>${sc.live?'<div class="text-[10px] text-emerald-500 mt-1">● fetched live from courier</div>':''}`;
+    else scanHtml=`${scanRows(sc.scans)}${sc.live?'<div class="text-[10px] text-emerald-500 mt-1">● fetched live from courier</div>':''}`;
     return `<tr class="dp-detail"><td colspan="11" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
         <div class="grid md:grid-cols-2 gap-6">
           <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Date log</div>${timeline}${meta}</div>
@@ -5917,7 +6164,7 @@ function dpRenderDetail(r,td){ const ts=r.ts||{};
 async function dpLoadScans(awb){ _dpScanCache[awb]={loading:true}; try{
         const r=await fetch(`/api/delivery-performance/shipment/${encodeURIComponent(awb)}`,{headers:getAuthHeaders()});
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
-        _dpScanCache[awb]={loading:false,scans:d.scans||[],live:!!d.live};
+        _dpScanCache[awb]={loading:false,scans:d.scans||[],live:!!d.live,dp:d.dp||null,edd:(d.journey&&d.journey.ts&&d.journey.ts.edd)||null};
     }catch(e){ _dpScanCache[awb]={loading:false,error:e.message}; }
     if(_dpOpenAwb===awb) dpTableRender();
 }
