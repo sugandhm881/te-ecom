@@ -11,6 +11,8 @@ module.exports = {
     SECRET_KEY: process.env.JWT_SECRET,
 
     // --- Dashboard Login ---
+    // 2FA login OTP (ALL accounts) is EMAILED via the shared sendMail — sender comes from
+    // Settings → Email (app_email_settings), falling back to the EMAIL_* values below.
     APP_USER_EMAIL: process.env.APP_USER_EMAIL,
     APP_USER_PASSWORD: process.env.APP_USER_PASSWORD,
 

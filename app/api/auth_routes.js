@@ -1,10 +1,15 @@
 const express = require('express');
 const router = express.Router();
+const jwt = require('jsonwebtoken');
 const config = require('../../config');
 const { supabase } = require('../supabase');
 const { generateToken, tokenRequired, hashPassword, verifyPassword } = require('../auth');
+const otpMail = require('../otp_mail');
 
 const norm = e => String(e || '').toLowerCase().trim();
+const MOBILE_RX = /^[6-9]\d{9}$/;                                  // Indian 10-digit mobile
+const cleanMobile = m => String(m || '').replace(/\D/g, '').slice(-10);
+const emailHint = e => { const [u, d] = String(e).split('@'); return (u || '').slice(0, 2) + '******@' + (d || ''); };
 
 // In-memory rate limit for auth endpoints — blunts brute-force / credential-stuffing.
 const _attempts = new Map(); // ip -> { count, first }
@@ -28,13 +33,33 @@ function rateLimit(req, res, next) {
     next();
 }
 
+// ── 2FA (ALL accounts — admins + regular users, since 2026-07-17) ───────────────────
+// Password OK → if the portal can send email, a 6-digit OTP is emailed to the login address
+// (sender = Settings → Email) and the client must call /login/verify-otp before a real token
+// is issued. If email isn't configured, login falls through to password-only (never a lockout),
+// with a server-side warning.
+async function issueOrChallenge(res, user) {   // user = { email, role, permissions }
+    if (await otpMail.configured()) {
+        try { await otpMail.sendOtp(user.email, { reuseIfRecent: true }); }
+        catch (e) {
+            console.error('[2FA] OTP email send failed for', user.email, '-', e.message);
+            return res.status(503).json({ message: 'Could not send the OTP email right now. Please try again in a minute.' });
+        }
+        // Short-lived pre-auth token — proves the password step passed; carries NO permissions.
+        const otp_token = jwt.sign({ stage: 'otp2fa', email: user.email }, config.SECRET_KEY, { expiresIn: '5m' });
+        return res.json({ otp_required: true, otp_token, email_hint: emailHint(user.email) });
+    }
+    console.warn('[2FA] login without OTP — email/SMTP not configured (Settings → Email)');
+    return res.json({ token: generateToken({ email: user.email, role: user.role, permissions: user.permissions || [] }) });
+}
+
 router.post('/login', rateLimit, async (req, res) => {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ message: 'Email and password are required!' });
 
     // 1) .env bootstrap admin — always works, so the admin can never be locked out.
     if (config.APP_USER_EMAIL && config.APP_USER_PASSWORD && norm(email) === norm(config.APP_USER_EMAIL) && password === config.APP_USER_PASSWORD) {
-        return res.json({ token: generateToken({ email: norm(email), role: 'admin', permissions: ['*'] }) });
+        return issueOrChallenge(res, { email: norm(email), role: 'admin', permissions: ['*'] });
     }
 
     // 2) Database user.
@@ -44,19 +69,49 @@ router.post('/login', rateLimit, async (req, res) => {
             if (u.status === 'pending') return res.status(403).json({ message: 'Your account is pending admin approval.' });
             if (u.status === 'disabled') return res.status(403).json({ message: 'Your account has been disabled.' });
             if (u.status === 'active' && verifyPassword(password, u.password_hash)) {
-                return res.json({ token: generateToken({ email: u.email, role: u.role, permissions: u.permissions || [] }) });
+                return issueOrChallenge(res, { email: u.email, role: u.role, permissions: u.permissions || [] });
             }
         }
     } catch (_) {}
     return res.status(401).json({ message: 'Invalid credentials!' });
 });
 
+// Step 2 of 2FA: pre-auth token + the OTP the user received → real session token.
+router.post('/login/verify-otp', rateLimit, async (req, res) => {
+    const { otp_token, otp } = req.body || {};
+    if (!otp_token || !otp) return res.status(400).json({ message: 'OTP is required.' });
+    let claims;
+    try { claims = jwt.verify(otp_token, config.SECRET_KEY); } catch (_) { return res.status(401).json({ message: 'This OTP session has expired — please sign in again.' }); }
+    if (claims.stage !== 'otp2fa') return res.status(401).json({ message: 'Invalid OTP session.' });
+    if (!otpMail.verifyOtp(claims.email, otp)) return res.status(401).json({ message: 'Incorrect or expired OTP.' });
+    // Issue the real token with FRESH role/permissions (never trusted from the pre-auth token).
+    if (config.APP_USER_EMAIL && claims.email === norm(config.APP_USER_EMAIL)) {
+        return res.json({ token: generateToken({ email: claims.email, role: 'admin', permissions: ['*'] }) });
+    }
+    try {
+        const { data: u } = await supabase.from('app_users_ecom').select('*').eq('email', claims.email).single();
+        if (u && u.status === 'active') return res.json({ token: generateToken({ email: u.email, role: u.role, permissions: u.permissions || [] }) });
+    } catch (_) {}
+    return res.status(403).json({ message: 'Account is not active.' });
+});
+
+router.post('/login/resend-otp', rateLimit, async (req, res) => {
+    const { otp_token } = req.body || {};
+    let claims;
+    try { claims = jwt.verify(otp_token, config.SECRET_KEY); } catch (_) { return res.status(401).json({ message: 'This OTP session has expired — please sign in again.' }); }
+    if (claims.stage !== 'otp2fa') return res.status(401).json({ message: 'Invalid OTP session.' });
+    try { await otpMail.sendOtp(claims.email); } catch (e) { return res.status(503).json({ message: e.message }); }
+    res.json({ ok: true });
+});
+
 // Open signup → creates a PENDING account with no access. Admin must approve + grant dashboards.
 router.post('/signup', rateLimit, async (req, res) => {
     const email = norm(req.body && req.body.email);
     const password = (req.body && req.body.password) || '';
+    const mobile = cleanMobile(req.body && req.body.mobile);
     if (!email || !password) return res.status(400).json({ message: 'Email and password are required.' });
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ message: 'Please enter a valid email.' });
+    if (!MOBILE_RX.test(mobile)) return res.status(400).json({ message: 'A valid 10-digit mobile number is required.' });
     if (String(password).length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' });
     if (config.APP_USER_EMAIL && email === norm(config.APP_USER_EMAIL)) return res.status(409).json({ message: 'This email is reserved.' });
     try {
@@ -64,7 +119,7 @@ router.post('/signup', rateLimit, async (req, res) => {
         if (existing) return res.status(409).json({ message: 'An account with this email already exists.' });
     } catch (_) {}
     const { error } = await supabase.from('app_users_ecom').insert({
-        email, password_hash: hashPassword(password), role: 'user', status: 'pending', permissions: [], created_by: 'signup'
+        email, password_hash: hashPassword(password), mobile, role: 'user', status: 'pending', permissions: [], created_by: 'signup'
     });
     if (error) return res.status(500).json({ message: 'Could not create the account. Try again.' });
     return res.json({ ok: true, message: 'Account created — an admin will review and grant access.' });

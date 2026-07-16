@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const moment = require('moment-timezone');
 const { supabase } = require('../supabase');
-const { dbRowToDashboard } = require('./easyecom');
 
 // ─────────────────────────────────────────────────────
 // NORMALIZE: Supabase Shopify order → dashboard format
@@ -56,8 +55,9 @@ router.get('/get-orders', async (req, res) => {
         const thirtyDaysAgo = moment().subtract(30, 'days').toISOString();
 
         // ── 1. FETCH ALL DATA IN PARALLEL ──────────────────
-        // (Amazon orders removed 2026-07 — the Orders dashboard is Shopify/EasyEcom only now; Amazon
-        //  has its own dashboards. Skipping that query + payload makes this endpoint noticeably faster.)
+        // (Amazon orders removed 2026-07; EasyEcom-only orders removed 2026-07-17 — the Orders
+        //  dashboard lists Shopify orders only. EasyEcom data is still fetched, but purely to map
+        //  easyecomOrderId/status onto Shopify rows for the hold/unhold feature.)
         const [
             shopifyRes,
             shipmentRows,
@@ -85,10 +85,12 @@ router.get('/get-orders', async (req, res) => {
             supabase.from('awb_cache_ecom').select('*'),
             supabase.from('rapidshyp_tracking_ecom').select('awb, raw_status'),
 
-            // EasyEcom orders — full rows for dashboard + mapping
+            // EasyEcom rows — MAPPING ONLY (easyecomOrderId/status onto Shopify orders, for the
+            // hold/unhold feature + hold-mark reconciliation). EasyEcom-only orders (Flipkart etc.)
+            // are NOT listed on the Orders dashboard (removed 2026-07-17 per user).
             supabase
                 .from('b2c_order_easycom')
-                .select('*')
+                .select('order_id, reference_code, store_order_id, marketplace_order_id, order_status, updated_at, fetched_at')
                 .gte('order_date', thirtyDaysAgo)
                 .order('order_date', { ascending: false })
                 .limit(1000),
@@ -135,15 +137,10 @@ router.get('/get-orders', async (req, res) => {
             if (row.awb) trackingCache[String(row.awb)] = row;
         });
 
-        // ── 3. NORMALIZE ORDERS ─────────────────────────────
-        const shopifyOrders  = (shopifyRes.data || []).map(normalizeSupabaseOrder);
-        const easyecomOrders = (easyecomRows.data || []).map(dbRowToDashboard);
+        // ── 3. NORMALIZE ORDERS — Shopify only ──────────────
+        const shopifyOrders = (shopifyRes.data || []).map(normalizeSupabaseOrder);
 
-        // Merge: Start with Shopify, then add EasyEcom-only orders
-        // (orders in EasyEcom that don't exist in Shopify by order name)
-        const shopifyNameSet = new Set(shopifyOrders.map(o => String(o.id).trim()));
-
-        // Also map EasyEcom ID onto matching Shopify orders
+        // Map EasyEcom ID/status onto matching Shopify orders (hold/unhold needs these).
         shopifyOrders.forEach(o => {
             const ecMatch = easyecomMap[String(o.id)]
                          || easyecomMap[String(o.id).replace('#', '')]
@@ -155,16 +152,9 @@ router.get('/get-orders', async (req, res) => {
             }
         });
 
-        // EasyEcom-only orders = those whose display ID is NOT in Shopify
-        // Shopify names have "#" prefix (e.g. "#TE25-22042"), EasyEcom reference_code doesn't
-        const easyecomOnly = easyecomOrders.filter(o => {
-            const ecId = String(o.id).trim();
-            return !shopifyNameSet.has(ecId) && !shopifyNameSet.has('#' + ecId);
-        });
+        console.log(`[get-orders] Shopify: ${shopifyOrders.length} (EasyEcom-only orders are not listed)`);
 
-        console.log(`[get-orders] Shopify: ${shopifyOrders.length}, EasyEcom-only: ${easyecomOnly.length} (total EC: ${easyecomOrders.length})`);
-
-        let allOrders = [...shopifyOrders, ...easyecomOnly]
+        let allOrders = [...shopifyOrders]
             .sort((a, b) => {
                 // Priority: Use the exact millisecond timestamp we added
                 if (a.timestamp && b.timestamp) {

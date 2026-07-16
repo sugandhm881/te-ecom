@@ -25,6 +25,9 @@ const round2 = n => Math.round(n * 100) / 100;
 const _cache = new Map();
 const CACHE_TTL = 5 * 60 * 1000;
 router.use((req, res, next) => {
+    // Scope STRICTLY to /fba paths — this router is mounted at /api, so an unscoped use() would cache
+    // every GET of routers mounted after it (same bug as ops_control's cache). Never widen this guard.
+    if (!req.path.startsWith('/fba')) return next();
     if (req.method !== 'GET') return next();
     if (/^\/fba\/(locations|inbound)/.test(req.path)) return next(); // live table + action state
     const key = req.originalUrl.replace(/([?&])fresh=1(&|$)/, '$1').replace(/[?&]$/, '');

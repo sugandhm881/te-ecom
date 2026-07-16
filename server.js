@@ -80,7 +80,7 @@ app.use('/api/admin', require('./app/api/email_settings').router);   // admin-on
 
 // --- Require a valid JWT for ALL data APIs below. Public: login/signup (handled above) + external webhooks. ---
 const { tokenRequired: _apiAuth, requirePermission } = require('./app/auth');
-const PUBLIC_API = [/^\/login$/, /^\/signup$/, /^\/webhook(\/|$)/];
+const PUBLIC_API = [/^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/];
 app.use('/api', (req, res, next) => {
     if (req.method === 'OPTIONS') return next();
     if (PUBLIC_API.some(rx => rx.test(req.path))) return next();
@@ -105,6 +105,8 @@ const _VIEW_PERMS = [
     [/^\/silent-rto-claims/i, 'claims-sla'],
     [/^\/late-deliveries/i, 'claims-sla'],
     [/^\/intransit-late/i, 'claims-sla'],
+    // Customer Support console — any support view permission unlocks its API group.
+    [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts']],
 ];
 app.use('/api', (req, res, next) => {
     const perms = (req.user && req.user.permissions) || [];
@@ -131,6 +133,7 @@ app.use('/api', opsControlRoutes);
 app.use('/api', amazonFbaRoutes);
 app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll
+app.use('/api', require('./app/api/support_console'));        // Customer Support console (queue/calls/notes/contacts)
 app.use('/api', docpharmaReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
 app.use('/api', docpharmaLedgerRoutes);

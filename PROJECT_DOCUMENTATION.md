@@ -54,7 +54,7 @@ Ecom Central is a single-server operations hub that unifies order management, sh
 | Styling | Tailwind CSS **3.4** — statically compiled (no CDN/JIT at runtime) |
 | Charts | Chart.js (self-hosted at `app/static/vendor/chart.min.js`) |
 | Auth | JWT (`jsonwebtoken`), scrypt password hashing (Node crypto, no external dep) |
-| Email | Nodemailer (SMTP; portal-configurable settings, AES-256-GCM-encrypted password) |
+| Email | Nodemailer (SMTP send) + imapflow/mailparser (IMAP reply reading); portal-configurable settings, AES-256-GCM-encrypted password |
 | Scheduling | node-cron (all times **Asia/Kolkata**) |
 | AI | Google Gemini (native `generateContent`) or any OpenAI-compatible provider — used for escalation-email polish |
 | Reports/Exports | ExcelJS, PDFKit |
@@ -139,9 +139,12 @@ ecom-central-Staging/
         ├── serviceability.js      # Pincode serviceability / EDD estimates
         ├── docpharma_*.js         # DocPharma recon, invoices, ledger, overview, inventory, portal
         ├── ad_performance.js / adset_performance.js  # Meta ads analytics
-        ├── auth_routes.js         # /login /signup /me (+ rate limiting)
+        ├── auth_routes.js         # /login /signup /me + 2FA OTP (verify/resend) (+ rate limiting)
         ├── users.js               # Admin user management (/api/admin/users)
         ├── email_settings.js      # Portal SMTP settings + shared sendMail()
+        ├── email_replies.js       # Escalation reply tracking: IMAP inbox poll, thread matching, AI scoring
+        ├── cod_risk.js            # Shared pre-dispatch COD risk scorer (customer history + pincode RTO)
+        ├── support_console.js     # Customer Support console API (queue/orders/calls/notes/contacts/team)
         ├── crypto_util.js         # AES-256-GCM encrypt/decrypt for stored secrets
         ├── ai.js                  # AI client (Gemini native / OpenAI-compatible)
         ├── excel_report.js / pdf_generator.js
@@ -159,11 +162,11 @@ Navigation is permission-gated per user (see §6). Permission keys in parenthese
 ### Operations
 | Dashboard | Key | Description |
 |---|---|---|
-| Orders Dashboard | `orders-dashboard` | All Shopify orders, enriched with tracking, COD/repeat flags, EDD; progressive-rendered table |
+| Orders Dashboard | `orders-dashboard` | **Shopify orders only** (Amazon excluded 2026-07; EasyEcom-only orders — Flipkart `OD…` etc. — excluded 2026-07-17; EasyEcom data is still queried purely to map `easyecomOrderId`/status for hold/unhold) enriched with tracking, COD-confirmation & repeat flags; progressive-rendered table with **lazy expanded details** (built on first expand — never pre-rendered), EasyEcom workflow (Approve, **⏸ Hold / ▶ Unhold** with reason + auto-reconcile against EasyEcom's synced status) |
 | Fulfillment Ops | `fulfillment-ops` | Fulfillment pipeline operations, AWB fetch, label download |
-| Delivery Performance | `delivery-perf` | KPIs (FASR/RTO/NDR-recovery/TAT), status partition, FASR trend, NDR funnel, RTO-by-courier, **FASR vs NDR Prepaid-vs-COD**, **🚩 Likely-Fake tracking insight**, shipment explorer (sortable, filterable, expandable rows with date/scan logs, **Promise date column**, per-order actions: *mark likely-fake*, *send critical email*) |
+| Delivery Performance | `delivery-perf` | KPIs (FASR/RTO/NDR-recovery/TAT), status partition, FASR trend, NDR funnel, RTO-by-courier, **FASR vs NDR Prepaid-vs-COD**, **🚩 Likely-Fake tracking insight** (marked → delivered conversion %), shipment explorer (sortable, filterable, expandable rows with date/scan logs, **Promise date column**, per-order actions: *mark likely-fake*, *send critical email* → becomes *View email & replies* with the **escalation mail thread auto-loaded** (sender/receiver format, AI reply scores + next-action), *🔁 NDR action* on NDR-pending rows) |
 | Silent-RTO & SLA | `claims-sla` | 3 tabs: **Silent-RTO Claims** (RTO with zero attempts + claimable freight/invoice value), **Late Deliveries** (delivered after promise date), **In-transit · Overdue** (promise passed, still moving). All tabs: KPIs, DD-MM-YYYY dates, sortable columns, shared filters (search/platform/payment/courier/zone), expandable rows, admin email-send buttons |
-| Ops Control | `ops-control` | Operational control actions |
+| Ops Control | `ops-control` | Action queues: **NDR queue** (aged failed-delivery orders — call/WhatsApp customer, one-click status actions, **🔁 NDR action** modal firing RapidShyp reattempt/return with corrected phone+address; customer conversations are logged in the Customer Support console's notes/call-log, not here), **Pre-dispatch Risk** (COD risk scores from `cod_risk.js` incl. the customer's own RTO history, 📱 WhatsApp-verify, verify/hold/→prepaid actions), courier scorecard, exceptions & claims, cost views |
 | DocPharma Recon | `docpharma-recon` | DocPharma reconciliation: invoices, ledger, payments, rate card, stock |
 | Amazon FBA | `amazon-fba` | FBA insights, inventory, forecast, by-location |
 
@@ -181,6 +184,17 @@ Navigation is permission-gated per user (see §6). Permission keys in parenthese
 | Ad Ranking | `ad-ranking` |
 | Ad Set Breakdown | `adset-breakdown` |
 | Ad Analysis | `ad-analysis` |
+
+### Customer Support (port of the standalone Support Console)
+| Dashboard | Key | Description |
+|---|---|---|
+| Support Dashboard | `support-dashboard` | KPIs (orders/calls/delivered/pending/MSG91-confirmed) + 8 clickable bucket tiles |
+| Call Queue | `support-queue` | 3 tabs — Repeat customers (COD repeat pre-dispatch), Undelivered, Status-changed; note/age filters, notes dialog, RapidShyp sync button |
+| Support Orders | `support-orders` | Full order search (bucket/partner/courier/status/free-text), 50/page, order-detail modal (MSG91 column/filter removed 2026-07-16; detail modal shows MSG91 thread with template-variable JSON rendered as plain text) |
+| Call Logs | `support-calls` | My calls (admin: all), outcome stats, follow-ups |
+| Escalation Contacts | `support-contacts` | Courier/region/pincode escalation directory (admin CRUD) — powers "Whom to call" in order detail |
+
+Backend: `app/api/support_console.js` reads the `order_buckets` **view** + `order_notes`, `call_logs`, `escalation_contacts`, `undelivered_tracking`, `msg91_messages`, `tracking_run_lock`, `profiles`. Portal agents are bridged to Supabase auth via shadow users (`auth.admin.createUser`) because `call_logs.agent_id`/`profiles.user_id` FK to `auth.users`.
 
 ### System
 | Dashboard | Key | Description |
@@ -202,7 +216,8 @@ Navigation is permission-gated per user (see §6). Permission keys in parenthese
 ## 6. Authentication & Authorization
 
 - **Login:** `POST /api/login` — checks the `.env` bootstrap admin first (never lockable), then `app_users_ecom` (scrypt-hashed passwords). Returns a 1-day JWT with `{ sub, role, permissions[] }`.
-- **Signup:** `POST /api/signup` — open signup creates a **pending** account; an admin must approve and grant dashboard permissions.
+- **2FA (added 2026-07-16 for admins; switched from MSG91 SMS to EMAIL OTP and extended to ALL accounts 2026-07-17):** when the portal can send mail (Settings → Email / `app_email_settings`, sender `digital@theelement.skin`, falling back to `.env` `EMAIL_*`), `/login` for any user does not return a token — `app/otp_mail.js` generates a 6-digit OTP, stores only its HMAC-SHA256 hash in a 5-minute in-memory record (max 5 wrong attempts, single-use, 25s server-side resend throttle — a duplicate `/login` inside the gap **reuses** the in-flight OTP instead of erroring; a pm2 restart just voids pending OTPs), emails it via the shared `sendMail`, and `/login` returns `{ otp_required, otp_token (5-min pre-auth JWT, stage:'otp2fa', no permissions), email_hint }`. The client then calls `POST /api/login/verify-otp { otp_token, otp }` → real JWT (role/permissions re-fetched fresh from DB, never trusted from the pre-auth token), or `POST /api/login/resend-otp`. Both are public + rate-limited. OTP mails carry **no CC** (`cc: []` — the default report CC from Settings is explicitly excluded), and after expiry each OTP email is **auto-purged from the sender's Sent folder** over IMAP (moved to `[Gmail]/Trash` + expunged; a plain expunge in Sent would only archive on Gmail) — scheduled at send-time +5m15s, plus startup sweeps at +60s/+6.5m to catch purges lost to a restart. If email/SMTP isn't configured, logins fall back to password-only with a server-side warning — never a lockout. **Emergency 2FA off-switch:** blank the SMTP settings (or fix SMTP) — there is no separate 2FA env var. The OTP email shows the Ecom Central logo as a hosted image (`DASHBOARD_URL/static/assets/ecom-logo.png`, not an attachment — no Gmail attachment chip).
+- **Signup:** `POST /api/signup` — open signup creates a **pending** account; an admin must approve and grant dashboard permissions. **Mobile (Indian 10-digit) is mandatory** on signup, admin add-user, and editable per-user (`POST /admin/users/:id { mobile }`).
 - **Rate limiting:** per-IP (`req.ip`, trust-proxy aware) + per-account (10 attempts / 15 min); bootstrap admin exempt from the account limit.
 - **RBAC:**
   - Admin (`role=admin` or permission `*`) → everything.
@@ -219,8 +234,10 @@ All endpoints require `Authorization: Bearer <JWT>` unless noted. Base path `/ap
 ### Auth & Admin
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/login` | public (rate-limited) | Issue JWT |
-| POST | `/signup` | public (rate-limited) | Create pending account |
+| POST | `/login` | public (rate-limited) | Issue JWT, or start 2FA (`otp_required` + `otp_token`) — all accounts |
+| POST | `/login/verify-otp` | public (rate-limited) | 2FA step 2: pre-auth token + OTP → real JWT |
+| POST | `/login/resend-otp` | public (rate-limited) | Re-email the 2FA OTP (new code, 25s throttle) |
+| POST | `/signup` | public (rate-limited) | Create pending account (mobile mandatory) |
 | GET | `/me` | user | Current user + permissions |
 | GET/POST | `/admin/users`, `/admin/users/:id`, `/admin/users/:id/password` | admin | User management |
 | GET/POST | `/admin/email-settings` | admin | Read/write portal SMTP settings (password write-only, stored encrypted) |
@@ -241,7 +258,13 @@ All endpoints require `Authorization: Bearer <JWT>` unless noted. Base path `/ap
 | GET | `/order-marks?type=` | delivery-perf | List marks |
 | GET | `/likely-fake-insight` | delivery-perf | Marked-orders outcome split + delivered-conversion % |
 | POST | `/critical-email/compose` `{awbs[]}` | admin | Build an AI-polished escalation draft (template fallback) |
-| POST | `/critical-email/send` `{subject, body, to?, tableHtml, orders[]}` | admin | Send + log `critical_mail_sent` marks |
+| POST | `/critical-email/send` `{subject, body, to?, tableHtml, orders[]}` | admin | Send + log `critical_mail_sent` marks + record the thread for reply tracking |
+| POST | `/critical-email/polish` `{subject, body, tone}` | admin | AI-rewrite the (hand-edited) draft in a chosen tone: polite / direct / formal |
+| GET | `/escalation-emails?awb=\|order=` | delivery-perf or claims-sla | Mail thread(s): sent escalation + replies with `direction` (outbound/inbound) + AI score/status/suggestion |
+| GET | `/escalation-emails/recent` · POST `/escalation-emails/poll` | delivery-perf | Latest replies (order-labeled) · manual inbox poll |
+| POST | `/ndr-action` `{awb, action: RE_ATTEMPT\|RETURN, phone?, address1?, address2?, order?}` | ops-control or delivery-perf | Fire RapidShyp's NDR action (auto-retries the alternate action spelling on rejection); logs to `ops_actions_ecom` |
+| POST | `/easyecom/hold-order` `{orderName, reason}` · `/easyecom/unhold-order` | user | Hold/release in EasyEcom (keyed by invoice_id); writes/clears the `ee_hold` live-state mark; "already held/unheld" counts as success |
+| GET/POST | `/support/*` (summary, queue, orders, order/:id, notes, calls, contacts, team, refresh-tracking) | any `support-*` perm (writes: notes/calls any agent; contacts & team admin) | Customer Support console API (see §5) |
 
 ### Other domains (mounted routers)
 - `/api/orders…` — Shopify orders + enrichment (shared across dashboards, not view-gated)
@@ -268,8 +291,11 @@ All endpoints require `Authorization: Bearer <JWT>` unless noted. Base path `/ap
 | `rapidshyp_tracking_ecom` (~26k) | RapidShyp status cache for EasyEcom-shipped orders |
 | `b2c_order_easycom` (~27k) | Synced EasyEcom B2C orders |
 | `order_marks_ecom` | Manual per-order marks: `likely_fake` (toggle) + `critical_mail_sent` (audit log) — unique per (order_name, mark_type) |
-| `app_users_ecom` | Portal users: email, scrypt hash, role, status (pending/active/disabled), permissions[] |
+| `app_users_ecom` | Portal users: email, mobile (mandatory, kept on profile), scrypt hash, role, status (pending/active/disabled), permissions[] |
 | `app_email_settings` | Single-row portal SMTP config; `smtp_password_enc` is AES-256-GCM encrypted, never returned to clients |
+| `escalation_emails_ecom` | Escalation mail threads: every SENT critical email (RFC Message-ID) + every REPLY pulled via IMAP, with AI resolution score/status/suggestion |
+| `easyecom_token_cache` | Shared EasyEcom JWT (single row id=1) — one login per ~90 days instead of per process |
+| `order_buckets` (**view**) + `order_notes`, `call_logs`, `escalation_contacts`, `undelivered_tracking`, `msg91_messages`, `tracking_run_lock`, `profiles`, `user_roles` | Customer Support console data layer (shared with the original standalone console; portal agents bridged via shadow auth users) |
 | `dp_rejected_handled_ecom` | Dedup ledger: DocPharma-rejected orders already reported → never re-reported |
 | `docpharma_check_ecom` | "Not-in-DocPharma" check cache (TTL) to avoid re-hitting their rate-limited API |
 | `serviceability_edd_ecom` | Pincode serviceability / EDD estimates |
@@ -304,6 +330,7 @@ All schedules run in **Asia/Kolkata** inside the server process (`server.js` unl
 | `0 11 * * *` | EasyEcom On-Hold report → Teams |
 | `30 9 * * 1` | **Silent-RTO weekly claim email → RapidShyp** (previous 7 days, freight + invoice value) |
 | `45 9 * * 1` | **Late-deliveries weekly email** (last 30 days, delivered-only) |
+| `*/10 * * * *` | **Escalation reply poll** — IMAP inbox scan, match replies to sent threads (whole-chain In-Reply-To + subject), AI-score inbound replies, retry unscored |
 | `20 */3 * * *` | RapidShyp cache sync for EasyEcom orders + once ~15s after boot |
 | `0 10 * * *` | Amazon auto-review check (`AUTO_REVIEW_CRON`, in `amazon_auto_review.js`) |
 | `30 6 * * *` | FBA locations sync (`amazon_fba.js`) |
@@ -326,6 +353,9 @@ All schedules run in **Asia/Kolkata** inside the server process (`server.js` unl
 | **Slack** | **Decommissioned (2026-07).** Posting + keyword trigger hard-disabled in code unless `SLACK_ENABLED=true` | `warehouse_slack_report.js` |
 | **AI (Gemini / OpenAI-compatible)** | Critical-email polish. Auto-detects Gemini URLs → native `generateContent` with `thinkingBudget: 0` (compat endpoint returns empty for thinking models); otherwise standard `chat/completions`. Always falls back to a built-in template | `ai.js` |
 | **SMTP (Gmail)** | All report emails via shared `sendMail()` — portal settings override `.env` defaults | `email_settings.js` |
+| **IMAP (same mailbox)** | Reads the inbox every 10 min for replies to sent escalations (imapflow + mailparser; two-phase fetch — never download inside an active fetch stream). Replies matched via In-Reply-To across the whole thread chain, then AI-scored | `email_replies.js` |
+| **RapidShyp NDR action** | `POST /ndr/action` — reattempt (with corrected phone/address) or return. Vendor docs contradict themselves on the action value (`REATTEMPT` vs `RE_ATTEMPT`); the wrapper tries the curl-example spelling first and falls back only on an invalid-action rejection. **Never live-test** — it acts on real shipments | `ops_control.js` |
+| **EasyEcom hold/unhold** | `PUT /orders/holdOrders` / `unholdOrders` keyed by **invoice_id** (from `b2c_order_easycom.raw_data`) — endpoint discovered from their official Postman collection (not in public docs). JWT cached in `easyecom_token_cache` (DB) so logins happen ~90-daily, not per process | `easyecom.js` |
 | **MSG91** | COD-confirmation webhook (Supabase edge function) | `supabase/functions/` |
 
 ---
@@ -347,6 +377,8 @@ All schedules run in **Asia/Kolkata** inside the server process (`server.js` unl
 | Critical escalation (AI-polished; single order or all marked-fake; shipment table auto-attached) | RapidShyp (or typed recipient) | Per-order / batch buttons (admin) |
 | Adset performance PDFs (MTD + last month) | Default recipients | `cron_job.js` (external scheduler) |
 
+**Reply tracking:** every sent critical escalation is logged as a thread (`escalation_emails_ecom`); the inbox is IMAP-polled every 10 minutes, replies are matched to their thread (In-Reply-To across the whole chain, subject fallback), stored, and **AI-scored** (0–100 resolution + status + suggested next action — inbound replies only). Threads render inside the order's expanded row on Delivery Performance in sender/receiver format (THE ELEMENT ↔ RAPIDSHYP).
+
 ---
 
 ## 12. Environment Variables
@@ -356,7 +388,7 @@ Defined in `.env` (git-ignored — **never commit**), read exclusively through `
 | Group | Variables |
 |---|---|
 | Server | `PORT` (5002), `JWT_SECRET` (≥32 chars, enforced), `DASHBOARD_URL` |
-| Bootstrap admin | `APP_USER_EMAIL`, `APP_USER_PASSWORD` |
+| Bootstrap admin | `APP_USER_EMAIL`, `APP_USER_PASSWORD` (2FA OTP — all accounts — is emailed to the login address; no extra env vars, activates whenever SMTP is usable) |
 | Supabase | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` |
 | Shopify | `SHOPIFY_TOKEN`, `SHOPIFY_SHOP_URL` |
 | RapidShyp | `RAPIDSHYP_API_KEY`, `RAPIDSHYP_API_URL` |
@@ -365,7 +397,8 @@ Defined in `.env` (git-ignored — **never commit**), read exclusively through `
 | Amazon SP-API | `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`, `AWS_REGION`, `LWA_CLIENT_ID`, `LWA_CLIENT_SECRET`, `REFRESH_TOKEN`, `MARKETPLACE_ID`, `BASE_URL` |
 | Meta Ads | `FACEBOOK_AD_ACCOUNT_ID`, `FACEBOOK_ACCESS_TOKEN` |
 | Email | `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_USER`, `EMAIL_PASSWORD`, `RECIPIENT_EMAIL`, `EMAIL_ENC_KEY` (optional 64-hex AES key; falls back to key derived from `JWT_SECRET` — **don't change after passwords are stored**) |
-| AI | `AI_API_KEY`, `AI_API_URL` (`https://generativelanguage.googleapis.com` for Gemini), `AI_MODEL` (`gemini-flash-latest`) |
+| AI | `AI_API_KEY`, `AI_API_URL` (`https://generativelanguage.googleapis.com` for Gemini), `AI_MODEL` (`gemini-flash-latest`), `AI_MODEL_FALLBACK` (optional, default `gemini-flash-lite-latest` — used automatically on 503/429) |
+| IMAP | `IMAP_HOST` (optional — defaults to the SMTP host with `smtp.` → `imap.`) |
 | Teams outbound | `TEAMS_WEBHOOK_WAREHOUSE`, `TEAMS_WEBHOOK_DP`, `TEAMS_WEBHOOK_HOLD`, `TEAMS_WEBHOOK_AMAZON` |
 | Teams inbound | `TEAMS_TENANT_ID`, `TEAMS_CLIENT_ID`, `TEAMS_REFRESH_TOKEN` (auto-rotated — run the listener in ONE process only), `TEAMS_TEAM_ID`, `TEAMS_CHANNEL_DP`, `TEAMS_CHANNEL_AMAZON`, `TEAMS_LISTENER_DRYRUN` |
 | Slack (legacy, off) | `SLACK_ENABLED` (must be `true` to re-enable), `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID` |
@@ -383,7 +416,7 @@ node_modules/.bin/tailwindcss -i tw-input.css -o app/static/tailwind.css --minif
 
 **Run this after ANY change that adds/removes CSS utility classes** in `app/templates/index.html` or `app/static/app.js`, and commit the rebuilt `app/static/tailwind.css`. The scan config lives in `tailwind.config.js` (no safelist — the content scan is sufficient).
 
-Shared UI conventions: `.filter-select` / `.filter-input` / `.filter-btn` (38px, custom chevron, indigo focus ring) for all filter rows; DD-MM-YYYY (IST) date display on newer dashboards; progressive/chunked table rendering with `requestAnimationFrame` for large lists; `escapeHtml`/`ecEsc` on all user-content sinks.
+Shared UI conventions: `.filter-select` / `.filter-input` / `.filter-btn` (38px, custom chevron, indigo focus ring) for all filter rows; DD-MM-YYYY (IST) date display on newer dashboards; progressive/chunked table rendering with `requestAnimationFrame` for large lists; `escapeHtml`/`ecEsc` on all user-content sinks; **every loading state uses the branded logo loader** — `brandLoader(label)` (large, tables/KPIs/modals) or `brandLoaderSm(label)` (compact panels), never plain "Loading…" text.
 
 ---
 
@@ -394,7 +427,7 @@ Shared UI conventions: `.filter-select` / `.filter-input` / `.filter-btn` (38px,
 # on the server
 cd <app-dir>
 git pull
-npm install            # only if package.json changed
+npm install            # required when package.json changed (2026-07: added imapflow + mailparser)
 node_modules/.bin/tailwindcss -i tw-input.css -o app/static/tailwind.css --minify   # only if not committed
 pm2 restart <app-name>
 pm2 logs <app-name> --lines 50   # verify clean boot
@@ -405,6 +438,9 @@ pm2 logs <app-name> --lines 50   # verify clean boot
 - `[TeamsListener] started — watching Amazon + DP channels every 20s`
 - `[AutoReview] Cron scheduled`
 - `[DP Trigger] Slack keyword trigger disabled (Teams-only)` ← expected; Slack is off
+
+### Engineering gotcha — router-level response caches
+`ops_control.js` and `amazon_fba.js` keep 5-minute GET response caches via `router.use(...)`. Because those routers are mounted at `/api`, an **unscoped** `use()` runs for every `/api` request that falls through them and silently caches *other routers'* GET responses (this once froze all `/support/*` reads for 5 minutes — "DB changed but dashboard shows old data"). Both middlewares are now path-guarded (`/ops-control`, `/fba`) — never widen those guards, and scope any future `router.use()` middleware to its own path prefix.
 
 ### `.env` sync
 `.env` is not in git. When new variables are introduced (see §12 — most recently `AI_*`, `EMAIL_ENC_KEY`, `TEAMS_*`), copy them to the server's `.env` manually before restart.

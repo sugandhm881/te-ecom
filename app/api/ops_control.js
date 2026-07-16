@@ -17,6 +17,11 @@ const daysBetween = (a, b) => { const h = hoursBetween(a, b); return h == null ?
 const _opsRespCache = new Map();
 const OPS_CACHE_TTL = 5 * 60 * 1000;
 router.use((req, res, next) => {
+    // Scope STRICTLY to /ops-control paths. This router is mounted at /api, so an unscoped use()
+    // runs for EVERY /api request that falls through to later routers — it silently cached all
+    // /support/*, /fba/*, /docpharma* GETs for 5 minutes (the "DB changed but dashboard shows old
+    // data" bug). Never widen this guard.
+    if (!req.path.startsWith('/ops-control')) return next();
     if (req.method !== 'GET' || /\/actions?(\/|$)/.test(req.path)) return next();
     const key = req.originalUrl.replace(/([?&])fresh=1(&|$)/, '$1').replace(/[?&]$/, '');
     if (!req.query.fresh) {

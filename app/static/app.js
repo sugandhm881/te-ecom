@@ -161,6 +161,15 @@ function createFallbackImage(itemName) {
         `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#f1f5f9"/><text x="50" y="50" font-family="Arial,sans-serif" font-size="34" fill="#94a3b8" text-anchor="middle" dominant-baseline="central">${initials}</text></svg>`);
 }
 
+// Branded loaders — EVERY loading state shows the Ecom Central logo (spinning ring + logo).
+// brandLoader = large centered (tables, KPI strips, modals) · brandLoaderSm = compact inline (small panels).
+function brandLoader(label = 'Loading…') {
+    return `<div class="flex flex-col items-center justify-center gap-3 py-8"><span class="relative inline-flex items-center justify-center w-12 h-12"><span class="absolute w-12 h-12 rounded-full border-[3px] border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/ecom-logo.png" class="w-8 h-8 rounded-lg"></span><span class="text-slate-400 text-sm font-medium">${escapeHtml(label)}</span></div>`;
+}
+function brandLoaderSm(label = 'Loading…') {
+    return `<div class="flex items-center gap-2 py-3"><span class="relative inline-flex items-center justify-center w-6 h-6 shrink-0"><span class="absolute w-6 h-6 rounded-full border-2 border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/ecom-logo.png" class="w-4 h-4 rounded"></span><span class="text-slate-400 text-xs">${escapeHtml(label)}</span></div>`;
+}
+
 // Debounce: run fn only after `ms` of quiet — keeps typing smooth on heavy table re-renders.
 function debounce(fn, ms) {
     let t;
@@ -193,7 +202,10 @@ function getCustomerBadge(email, phone, currentOrderId, precount) {
 
 // --- AUTHENTICATION ---
 
+let _loginBusy = false;   // Enter fires BOTH the form submit and the keypress handler — post once
 async function handleLogin() {
+    if (_loginBusy) return;
+    _loginBusy = true;
     showLoader();
     try {
         const response = await fetch('/api/login', {
@@ -202,14 +214,74 @@ async function handleLogin() {
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.message || 'Login failed');
+        if (data.otp_required) { _otpShow(data); return; }   // 2FA: password OK → OTP step
         authToken = data.token;
         localStorage.setItem('authToken', authToken);
         showApp();
     } catch (error) {
         showNotification(error.message, true);
     } finally {
+        _loginBusy = false;
         hideLoader();
     }
+}
+
+// --- 2FA OTP step (admin logins — OTP emailed, verified server-side) ---
+let _otpToken = null, _otpTimer = null;
+function _otpShow(data) {
+    _otpToken = data.otp_token;
+    document.getElementById('login-form')?.classList.add('hidden');
+    document.getElementById('auth-toggle')?.classList.add('hidden');
+    document.getElementById('otp-form')?.classList.remove('hidden');
+    const h = document.querySelector('#login-view h1'); if (h) h.textContent = 'Verify it’s you';
+    const hint = document.getElementById('otp-hint'); if (hint) hint.textContent = data.email_hint || 'your email';
+    const inp = document.getElementById('otp-input'); if (inp) { inp.value = ''; inp.focus(); }
+    _otpCountdown(30);
+}
+function _otpCountdown(secs) {
+    const btn = document.getElementById('otp-resend'); if (!btn) return;
+    clearInterval(_otpTimer);
+    let left = secs;
+    btn.disabled = true; btn.textContent = `Resend OTP (${left}s)`;
+    _otpTimer = setInterval(() => {
+        left--;
+        if (left <= 0) { clearInterval(_otpTimer); btn.disabled = false; btn.textContent = 'Resend OTP'; }
+        else btn.textContent = `Resend OTP (${left}s)`;
+    }, 1000);
+}
+function _otpBack() {
+    clearInterval(_otpTimer); _otpToken = null;
+    document.getElementById('otp-form')?.classList.add('hidden');
+    document.getElementById('login-form')?.classList.remove('hidden');
+    document.getElementById('auth-toggle')?.classList.remove('hidden');
+    const h = document.querySelector('#login-view h1'); if (h) h.textContent = 'Sign in to Ecom Central';
+}
+let _otpBusy = false;
+async function _otpVerify() {
+    if (_otpBusy) return;
+    const otp = String((document.getElementById('otp-input') || {}).value || '').trim();
+    if (!/^\d{6}$/.test(otp)) return showNotification('Enter the 6-digit OTP.', true);
+    _otpBusy = true;
+    showLoader();
+    try {
+        const r = await fetch('/api/login/verify-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ otp_token: _otpToken, otp }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.message || 'OTP verification failed');
+        authToken = d.token; localStorage.setItem('authToken', authToken);
+        _otpBack();   // reset the login card for the next sign-in
+        showApp();
+    } catch (e) { showNotification(e.message, true); }
+    finally { _otpBusy = false; hideLoader(); }
+}
+async function _otpResend() {
+    if (!_otpToken) return;
+    try {
+        const r = await fetch('/api/login/resend-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ otp_token: _otpToken }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.message || 'Could not resend the OTP');
+        showNotification('OTP re-sent.');
+        _otpCountdown(30);
+    } catch (e) { showNotification(e.message, true); }
 }
 
 function logout() {
@@ -270,11 +342,16 @@ function canView(view) { return !currentUser || currentUser.isAdmin || (currentU
 
 async function handleSignup() {
     const email = (document.getElementById('signup-email') || {}).value;
+    const mobile = String((document.getElementById('signup-mobile') || {}).value || '').replace(/\D/g, '');
     const password = (document.getElementById('signup-password') || {}).value;
     const msg = document.getElementById('auth-msg');
+    if (!/^[6-9]\d{9}$/.test(mobile)) {
+        if (msg) { msg.textContent = 'Enter a valid 10-digit mobile number.'; msg.className = 'text-sm text-center mt-4 text-rose-500'; }
+        return;
+    }
     showLoader();
     try {
-        const r = await fetch('/api/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+        const r = await fetch('/api/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, mobile, password }) });
         const d = await r.json();
         if (!r.ok) throw new Error(d.message || 'Sign up failed');
         _authToggle(false);
@@ -286,6 +363,8 @@ function _authToggle(toSignup) {
     const lf = document.getElementById('login-form'), sf = document.getElementById('signup-form');
     const tg = document.getElementById('auth-toggle'), msg = document.getElementById('auth-msg'), h = document.querySelector('#login-view h1');
     if (!lf || !sf) return;
+    clearInterval(_otpTimer); _otpToken = null;
+    document.getElementById('otp-form')?.classList.add('hidden');
     lf.classList.toggle('hidden', toSignup); sf.classList.toggle('hidden', !toSignup);
     if (tg) tg.textContent = toSignup ? 'Already have an account? Sign in' : 'Create an account';
     if (h) h.textContent = toSignup ? 'Create your account' : 'Sign in to Ecom Central';
@@ -497,6 +576,31 @@ function navigate(view) {
             activeLinkElement = document.getElementById('nav-claims-sla');
             activeViewElement = document.getElementById('claims-sla-view');
             if (typeof claimsInit === 'function') claimsInit();
+            break;
+        case 'support-dashboard':
+            activeLinkElement = document.getElementById('nav-support-dashboard');
+            activeViewElement = document.getElementById('support-dashboard-view');
+            if (typeof supDashInit === 'function') supDashInit();
+            break;
+        case 'support-queue':
+            activeLinkElement = document.getElementById('nav-support-queue');
+            activeViewElement = document.getElementById('support-queue-view');
+            if (typeof supQueueInit === 'function') supQueueInit();
+            break;
+        case 'support-orders':
+            activeLinkElement = document.getElementById('nav-support-orders');
+            activeViewElement = document.getElementById('support-orders-view');
+            if (typeof supOrdersInit === 'function') supOrdersInit();
+            break;
+        case 'support-calls':
+            activeLinkElement = document.getElementById('nav-support-calls');
+            activeViewElement = document.getElementById('support-calls-view');
+            if (typeof supCallsInit === 'function') supCallsInit();
+            break;
+        case 'support-contacts':
+            activeLinkElement = document.getElementById('nav-support-contacts');
+            activeViewElement = document.getElementById('support-contacts-view');
+            if (typeof supContactsInit === 'function') supContactsInit();
             break;
         case 'ops-control':
             activeLinkElement = document.getElementById('nav-ops-control');
@@ -2834,7 +2938,7 @@ function claimsDetailRow(r, which){
   const meta = `<div class="text-xs text-slate-500 mt-3 flex flex-wrap gap-x-4 gap-y-1">${pieces.map(p => `<span>${p}</span>`).join('')}${reasons}</div>`;
   let scanHtml;
   const scanRows = arr => `<div class="space-y-1 max-h-56 overflow-auto pr-1">${arr.map(s => `<div class="flex gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${ecEsc(s.desc)}${s.code ? ` <span class="text-slate-400">(${ecEsc(s.code)})</span>` : ''}${s.location ? ` <span class="text-slate-400">· ${ecEsc(s.location)}</span>` : ''}</span></div>`).join('')}</div>`;
-  if(!d || d.loading) scanHtml = '<div class="text-slate-400 text-xs py-3">Loading scan log…</div>';
+  if(!d || d.loading) scanHtml = brandLoaderSm('Loading scan log…');
   else if(d.error) scanHtml = `<div class="text-rose-400 text-xs py-3">${ecEsc(d.error)}</div>`;
   else if(d.dp){
     const dp = d.dp;
@@ -2868,7 +2972,7 @@ async function claimsLoad(){
   const from = document.getElementById('claims-from')?.value, to = document.getElementById('claims-to')?.value;
   const qs = `?from=${from}&to=${to}`;
   _claimsOpenAwb = null;
-  ['srto-tbody', 'late-tbody', 'itl-tbody'].forEach(id => { const t = document.getElementById(id); if(t) t.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr>'; });
+  ['srto-tbody', 'late-tbody', 'itl-tbody'].forEach(id => { const t = document.getElementById(id); if(t) t.innerHTML = '<tr><td colspan="7">'+brandLoader()+'</td></tr>'; });
   try{
     const [a, b, c] = await Promise.all([
       fetch('/api/silent-rto-claims' + qs, { headers: getAuthHeaders() }).then(r => r.json()),
@@ -3017,6 +3121,543 @@ async function claimsSend(which){
   }catch(e){ if(st){ st.textContent = e.message; st.className = 'text-sm text-rose-600'; } }
 }
 
+// ═════════════════ CUSTOMER SUPPORT CONSOLE (port of the standalone Support Console) ═════════════════
+// Buckets — every order sits in exactly one (computed upstream in the order_buckets view).
+const SUP_BUCKETS = [
+  ['order_to_dispatch','Order → Dispatch','info'], ['dispatch_plus_2','Dispatch + 2 days','info'],
+  ['two_to_five_days','2–5 days','warning'], ['five_days_plus','5 days +','destructive'],
+  ['undelivered','Undelivered','destructive'], ['delivered','Delivered','success'],
+  ['rto','RTO','destructive'], ['cancelled','Cancelled','muted'],
+];
+const SUP_TONE = {
+  info:        ['bg-sky-100 text-sky-700 border-sky-200', 'ring-sky-300'],
+  warning:     ['bg-amber-100 text-amber-700 border-amber-200', 'ring-amber-300'],
+  destructive: ['bg-rose-100 text-rose-700 border-rose-200', 'ring-rose-300'],
+  success:     ['bg-emerald-100 text-emerald-700 border-emerald-200', 'ring-emerald-300'],
+  muted:       ['bg-slate-100 text-slate-600 border-slate-200', 'ring-slate-300'],
+};
+const supBucketOf = id => SUP_BUCKETS.find(b => b[0] === id) || [id, id || '—', 'muted'];
+function supBadge(id){ const [,label,tone]=supBucketOf(id); return `<span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${SUP_TONE[tone][0]} whitespace-nowrap">${escapeHtml(label)}</span>`; }
+const SUP_OUTCOMES = [['no_answer','No answer'],['customer_will_accept','Customer will accept'],['refused','Refused'],['reschedule','Reschedule'],['wrong_number','Wrong number'],['delivered_confirmed','Delivered confirmed'],['other','Other']];
+const supOutcomeLbl = o => (SUP_OUTCOMES.find(x=>x[0]===o)||[o,String(o||'').replace(/_/g,' ')])[1];
+function supAge(iso){ if(!iso) return '—'; const h=(Date.now()-new Date(iso).getTime())/3600000; if(h<24) return Math.max(1,Math.round(h))+'h'; return Math.round(h/24)+'d'; }
+async function supFetch(url, opts){ const r=await fetch(url,{...(opts||{}),headers:{'Content-Type':'application/json',...getAuthHeaders(),...((opts||{}).headers||{})}}); const d=await r.json().catch(()=>({})); if(!r.ok||d.success===false) throw new Error(d.error||d.message||('HTTP '+r.status)); return d; }
+
+// Shared date range (persisted) + a tiny picker rendered into each page header.
+let _supRange = (()=>{ try{ const s=JSON.parse(localStorage.getItem('support.dateRange')||'null'); if(s&&s.from&&s.to) return s; }catch(_){}
+  const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-14); return { from:_ymd(f), to:_ymd(d) }; })();
+function supRangeQS(){ return `from=${_supRange.from}&to=${_supRange.to}`; }
+function supRenderRange(containerId, onChange){
+  const el=document.getElementById(containerId); if(!el) return;
+  el.innerHTML=`<div class="flex items-center gap-2 flex-wrap">
+    <select class="filter-select sup-preset"><option value="">Presets</option><option value="0">Today</option><option value="7">Last 7 days</option><option value="14">Last 14 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select>
+    <input type="date" class="filter-input sup-from" value="${_supRange.from}"><span class="text-slate-400">→</span>
+    <input type="date" class="filter-input sup-to" value="${_supRange.to}">
+    <button class="filter-btn sup-apply">Apply</button></div>`;
+  el.querySelector('.sup-preset').addEventListener('change',e=>{ const n=e.target.value; if(n==='') return;
+    const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-(+n)); _supRange={from:_ymd(f),to:_ymd(d)};
+    localStorage.setItem('support.dateRange',JSON.stringify(_supRange)); onChange(); });
+  el.querySelector('.sup-apply').addEventListener('click',()=>{ _supRange={from:el.querySelector('.sup-from').value,to:el.querySelector('.sup-to').value};
+    localStorage.setItem('support.dateRange',JSON.stringify(_supRange)); onChange(); });
+}
+
+// ── Support Dashboard ──────────────────────────────────────────────────────
+async function supDashInit(){
+  supRenderRange('sup-range-dash', supDashInit);
+  const k=document.getElementById('sup-kpis'); if(k) k.innerHTML='<div class="col-span-full">'+brandLoader()+'</div>';
+  try{
+    const d=await supFetch('/api/support/summary?'+supRangeQS());
+    const tile=(label,val,sub)=>`<div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">${label}</p><p class="text-2xl font-bold text-slate-800 mt-1">${val}</p>${sub?`<p class="text-[11px] text-slate-400 mt-0.5">${sub}</p>`:''}</div>`;
+    k.innerHTML = tile('Total orders', d.kpis.totalOrders,'selected range')+tile('Calls today', d.kpis.callsToday,'today')+
+      tile('Delivered today', d.kpis.deliveredToday,'today')+tile('Pending (undelivered)', d.kpis.pendingUndelivered,'selected range')+
+      tile('MSG91 confirmed', d.kpis.msg91Confirmed,'undelivered + confirmed');
+    document.getElementById('sup-buckets').innerHTML = SUP_BUCKETS.map(([id,label,tone])=>
+      `<button class="sup-bucket-tile card p-4 text-left hover:ring-2 ${SUP_TONE[tone][1]} transition-all" data-bucket="${id}">
+        <p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide truncate">${label}</p>
+        <p class="text-xl font-bold mt-1 ${SUP_TONE[tone][0].split(' ')[1]}">${d.buckets[id]||0}</p></button>`).join('');
+    document.querySelectorAll('.sup-bucket-tile').forEach(b=>b.addEventListener('click',()=>{ _supoFilters={bucket:b.dataset.bucket,page:1}; navigate('support-orders'); }));
+    document.getElementById('sup-calls-range').innerHTML =
+      `<div class="flex items-center justify-between"><div><p class="text-sm font-semibold text-slate-700">${d.kpis.callsInRange} calls logged in the selected window</p>
+       <p class="text-xs text-slate-400 mt-0.5">Every outcome is in the call log</p></div>
+       <button class="filter-btn" onclick="navigate('support-calls')">View call log →</button></div>`;
+  }catch(e){ if(k) k.innerHTML=`<div class="col-span-full text-rose-500 text-sm">${escapeHtml(e.message)}</div>`; }
+}
+
+// ── Call Queue ─────────────────────────────────────────────────────────────
+let _supTab='und', _supQueueRows=[], _supQueueWired=false;
+function supQueueInit(){
+  supRenderRange('sup-range-queue', supLoadQueue);
+  if(!_supQueueWired){ _supQueueWired=true;
+    document.querySelectorAll('.sup-tab').forEach(b=>b.addEventListener('click',()=>{ _supTab=b.dataset.tab; supTabPaint(); supLoadQueue(); }));
+    ['sup-f-notes','sup-f-age','sup-f-sort'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
+    document.getElementById('sup-f-notesearch')?.addEventListener('input', debounce(supQueueTable,250));
+    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-sort'].forEach((id,i)=>{ document.getElementById(id).value=['all','any','default'][i]; }); document.getElementById('sup-f-notesearch').value=''; supQueueTable(); });
+    document.getElementById('sup-refresh')?.addEventListener('click', supRefreshTracking);
+  }
+  supTabPaint(); supLoadQueue();
+}
+function supTabPaint(){ document.querySelectorAll('.sup-tab').forEach(b=>{ const on=b.dataset.tab===_supTab;
+  b.classList.toggle('border-indigo-600',on); b.classList.toggle('text-indigo-700',on);
+  b.classList.toggle('border-transparent',!on); b.classList.toggle('text-slate-500',!on); }); }
+function supSyncInfo(lock){ const el=document.getElementById('sup-sync-info'); if(!el||!lock) return;
+  const res=lock.last_result||{}; el.textContent = lock.is_running?'Sync running…':(lock.last_finished_at?`Last sync ${new Date(lock.last_finished_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}${res.updated!=null?` · ${res.updated} updated`:''}`:''); }
+async function supLoadQueue(){
+  const c=document.getElementById('sup-queue-table'); if(c) c.innerHTML=brandLoader('Loading queue…');
+  try{ const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS()); _supQueueRows=d.rows||[]; supSyncInfo(d.lock); supQueueTable(); }
+  catch(e){ if(c) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }
+}
+function supQueueTable(){
+  const c=document.getElementById('sup-queue-table'); if(!c) return;
+  const fN=document.getElementById('sup-f-notes')?.value||'all';
+  const fQ=(document.getElementById('sup-f-notesearch')?.value||'').trim().toLowerCase();
+  const fA=document.getElementById('sup-f-age')?.value||'any';
+  const fS=document.getElementById('sup-f-sort')?.value||'default';
+  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fS!=='default')?'':'none';
+  let list=_supQueueRows.slice();
+  if(fN==='with') list=list.filter(r=>r.note_count>0);
+  if(fN==='none') list=list.filter(r=>!r.note_count);
+  if(fQ) list=list.filter(r=>(r.latest_note||'').toLowerCase().includes(fQ));
+  if(fA!=='any') list=list.filter(r=>{ const dAge=(Date.now()-new Date(r.created_at))/86400000;
+    return fA==='lt1'?dAge<1:fA==='1-3'?(dAge>=1&&dAge<3):fA==='3-7'?(dAge>=3&&dAge<7):dAge>=7; });
+  if(fS==='age_old') list.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));
+  else if(fS==='age_new') list.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
+  else if(fS==='courier') list.sort((a,b)=>String(a.courier||'').localeCompare(String(b.courier||'')));
+  else if(fS==='order') list.sort((a,b)=>String(a.order_name||'').localeCompare(String(b.order_name||'')));
+  const cnt=document.getElementById('sup-queue-count'); if(cnt) cnt.textContent=`${list.length} shown`;
+  document.querySelector(`.sup-tab[data-tab="${_supTab}"] .sup-tab-count`).textContent=`(${list.length})`;
+  if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">Queue is clear 🎉</div>'; return; }
+  const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+  const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
+  c.innerHTML=`<table class="w-full"><thead><tr>${['Order','Customer','Bucket','Age','Courier','Actions'].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+    list.slice(0,500).map(r=>{ const ph=String(r.phone||'').replace(/\D/g,'').slice(-10);
+      return `<tr class="sup-row cursor-pointer hover:bg-slate-50 ${r.msg91_confirmed?'bg-sky-50/50':''}" data-oid="${escapeHtml(r.order_id)}">
+      <td class="${TD} font-mono font-semibold">${escapeHtml(r.order_name||r.order_id)}</td>
+      <td class="${TD}">${ph?`<a href="tel:+91${ph}" onclick="event.stopPropagation()" class="text-indigo-600 font-medium hover:underline">${ph}</a>`:'<span class="text-slate-300">no phone</span>'}
+        ${r.orders_count?` <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-violet-100 text-violet-700">${r.orders_count} orders</span>`:''}
+        ${r.msg91_confirmed?' <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}</td>
+      <td class="${TD}">${supBadge(r.bucket)}</td>
+      <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
+      <td class="${TD}">${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}</td>
+      <td class="${TD}"><div class="flex items-center gap-2.5">
+        <button class="sup-note-btn inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-bold border transition-colors ${r.note_count?'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100':'bg-white text-slate-400 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="${r.note_count?'View / add notes':'Add a note'}">📝${r.note_count?` <span class="min-w-[16px] h-4 px-1 rounded-full bg-amber-200/80 text-amber-800 text-[10px] leading-4 text-center">${r.note_count}</span>`:' <span class="font-medium">+</span>'}</button>
+        ${r.latest_note?`<div class="min-w-0 border-l-2 border-amber-300 pl-2">
+          <div class="text-xs text-slate-600 italic truncate max-w-[230px]" title="${escapeHtml(r.latest_note)}">“${escapeHtml(r.latest_note)}”</div>
+          <div class="text-[10px] text-slate-400 truncate">${escapeHtml(r.latest_note_by||'')}${r.latest_note_by&&r.latest_note_at?' · ':''}${r.latest_note_at?supRelTime(r.latest_note_at):''}</div></div>`:''}</div></td></tr>`; }).join('')
+  }</tbody></table>${list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:''}`;
+  c.querySelectorAll('.sup-row').forEach(row=>row.addEventListener('click',()=>supOrderModal(row.dataset.oid)));
+  c.querySelectorAll('.sup-note-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supNotesModal(b.dataset.oid,b.dataset.oname); }));
+}
+async function supRefreshTracking(){
+  const btn=document.getElementById('sup-refresh'); const orig=btn.textContent;
+  btn.disabled=true; btn.textContent='Syncing…'; showNotification('Fetching latest tracking from RapidShyp…');
+  try{ const d=await supFetch('/api/support/refresh-tracking',{method:'POST'});
+    showNotification('Tracking refreshed'+((d.result&&d.result.updated!=null)?` — ${d.result.updated} orders updated`:'')); supSyncInfo(d.lock); supLoadQueue(); }
+  catch(e){ showNotification('Sync failed: '+e.message, true); }
+  finally{ btn.disabled=false; btn.textContent=orig; }
+}
+
+// ── Notes dialog (add / edit / delete own) — avatar cards, relative time, hover actions ──
+function supRelTime(iso){ if(!iso) return ''; const m=(Date.now()-new Date(iso).getTime())/60000;
+  if(m<1) return 'just now'; if(m<60) return Math.round(m)+'m ago'; if(m<1440) return Math.round(m/60)+'h ago';
+  if(m<10080) return Math.round(m/1440)+'d ago'; return new Date(iso).toLocaleDateString('en-IN',{day:'2-digit',month:'short'}); }
+// Our own confirm dialog (no browser confirm()) — stacks above any open modal. Returns Promise<boolean>.
+function supConfirm({ title = 'Are you sure?', message = '', confirmLabel = 'Confirm', danger = false } = {}) {
+  return new Promise(resolve => {
+    document.getElementById('sup-confirm-modal')?.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'sup-confirm-modal';
+    wrap.className = 'fixed inset-0 z-[95] flex items-center justify-center bg-slate-900/50 backdrop-blur-[2px] p-4';
+    wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+      <div class="flex items-start gap-3">
+        <span class="w-10 h-10 rounded-xl ${danger ? 'bg-rose-100 text-rose-600' : 'bg-indigo-100 text-indigo-600'} flex items-center justify-center text-lg shrink-0">${danger ? '🗑' : '❓'}</span>
+        <div class="min-w-0"><h3 class="text-base font-bold text-slate-800">${escapeHtml(title)}</h3>
+          ${message ? `<p class="text-sm text-slate-500 mt-1">${escapeHtml(message)}</p>` : ''}</div></div>
+      <div class="flex justify-end gap-2.5 mt-5">
+        <button id="supcf-no" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100 transition-colors">Cancel</button>
+        <button id="supcf-yes" class="px-4 py-2 rounded-lg text-sm font-semibold text-white ${danger ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'} transition-colors">${escapeHtml(confirmLabel)}</button>
+      </div></div>`;
+    document.body.appendChild(wrap);
+    const done = v => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = e => { if (e.key === 'Escape') done(false); if (e.key === 'Enter') done(true); };
+    document.addEventListener('keydown', onKey);
+    wrap.addEventListener('click', e => { if (e.target === wrap) done(false); });
+    document.getElementById('supcf-no').addEventListener('click', () => done(false));
+    const yes = document.getElementById('supcf-yes'); yes.addEventListener('click', () => done(true)); yes.focus();
+  });
+}
+const SUP_ICON_EDIT='<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>';
+const SUP_ICON_TRASH='<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>';
+async function supNotesModal(orderId, orderName){
+  document.getElementById('sup-notes-modal')?.remove();
+  const wrap=document.createElement('div'); wrap.id='sup-notes-modal';
+  // z-[85]: must stay ABOVE the order-detail modal (z-80), which gets re-created underneath by
+  // refreshBehind() after every note mutation — equal z would let the refreshed modal cover this dialog.
+  wrap.className='fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/50 backdrop-blur-[2px] p-4';
+  wrap.innerHTML=`<div class="sup-pop bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+      <div class="flex items-center gap-2.5">
+        <span class="w-9 h-9 rounded-xl bg-amber-100 text-amber-600 flex items-center justify-center text-lg">📝</span>
+        <div><h3 class="text-base font-bold text-slate-800 leading-tight">Notes <span id="supn-count" class="ml-1 px-1.5 py-0.5 rounded-full text-[11px] font-bold bg-slate-100 text-slate-500 align-middle"></span></h3>
+        <p class="text-xs text-slate-400">${escapeHtml(orderName||orderId)}</p></div></div>
+      <button class="sup-close text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100 transition-colors">✕</button></div>
+    <div class="px-6 pt-4">
+      <div class="rounded-xl border border-slate-200 focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-100 transition-all">
+        <textarea id="supn-new" rows="2" maxlength="2000" class="w-full px-3.5 py-2.5 text-sm rounded-t-xl outline-none resize-none placeholder:text-slate-400" placeholder="Type a new note for the team…"></textarea>
+        <div class="flex items-center justify-between px-3 py-2 border-t border-slate-100 bg-slate-50/60 rounded-b-xl">
+          <span class="text-[11px] text-slate-400">Ctrl+Enter to save</span>
+          <button id="supn-add" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all" disabled>Add note</button>
+        </div></div>
+      <p id="supn-status" class="text-xs text-rose-600 mt-1.5 h-4"></p></div>
+    <div id="supn-list" class="px-6 pb-6 pt-2 space-y-2.5 overflow-y-auto flex-1 custom-scrollbar">${brandLoaderSm('Loading notes…')}</div></div>`;
+  document.body.appendChild(wrap);
+  // Every mutation refreshes what's BEHIND the dialog immediately. The queue row is synced straight
+  // from the SAME notes payload the dialog just fetched (see loadList → syncQueueRow) — so the chip,
+  // quote, author and count can never disagree with the dialog. The open detail modal re-fetches.
+  const refreshBehind=()=>{ if(document.getElementById('sup-order-modal')) supOrderModal(orderId); };
+  const syncQueueRow=(notes)=>{
+    const row=(_supQueueRows||[]).find(r=>String(r.order_id)===String(orderId)); if(!row) return;
+    row.note_count=notes.length;
+    row.latest_note=notes.length?notes[0].content:null;          // endpoint returns newest first
+    row.latest_note_by=notes.length?(notes[0].agent_name||null):null;
+    row.latest_note_at=notes.length?notes[0].created_at:null;
+    if(currentView==='support-queue') supQueueTable();
+  };
+  const close=()=>wrap.remove();
+  wrap.querySelector('.sup-close').addEventListener('click',close);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  const ta=document.getElementById('supn-new');
+  setTimeout(()=>ta.focus(),60);
+  ta.addEventListener('input',()=>{ document.getElementById('supn-add').disabled=!ta.value.trim(); });
+  const addNote=async()=>{ if(!ta.value.trim()) return;
+    try{ await supFetch('/api/support/notes',{method:'POST',body:JSON.stringify({order_id:orderId,content:ta.value.trim()})});
+      ta.value=''; document.getElementById('supn-add').disabled=true; loadList(); refreshBehind(); }
+    catch(e){ document.getElementById('supn-status').textContent=e.message; } };
+  document.getElementById('supn-add').addEventListener('click',addNote);
+  ta.addEventListener('keydown',e=>{ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)) addNote(); });
+  async function loadList(){
+    const list=document.getElementById('supn-list');
+    try{ const d=await supFetch('/api/support/order/'+encodeURIComponent(orderId));
+      const notes=d.notes||[];
+      syncQueueRow(notes);   // queue row chip/quote always mirrors exactly what this dialog shows
+      const cnt=document.getElementById('supn-count'); if(cnt) cnt.textContent=notes.length||'0';
+      list.innerHTML=notes.length? notes.map(n=>{ const av=_avatar(n.agent_name||'?');
+        return `<div class="group flex gap-2.5 ${n.mine?'':''}" data-nid="${n.id}">
+        <span class="w-8 h-8 rounded-full ${av.color} text-white text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">${av.initials}</span>
+        <div class="flex-1 min-w-0 rounded-xl border ${n.mine?'bg-indigo-50/60 border-indigo-100':'bg-white border-slate-200'} px-3.5 py-2.5">
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-bold text-slate-700">${escapeHtml(n.agent_name||'—')}</span>
+            ${n.mine?'<span class="px-1.5 py-px rounded-full text-[9px] font-bold bg-indigo-100 text-indigo-600 uppercase tracking-wide">You</span>':''}
+            <span class="text-[11px] text-slate-400" title="${new Date(n.created_at).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})}">${supRelTime(n.created_at)}</span>
+            ${(n.mine||d.isAdmin)?`<span class="ml-auto flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button class="supn-edit w-6 h-6 rounded-md flex items-center justify-center text-slate-400 hover:text-indigo-600 hover:bg-indigo-50" title="Edit">${SUP_ICON_EDIT}</button>
+              <button class="supn-del w-6 h-6 rounded-md flex items-center justify-center text-slate-400 hover:text-rose-600 hover:bg-rose-50" title="Delete">${SUP_ICON_TRASH}</button></span>`:''}
+          </div>
+          <div class="supn-content text-sm text-slate-700 mt-1 whitespace-pre-wrap break-words">${escapeHtml(n.content)}</div>
+        </div></div>`; }).join('')
+        : `<div class="text-center py-8"><div class="text-3xl mb-2">🗒️</div><p class="text-sm text-slate-400">No notes yet — be the first to add context for the team.</p></div>`;
+      list.querySelectorAll('.supn-del').forEach(b=>b.addEventListener('click',async()=>{ const id=b.closest('[data-nid]').dataset.nid;
+        if(!(await supConfirm({ title:'Delete this note?', message:'The note is removed for the whole team. This cannot be undone.', confirmLabel:'Delete note', danger:true }))) return;
+        try{ await supFetch('/api/support/notes/'+id,{method:'DELETE'}); loadList(); refreshBehind(); }catch(e){ showNotification(e.message,true); } }));
+      list.querySelectorAll('.supn-edit').forEach(b=>b.addEventListener('click',()=>{ const box=b.closest('[data-nid]'); const id=box.dataset.nid;
+        const cur=box.querySelector('.supn-content').textContent;
+        box.querySelector('.supn-content').innerHTML=`<textarea class="w-full px-3 py-2 text-sm rounded-lg border border-indigo-300 outline-none focus:ring-2 focus:ring-indigo-100 resize-none" rows="2">${escapeHtml(cur)}</textarea>
+          <div class="flex gap-2 mt-1.5"><button class="supn-save px-3 py-1 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700">Save</button><button class="supn-cancel px-3 py-1 rounded-lg text-xs text-slate-500 border border-slate-200 hover:bg-slate-50">Cancel</button></div>`;
+        const eta=box.querySelector('textarea'); eta.focus(); eta.setSelectionRange(eta.value.length,eta.value.length);
+        box.querySelector('.supn-cancel').addEventListener('click',loadList);
+        box.querySelector('.supn-save').addEventListener('click',async()=>{ const v=eta.value.trim(); if(!v) return;
+          try{ await supFetch('/api/support/notes/'+id,{method:'PUT',body:JSON.stringify({content:v})}); loadList(); refreshBehind(); }catch(e){ showNotification(e.message,true); } }); }));
+    }catch(e){ list.innerHTML=`<div class="text-rose-500 text-sm">${escapeHtml(e.message)}</div>`; }
+  }
+  loadList();
+}
+
+// ── Log-a-call dialog ──────────────────────────────────────────────────────
+function supLogCallModal(orderId, orderName, onDone){
+  document.getElementById('sup-call-modal')?.remove();
+  const wrap=document.createElement('div'); wrap.id='sup-call-modal';
+  wrap.className='fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/50 p-4';
+  wrap.innerHTML=`<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-md flex flex-col">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+      <div><h3 class="text-lg font-bold text-slate-800">Log a call</h3><p class="text-xs text-slate-400 mt-0.5">${escapeHtml(orderName||orderId)}</p></div>
+      <button class="sup-close text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div>
+    <div class="p-6 space-y-3">
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Outcome</label>
+        <select id="supc-outcome" class="filter-select w-full">${SUP_OUTCOMES.map(([v,l])=>`<option value="${v}">${l}</option>`).join('')}</select></div>
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Notes</label>
+        <textarea id="supc-notes" rows="3" class="filter-input w-full !h-auto py-2 resize-none" placeholder="What was discussed…"></textarea></div>
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Follow up at</label>
+        <input id="supc-follow" type="datetime-local" class="filter-input w-full"></div></div>
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200">
+      <span id="supc-status" class="text-sm mr-auto"></span>
+      <button class="sup-close px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="supc-save" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">Log call</button></div></div>`;
+  document.body.appendChild(wrap);
+  const close=()=>wrap.remove();
+  wrap.querySelectorAll('.sup-close').forEach(b=>b.addEventListener('click',close));
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  document.getElementById('supc-save').addEventListener('click',async()=>{
+    const st=document.getElementById('supc-status');
+    try{ await supFetch('/api/support/calls',{method:'POST',body:JSON.stringify({
+        order_id:orderId, outcome:document.getElementById('supc-outcome').value,
+        notes:document.getElementById('supc-notes').value.trim(),
+        next_followup_at:document.getElementById('supc-follow').value?new Date(document.getElementById('supc-follow').value).toISOString():null })});
+      showNotification('Call logged'); close(); if(onDone) onDone();
+      if(currentView==='support-calls') supCallsLoad();          // calls table behind the modal stays fresh
+      if(currentView==='support-dashboard') supDashInit();       // "Calls today" KPI stays fresh
+    }
+    catch(e){ st.textContent=e.message; st.className='text-sm text-rose-600 mr-auto'; }
+  });
+}
+
+// MSG91 `content` for template sends holds the variables JSON, not readable text —
+// pull out only the human text values (skip image/video/document components & bare URLs).
+function supMsgText(raw){
+  const s=String(raw||'').trim(); if(!s) return '';
+  if(s[0]!=='{'&&s[0]!=='[') return s;
+  try{
+    const out=[];
+    (function walk(v){
+      if(!v||typeof v!=='object') return;
+      if(Array.isArray(v)){ v.forEach(walk); return; }
+      if(v.type==='image'||v.type==='video'||v.type==='document') return;
+      if(typeof v.text==='string'&&v.text.trim()&&!/^https?:\/\//i.test(v.text.trim())){ out.push(v.text.trim()); return; }
+      Object.values(v).forEach(walk);
+    })(JSON.parse(s));
+    return out.filter((x,i,a)=>a.indexOf(x)===i).join(' · ');
+  }catch(_){ return s; }
+}
+// ── Order detail modal (customer · whom-to-call · items · timeline · calls · MSG91 · notes) ──
+async function supOrderModal(orderId){
+  document.getElementById('sup-order-modal')?.remove();
+  const wrap=document.createElement('div'); wrap.id='sup-order-modal';
+  wrap.className='fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+  wrap.innerHTML=`<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-5xl max-h-[90vh] overflow-y-auto p-6">${brandLoader('Loading order…')}</div>`;
+  document.body.appendChild(wrap);
+  const close=()=>wrap.remove();
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  try{
+    const d=await supFetch('/api/support/order/'+encodeURIComponent(orderId));
+    const o=d.order, a=d.address||{}, ph=String(o.phone||'').replace(/\D/g,'').slice(-10);
+    const days=Math.round((Date.now()-new Date(o.created_at))/86400000);
+    const esc=d.escalation;
+    wrap.firstElementChild.innerHTML=`
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div><div class="flex items-center gap-2 flex-wrap"><span class="font-mono text-lg font-bold text-slate-800">${escapeHtml(o.order_name||o.order_id)}</span>${supBadge(o.bucket)}
+          ${o.msg91_confirmed?'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}</div>
+          <p class="text-xs text-slate-400 mt-1">Placed ${new Date(o.created_at).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})} · ${days} days ago</p></div>
+        <div class="flex items-center gap-2"><button id="supd-logcall" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">📞 Log a call</button>
+          <button class="supd-close text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div></div>
+      <div class="grid md:grid-cols-2 gap-6 mt-5">
+        <div class="space-y-4">
+          <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Customer</p>
+            <p class="font-semibold text-slate-800">${escapeHtml(a.name||[a.first_name,a.last_name].filter(Boolean).join(' ')||'—')}</p>
+            <p class="text-sm mt-1">${ph?`<a href="tel:+91${ph}" class="text-indigo-600 font-medium">${ph}</a>`:'—'} · <span class="text-slate-500">${escapeHtml(o.email||'—')}</span></p>
+            <p class="text-sm text-slate-500 mt-1.5 leading-relaxed">${escapeHtml([a.address1,a.address2,a.city,a.province,a.zip].filter(Boolean).join(', ')||'No address')}</p></div>
+          <div class="card p-4 ${esc?'border-emerald-200':''}"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Whom to call</p>
+            ${esc?`<p class="font-semibold text-slate-800">${escapeHtml(esc.contact_name)} <span class="text-xs text-slate-400 font-normal">· ${escapeHtml(esc.courier)}${esc.region?' · '+escapeHtml(esc.region):''}</span></p>
+              <p class="text-sm mt-1"><a href="tel:${escapeHtml(esc.phone)}" class="text-indigo-600 font-medium">${escapeHtml(esc.phone)}</a>${esc.email?` · <span class="text-slate-500">${escapeHtml(esc.email)}</span>`:''}</p>
+              ${esc.notes?`<p class="text-xs text-slate-400 mt-1">${escapeHtml(esc.notes)}</p>`:''}`
+            :`<p class="text-sm text-slate-400">No escalation contact for this courier. <a href="#" onclick="document.getElementById('sup-order-modal').remove();navigate('support-contacts');return false;" class="text-indigo-600">Add one</a></p>`}</div>
+        </div>
+        <div class="space-y-4">
+          <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Items</p>
+            ${(d.items||[]).map(i=>`<div class="flex items-center justify-between py-1 text-sm"><span class="text-slate-700 truncate mr-2">${escapeHtml(i.title||'')}${i.variant_title?` <span class="text-slate-400">· ${escapeHtml(i.variant_title)}</span>`:''}</span><span class="text-slate-500 whitespace-nowrap">×${i.quantity} · ₹${Number(i.price||0).toLocaleString('en-IN')}</span></div>`).join('')||'<p class="text-sm text-slate-400">—</p>'}
+            <div class="flex justify-between border-t border-slate-100 mt-2 pt-2 text-sm font-bold text-slate-800"><span>Total</span><span>₹${Number(o.total_price||0).toLocaleString('en-IN')}</span></div></div>
+          <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Delivery timeline</p>
+            <div class="space-y-1.5 max-h-44 overflow-auto">${(d.tracking||[]).map(t=>`<div class="text-xs"><span class="font-semibold text-slate-700">${escapeHtml(t.tracking_status||'—')}</span> <span class="text-slate-400">· ${escapeHtml(t.courier_name||'')} · ${escapeHtml(t.awb_number||'')} · ${t.last_tracked_at?new Date(t.last_tracked_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}${t.edd?` · EDD ${_dmy(t.edd)}`:''}</span></div>`).join('')||'<p class="text-sm text-slate-400">No tracking yet</p>'}</div></div>
+        </div>
+      </div>
+      <div class="grid md:grid-cols-2 gap-6 mt-5">
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide">Call history (${(d.calls||[]).length})</p></div>
+          <div class="space-y-2 max-h-52 overflow-auto">${(d.calls||[]).map(cl=>`<div class="rounded-lg border border-slate-100 p-2.5 text-xs">
+            <div class="flex items-center gap-2"><span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">${supOutcomeLbl(cl.outcome)}</span><span class="text-slate-400">${escapeHtml(cl.agent_name||'')} · ${new Date(cl.called_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span></div>
+            ${cl.notes?`<p class="text-slate-600 mt-1">${escapeHtml(cl.notes)}</p>`:''}${cl.next_followup_at?`<p class="text-amber-600 mt-1">Follow up: ${new Date(cl.next_followup_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</p>`:''}</div>`).join('')||'<p class="text-sm text-slate-400">No calls yet</p>'}</div></div>
+        <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Recent MSG91 messages</p>
+          <div class="space-y-2 max-h-52 overflow-auto">${(d.msg91||[]).map(m=>{ const tx=supMsgText(m.content);
+            return `<div class="text-xs"><span class="px-1.5 py-0.5 rounded ${m.direction==='inbound'?'bg-emerald-50 text-emerald-700':'bg-slate-100 text-slate-600'} font-semibold">${escapeHtml(m.direction||'')}</span>
+            <span class="text-slate-400">${escapeHtml(m.template_name||'')} · ${m.sent_at?new Date(m.sent_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span>
+            ${tx?`<p class="text-slate-600 mt-0.5">${escapeHtml(tx.slice(0,160))}</p>`:''}</div>`; }).join('')||'<p class="text-sm text-slate-400">No messages</p>'}</div></div>
+      </div>
+      <div class="card p-4 mt-5">
+        <div class="flex items-center justify-between mb-2"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide">All orders from this customer</p>
+          <span class="text-xs text-slate-400">${(d.customer_orders||[]).length} order${(d.customer_orders||[]).length===1?'':'s'}</span></div>
+        ${(d.customer_orders||[]).length?`<div class="overflow-x-auto"><table class="w-full text-sm">
+          <thead><tr>${['Order','Date','Status','Tracking','Courier','Total'].map(h=>`<th class="text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider py-2 pr-4 border-b border-slate-200">${h}</th>`).join('')}</tr></thead>
+          <tbody>${d.customer_orders.map(co=>{ const cur=co.order_id===o.order_id;
+            return `<tr class="supd-cust-row ${cur?'bg-indigo-50/60':'hover:bg-slate-50 cursor-pointer'}" data-oid="${escapeHtml(co.order_id)}">
+            <td class="py-2 pr-4 border-b border-slate-100 font-mono font-semibold text-indigo-700">${escapeHtml(co.order_name||co.order_id)}${cur?' <span class="text-[10px] text-slate-400 font-sans font-normal">(this order)</span>':''}</td>
+            <td class="py-2 pr-4 border-b border-slate-100 text-xs tabular-nums">${_dmy(co.created_at)}</td>
+            <td class="py-2 pr-4 border-b border-slate-100">${supBadge(co.bucket)}</td>
+            <td class="py-2 pr-4 border-b border-slate-100 text-xs text-slate-500">${escapeHtml(co.tracking_status||'—')}</td>
+            <td class="py-2 pr-4 border-b border-slate-100 text-xs">${escapeHtml(co.courier||'—')}</td>
+            <td class="py-2 pr-4 border-b border-slate-100 font-semibold tabular-nums">₹${Number(co.total_price||0).toLocaleString('en-IN')}</td></tr>`; }).join('')}</tbody>
+        </table></div>`:'<p class="text-sm text-slate-400">No orders found for this customer.</p>'}
+      </div>
+      <div class="mt-5 flex items-center gap-2">
+        <button id="supd-notes" class="filter-btn">📝 Notes (${(d.notes||[]).length})</button>
+      </div>`;
+    wrap.querySelector('.supd-close').addEventListener('click',close);
+    document.getElementById('supd-logcall').addEventListener('click',()=>supLogCallModal(o.order_id,o.order_name,()=>supOrderModal(orderId)));
+    document.getElementById('supd-notes').addEventListener('click',()=>supNotesModal(o.order_id,o.order_name));
+    wrap.querySelectorAll('.supd-cust-row').forEach(row=>{ if(row.dataset.oid!==o.order_id) row.addEventListener('click',()=>supOrderModal(row.dataset.oid)); });
+  }catch(e){ wrap.firstElementChild.innerHTML=`<div class="text-rose-500 text-sm">${escapeHtml(e.message)}</div><button class="filter-btn mt-3" onclick="document.getElementById('sup-order-modal').remove()">Close</button>`; }
+}
+
+// ── Support Orders (search page) ───────────────────────────────────────────
+let _supoFilters={page:1}, _supoWired=false, _supoSummary=null;
+function supOrdersInit(){
+  supRenderRange('sup-range-orders', ()=>{ _supoFilters.page=1; supOrdersLoad(); });
+  if(!_supoWired){ _supoWired=true;
+    const bsel=document.getElementById('supo-bucket'); SUP_BUCKETS.forEach(([id,l])=>{ const o=document.createElement('option'); o.value=id; o.textContent=l; bsel.appendChild(o); });
+    document.getElementById('supo-q').addEventListener('input', debounce(()=>{ _supoFilters.q=document.getElementById('supo-q').value.trim(); _supoFilters.page=1; supOrdersLoad(); },350));
+    [['supo-bucket','bucket'],['supo-partner','partner'],['supo-courier','courier'],['supo-status','status']].forEach(([id,k])=>
+      document.getElementById(id).addEventListener('change',e=>{ _supoFilters[k]=e.target.value; _supoFilters.page=1; supOrdersLoad(); }));
+    document.getElementById('supo-reset').addEventListener('click',()=>{ _supoFilters={page:1};
+      ['supo-q','supo-bucket','supo-partner','supo-courier','supo-status'].forEach(id=>{ document.getElementById(id).value=''; }); supOrdersLoad(); });
+    document.getElementById('supo-prev').addEventListener('click',()=>{ if(_supoFilters.page>1){ _supoFilters.page--; supOrdersLoad(); } });
+    document.getElementById('supo-next').addEventListener('click',()=>{ _supoFilters.page++; supOrdersLoad(); });
+  }
+  // apply an incoming bucket pre-filter (from dashboard tiles)
+  if(_supoFilters.bucket) document.getElementById('supo-bucket').value=_supoFilters.bucket;
+  supOrdersLoad(); supOrdersBuckets();
+}
+async function supOrdersBuckets(){
+  try{ const d=await supFetch('/api/support/summary?'+supRangeQS()); _supoSummary=d;
+    document.getElementById('sup-orders-buckets').innerHTML=SUP_BUCKETS.map(([id,label,tone])=>
+      `<button class="supo-bt card px-3 py-2 text-left hover:ring-2 ${SUP_TONE[tone][1]} ${_supoFilters.bucket===id?'ring-2 '+SUP_TONE[tone][1]:''}" data-b="${id}">
+        <span class="text-[10px] font-semibold text-slate-400 uppercase block truncate">${label}</span>
+        <span class="text-sm font-bold ${SUP_TONE[tone][0].split(' ')[1]}">${d.buckets[id]||0}</span></button>`).join('');
+    document.querySelectorAll('.supo-bt').forEach(b=>b.addEventListener('click',()=>{ _supoFilters.bucket=(_supoFilters.bucket===b.dataset.b?'':b.dataset.b);
+      document.getElementById('supo-bucket').value=_supoFilters.bucket; _supoFilters.page=1; supOrdersLoad(); supOrdersBuckets(); }));
+  }catch(_){}
+}
+async function supOrdersLoad(){
+  const c=document.getElementById('sup-orders-table'); if(c) c.innerHTML=brandLoader();
+  try{
+    const f=_supoFilters; const qs=new URLSearchParams({ ...(f.q?{q:f.q}:{}) , ...(f.bucket?{bucket:f.bucket}:{}), ...(f.partner?{partner:f.partner}:{}), ...(f.courier?{courier:f.courier}:{}), ...(f.status?{status:f.status}:{}), page:f.page||1, from:_supRange.from, to:_supRange.to });
+    const d=await supFetch('/api/support/orders?'+qs.toString());
+    // facets
+    const csel=document.getElementById('supo-courier'), ssel=document.getElementById('supo-status');
+    if(csel.options.length<=1) d.facets.couriers.forEach(x=>{ const o=document.createElement('option'); o.value=x; o.textContent=x; csel.appendChild(o); });
+    if(ssel.options.length<=1) d.facets.statuses.forEach(x=>{ const o=document.createElement('option'); o.value=x; o.textContent=x; ssel.appendChild(o); });
+    document.getElementById('supo-count').textContent=`${d.total.toLocaleString('en-IN')} orders`;
+    document.getElementById('supo-pageinfo').textContent=`Page ${d.page} of ${d.pages}`;
+    document.getElementById('supo-prev').disabled=d.page<=1; document.getElementById('supo-next').disabled=d.page>=d.pages;
+    const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+    const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
+    c.innerHTML=d.rows.length?`<table class="w-full"><thead><tr>${['Order','Customer','Bucket','Partner / Courier / AWB','Status','Created','Total'].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+      d.rows.map(r=>{ const ph=String(r.phone||'').replace(/\D/g,'').slice(-10);
+        return `<tr class="supo-row cursor-pointer hover:bg-slate-50" data-oid="${escapeHtml(r.order_id)}">
+        <td class="${TD} font-mono font-semibold">${escapeHtml(r.order_name||r.order_id)}</td>
+        <td class="${TD}"><div>${ph||'—'}</div><div class="text-xs text-slate-400 truncate max-w-[160px]">${escapeHtml(r.email||'')}</div></td>
+        <td class="${TD}">${supBadge(r.bucket)}</td>
+        <td class="${TD} text-xs"><div>${escapeHtml(r.partner||'—')} · ${escapeHtml(r.courier||'—')}</div><div class="text-slate-400 font-mono">${escapeHtml(r.awb_number||'')}</div></td>
+        <td class="${TD} text-xs">${escapeHtml(r.tracking_status||'—')}</td>
+        <td class="${TD} text-xs tabular-nums">${_dmy(r.created_at)}</td>
+        <td class="${TD} font-semibold tabular-nums">₹${Number(r.total_price||0).toLocaleString('en-IN')}</td></tr>`; }).join('')
+    }</tbody></table>`:'<div class="text-slate-400 text-sm p-10 text-center">No orders match</div>';
+    c.querySelectorAll('.supo-row').forEach(row=>row.addEventListener('click',()=>supOrderModal(row.dataset.oid)));
+  }catch(e){ if(c) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }
+}
+
+// ── Call Logs ──────────────────────────────────────────────────────────────
+let _supCallsFilter=null;
+function supCallsInit(){ supRenderRange('sup-range-calls', supCallsLoad); _supCallsFilter=null; supCallsLoad(); }
+async function supCallsLoad(){
+  const c=document.getElementById('sup-calls-table'); if(c) c.innerHTML=brandLoader();
+  try{
+    const d=await supFetch('/api/support/calls?'+supRangeQS());
+    document.getElementById('sup-calls-title').textContent=d.isAdmin?'All Calls':'My Calls';
+    const byStatus={}; d.calls.forEach(cl=>{ const k=cl.tracking_status||'—'; byStatus[k]=(byStatus[k]||0)+1; });
+    const stats=document.getElementById('sup-calls-stats');
+    stats.innerHTML=[`<button class="sup-cstat card px-4 py-2.5 text-left ${!_supCallsFilter?'ring-2 ring-indigo-300':''}" data-s=""><span class="text-[10px] font-semibold text-slate-400 uppercase block">Total</span><span class="text-lg font-bold text-slate-800">${d.calls.length}</span></button>`,
+      ...Object.entries(byStatus).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([s,n])=>`<button class="sup-cstat card px-4 py-2.5 text-left ${_supCallsFilter===s?'ring-2 ring-indigo-300':''}" data-s="${escapeHtml(s)}"><span class="text-[10px] font-semibold text-slate-400 uppercase block truncate max-w-[120px]">${escapeHtml(s)}</span><span class="text-lg font-bold text-slate-800">${n}</span></button>`)].join('');
+    stats.querySelectorAll('.sup-cstat').forEach(b=>b.addEventListener('click',()=>{ _supCallsFilter=b.dataset.s||null; supCallsRender(d); supCallsLoadStatsPaint(); }));
+    window._supCallsData=d; supCallsRender(d);
+  }catch(e){ if(c) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }
+}
+function supCallsLoadStatsPaint(){ document.querySelectorAll('.sup-cstat').forEach(b=>{ b.classList.toggle('ring-2',(_supCallsFilter||'')===b.dataset.s); b.classList.toggle('ring-indigo-300',(_supCallsFilter||'')===b.dataset.s); }); }
+function supCallsRender(d){
+  const c=document.getElementById('sup-calls-table');
+  let list=d.calls; if(_supCallsFilter) list=list.filter(cl=>(cl.tracking_status||'—')===_supCallsFilter);
+  const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+  const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
+  c.innerHTML=list.length?`<table class="w-full"><thead><tr>${['When','Agent','Order','Current status','Outcome','Notes','Follow up'].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+    list.map(cl=>`<tr class="supo-row cursor-pointer hover:bg-slate-50" data-oid="${escapeHtml(cl.order_id)}">
+      <td class="${TD} text-xs tabular-nums whitespace-nowrap">${new Date(cl.called_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</td>
+      <td class="${TD}">${escapeHtml(cl.agent_name||'—')}</td>
+      <td class="${TD} font-mono font-semibold">${escapeHtml(cl.order_name)}</td>
+      <td class="${TD}">${cl.bucket?supBadge(cl.bucket):'—'}<div class="text-[11px] text-slate-400">${escapeHtml(cl.tracking_status||'')}</div></td>
+      <td class="${TD}"><span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 text-xs font-semibold">${supOutcomeLbl(cl.outcome)}</span></td>
+      <td class="${TD} text-xs text-slate-500 max-w-[240px] truncate" title="${escapeHtml(cl.notes||'')}">${escapeHtml(cl.notes||'—')}</td>
+      <td class="${TD} text-xs ${cl.next_followup_at?'text-amber-600 font-semibold':'text-slate-300'}">${cl.next_followup_at?new Date(cl.next_followup_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'—'}</td></tr>`).join('')
+  }</tbody></table>`:'<div class="text-slate-400 text-sm p-10 text-center">No calls in this window</div>';
+  c.querySelectorAll('.supo-row').forEach(row=>row.addEventListener('click',()=>supOrderModal(row.dataset.oid)));
+}
+
+// ── Escalation Contacts (admin CRUD) ───────────────────────────────────────
+let _supcWired=false;
+function supContactsInit(){
+  if(!_supcWired){ _supcWired=true; document.getElementById('supc-add')?.addEventListener('click',supContactModal); }
+  supContactsLoad();
+}
+async function supContactsLoad(){
+  const c=document.getElementById('sup-contacts-table'); if(c) c.innerHTML=brandLoader();
+  try{
+    const d=await supFetch('/api/support/contacts');
+    const addBtn=document.getElementById('supc-add'); if(addBtn) addBtn.style.display=d.isAdmin?'':'none';
+    const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+    const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
+    c.innerHTML=d.contacts.length?`<table class="w-full"><thead><tr>${['Courier','Region / Pincode','Contact name','Phone','Notes',''].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+      d.contacts.map(ct=>`<tr class="hover:bg-slate-50">
+        <td class="${TD} font-semibold capitalize">${escapeHtml(ct.courier)}</td>
+        <td class="${TD} text-xs">${escapeHtml(ct.region||'—')}${ct.pincode_pattern?` · <span class="font-mono">${escapeHtml(ct.pincode_pattern)}*</span>`:''}</td>
+        <td class="${TD}">${escapeHtml(ct.contact_name)}</td>
+        <td class="${TD}"><a href="tel:${escapeHtml(ct.phone)}" class="text-indigo-600 font-medium">${escapeHtml(ct.phone)}</a>${ct.email?`<div class="text-xs text-slate-400">${escapeHtml(ct.email)}</div>`:''}</td>
+        <td class="${TD} text-xs text-slate-500 max-w-[220px] truncate">${escapeHtml(ct.notes||'—')}</td>
+        <td class="${TD}">${d.isAdmin?`<button class="supc-del text-slate-400 hover:text-rose-600" data-id="${ct.id}" title="Delete">🗑</button>`:''}</td></tr>`).join('')
+    }</tbody></table>`:'<div class="text-slate-400 text-sm p-10 text-center">No escalation contacts yet'+(d.isAdmin?' — add the first one':'')+'</div>';
+    c.querySelectorAll('.supc-del').forEach(b=>b.addEventListener('click',async()=>{
+      if(!(await supConfirm({ title:'Delete this escalation contact?', message:'Orders matched to this contact will show no "Whom to call" until a replacement is added.', confirmLabel:'Delete contact', danger:true }))) return;
+      try{ await supFetch('/api/support/contacts/'+b.dataset.id,{method:'DELETE'}); showNotification('Contact deleted'); supContactsLoad(); }catch(e){ showNotification(e.message,true); } }));
+  }catch(e){ if(c) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }
+}
+function supContactModal(){
+  document.getElementById('supc-modal')?.remove();
+  const wrap=document.createElement('div'); wrap.id='supc-modal';
+  wrap.className='fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+  const F=(id,label,ph,req)=>`<div><label class="block text-xs font-semibold text-slate-500 mb-1.5">${label}${req?' <span class="text-rose-500">*</span>':''}</label><input id="${id}" type="text" class="filter-input w-full" placeholder="${ph||''}"></div>`;
+  wrap.innerHTML=`<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-md flex flex-col">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200"><h3 class="text-lg font-bold text-slate-800">Add escalation contact</h3>
+      <button class="sup-close text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div>
+    <div class="p-6 grid grid-cols-2 gap-3">
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Courier <span class="text-rose-500">*</span></label>
+        <select id="ct-courier" class="filter-select w-full"><option value="rapidshyp">rapidshyp</option><option value="docpharma">docpharma</option></select></div>
+      ${F('ct-region','Region','e.g. Maharashtra')}
+      ${F('ct-pin','Pincode prefix','e.g. 400')}
+      ${F('ct-name','Contact name','',true)}
+      ${F('ct-phone','Phone','',true)}
+      ${F('ct-email','Email','')}
+      <div class="col-span-2"><label class="block text-xs font-semibold text-slate-500 mb-1.5">Notes</label><textarea id="ct-notes" rows="2" class="filter-input w-full !h-auto py-2 resize-none"></textarea></div>
+    </div>
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200">
+      <span id="ct-status" class="text-sm mr-auto"></span>
+      <button class="sup-close px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="ct-save" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">Add contact</button></div></div>`;
+  document.body.appendChild(wrap);
+  const close=()=>wrap.remove();
+  wrap.querySelectorAll('.sup-close').forEach(b=>b.addEventListener('click',close));
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  document.getElementById('ct-save').addEventListener('click',async()=>{
+    const v=id=>document.getElementById(id).value.trim();
+    const st=document.getElementById('ct-status');
+    try{ await supFetch('/api/support/contacts',{method:'POST',body:JSON.stringify({ courier:v('ct-courier'), region:v('ct-region'), pincode_pattern:v('ct-pin'), contact_name:v('ct-name'), phone:v('ct-phone'), email:v('ct-email'), notes:v('ct-notes') })});
+      showNotification('Contact added'); close(); supContactsLoad(); }
+    catch(e){ st.textContent=e.message; st.className='text-sm text-rose-600 mr-auto'; }
+  });
+}
+// ═════════════════ END CUSTOMER SUPPORT CONSOLE ═════════════════
+
 // ─────────── Deep-linkable views (open-in-new-tab / refresh / bookmark) ───────────
 // Map each nav item to a #hash so its page survives a full page load, not just an in-app click.
 const NAV_HREF = {
@@ -3025,7 +3666,9 @@ const NAV_HREF = {
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon',
-    'nav-amazon-fba': 'amazon-fba', 'nav-users': 'users'
+    'nav-amazon-fba': 'amazon-fba', 'nav-users': 'users',
+    'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
+    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts'
 };
 const VALID_VIEWS = new Set(Object.values(NAV_HREF));
 function viewFromHash() { const v = (location.hash || '').replace(/^#/, ''); return VALID_VIEWS.has(v) ? v : null; }
@@ -3728,6 +4371,8 @@ document.getElementById('nav-docpharma-recon')?.addEventListener('click', (e) =>
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
 document.getElementById('nav-claims-sla')?.addEventListener('click', (e) => { e.preventDefault(); navigate('claims-sla'); });
+['support-dashboard','support-queue','support-orders','support-calls','support-contacts'].forEach(v =>
+    document.getElementById('nav-' + v)?.addEventListener('click', (e) => { e.preventDefault(); navigate(v); }));
 document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
 document.getElementById('nav-amazon-fba')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-fba'); });
 document.getElementById('nav-users')?.addEventListener('click', (e) => { e.preventDefault(); navigate('users'); });
@@ -3737,6 +4382,7 @@ const PERM_GROUPS = [
   ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['docpharma-recon','DocPharma Recon'],['amazon-fba','Amazon FBA']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
+  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]]
 ];
 const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
@@ -3752,15 +4398,45 @@ function ecEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;
 let _usersWired = false;
 function usersInit(){
   if(!_usersWired){
-    document.getElementById('users-refresh')?.addEventListener('click', loadUsers);
+    document.getElementById('users-refresh')?.addEventListener('click', ()=>{ loadUsers(); loadSupportTeam(); });
     document.getElementById('users-add')?.addEventListener('click', usersAddPrompt);
     document.getElementById('users-list')?.addEventListener('click', usersListClick);
     _usersWired = true;
   }
   loadUsers();
+  loadSupportTeam();
+}
+// Support Console team (Supabase-auth agents from the original console) — promote/demote admin role.
+async function loadSupportTeam(){
+  const box=document.getElementById('support-team-list'); if(!box) return;
+  box.innerHTML=brandLoaderSm('Loading team…');
+  try{
+    const r=await fetch('/api/support/team',{headers:getAuthHeaders()});
+    const d=await r.json(); if(!r.ok||!d.success) throw new Error(d.error||'Failed to load team');
+    const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap';
+    const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
+    box.innerHTML=(d.team||[]).length?`<table class="w-full"><thead><tr>${['Name','Roles','Joined','Actions'].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+      d.team.map(m=>{ const isAdm=m.roles.includes('admin');
+        return `<tr class="hover:bg-slate-50">
+        <td class="${TD}"><div class="font-semibold text-slate-800">${ecEsc(m.display_name)}</div><div class="text-xs text-slate-400">${ecEsc(m.email||m.user_id.slice(0,8)+'…')}</div></td>
+        <td class="${TD}">${m.roles.map(rl=>`<span class="px-2 py-0.5 rounded border text-[11px] font-semibold mr-1 ${rl==='admin'?'bg-indigo-50 text-indigo-700 border-indigo-200':'bg-slate-50 text-slate-600 border-slate-200'}">${ecEsc(rl.charAt(0).toUpperCase()+rl.slice(1))}</span>`).join('')}</td>
+        <td class="${TD} text-xs tabular-nums">${m.joined?new Date(m.joined).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}):'—'}</td>
+        <td class="${TD}">${m.self?'<span class="text-xs text-slate-300">you</span>':(isAdm
+            ?`<button class="sup-team-act text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50" data-uid="${m.user_id}" data-act="demote">Demote to agent</button>`
+            :`<button class="sup-team-act text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700" data-uid="${m.user_id}" data-act="promote">Promote to admin</button>`)}</td></tr>`; }).join('')
+    }</tbody></table>`:'<p class="text-sm text-slate-400">No support agents yet — they appear after their first call/note in the Customer Support console.</p>';
+    box.querySelectorAll('.sup-team-act').forEach(b=>b.addEventListener('click',async()=>{
+      const promo=b.dataset.act==='promote';
+      if(!(await supConfirm({ title:(promo?'Promote':'Demote')+' this agent?', message:promo?'They get admin rights in the Support console (contacts & team management).':'They lose Support-console admin rights and become a regular agent.', confirmLabel:promo?'Promote':'Demote', danger:!promo }))) return;
+      try{ const rr=await fetch('/api/support/team/'+b.dataset.uid+'/role',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({action:b.dataset.act})});
+        const dd=await rr.json(); if(!rr.ok||!dd.success) throw new Error(dd.error||'Failed');
+        showNotification(dd.message||'Done'); loadSupportTeam(); }
+      catch(e){ showNotification(e.message,true); }
+    }));
+  }catch(e){ box.innerHTML=`<p class="text-sm text-rose-500">${ecEsc(e.message)}</p>`; }
 }
 async function loadUsers(){
-  const box=document.getElementById('users-list'); if(box) box.innerHTML='<p class="text-sm text-slate-400">Loading…</p>';
+  const box=document.getElementById('users-list'); if(box) box.innerHTML=brandLoaderSm('Loading users…');
   try{
     const r=await fetch('/api/admin/users',{headers:getAuthHeaders()});
     const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed to load users');
@@ -3788,7 +4464,13 @@ function renderUsers(users){
           <div class="flex items-center gap-2 flex-wrap"><span class="font-semibold text-slate-800 break-all">${ecEsc(u.email)}</span>
             <span class="text-[11px] px-2 py-0.5 rounded-full ring-1 ${badge(u.status)}">${ecEsc(u.status)}</span>
             ${isAdmin?'<span class="text-[11px] px-2 py-0.5 rounded-full ring-1 bg-indigo-50 text-indigo-700 ring-indigo-200">admin</span>':''}</div>
-          <div class="text-xs text-slate-400 mt-0.5">${isAdmin?'Full access — signs in with the app credentials':`<span class="dpu-count font-semibold text-slate-500">${granted}</span> of ${PERM_TOTAL} dashboards`}</div>
+          <div class="text-xs text-slate-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
+            <span>${isAdmin?'Full access — signs in with the app credentials':`<span class="dpu-count font-semibold text-slate-500">${granted}</span> of ${PERM_TOTAL} dashboards`}</span>
+            <span class="text-slate-300">·</span>
+            ${u.mobile?`<span class="inline-flex items-center gap-1 text-slate-500 font-medium"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 7V5z"/></svg>${ecEsc(u.mobile)}</span>`
+                     :'<span class="text-amber-600 font-semibold">No mobile added</span>'}
+            <button data-act="mobile" title="${u.mobile?'Edit':'Add'} mobile number" class="text-slate-400 hover:text-indigo-600 p-0.5 rounded hover:bg-indigo-50">${SUP_ICON_EDIT}</button>
+          </div>
         </div>
       </div>
       <div class="flex items-center gap-2">
@@ -3797,7 +4479,7 @@ function renderUsers(users){
         ${!isAdmin?'<button data-act="delete" title="Delete user" class="text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg w-8 h-8 flex items-center justify-center"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>':''}
       </div>
     </div>`;
-    if(isAdmin) return `<div class="card p-5">${head}</div>`;
+    if(isAdmin) return `<div class="card p-5" data-uid="${u.id}" data-email="${ecEsc(u.email)}" data-mobile="${ecEsc(u.mobile||'')}">${head}</div>`;
     const groups=PERM_GROUPS.map(([gname,items])=>{
       const chips=items.map(([k,label])=>`<button type="button" data-perm="${k}" class="perm-chip ${perms.has(k)?'is-on':''}"><span class="pc-box">${_PC_CHECK}</span>${ecEsc(label)}</button>`).join('');
       return `<div><div class="flex items-center justify-between mb-1.5"><span class="text-[11px] font-bold uppercase tracking-wide text-slate-400">${gname}</span><button type="button" data-group="${gname}" class="text-[11px] text-indigo-500 hover:text-indigo-700 font-medium">toggle all</button></div><div class="flex flex-wrap gap-1.5">${chips}</div></div>`;
@@ -3805,7 +4487,7 @@ function renderUsers(users){
     const primary=(u.status==='active')
       ? '<button data-act="save" class="text-xs px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 shadow-sm">Save access</button>'
       : '<button data-act="approve" class="text-xs px-4 py-2 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700 shadow-sm">✓ Approve &amp; grant</button>';
-    return `<div class="card p-5 ${u.status==='pending'?'ring-1 ring-amber-200':''}" data-uid="${u.id}" data-email="${ecEsc(u.email)}">
+    return `<div class="card p-5 ${u.status==='pending'?'ring-1 ring-amber-200':''}" data-uid="${u.id}" data-email="${ecEsc(u.email)}" data-mobile="${ecEsc(u.mobile||'')}">
       ${head}
       <div class="dpu-perms ${collapsed?'hidden':''}">
         <div class="mt-4 grid sm:grid-cols-2 gap-x-8 gap-y-4">${groups}</div>
@@ -3834,19 +4516,87 @@ function usersListClick(e){
   const btn=e.target.closest('button[data-act]'); if(!btn) return;
   const id=card.dataset.uid, act=btn.dataset.act;
   if(act==='toggle'){ const sec=card.querySelector('.dpu-perms'), chev=btn.querySelector('.dpu-chev'); if(sec){ sec.classList.toggle('hidden'); if(chev) chev.classList.toggle('rotate-180', !sec.classList.contains('hidden')); } return; }
+  if(act==='mobile'){ usrMobileModal(id, card.dataset.email, card.dataset.mobile||''); return; }
   const perms=()=>[...card.querySelectorAll('.perm-chip.is-on')].map(c=>c.dataset.perm);
   if(act==='approve') usersUpdate(id,{status:'active',permissions:perms()},'Approved & access granted');
   else if(act==='disable') usersUpdate(id,{status:'disabled'},'Disabled');
   else if(act==='save') usersUpdate(id,{permissions:perms()},'Access updated');
-  else if(act==='delete'){ if(!confirm('Delete '+card.dataset.email+'? This cannot be undone.')) return;
-    fetch('/api/admin/users/'+id,{method:'DELETE',headers:getAuthHeaders()}).then(r=>r.json()).then(d=>{ showNotification(d.success?'Deleted':(d.message||'Failed'),!d.success); loadUsers(); }); }
+  else if(act==='delete'){
+    supConfirm({ title:'Delete this user?', message:card.dataset.email+' will lose access permanently. This cannot be undone.', confirmLabel:'Delete', danger:true }).then(ok=>{ if(!ok) return;
+      fetch('/api/admin/users/'+id,{method:'DELETE',headers:getAuthHeaders()}).then(r=>r.json()).then(d=>{ showNotification(d.success?'Deleted':(d.message||'Failed'),!d.success); loadUsers(); }); }); }
 }
-async function usersAddPrompt(){
-  const email=prompt('New user email:'); if(!email) return;
-  const password=prompt('Temporary password (min 6 characters):'); if(!password) return;
-  try{ const r=await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({email,password,permissions:[]})});
-    const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed'); showNotification('User added — now grant dashboards below.'); loadUsers();
-  }catch(e){ showNotification(e.message,true); }
+// Own add-user modal (email + mandatory mobile + temp password) — replaces the old browser prompt().
+function usersAddPrompt(){
+  document.getElementById('usr-add-modal')?.remove();
+  const wrap=document.createElement('div');
+  wrap.id='usr-add-modal';
+  wrap.className='fixed inset-0 z-[70] bg-slate-900/40 backdrop-blur-[2px] flex items-center justify-center p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-2xl w-full max-w-md sup-pop">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+      <h3 class="font-bold text-slate-800">Add user</h3>
+      <button data-x class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
+    <div class="p-5 space-y-4">
+      <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Email</label>
+        <input id="usradd-email" type="email" class="filter-input w-full" placeholder="name@company.com"></div>
+      <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Mobile number <span class="text-rose-500">*</span></label>
+        <input id="usradd-mobile" type="tel" inputmode="numeric" maxlength="10" class="filter-input w-full" placeholder="10-digit mobile number">
+        <p class="text-[11px] text-slate-400 mt-1">Required — kept on the user's profile.</p></div>
+      <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Temporary password</label>
+        <input id="usradd-pass" type="text" class="filter-input w-full" placeholder="Min 6 characters"></div>
+      <p id="usradd-err" class="text-xs text-rose-500 hidden"></p>
+    </div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="usradd-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Add user</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap||e.target.closest('[data-x]')) wrap.remove(); });
+  document.getElementById('usradd-mobile').addEventListener('input',e=>{ e.target.value=e.target.value.replace(/\D/g,'').slice(0,10); });
+  const err=t=>{ const p=document.getElementById('usradd-err'); p.textContent=t; p.classList.remove('hidden'); };
+  document.getElementById('usradd-save').addEventListener('click', async ()=>{
+    const email=document.getElementById('usradd-email').value.trim().toLowerCase();
+    const mobile=document.getElementById('usradd-mobile').value.trim();
+    const password=document.getElementById('usradd-pass').value;
+    if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return err('Enter a valid email address.');
+    if(!/^[6-9]\d{9}$/.test(mobile)) return err('Enter a valid 10-digit mobile number.');
+    if(String(password).length<6) return err('Password must be at least 6 characters.');
+    try{ const r=await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({email,mobile,password,permissions:[]})});
+      const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed');
+      wrap.remove(); showNotification('User added — now grant dashboards below.'); loadUsers();
+    }catch(e){ err(e.message); }
+  });
+  setTimeout(()=>document.getElementById('usradd-email')?.focus(),50);
+}
+// Add/edit a user's mobile (mandatory for everyone; admins need it for the login OTP).
+function usrMobileModal(id, email, current){
+  document.getElementById('usr-mob-modal')?.remove();
+  const wrap=document.createElement('div');
+  wrap.id='usr-mob-modal';
+  wrap.className='fixed inset-0 z-[70] bg-slate-900/40 backdrop-blur-[2px] flex items-center justify-center p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm sup-pop">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+      <div><h3 class="font-bold text-slate-800">${current?'Edit':'Add'} mobile number</h3><p class="text-xs text-slate-400 mt-0.5">${ecEsc(email||'')}</p></div>
+      <button data-x class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
+    <div class="p-5">
+      <input id="usrmob-input" type="tel" inputmode="numeric" maxlength="10" class="filter-input w-full" placeholder="10-digit mobile number" value="${ecEsc(current||'')}">
+      <p class="text-[11px] text-slate-400 mt-2">Kept on the user's profile.</p>
+      <p id="usrmob-err" class="text-xs text-rose-500 mt-2 hidden"></p></div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="usrmob-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Save</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap||e.target.closest('[data-x]')) wrap.remove(); });
+  const inp=document.getElementById('usrmob-input');
+  inp.addEventListener('input',e=>{ e.target.value=e.target.value.replace(/\D/g,'').slice(0,10); });
+  document.getElementById('usrmob-save').addEventListener('click', async ()=>{
+    const m=inp.value.trim();
+    const perr=document.getElementById('usrmob-err');
+    if(!/^[6-9]\d{9}$/.test(m)){ perr.textContent='Enter a valid 10-digit mobile number.'; perr.classList.remove('hidden'); return; }
+    try{ const r=await fetch('/api/admin/users/'+id,{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({mobile:m})});
+      const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed');
+      wrap.remove(); showNotification('Mobile number saved'); loadUsers();
+    }catch(e){ perr.textContent=e.message; perr.classList.remove('hidden'); }
+  });
+  setTimeout(()=>inp.focus(),50);
 }
 
 // ═══════════════ AMAZON FBA (Insights · Live inventory · Restock forecast) ═══════════════
@@ -3939,7 +4689,7 @@ function _fbaSetUpdated(ms,stale){
 // ── INSIGHTS ──
 async function _fbaLoadInsights(fresh){
   const days=parseInt(FBA.$('fba-ins-days')?.value||'30',10);
-  FBA.$('fba-ins-kpis').innerHTML='<div class="col-span-full text-sm text-slate-400 py-6 text-center">Loading…</div>';
+  FBA.$('fba-ins-kpis').innerHTML='<div class="col-span-full">'+brandLoader()+'</div>';
   try{
     const r=await fetch(`/api/fba/insights?days=${days}`+(fresh?'&fresh=1':''),{headers:getAuthHeaders()});
     const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
@@ -4002,7 +4752,7 @@ function _fbaDrawTrend(){
 
 // ── INVENTORY ──
 async function _fbaLoadInventory(fresh){
-  FBA.$('fba-inv-table').innerHTML='<div class="p-6 text-sm text-slate-400 text-center">Loading live stock from Amazon…</div>';
+  FBA.$('fba-inv-table').innerHTML=brandLoader('Loading live stock from Amazon…');
   try{
     const r=await fetch('/api/fba/inventory'+(fresh?'?fresh=1':''),{headers:getAuthHeaders()});
     const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
@@ -4122,7 +4872,7 @@ function _fbaLocPending(d){
   FBA.$('fba-loc-status').textContent = (d&&d.error)?('Last error: '+d.error):'Generating…';
 }
 async function _fbaLoadLocations(){
-  if(!_fbaLoc) FBA.$('fba-loc-matrix').innerHTML='<div class="p-6 text-sm text-slate-400 text-center">Loading…</div>';
+  if(!_fbaLoc) FBA.$('fba-loc-matrix').innerHTML=brandLoader();
   try{
     const r=await fetch('/api/fba/locations?window=30',{headers:getAuthHeaders()});
     const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
@@ -4353,7 +5103,7 @@ function _fbaOrdStatusBadge(o){
   return {t:'Draft',c:'reorder'};
 }
 async function _fbaLoadOrders(){
-  FBA.$('fba-ord-table').innerHTML='<div class="p-6 text-sm text-slate-400 text-center">Loading orders…</div>';
+  FBA.$('fba-ord-table').innerHTML=brandLoader('Loading orders…');
   try{ const r=await fetch('/api/fba/inbound',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
     _fbaOrd=d; _fbaRenderOrders();
   }catch(e){ FBA.$('fba-ord-table').innerHTML=`<div class="p-6 text-sm text-rose-500 text-center">${FBA.esc(e.message)}</div>`; }
@@ -4463,52 +5213,10 @@ async function opsSetAction(tab,order,status,note,snooze){
 function opsActionCell(tab,order){ const a=opsActOf(tab,order);
     if(a&&a.status&&!(a.status==='snoozed'&&!(a.snooze_until&&new Date(a.snooze_until)>new Date()))){
         const lbl=a.status==='snoozed'?'Snoozed':a.status;
-        const noteHtml=a.note?`<span class="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 max-w-[200px] truncate inline-block align-middle" title="${_opsEsc(a.note)}">📝 ${_opsEsc(a.note)}</span>`:'';
-        const noteBtn=(tab==='ndr'||tab==='prepaidrisk')?`<button class="ops-note-edit text-xs text-slate-400 hover:text-indigo-600" data-tab="${tab}" data-o="${_opsEsc(order)}" title="${a.note?'Edit customer response':'Add customer response'}">${a.note?'✎':'📝+'}</button>`:'';
-        return `<div class="flex items-center gap-1.5 flex-wrap"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700 whitespace-nowrap">✓ ${_opsEsc(lbl)}</span>${noteHtml}${noteBtn}<button class="ops-act text-xs text-slate-400 hover:text-rose-600" data-tab="${tab}" data-o="${_opsEsc(order)}" data-s="clear" title="Undo">✕</button></div>`;
+        return `<div class="flex items-center gap-1 whitespace-nowrap"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700">✓ ${_opsEsc(lbl)}</span><button class="ops-act text-xs text-slate-400 hover:text-rose-600" data-tab="${tab}" data-o="${_opsEsc(order)}" data-s="clear" title="Undo">✕</button></div>`;
     }
     return `<div class="flex items-center gap-1 whitespace-nowrap">`+(OPS_ACTS[tab]||[]).map(([s,l])=>`<button class="ops-act text-[11px] px-1.5 py-0.5 rounded border border-slate-200 text-slate-600 hover:border-indigo-400 hover:text-indigo-600" data-tab="${tab}" data-o="${_opsEsc(order)}" data-s="${s}">${l}</button>`).join('')+`</div>`;
 }
-// Customer-response capture — opens after a call-type action (NDR "Called"/"Reattempt asked",
-// prepaid-risk "Contacted") and via the ✎ edit button. Saves the response into ops_actions_ecom.note.
-function opsResponseModal(tab, order, status, existing){
-  document.getElementById('ops-resp-modal')?.remove();
-  const statusLbl=((OPS_ACTS[tab]||[]).find(x=>x[0]===status)||[status,status])[1];
-  const wrap=document.createElement('div');
-  wrap.id='ops-resp-modal';
-  wrap.className='fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
-  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-xl w-full max-w-md flex flex-col">
-    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
-      <div><h3 class="text-lg font-bold text-slate-800">Customer response</h3>
-        <p class="text-xs text-slate-400 mt-0.5">${_opsEsc(order)} · <span class="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 font-semibold">${_opsEsc(statusLbl)}</span></p></div>
-      <button id="opsr-close" class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button>
-    </div>
-    <div class="p-6">
-      <label class="block text-xs font-semibold text-slate-500 mb-1.5">What did the customer say?</label>
-      <textarea id="opsr-note" rows="3" maxlength="300" class="filter-input w-full !h-auto py-2 resize-none" placeholder="e.g. Will accept tomorrow after 5 PM / asked to cancel / number unreachable / wants address change"></textarea>
-      <p class="text-[11px] text-slate-400 mt-1.5">Saved on the order — visible to the whole team in the NDR queue.</p>
-    </div>
-    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200">
-      <span id="opsr-status" class="text-sm mr-auto"></span>
-      ${existing?'':'<button id="opsr-skip" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-500 hover:bg-slate-100" title="Mark the action without a note">Skip note</button>'}
-      <button id="opsr-save" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">Save</button>
-    </div></div>`;
-  document.body.appendChild(wrap);
-  const ta=document.getElementById('opsr-note'); ta.value=existing||''; setTimeout(()=>ta.focus(),50);
-  const close=()=>wrap.remove();
-  document.getElementById('opsr-close').addEventListener('click',close);
-  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
-  const submit=async(note)=>{
-    const st=document.getElementById('opsr-status'), btn=document.getElementById('opsr-save');
-    btn.disabled=true; if(st){ st.textContent='Saving…'; st.className='text-sm text-slate-500 mr-auto'; }
-    try{ await opsSetAction(tab,order,status,note||null,null); _opsRerender(tab); close(); }
-    catch(e){ if(st){ st.textContent=e.message||'Failed'; st.className='text-sm text-rose-600 mr-auto'; } btn.disabled=false; }
-  };
-  document.getElementById('opsr-save').addEventListener('click',()=>submit(ta.value.trim()));
-  document.getElementById('opsr-skip')?.addEventListener('click',()=>submit(''));
-  ta.addEventListener('keydown',e=>{ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)) submit(ta.value.trim()); });
-}
-
 function opsToolbar(tab,total,count){
     const dcfg={ndr:45,courier:90,exceptions:90,cost:90}[tab];
     const dsel=dcfg?`<select class="ops-days text-xs border border-slate-200 rounded-md bg-white px-2 py-1 text-slate-600" data-tab="${tab}">${[7,15,30,45,60,90,120].map(v=>`<option value="${v}" ${(_opsDays[tab]||dcfg)==v?'selected':''}>Last ${v}d</option>`).join('')}</select>`:'';
@@ -4564,11 +5272,7 @@ function opsInit(){
         const view=document.getElementById('ops-control-view');
         view?.addEventListener('click', async e=>{
             const sub=e.target.closest('#ops-subtabs button[data-sub]'); if(sub){ opsSubSwitch(sub.dataset.tab, sub.dataset.sub); return; }
-            const noteBtn=e.target.closest('.ops-note-edit'); if(noteBtn){ e.preventDefault(); const a=opsActOf(noteBtn.dataset.tab,noteBtn.dataset.o); opsResponseModal(noteBtn.dataset.tab,noteBtn.dataset.o,(a&&a.status)||'called',(a&&a.note)||''); return; }
-            const act=e.target.closest('.ops-act'); if(act){ e.preventDefault(); const {tab,o,s}=act.dataset;
-                // Call-type actions → capture what the customer said before saving (custom modal).
-                if(s!=='clear' && s!=='snoozed' && (tab==='ndr'||tab==='prepaidrisk')){ opsResponseModal(tab,o,s,''); return; }
-                let sn=null; if(s==='snoozed') sn=new Date(Date.now()+3*86400000).toISOString(); await opsSetAction(tab,o,s,null,sn); _opsRerender(tab); return; }
+            const act=e.target.closest('.ops-act'); if(act){ e.preventDefault(); const {tab,o,s}=act.dataset; let sn=null; if(s==='snoozed') sn=new Date(Date.now()+3*86400000).toISOString(); await opsSetAction(tab,o,s,null,sn); _opsRerender(tab); return; }
             const exp=e.target.closest('.ops-export'); if(exp){ opsExport(exp.dataset.tab); return; }
         });
         view?.addEventListener('change', e=>{
@@ -4613,7 +5317,7 @@ function opsSubSwitch(t, sub){
     opsLoadPane(sub);
 }
 async function opsLoad(){
-    const kpi=document.getElementById('ops-kpis'); if(kpi) kpi.innerHTML='<div class="text-slate-400 text-sm p-6">Loading NDR queue…</div>';
+    const kpi=document.getElementById('ops-kpis'); if(kpi) kpi.innerHTML=brandLoader('Loading NDR queue…');
     try{
         const r=await fetch('/api/ops-control/ndr-queue?days='+(_opsDays.ndr||45), { headers: getAuthHeaders() });
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
@@ -4754,7 +5458,7 @@ async function ndrActionSend(awb,order,mode){
 
 // ── Pre-dispatch Risk ──
 async function opsLoadRisk(){
-    const k=document.getElementById('ops-risk-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Scoring pipeline orders…</div>';
+    const k=document.getElementById('ops-risk-kpis'); if(k) k.innerHTML=brandLoader('Scoring pipeline orders…');
     try{ const r=await fetch('/api/ops-control/risk',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsRisk=d; const s=d.summary||{};
         k.innerHTML =
@@ -4799,7 +5503,7 @@ function opsRiskTable(){ const c=document.getElementById('ops-risk-table'); cons
 
 // ── Courier Scorecard ──
 async function opsLoadCourier(){
-    const c=document.getElementById('ops-courier-table'); if(c) c.innerHTML='<div class="text-slate-400 text-sm p-6">Loading courier scorecard…</div>';
+    const c=document.getElementById('ops-courier-table'); if(c) c.innerHTML=brandLoader('Loading courier scorecard…');
     try{ const r=await fetch('/api/ops-control/courier-scorecard?days='+(_opsDays.courier||90),{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsCourier=d; opsCourierTable();
     }catch(e){ if(c) c.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
@@ -4823,7 +5527,7 @@ function opsCourierTable(){ const c=document.getElementById('ops-courier-table')
 
 // ── Cost & Hotspots ──
 async function opsLoadCost(){
-    const k=document.getElementById('ops-cost-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Loading…</div>';
+    const k=document.getElementById('ops-cost-kpis'); if(k) k.innerHTML=brandLoader();
     try{ const r=await fetch('/api/ops-control/hotspots?days='+(_opsDays.cost||90),{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsCost=d; opsCostRender();
     }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
@@ -4856,7 +5560,7 @@ function opsCitiesTable(){ const el=document.getElementById('ops-cities'); const
 
 // ── Exceptions & Claims ──
 async function opsLoadExceptions(){
-    const k=document.getElementById('ops-exc-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Loading exceptions…</div>';
+    const k=document.getElementById('ops-exc-kpis'); if(k) k.innerHTML=brandLoader('Loading exceptions…');
     try{ const r=await fetch('/api/ops-control/exceptions?days='+(_opsDays.exceptions||90),{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         _opsExc=d; const s=d.summary||{};
         k.innerHTML =
@@ -4920,12 +5624,12 @@ async function opsLoadPrepaidRisk(){
 let _opsPrOpen=null; const _opsPrScan={};
 function opsPrDetail(r){ const sc=_opsPrScan[r.awb];
     const reasons=(r.reasons||[]).map(x=>`<span class="inline-block px-2 py-0.5 rounded bg-white border border-slate-200 text-slate-600 text-xs mr-1 mb-1">${x}</span>`).join('')||'—';
-    let tl='<div class="text-slate-400 text-xs">Loading…</div>';
+    let tl=brandLoaderSm();
     if(sc&&sc.journey&&sc.journey.ts){ const ts=sc.journey.ts;
         const step=(label,iso,color)=>{ const on=!!iso; return `<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:${on?color:'#cbd5e1'}"></span><span class="w-28 text-slate-500">${label}</span><span class="tabular-nums ${on?'text-slate-700 font-medium':'text-slate-300'}">${dpFmtTs(iso)}</span></div>`; };
         tl=step('Order placed',ts.order,'#6366f1')+step('Picked up',ts.dispatched,'#0ea5e9')+step('Out for delivery',ts.ofd,'#f59e0b')+step('Promised EDD',ts.edd,'#8b5cf6'); }
     let scanHtml;
-    if(!sc||sc.loading) scanHtml='<div class="text-slate-400 text-xs py-3">Loading scan log…</div>';
+    if(!sc||sc.loading) scanHtml=brandLoaderSm('Loading scan log…');
     else if(sc.error) scanHtml=`<div class="text-rose-400 text-xs py-3">Couldn’t load: ${sc.error}</div>`;
     else if(!sc.scans||!sc.scans.length) scanHtml='<div class="text-slate-400 text-xs py-3">No scan log available.</div>';
     else scanHtml=`<div class="space-y-1 max-h-56 overflow-auto pr-1">${sc.scans.map(s=>`<div class="flex gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${s.desc}${s.code?` <span class="text-slate-400">(${s.code})</span>`:''}${s.location?` <span class="text-slate-400">· ${s.location}</span>`:''}</span></div>`).join('')}</div>`+(sc.live?'<div class="text-[10px] text-emerald-500 mt-1">● fetched live from courier</div>':'');
@@ -5339,7 +6043,7 @@ function dpreInvInit(){
 function dpinvOpenModal(){ const m=document.getElementById('dpinv-modal'); m.classList.remove('hidden'); m.classList.add('flex'); }
 function dpinvCloseModal(){ const m=document.getElementById('dpinv-modal'); m.classList.add('hidden'); m.classList.remove('flex'); }
 const _th='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60', _td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100';
-async function dpinvLoadGoods(){ const el=document.getElementById('dpinv-goods-list'); if(!el)return; el.innerHTML='<div class="p-4 text-xs text-slate-400">Loading…</div>';
+async function dpinvLoadGoods(){ const el=document.getElementById('dpinv-goods-list'); if(!el)return; el.innerHTML=brandLoaderSm();
     try{ const r=await fetch('/api/docpharma-invoices/goods?_='+Date.now(),{headers:getAuthHeaders(),cache:'no-store'}); const d=await r.json(); if(!d.success)throw new Error(d.error);
         const invs=d.invoices||[]; if(!invs.length){ el.innerHTML='<div class="p-6 text-center text-xs text-slate-400">No goods invoices yet — Add or Upload one.</div>'; return; }
         el.innerHTML=`<table class="w-full"><thead><tr><th class="${_th}">Invoice</th><th class="${_th}">Date</th><th class="${_th}">PO</th><th class="${_th} text-right">Qty</th><th class="${_th} text-right">Value</th><th class="${_th}"></th></tr></thead><tbody>${invs.map(iv=>`<tr class="hover:bg-slate-50"><td class="${_td} font-semibold">${iv.invoice_no||'—'}</td><td class="${_td} tabular-nums">${dpreDMY(iv.invoice_date)||'—'}</td><td class="${_td}">${iv.po_number||'—'}</td><td class="${_td} text-right tabular-nums">${iv.total_qty||0}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.total_value||0)}</td><td class="${_td} text-right whitespace-nowrap"><button class="dpinv-gv text-indigo-600 text-xs" data-id="${iv.id}">View</button> <button class="dpinv-gd text-rose-500 text-xs ml-2" data-id="${iv.id}" data-no="${iv.invoice_no||''}">Delete</button></td></tr>`).join('')}</tbody></table>`;
@@ -5347,7 +6051,7 @@ async function dpinvLoadGoods(){ const el=document.getElementById('dpinv-goods-l
         el.querySelectorAll('.dpinv-gd').forEach(b=>b.addEventListener('click',()=>dpinvDelete('goods',b.dataset.id,b.dataset.no)));
     }catch(e){ el.innerHTML='<div class="p-4 text-xs text-rose-500">'+escapeHtml(e.message)+'</div>'; }
 }
-async function dpinvLoadCharge(){ const el=document.getElementById('dpinv-charge-list'); if(!el)return; el.innerHTML='<div class="p-4 text-xs text-slate-400">Loading…</div>';
+async function dpinvLoadCharge(){ const el=document.getElementById('dpinv-charge-list'); if(!el)return; el.innerHTML=brandLoaderSm();
     try{ const r=await fetch('/api/docpharma-invoices/charge?_='+Date.now(),{headers:getAuthHeaders(),cache:'no-store'}); const d=await r.json(); if(!d.success)throw new Error(d.error);
         const invs=d.invoices||[]; if(!invs.length){ el.innerHTML='<div class="p-6 text-center text-xs text-slate-400">No charge invoices yet — Add or Upload one.</div>'; return; }
         el.innerHTML=`<table class="w-full"><thead><tr><th class="${_th}">Invoice</th><th class="${_th}">Date</th><th class="${_th}">Subject</th><th class="${_th} text-right">Service</th><th class="${_th} text-right">RTO</th><th class="${_th} text-right">COD</th><th class="${_th} text-right">Grand Total</th><th class="${_th}"></th></tr></thead><tbody>${invs.map(iv=>`<tr class="hover:bg-slate-50"><td class="${_td} font-semibold">${iv.invoice_no||'—'}</td><td class="${_td} tabular-nums">${dpreDMY(iv.invoice_date)||'—'}</td><td class="${_td} text-slate-500">${iv.subject||'—'}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.service_total||0)}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.rto_total||0)}</td><td class="${_td} text-right tabular-nums">${OPS_INR(iv.cod_fee_total||0)}</td><td class="${_td} text-right tabular-nums font-bold">${OPS_INR(iv.grand_total||iv.total_charges||0)}</td><td class="${_td} text-right whitespace-nowrap"><button class="dpinv-cv text-indigo-600 text-xs" data-id="${iv.id}">Edit</button> <button class="dpinv-cd text-rose-500 text-xs ml-2" data-id="${iv.id}" data-no="${iv.invoice_no||''}">Delete</button></td></tr>`).join('')}</tbody></table>`;
@@ -5463,7 +6167,7 @@ function dpreOverviewInit(){ const sec=document.getElementById('dpre-tab-overvie
               <button id="dpov-refresh" class="px-3 py-1.5 bg-slate-800 text-white rounded-lg">↻ Refresh</button>
             </div>
           </div>
-          <div id="dpov-body" class="space-y-4"><div class="text-xs text-slate-400 p-4">Loading…</div></div>
+          <div id="dpov-body" class="space-y-4">${brandLoaderSm()}</div>
         </div>`;
         sec.querySelector('#dpov-apply').addEventListener('click',()=>{ _dpovFrom=sec.querySelector('#dpov-from').value||''; _dpovTo=sec.querySelector('#dpov-to').value||''; dpreOverviewLoad(); });
         sec.querySelector('#dpov-clear').addEventListener('click',()=>{ _dpovFrom=_dpovTo=''; sec.querySelector('#dpov-from').value=''; sec.querySelector('#dpov-to').value=''; dpreOverviewLoad(); });
@@ -5688,7 +6392,7 @@ function dpimDrillHtml(x,dt){ const nf=n=>Number(n||0).toLocaleString('en-IN'), 
     const banner=x.reorder?`<div class="mb-3 p-2.5 rounded-lg bg-orange-50 border border-orange-200 text-xs text-orange-800">⚠ <b>Reorder now</b> — only ${x.daysCover} days of cover left at ${x.runRate}/day. Suggested order: <b>${nf(x.suggestedQty)} units</b> (to ~${lead*2}-day cover).</div>`:'';
     const recon=`<div class="mb-2 flex flex-wrap gap-y-1 items-center">${chip('Implied',nf(x.onHand),'text-slate-700')}${chip('DocPharma',x.dpStock==null?'—':nf(x.dpStock),x.dpStock<0?'text-rose-600':'text-indigo-700')}${chip('EasyEcom',x.eeStock==null?'—':nf(x.eeStock),'text-slate-600')}${chip('Variance (EE−Impl)',x.variance==null?'—':(x.variance>0?'+':'')+nf(x.variance),x.discrepancy?'text-amber-600':'text-emerald-600')}${x.dpExpiry?chip('Expiry',dpimDate(x.dpExpiry)+(x.expiryDays!=null?` (${x.expiryDays}d)`:''),x.expiryDays!=null&&x.expiryDays<120?'text-rose-600':'text-slate-600'):''}${x.sourcesDisagree?'<span class="text-[11px] text-amber-600 font-semibold">⚠ sources disagree — check which is right</span>':''}</div>`;
     const stats=`<div class="mb-3 flex flex-wrap gap-y-1">${chip('Run-rate',(x.runRate||0)+'/day')}${chip('Days cover',x.daysCover==null?'—':x.daysCover+'d')}${chip('RTO rate',(x.rtoRate*100).toFixed(0)+'%',x.rtoRate>0.35?'text-rose-600':'text-slate-700')}${chip('RTO value',OPS_INR(x.rtoValue||0),'text-rose-600')}${chip('Lost',nf(x.lost))}${chip('In-transit',nf(x.inTransit),'text-sky-600')}${chip('Unit rate',OPS_INR(x.unitRate||0))}</div>`;
-    if(!dt) return `${banner}${recon}${stats}<div class="text-xs text-slate-400">Loading detail…</div>`;
+    if(!dt) return `${banner}${recon}${stats}${brandLoaderSm('Loading detail…')}`;
     const maxV=Math.max(1,...dt.monthly.map(m=>m.delivered)), maxH=34;
     const spark=dt.monthly.length?`<div><div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Delivered / month (base units)</div><div class="flex items-end gap-2 overflow-x-auto">${dt.monthly.map(m=>`<div class="flex flex-col items-center gap-1" title="${dpledMonLabel(m.month)}: ${nf(m.delivered)}"><div class="flex items-end" style="height:${maxH}px"><div class="w-5 bg-emerald-500 rounded-t" style="height:${Math.max(2,Math.round(m.delivered/maxV*maxH))}px"></div></div><div class="text-[9px] text-slate-400 whitespace-nowrap">${dpovShortM(m.month)}</div></div>`).join('')}</div></div>`:'';
     const contrib=dt.contributors.length?`<div><div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Demand from (packs &amp; combos)</div><div class="flex flex-wrap gap-1.5">${dt.contributors.map(c=>`<span class="px-2 py-1 rounded-lg bg-white border border-slate-200 text-[11px] text-slate-600">${c.sku}${c.mult>1?` <b class="text-indigo-600">×${c.mult}</b>`:''} · ${nf(c.delivered)}u</span>`).join('')}</div></div>`:'';
@@ -5956,7 +6660,7 @@ function dprePayInit(){ const sec=document.getElementById('dpre-tab-payments'); 
     }
     dprePayLoad();
 }
-async function dprePayLoad(){ const el=document.getElementById('dppay-list'); if(!el)return; el.innerHTML='<div class="p-4 text-xs text-slate-400">Loading…</div>';
+async function dprePayLoad(){ const el=document.getElementById('dppay-list'); if(!el)return; el.innerHTML=brandLoaderSm();
     try{ const r=await fetch('/api/docpharma-payments',{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success)throw new Error(d.error);
         const ps=d.payments||[]; if(!ps.length){ el.innerHTML='<div class="p-6 text-center text-xs text-slate-400">No payments recorded yet.</div>'; return; }
         const th='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60',td='px-3 py-2 text-sm text-slate-700 border-b border-slate-100';
@@ -6071,7 +6775,7 @@ function dpInit(){
     dpLoad();
 }
 async function dpLoad(){
-    const kpi=document.getElementById('dp-kpis'); if(kpi) kpi.innerHTML='<div class="text-slate-400 text-sm p-6">Loading delivery data…</div>';
+    const kpi=document.getElementById('dp-kpis'); if(kpi) kpi.innerHTML=brandLoader('Loading delivery data…');
     try{
         const r=await fetch(`/api/delivery-performance?from=${_dpFrom}&to=${_dpTo}&source=${_dpSource}&payment=${_dpPayment}&zone=${encodeURIComponent(_dpZone.join(','))}&state=${encodeURIComponent(_dpState.join(','))}&order_type=${_dpOrderType}&compare=1`, { headers: getAuthHeaders() });
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
@@ -6330,7 +7034,7 @@ const _ESC_STATUS_BADGE = {
 function dpThreadHtml(awb){
   const t = _dpThreadCache[awb];
   if(!t) return '';
-  if(t.loading) return '<div class="mt-3 text-xs text-slate-400">Loading escalation thread…</div>';
+  if(t.loading) return '<div class="mt-3">'+brandLoaderSm('Loading escalation thread…')+'</div>';
   if(t.error) return `<div class="mt-3 text-xs text-rose-500">${ecEsc(t.error)}</div>`;
   if(!t.threads || !t.threads.length) return '<div class="mt-3 text-xs text-slate-400">Escalation sent — thread will appear here once logged (older sends before reply-tracking have no thread).</div>';
   // Proper sender/receiver mail thread: The Element (us, outbound → indigo, right-shifted) vs the
@@ -6579,7 +7283,7 @@ function dpRenderDetail(r,td){ const ts=r.ts||{};
         ${(r.reasons&&r.reasons.length)?`<span>Reasons: <b class="text-slate-700">${r.reasons.join('; ')}</b></span>`:''}</div>`;
     let scanHtml;
     const scanRows=arr=>`<div class="space-y-1 max-h-64 overflow-auto pr-1">${arr.map(s=>`<div class="flex gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${s.desc}${s.code?` <span class="text-slate-400">(${s.code})</span>`:''}${s.location?` <span class="text-slate-400">· ${s.location}</span>`:''}</span></div>`).join('')}</div>`;
-    if(!sc||sc.loading) scanHtml='<div class="text-slate-400 text-xs py-3">Loading scan log…</div>';
+    if(!sc||sc.loading) scanHtml=brandLoaderSm('Loading scan log…');
     else if(sc.error) scanHtml=`<div class="text-rose-400 text-xs py-3">Couldn’t load scans: ${sc.error}</div>`;
     else if(sc.dp){ // DocPharma has no scan-by-scan log — show status milestones + a live tracking link.
         const dp=sc.dp;
@@ -6766,6 +7470,12 @@ document.addEventListener('DOMContentLoaded', () => {
     loginPasswordEl?.addEventListener('keypress', e => { if (e.key === 'Enter') handleLogin(); });
     document.getElementById('signup-btn')?.addEventListener('click', handleSignup);
     document.getElementById('signup-password')?.addEventListener('keypress', e => { if (e.key === 'Enter') handleSignup(); });
+    document.getElementById('signup-mobile')?.addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 10); });
+    document.getElementById('otp-verify-btn')?.addEventListener('click', _otpVerify);
+    document.getElementById('otp-input')?.addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6); });
+    document.getElementById('otp-input')?.addEventListener('keypress', e => { if (e.key === 'Enter') _otpVerify(); });
+    document.getElementById('otp-back')?.addEventListener('click', _otpBack);
+    document.getElementById('otp-resend')?.addEventListener('click', _otpResend);
     document.getElementById('auth-toggle')?.addEventListener('click', () => { const sf = document.getElementById('signup-form'); _authToggle(!!(sf && sf.classList.contains('hidden'))); });
     logoutBtn?.addEventListener('click', logout);
     

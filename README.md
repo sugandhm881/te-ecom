@@ -2,7 +2,7 @@
 
 Internal e-commerce operations & analytics dashboard for **The Element** (Shifupro Technologies Pvt Ltd).
 
-Unifies Shopify orders, RapidShyp/DocPharma shipment tracking, delivery-performance analytics (FASR · RTO · NDR · TAT), silent-RTO freight claims, warehouse reports to Microsoft Teams, Amazon review automation, and marketing analytics — behind a multi-user, permission-gated portal.
+Unifies Shopify orders, RapidShyp/DocPharma shipment tracking, delivery-performance analytics (FASR · RTO · NDR · TAT), silent-RTO freight claims, escalation emails with AI-scored reply tracking, a customer-support console (call queue · notes · escalation contacts), warehouse reports to Microsoft Teams, Amazon review automation, and marketing analytics — behind a multi-user, permission-gated portal.
 
 ## Quick start
 

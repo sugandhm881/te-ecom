@@ -275,6 +275,9 @@
     /* Expanded order-detail: soft fade+slide so open/close feels smooth, not jumpy. */
     @keyframes ord-fade-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
     .ord-detail-fade { animation: ord-fade-in .18s ease; }
+    /* Modal entrance: gentle pop (scale + rise). */
+    @keyframes sup-pop { from { opacity: 0; transform: scale(.97) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+    .sup-pop { animation: sup-pop .16s ease; }
 
     /* Custom-styled dropdown — a native <select class="filter-select"> is progressively enhanced into this so
        the OPEN option list matches the app's panel look. The native select stays hidden as the value/events source. */
@@ -440,8 +443,21 @@
             <input type="password" id="login-password" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="Password" autocomplete="current-password">
             <button id="login-btn" type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5">Continue</button>
         </form>
+        <form id="otp-form" class="space-y-5 hidden" onsubmit="return false;">
+            <div class="text-center">
+                <p class="text-sm text-slate-500">Enter the 6-digit OTP emailed to</p>
+                <p id="otp-hint" class="text-sm font-semibold text-slate-800 mt-0.5">your email</p>
+            </div>
+            <input type="text" id="otp-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-center text-2xl tracking-[0.45em] font-semibold" placeholder="••••••">
+            <button id="otp-verify-btn" type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5">Verify &amp; sign in</button>
+            <div class="flex items-center justify-between text-sm">
+                <button type="button" id="otp-back" class="text-slate-500 hover:text-slate-700">&larr; Back to sign in</button>
+                <button type="button" id="otp-resend" class="text-indigo-600 font-medium hover:underline disabled:text-slate-400 disabled:no-underline disabled:cursor-default" disabled>Resend OTP</button>
+            </div>
+        </form>
         <form id="signup-form" class="space-y-5 hidden" onsubmit="return false;">
             <input type="email" id="signup-email" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="name@company.com" autocomplete="email">
+            <input type="tel" id="signup-mobile" inputmode="numeric" maxlength="10" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="10-digit mobile number" autocomplete="tel">
             <input type="password" id="signup-password" class="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="Choose a password (min 6 characters)" autocomplete="new-password">
             <button id="signup-btn" type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5">Create account</button>
         </form>
@@ -542,6 +558,36 @@
                     <a href="#" id="nav-ad-analysis" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
                         <span class="ml-3 text-sm font-medium">Ad Analysis</span>
+                    </a>
+                </div>
+            </div>
+
+
+            <div class="nav-group">
+                <div class="nav-section-header flex items-center justify-between px-3 py-2 mt-2" data-target="support-menu">
+                    <span>Customer Support</span>
+                    <svg class="arrow-icon w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+                <div id="support-menu" class="nav-content collapsed space-y-1">
+                    <a href="#" id="nav-support-dashboard" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h12a2 2 0 012 2v2H4V6zM4 10h16v8a2 2 0 01-2 2H6a2 2 0 01-2-2v-8z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Support Dashboard</span>
+                    </a>
+                    <a href="#" id="nav-support-queue" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Call Queue</span>
+                    </a>
+                    <a href="#" id="nav-support-orders" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Support Orders</span>
+                    </a>
+                    <a href="#" id="nav-support-calls" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+                        <span class="ml-3 text-sm font-medium">Call Logs</span>
+                    </a>
+                    <a href="#" id="nav-support-contacts" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Escalation Contacts</span>
                     </a>
                 </div>
             </div>
@@ -1180,6 +1226,94 @@
                     </div>
                 </div>
             </div>
+        </div>
+
+        <!-- ═══════════ Customer Support console (port of the standalone Support Console) ═══════════ -->
+        <div id="support-dashboard-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Support Dashboard</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Orders, buckets and call activity at a glance</p></div>
+                <div class="flex items-center gap-2" id="sup-range-dash"></div>
+            </header>
+            <div class="p-8 space-y-6">
+                <div id="sup-kpis" class="grid grid-cols-2 md:grid-cols-5 gap-4"></div>
+                <div id="sup-buckets" class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3"></div>
+                <div id="sup-calls-range" class="card p-5"></div>
+            </div>
+        </div>
+
+        <div id="support-queue-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Call Queue</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Customer-confirmed (MSG91) rows appear first</p></div>
+                <div class="flex items-center gap-3 flex-wrap">
+                    <span id="sup-sync-info" class="text-xs text-slate-400"></span>
+                    <div id="sup-range-queue"></div>
+                    <button id="sup-refresh" class="filter-btn">🔄 Refresh tracking</button>
+                </div>
+            </header>
+            <div class="p-8 space-y-4">
+                <div class="flex items-center gap-1 border-b border-slate-200" id="sup-tabs">
+                    <button data-tab="repeat" class="sup-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">Repeat customers <span class="sup-tab-count"></span></button>
+                    <button data-tab="und" class="sup-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-indigo-600 text-indigo-700">Undelivered <span class="sup-tab-count"></span></button>
+                    <button data-tab="changed" class="sup-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">Status changed <span class="sup-tab-count"></span></button>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                    <select id="sup-f-notes" class="filter-select"><option value="all">All notes</option><option value="with">With notes</option><option value="none">No notes</option></select>
+                    <input id="sup-f-notesearch" type="text" placeholder="Search latest note…" class="filter-input w-48">
+                    <select id="sup-f-age" class="filter-select"><option value="any">Any age</option><option value="lt1">&lt; 1 day</option><option value="1-3">1–3 days</option><option value="3-7">3–7 days</option><option value="gt7">&gt; 7 days</option></select>
+                    <select id="sup-f-sort" class="filter-select"><option value="default">Default (confirmed → oldest)</option><option value="age_old">Age · oldest</option><option value="age_new">Age · newest</option><option value="courier">Courier</option><option value="order">Order name</option></select>
+                    <button id="sup-f-clear" class="filter-btn" style="display:none">Clear</button>
+                    <span id="sup-queue-count" class="text-sm text-slate-400 ml-auto"></span>
+                </div>
+                <div class="card overflow-hidden"><div class="overflow-x-auto" id="sup-queue-table"></div></div>
+            </div>
+        </div>
+
+        <div id="support-orders-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Support Orders</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Every order in range — search, filter, open</p></div>
+                <div id="sup-range-orders"></div>
+            </header>
+            <div class="p-8 space-y-4">
+                <div id="sup-orders-buckets" class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2"></div>
+                <div class="flex flex-wrap items-center gap-2">
+                    <input id="supo-q" type="text" placeholder="Search order / phone / email / AWB…" class="filter-input w-64">
+                    <select id="supo-bucket" class="filter-select"><option value="">All buckets</option></select>
+                    <select id="supo-partner" class="filter-select"><option value="">All partners</option><option value="rapidshyp">rapidshyp</option><option value="docpharma">docpharma</option></select>
+                    <select id="supo-courier" class="filter-select"><option value="">All couriers</option></select>
+                    <select id="supo-status" class="filter-select"><option value="">All statuses</option></select>
+                    <button id="supo-reset" class="filter-btn">Reset</button>
+                    <span id="supo-count" class="text-sm text-slate-400 ml-auto"></span>
+                </div>
+                <div class="card overflow-hidden"><div class="overflow-x-auto" id="sup-orders-table"></div></div>
+                <div class="flex items-center justify-between text-sm text-slate-500">
+                    <span id="supo-pageinfo"></span>
+                    <div class="flex gap-2"><button id="supo-prev" class="filter-btn">← Previous</button><button id="supo-next" class="filter-btn">Next →</button></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="support-calls-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800" id="sup-calls-title">My Calls</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Every logged call with outcome and follow-up</p></div>
+                <div id="sup-range-calls"></div>
+            </header>
+            <div class="p-8 space-y-4">
+                <div id="sup-calls-stats" class="flex flex-wrap gap-3"></div>
+                <div class="card overflow-hidden"><div class="overflow-x-auto" id="sup-calls-table"></div></div>
+            </div>
+        </div>
+
+        <div id="support-contacts-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Escalation Contacts</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Whom to call per courier / region / pincode when a shipment is stuck</p></div>
+                <button id="supc-add" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700" style="display:none">+ Add contact</button>
+            </header>
+            <div class="p-8"><div class="card overflow-hidden"><div class="overflow-x-auto" id="sup-contacts-table"></div></div></div>
         </div>
 
         <div id="settings-view" class="view-hidden">
@@ -2010,7 +2144,16 @@
               <button id="users-refresh" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-400">Refresh</button>
             </div>
           </header>
-          <div class="p-8"><div id="users-list" class="space-y-4"></div></div>
+          <div class="p-8"><div id="users-list" class="space-y-4"></div>
+            <div class="card p-6 mt-8">
+                <div class="flex items-center justify-between mb-1">
+                    <h2 class="text-lg font-bold text-slate-800">Support Console Team</h2>
+                    <span class="text-[11px] px-2 py-0.5 rounded-full ring-1 bg-indigo-50 text-indigo-700 ring-indigo-200">admin only</span>
+                </div>
+                <p class="text-sm text-slate-500 mb-4">Agents of the Customer Support console (calls &amp; notes attribution). Promote/demote controls their admin rights.</p>
+                <div class="overflow-x-auto" id="support-team-list"><p class="text-sm text-slate-400">Loading…</p></div>
+            </div>
+          </div>
         </div><!-- /users-view -->
 
     </main>

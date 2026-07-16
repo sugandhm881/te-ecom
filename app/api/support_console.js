@@ -1,0 +1,412 @@
+// Customer Support Console — port of the standalone Support Console app into Ecom Central.
+// Reads the SAME Supabase tables/views that app used: order_buckets (view — the per-order bucket
+// engine), order_notes, call_logs, escalation_contacts, undelivered_tracking, msg91_messages,
+// tracking_run_lock, profiles. Auth/roles come from OUR portal (JWT + permissions), not Supabase auth:
+// each portal user gets a deterministic uuid (md5 of email) + a profiles row so notes/calls attribute.
+const express = require('express');
+const crypto = require('crypto');
+const axios = require('axios');
+const router = express.Router();
+const config = require('../../config');
+const { supabase } = require('../supabase');
+
+const UNDELIVERED_BUCKETS = ['undelivered'];   // per the console spec: single member
+const CALL_OUTCOMES = ['no_answer', 'customer_will_accept', 'refused', 'reschedule', 'wrong_number', 'delivered_confirmed', 'other'];
+const PREPAID_STATUSES = ['paid', 'partially_paid', 'refunded', 'partially_refunded'];
+
+// ── identity: portal email → REAL Supabase auth user (created via admin API on first use) ───────────
+// call_logs.agent_id / profiles.user_id FK to auth.users, so each portal agent gets a shadow auth user
+// (email-confirmed, random password, never used to log in) — same thing the old console's signup did.
+const _agentCache = new Map();   // email(lower) → auth user uuid
+async function ensureProfile(email) {
+    const key = String(email || '').toLowerCase().trim();
+    if (_agentCache.has(key)) return _agentCache.get(key);
+    let uid = null;
+    // 1) Existing auth user with this email?
+    try {
+        for (let page = 1; page <= 5 && !uid; page++) {
+            const { data } = await supabase.auth.admin.listUsers({ page, perPage: 100 });
+            const hit = (data && data.users || []).find(u => String(u.email || '').toLowerCase() === key);
+            if (hit) uid = hit.id;
+            if (!data || !data.users || data.users.length < 100) break;
+        }
+    } catch (_) {}
+    // 2) Create a shadow auth user (portal agents don't log in through Supabase).
+    if (!uid) {
+        const { data, error } = await supabase.auth.admin.createUser({
+            email: key, email_confirm: true, password: crypto.randomBytes(24).toString('hex'),
+            user_metadata: { display_name: key.split('@')[0], portal_agent: true },
+        });
+        if (error) throw new Error('Could not provision support agent: ' + error.message);
+        uid = data.user.id;
+    }
+    // 3) Ensure the profiles row (display name in call/note lists).
+    try {
+        const { data: p } = await supabase.from('profiles').select('id').eq('user_id', uid).maybeSingle();
+        if (!p) await supabase.from('profiles').insert({ user_id: uid, display_name: key.split('@')[0] });
+    } catch (_) { /* display-name attribution is best-effort */ }
+    _agentCache.set(key, uid);
+    return uid;
+}
+// Synchronous best-effort lookup for read paths (the "mine" flag) — resolves once the user has written
+// anything this process lifetime; unknown users just get mine:false until their first write.
+function agentUuid(email) { return _agentCache.get(String(email || '').toLowerCase().trim()) || null; }
+const isAdmin = req => req.user && (req.user.role === 'admin' || (req.user.permissions || []).includes('*'));
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+function rangeISO(req, defDays = 14) {
+    const now = new Date();
+    const to = req.query.to ? new Date(req.query.to) : now;
+    const from = req.query.from ? new Date(req.query.from) : new Date(now.getFullYear(), now.getMonth(), now.getDate() - defDays);
+    return {
+        fromISO: new Date(from.getFullYear(), from.getMonth(), from.getDate()).toISOString(),
+        toISO: new Date(to.getFullYear(), to.getMonth(), to.getDate(), 23, 59, 59).toISOString(),
+    };
+}
+const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
+// PostgREST URL limits: big IN() lists are chunked at 300 and fetched in parallel (console pattern).
+async function chunkedIn(table, select, col, ids, extra) {
+    const parts = await Promise.all(chunk(ids, 300).map(part => {
+        let q = supabase.from(table).select(select).in(col, part);
+        if (extra) q = extra(q);
+        return q;
+    }));
+    return parts.flatMap(p => p.data || []);
+}
+// Latest note + count + author per order for a list of order_ids.
+async function notesByOrder(orderIds) {
+    if (!orderIds.length) return {};
+    const rows = await chunkedIn('order_notes', 'order_id, content, created_at, agent_id', 'order_id', orderIds);
+    const map = {};
+    rows.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    rows.forEach(n => { const m = map[n.order_id] || (map[n.order_id] = { count: 0, latest: null, latest_at: null, latest_agent: null }); m.count++; m.latest = n.content; m.latest_at = n.created_at; m.latest_agent = n.agent_id; });
+    // Resolve author display names in one shot.
+    const agentIds = [...new Set(Object.values(map).map(m => m.latest_agent).filter(Boolean))];
+    if (agentIds.length) {
+        const profs = await chunkedIn('profiles', 'user_id, display_name', 'user_id', agentIds);
+        const nameById = {}; profs.forEach(p => { nameById[p.user_id] = p.display_name; });
+        Object.values(map).forEach(m => { m.latest_by = nameById[m.latest_agent] || null; delete m.latest_agent; });
+    }
+    return map;
+}
+async function lockState() {
+    const { data } = await supabase.from('tracking_run_lock').select('*').eq('id', 1).maybeSingle();
+    return data || null;
+}
+
+// ── GET /support/summary — dashboard KPIs + bucket counts + calls in range ──
+router.get('/support/summary', async (req, res) => {
+    try {
+        const { fromISO, toISO } = rangeISO(req);
+        const today = new Date(); const dayISO = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
+        const B = () => supabase.from('order_buckets').select('*', { count: 'exact', head: true }).gte('created_at', fromISO).lte('created_at', toISO);
+        const buckets = ['order_to_dispatch', 'dispatch_plus_2', 'two_to_five_days', 'five_days_plus', 'undelivered', 'delivered', 'rto', 'cancelled'];
+        const [total, callsToday, deliveredToday, pending, msg91, callsRange, ...bucketCounts] = await Promise.all([
+            B(),
+            supabase.from('call_logs').select('*', { count: 'exact', head: true }).gte('called_at', dayISO),
+            supabase.from('order_buckets').select('*', { count: 'exact', head: true }).eq('bucket', 'delivered').gte('delivered_date', dayISO),
+            B().in('bucket', UNDELIVERED_BUCKETS),
+            B().in('bucket', UNDELIVERED_BUCKETS).eq('msg91_confirmed', true),
+            supabase.from('call_logs').select('*', { count: 'exact', head: true }).gte('called_at', fromISO).lte('called_at', toISO),
+            ...buckets.map(b => B().eq('bucket', b)),
+        ]);
+        const bucketMap = {}; buckets.forEach((b, i) => { bucketMap[b] = bucketCounts[i].count || 0; });
+        res.json({ success: true, kpis: {
+            totalOrders: total.count || 0, callsToday: callsToday.count || 0, deliveredToday: deliveredToday.count || 0,
+            pendingUndelivered: pending.count || 0, msg91Confirmed: msg91.count || 0, callsInRange: callsRange.count || 0,
+        }, buckets: bucketMap, lock: await lockState() });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── GET /support/queue?tab=repeat|und|changed ────────────────────────────────
+router.get('/support/queue', async (req, res) => {
+    try {
+        const tab = req.query.tab || 'und';
+        const { fromISO, toISO } = rangeISO(req);
+        const SEL = 'order_id, order_name, phone, email, total_price, created_at, fulfillment_status, tracking_status, partner, courier, awb_number, bucket, msg91_confirmed, is_repeat_customer, dispatch_at, edd';
+        let rows = [];
+
+        if (tab === 'und') {
+            const { data, error } = await supabase.from('order_buckets').select(SEL)
+                .in('bucket', UNDELIVERED_BUCKETS).gte('created_at', fromISO).lte('created_at', toISO)
+                .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(2000);
+            if (error) throw new Error(error.message);
+            rows = data || [];
+            // Remember every order ever seen undelivered — powers the Status-changed tab.
+            if (rows.length) {
+                const now = new Date().toISOString();
+                for (const part of chunk(rows.map(r => ({ order_id: r.order_id, last_seen_at: now })), 500)) {
+                    await supabase.from('undelivered_tracking').upsert(part, { onConflict: 'order_id' }).then(() => {}).catch(() => {});
+                }
+            }
+        } else if (tab === 'changed') {
+            const { data: tracked } = await supabase.from('undelivered_tracking').select('order_id').order('last_seen_at', { ascending: false }).limit(3000);
+            const ids = (tracked || []).map(t => t.order_id);
+            const all = ids.length ? await chunkedIn('order_buckets', SEL, 'order_id', ids) : [];
+            rows = all.filter(r => !UNDELIVERED_BUCKETS.includes(r.bucket))
+                .sort((a, b) => (b.msg91_confirmed === true) - (a.msg91_confirmed === true) || new Date(a.created_at) - new Date(b.created_at));
+        } else { // repeat — COD repeat customers awaiting dispatch with a prior non-delivered order
+            const { data, error } = await supabase.from('order_buckets').select(SEL)
+                .eq('bucket', 'order_to_dispatch').eq('is_repeat_customer', true).is('fulfillment_status', null)
+                .gte('created_at', fromISO).lte('created_at', toISO)
+                .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(1000);
+            if (error) throw new Error(error.message);
+            let cand = data || [];
+            // Exclude prepaid (orders.financial_status ∈ paid-ish set).
+            const finRows = cand.length ? await chunkedIn('orders', 'id, financial_status', 'id', cand.map(c => c.order_id)) : [];
+            const finById = {}; finRows.forEach(o => { finById[String(o.id)] = (o.financial_status || '').toLowerCase(); });
+            cand = cand.filter(c => !PREPAID_STATUSES.includes(finById[String(c.order_id)] || ''));
+            // Customer history by phone: order count pill + require ≥1 previous non-delivered order.
+            const phones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
+            const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, phone, bucket, created_at', 'phone', phones) : [];
+            const byPhone = {}; hist.forEach(h => { (byPhone[h.phone] = byPhone[h.phone] || []).push(h); });
+            rows = cand.filter(c => {
+                const list = byPhone[c.phone] || [];
+                c.orders_count = list.length;
+                return list.some(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at) && !['delivered', 'cancelled'].includes(h.bucket));
+            });
+        }
+
+        const notes = await notesByOrder(rows.map(r => r.order_id));
+        rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; });
+        res.json({ success: true, tab, rows: rows.slice(0, 1500), lock: await lockState() });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── GET /support/orders — search with filters + pagination + facets ─────────
+router.get('/support/orders', async (req, res) => {
+    try {
+        const { fromISO, toISO } = rangeISO(req, 30);
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const PER = 50;
+        let q = supabase.from('order_buckets').select('*', { count: 'exact' }).gte('created_at', fromISO).lte('created_at', toISO);
+        if (req.query.bucket) q = q.eq('bucket', req.query.bucket);
+        if (req.query.partner) q = q.eq('partner', req.query.partner);
+        if (req.query.courier) q = q.eq('courier', req.query.courier);
+        if (req.query.status) q = q.eq('tracking_status', req.query.status);
+        const raw = String(req.query.q || '').trim();
+        if (raw) {
+            const safe = raw.replace(/[%,()]/g, '');
+            q = q.or(`order_name.ilike.%${safe}%,phone.ilike.%${safe}%,email.ilike.%${safe}%,awb_number.ilike.%${safe}%`);
+        }
+        const { data, count, error } = await q.order('created_at', { ascending: false }).range((page - 1) * PER, page * PER - 1);
+        if (error) throw new Error(error.message);
+        // Facets for the courier/status dropdowns (from the current window, unfiltered).
+        const { data: fac } = await supabase.from('order_buckets').select('courier, tracking_status').gte('created_at', fromISO).lte('created_at', toISO).limit(5000);
+        const couriers = [...new Set((fac || []).map(f => f.courier).filter(Boolean))].sort();
+        const statuses = [...new Set((fac || []).map(f => f.tracking_status).filter(Boolean))].sort();
+        res.json({ success: true, rows: data || [], total: count || 0, page, pages: Math.max(1, Math.ceil((count || 0) / PER)), facets: { couriers, statuses } });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── GET /support/order/:orderId — full detail bundle (7 parallel queries) ───
+router.get('/support/order/:orderId', async (req, res) => {
+    try {
+        const oid = String(req.params.orderId).trim();
+        const { data: b } = await supabase.from('order_buckets').select('*').eq('order_id', oid).maybeSingle();
+        if (!b) return res.status(404).json({ success: false, error: 'Order not found' });
+        // Customer's other orders — match by NORMALIZED phone (last 10 digits) OR email, because the
+        // stored phone format varies per order (+91…, bare 10-digit, spaced). Exact-match misses them.
+        const last10 = String(b.phone || '').replace(/\D/g, '').slice(-10);
+        const custEmail = String(b.email || '').trim();
+        const CUST_SEL = 'order_id, order_name, bucket, created_at, total_price, tracking_status, courier, phone, email';
+        const [items, addr, tracking, calls, notes, contactsAll, custByPhone, custByEmail] = await Promise.all([
+            supabase.from('order_line_items').select('title, variant_title, sku, quantity, price').eq('order_id', oid),
+            supabase.from('order_shipping_addresses').select('*').eq('order_id', oid).maybeSingle(),
+            supabase.from('order_tracking').select('tracking_status, courier_name, awb_number, last_tracked_at, edd').eq('order_id', oid).order('last_tracked_at', { ascending: false }),
+            supabase.from('call_logs').select('id, outcome, notes, called_at, next_followup_at, agent_id').eq('order_id', oid).order('called_at', { ascending: false }),
+            supabase.from('order_notes').select('id, content, created_at, agent_id').eq('order_id', oid).order('created_at', { ascending: false }),
+            supabase.from('escalation_contacts').select('*'),
+            last10 ? supabase.from('order_buckets').select(CUST_SEL).ilike('phone', `%${last10}`).order('created_at', { ascending: false }).limit(30) : Promise.resolve({ data: [] }),
+            custEmail ? supabase.from('order_buckets').select(CUST_SEL).ilike('email', custEmail).order('created_at', { ascending: false }).limit(30) : Promise.resolve({ data: [] }),
+        ]);
+        // Merge phone- and email-matched orders (deduped), newest first.
+        const custMap = new Map();
+        [...(custByPhone.data || []), ...(custByEmail.data || [])].forEach(o => { if (!custMap.has(o.order_id)) custMap.set(o.order_id, o); });
+        const custOrders = { data: [...custMap.values()].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 25) };
+        // MSG91 thread by phone (last 20).
+        let msg91 = [];
+        if (b.phone) {
+            const last10 = String(b.phone).replace(/\D/g, '').slice(-10);
+            const { data: msgs } = await supabase.from('msg91_messages').select('direction, template_name, content, status, sent_at')
+                .ilike('phone', `%${last10}`).order('sent_at', { ascending: false }).limit(20);
+            msg91 = msgs || [];
+        }
+        // Agent names for calls/notes.
+        const agentIds = [...new Set([...(calls.data || []), ...(notes.data || [])].map(x => x.agent_id).filter(Boolean))];
+        const profs = agentIds.length ? await chunkedIn('profiles', 'user_id, display_name', 'user_id', agentIds) : [];
+        const nameById = {}; profs.forEach(p => { nameById[p.user_id] = p.display_name; });
+        // Whom-to-call: courier match → pincode prefix → region → first contact for that courier.
+        const zip = (addr.data && addr.data.zip) || '';
+        const province = ((addr.data && addr.data.province) || '').toLowerCase();
+        const city = ((addr.data && addr.data.city) || '').toLowerCase();
+        const forCourier = (contactsAll.data || []).filter(c => String(c.courier || '').toLowerCase() === String(b.courier || b.partner || '').toLowerCase());
+        const escalation = forCourier.find(c => c.pincode_pattern && zip && String(zip).startsWith(c.pincode_pattern))
+            || forCourier.find(c => c.region && (province.includes(c.region.toLowerCase()) || city.includes(c.region.toLowerCase())))
+            || forCourier[0] || null;
+        const myId = await ensureProfile(req.user.sub).catch(() => null);
+        res.json({ success: true, order: b, items: items.data || [], address: addr.data || null,
+            tracking: tracking.data || [], msg91,
+            calls: (calls.data || []).map(c => ({ ...c, agent_name: nameById[c.agent_id] || null })),
+            notes: (notes.data || []).map(n => ({ ...n, agent_name: nameById[n.agent_id] || null, mine: n.agent_id === myId })),
+            escalation, customer_orders: custOrders.data || [],   // includes the current order (marked client-side)
+            isAdmin: isAdmin(req) });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── Notes CRUD (edit/delete own only; admins can moderate) ──────────────────
+router.post('/support/notes', async (req, res) => {
+    try {
+        const { order_id, content } = req.body || {};
+        if (!order_id || !String(content || '').trim()) return res.status(400).json({ success: false, error: 'order_id and content required' });
+        const uid = await ensureProfile(req.user.sub);
+        const { error } = await supabase.from('order_notes').insert({ order_id: String(order_id), agent_id: uid, content: String(content).trim().slice(0, 2000) });
+        if (error) throw new Error(error.message);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+router.put('/support/notes/:id', async (req, res) => {
+    try {
+        const content = String((req.body || {}).content || '').trim();
+        if (!content) return res.status(400).json({ success: false, error: 'content required' });
+        const { data: n } = await supabase.from('order_notes').select('agent_id').eq('id', req.params.id).maybeSingle();
+        if (!n) return res.status(404).json({ success: false, error: 'Note not found' });
+        if (n.agent_id !== await ensureProfile(req.user.sub).catch(() => null) && !isAdmin(req)) return res.status(403).json({ success: false, error: 'You can only edit your own notes' });
+        const { error } = await supabase.from('order_notes').update({ content: content.slice(0, 2000) }).eq('id', req.params.id);
+        if (error) throw new Error(error.message);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+router.delete('/support/notes/:id', async (req, res) => {
+    try {
+        const { data: n } = await supabase.from('order_notes').select('agent_id').eq('id', req.params.id).maybeSingle();
+        if (!n) return res.status(404).json({ success: false, error: 'Note not found' });
+        if (n.agent_id !== await ensureProfile(req.user.sub).catch(() => null) && !isAdmin(req)) return res.status(403).json({ success: false, error: 'You can only delete your own notes' });
+        const { error } = await supabase.from('order_notes').delete().eq('id', req.params.id);
+        if (error) throw new Error(error.message);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── POST /support/calls — log a call ─────────────────────────────────────────
+router.post('/support/calls', async (req, res) => {
+    try {
+        const { order_id, outcome, notes, next_followup_at } = req.body || {};
+        if (!order_id) return res.status(400).json({ success: false, error: 'order_id required' });
+        if (!CALL_OUTCOMES.includes(outcome)) return res.status(400).json({ success: false, error: 'invalid outcome' });
+        const uid = await ensureProfile(req.user.sub);
+        const { error } = await supabase.from('call_logs').insert({
+            order_id: String(order_id), agent_id: uid, outcome,
+            notes: String(notes || '').trim().slice(0, 2000) || null,
+            next_followup_at: next_followup_at || null,
+        });
+        if (error) throw new Error(error.message);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── GET /support/calls — my calls (admin: everyone's) ───────────────────────
+router.get('/support/calls', async (req, res) => {
+    try {
+        const { fromISO, toISO } = rangeISO(req);
+        let q = supabase.from('call_logs').select('id, order_id, agent_id, outcome, notes, called_at, next_followup_at')
+            .gte('called_at', fromISO).lte('called_at', toISO).order('called_at', { ascending: false }).limit(500);
+        if (!isAdmin(req)) q = q.eq('agent_id', await ensureProfile(req.user.sub).catch(() => null));
+        const { data, error } = await q;
+        if (error) throw new Error(error.message);
+        const calls = data || [];
+        const [profs, bucketRows] = await Promise.all([
+            chunkedIn('profiles', 'user_id, display_name', 'user_id', [...new Set(calls.map(c => c.agent_id).filter(Boolean))]),
+            chunkedIn('order_buckets', 'order_id, order_name, bucket, tracking_status', 'order_id', [...new Set(calls.map(c => c.order_id))]),
+        ]);
+        const nameById = {}; profs.forEach(p => { nameById[p.user_id] = p.display_name; });
+        const ordById = {}; bucketRows.forEach(o => { ordById[o.order_id] = o; });
+        res.json({ success: true, isAdmin: isAdmin(req), calls: calls.map(c => ({ ...c,
+            agent_name: nameById[c.agent_id] || '—',
+            order_name: (ordById[c.order_id] || {}).order_name || c.order_id,
+            bucket: (ordById[c.order_id] || {}).bucket || null,
+            tracking_status: (ordById[c.order_id] || {}).tracking_status || null })) });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── Escalation contacts (read: support users · write: admins) ───────────────
+router.get('/support/contacts', async (req, res) => {
+    const { data, error } = await supabase.from('escalation_contacts').select('*').order('courier').order('region');
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, contacts: data || [], isAdmin: isAdmin(req) });
+});
+router.post('/support/contacts', async (req, res) => {
+    if (!isAdmin(req)) return res.status(403).json({ success: false, error: 'Admin access required' });
+    const b = req.body || {};
+    if (!b.courier || !b.contact_name || !b.phone) return res.status(400).json({ success: false, error: 'courier, contact_name and phone are required' });
+    const { error } = await supabase.from('escalation_contacts').insert({
+        courier: String(b.courier).toLowerCase(), region: b.region || null, pincode_pattern: b.pincode_pattern || null,
+        contact_name: b.contact_name, phone: b.phone, email: b.email || null, notes: b.notes || null });
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true });
+});
+router.delete('/support/contacts/:id', async (req, res) => {
+    if (!isAdmin(req)) return res.status(403).json({ success: false, error: 'Admin access required' });
+    const { error } = await supabase.from('escalation_contacts').delete().eq('id', req.params.id);
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true });
+});
+
+// ── Support Console Team (old console's /admin/team, now inside our Users page) ─────────────────────
+// Lists the Supabase-auth agents (profiles + user_roles) that the ORIGINAL console used; promote/demote
+// writes user_roles ('admin' row present = admin). These roles govern the old console; our portal RBAC
+// stays separate. Admin-only.
+router.get('/support/team', async (req, res) => {
+    if (!isAdmin(req)) return res.status(403).json({ success: false, error: 'Admin access required' });
+    try {
+        const [profs, roles] = await Promise.all([
+            supabase.from('profiles').select('user_id, display_name, created_at').order('created_at', { ascending: true }),
+            supabase.from('user_roles').select('user_id, role'),
+        ]);
+        const emailById = {};
+        try {
+            for (let page = 1; page <= 5; page++) {
+                const { data } = await supabase.auth.admin.listUsers({ page, perPage: 100 });
+                (data && data.users || []).forEach(u => { emailById[u.id] = u.email; });
+                if (!data || !data.users || data.users.length < 100) break;
+            }
+        } catch (_) {}
+        const rolesById = {};
+        (roles.data || []).forEach(r => { (rolesById[r.user_id] = rolesById[r.user_id] || []).push(r.role); });
+        const myId = agentUuid(req.user.sub);
+        res.json({ success: true, team: (profs.data || []).map(p => ({
+            user_id: p.user_id, display_name: p.display_name || (emailById[p.user_id] || '').split('@')[0] || p.user_id.slice(0, 8),
+            email: emailById[p.user_id] || null, roles: rolesById[p.user_id] || ['agent'],
+            joined: p.created_at, self: p.user_id === myId })) });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+router.post('/support/team/:userId/role', async (req, res) => {
+    if (!isAdmin(req)) return res.status(403).json({ success: false, error: 'Admin access required' });
+    try {
+        const uid = String(req.params.userId), action = (req.body || {}).action;
+        if (uid === agentUuid(req.user.sub)) return res.status(400).json({ success: false, error: 'You cannot change your own role.' });
+        if (action === 'promote') {
+            const { error } = await supabase.from('user_roles').insert({ user_id: uid, role: 'admin' });
+            if (error && !/duplicate/i.test(error.message)) throw new Error(error.message);   // duplicate = already admin
+            return res.json({ success: true, message: 'Promoted to admin' });
+        }
+        if (action === 'demote') {
+            const { error } = await supabase.from('user_roles').delete().eq('user_id', uid).eq('role', 'admin');
+            if (error) throw new Error(error.message);
+            return res.json({ success: true, message: 'Demoted to agent' });
+        }
+        res.status(400).json({ success: false, error: 'action must be promote or demote' });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── POST /support/refresh-tracking — invoke the 'track-orders' edge function ─
+router.post('/support/refresh-tracking', async (req, res) => {
+    try {
+        const r = await axios.post(`${config.SUPABASE_URL}/functions/v1/track-orders`, { time: 'now' },
+            { headers: { Authorization: `Bearer ${config.SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' }, timeout: 120000, validateStatus: () => true });
+        if (r.status >= 400) return res.status(502).json({ success: false, error: `track-orders returned ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}` });
+        res.json({ success: true, result: r.data, lock: await lockState() });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+module.exports = router;
