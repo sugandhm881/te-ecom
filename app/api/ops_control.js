@@ -3,6 +3,8 @@
 // customer's phone + order value pulled from Shopify, so ops can call BEFORE the courier auto-RTOs it.
 const express = require('express');
 const router = express.Router();
+const axios = require('axios');
+const config = require('../../config');
 const { supabase } = require('../supabase');
 
 const pct = (n, d) => (d > 0 ? Math.round((n / d) * 1000) / 10 : 0);
@@ -146,87 +148,64 @@ router.get('/ops-control/hotspots', async (req, res) => {
 });
 
 // ── Phase 4: Pre-dispatch RTO Risk flag ─────────────────────────────────────────────────────────
+// ── NDR Action (RapidShyp) ──────────────────────────────────────────────────────────────────────────
+// POST /api/ndr-action  { awb, action: 'RE_ATTEMPT'|'RETURN', phone?, address1?, address2?, order? }
+// Fires RapidShyp's NDR-action API for a pending NDR: reattempt (with updated phone/address) or return.
+// Gated to ops-control OR delivery-perf users (see _VIEW_PERMS). The taken action is logged to
+// ops_actions_ecom so the NDR queue reflects it.
+router.post('/ndr-action', async (req, res) => {
+    try {
+        const b = req.body || {};
+        const awb = String(b.awb || '').trim();
+        const wantReattempt = /^re.?attempt$/i.test(String(b.action || ''));
+        const wantReturn = /^return$/i.test(String(b.action || ''));
+        if (!awb) return res.status(400).json({ success: false, message: 'AWB is required.' });
+        if (!wantReattempt && !wantReturn) return res.status(400).json({ success: false, message: 'action must be RE_ATTEMPT or RETURN.' });
+        const phone = String(b.phone || '').replace(/\D/g, '').slice(-10);
+        const address1 = String(b.address1 || '').trim();
+        if (wantReattempt) {
+            if (!/^\d{10}$/.test(phone)) return res.status(400).json({ success: false, message: 'A valid 10-digit phone is required for a reattempt.' });
+            if (!address1) return res.status(400).json({ success: false, message: 'address1 is required for a reattempt.' });
+        }
+        if (!config.RAPIDSHYP_API_KEY) return res.status(500).json({ success: false, message: 'RapidShyp API key not configured.' });
+
+        const fire = (actionValue) => axios.post('https://api.rapidshyp.com/rapidshyp/apis/v1/ndr/action',
+            wantReattempt
+                ? { awb, action: actionValue, phone, address1, address2: String(b.address2 || '').trim() }
+                : { awb, action: actionValue },
+            { headers: { 'rapidshyp-token': config.RAPIDSHYP_API_KEY, 'Content-Type': 'application/json' }, timeout: 30000, validateStatus: () => true });
+
+        // RapidShyp's docs are self-contradictory on the reattempt value (curl example "REATTEMPT",
+        // parameter table "RE_ATTEMPT"). Try the curl spelling first; on an invalid-action style
+        // rejection (and ONLY then — never after a success/other failure), retry the other spelling.
+        let r = await fire(wantReturn ? 'RETURN' : 'REATTEMPT');
+        const invalidAction = resp => resp.status < 500 && /invalid.{0,20}action|action.{0,20}invalid|action.{0,20}not.{0,10}(valid|allowed|supported)/i.test(JSON.stringify(resp.data || {}));
+        if (wantReattempt && invalidAction(r)) r = await fire('RE_ATTEMPT');
+
+        const ok = r.status < 400 && !(r.data && (r.data.success === false || r.data.status === false));
+        if (ok) {
+            // Reflect in the NDR queue (best-effort log; the queue's Hide-handled uses this).
+            if (b.order) {
+                await supabase.from('ops_actions_ecom').upsert(
+                    { order_name: String(b.order).trim(), tab: 'ndr', status: wantReturn ? 'return_requested' : 'reattempt_requested', updated_by: req.user && req.user.sub, updated_at: new Date().toISOString() },
+                    { onConflict: 'order_name,tab' }).then(() => {}).catch(() => {});
+            }
+            return res.json({ success: true, message: wantReturn ? 'Return requested with RapidShyp.' : 'Reattempt requested with RapidShyp.', rapidshyp: r.data });
+        }
+        const msg = (r.data && (r.data.msg || r.data.message || JSON.stringify(r.data).slice(0, 200))) || `HTTP ${r.status}`;
+        return res.status(502).json({ success: false, message: `RapidShyp rejected the action: ${msg}` });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
 // GET /api/ops-control/risk — scores not-yet-shipped orders so ops verifies the risky ones first.
+// Scoring lives in cod_risk.js (shared with the Orders-dashboard badges) and now also weighs the
+// customer's OWN history — past RTOs by the same phone/email are the strongest predictor.
 router.get('/ops-control/risk', async (req, res) => {
     try {
-        // 1. Historical RTO rate per city (from the view).
-        const { data: cityRows } = await supabase.from('journey_city_rto').select('city, resolved, rto');
-        const cityRto = {};
-        (cityRows || []).forEach(c => { if (c.city && c.resolved >= 15) cityRto[c.city] = pct(c.rto, c.resolved); });
-
-        // 1b. Historical RTO rate per PINCODE — more precise than city where we have volume (≥10 shipments).
-        const { data: pinRows } = await supabase.from('journey_pincode_rto').select('pincode, resolved, rto');
-        const pinRto = {};
-        (pinRows || []).forEach(p => { if (p.pincode && p.resolved >= 10) pinRto[String(p.pincode)] = pct(p.rto, p.resolved); });
-
-        // 1c. Serviceability per delivery pincode — is it deliverable at all, how many couriers, how slow.
-        const svc = {};
-        for (let off = 0; ; off += 1000) {
-            const { data, error } = await supabase.from('serviceability_edd_ecom')
-                .select('delivery_pincode, serviceable, courier_count, slowest_days').range(off, off + 999);
-            if (error) break;
-            (data || []).forEach(s => { if (s.delivery_pincode) svc[String(s.delivery_pincode)] = s; });
-            if (!data || data.length < 1000) break;
-        }
-
-        // 2. Not-yet-dispatched, non-cancelled orders in the pipeline (recent).
-        const PIPELINE = ['Open', 'Confirmed', 'Printed', 'Ready to dispatch', 'Assigned', 'On Hold'];
-        const since = new Date(Date.now() - 20 * 86400000).toISOString();
-        const orders = [];
-        for (let off = 0; ; off += 1000) {
-            const { data, error } = await supabase.from('b2c_order_easycom')
-                .select('reference_code, order_status, payment_mode, order_total, shipping_city, shipping_state, shipping_pincode, order_date, raw_data')
-                .ilike('reference_code', 'TE%').in('order_status', PIPELINE).gte('order_date', since)
-                .range(off, off + 999);
-            if (error) throw new Error(error.message);
-            orders.push(...(data || []));
-            if (!data || data.length < 1000) break;
-        }
-
-        // 3. New vs Repeat from the Shopify tag.
-        const names = [...new Set(orders.map(o => o.reference_code))];
-        const repeat = new Set();
-        for (let i = 0; i < names.length; i += 300) {
-            const batch = names.slice(i, i + 300);
-            const { data } = await supabase.from('enriched_orders_ecom').select('name, tags').in('name', batch.flatMap(n => ['#' + n, n]));
-            (data || []).forEach(e => { if (/(^|,)\s*repeat\s*(,|$)/i.test(e.tags || '')) repeat.add(String(e.name).replace('#', '')); });
-        }
-
-        // 4. Score each order.
-        const scored = orders.map(o => {
-            const city = String(o.shipping_city || (o.raw_data && o.raw_data.city) || '').trim().toUpperCase();
-            const pin = String(o.shipping_pincode || (o.raw_data && (o.raw_data.pincode || o.raw_data.zip)) || '').trim();
-            const isCOD = /cod/i.test(o.payment_mode || '');
-            const isNew = !repeat.has(o.reference_code);
-            // Prefer pincode-level RTO (precise) where we have volume; else fall back to city-level.
-            const pr = (pin && pinRto[pin] != null) ? pinRto[pin] : null;
-            const cr = pr != null ? pr : (cityRto[city] != null ? cityRto[city] : null);
-            const rtoLbl = pr != null ? `Pincode RTO ${pr}%` : null;
-            const s = pin ? svc[pin] : null;
-            let score = 0; const reasons = []; let block = false;
-            if (isCOD) { score += 40; reasons.push('COD'); }
-            if (isNew) { score += 20; reasons.push('First-time buyer'); }
-            if (cr != null) {
-                if (cr >= 30) { score += 30; reasons.push(rtoLbl || `High-RTO city ${cr}%`); }
-                else if (cr >= 20) { score += 20; reasons.push(rtoLbl || `Elevated-RTO city ${cr}%`); }
-                else if (cr >= 12) { score += 10; reasons.push(rtoLbl || `City RTO ${cr}%`); }
-            }
-            // ── Pincode serviceability gate (pre-dispatch) ──
-            if (s && s.serviceable === false) { score += 50; block = true; reasons.unshift('🛑 Pincode NOT serviceable — hold'); }
-            else if (s && s.courier_count != null && s.courier_count <= 1) { score += 15; reasons.push('Only 1 courier serves this pincode'); }
-            if (s && s.slowest_days != null && s.slowest_days >= 8) { score += 10; reasons.push(`Slow lane (~${s.slowest_days}d)`); }
-            const val = o.order_total != null ? Math.round(Number(o.order_total)) : null;
-            if (val != null && val >= 1500) { score += 10; reasons.push(`High value ₹${val.toLocaleString('en-IN')}`); }  // a lost/RTO'd high-value order hurts most
-            if (!city && !pin) { score += 15; reasons.push('Incomplete address'); }                                       // no destination → top RTO driver
-            const band = block ? 'High' : score >= 60 ? 'High' : score >= 35 ? 'Medium' : 'Low';
-            return {
-                order: o.reference_code, status: o.order_status, payment: o.payment_mode || null,
-                value: val,
-                city: o.shipping_city || (o.raw_data && o.raw_data.city) || '—', state: o.shipping_state || (o.raw_data && o.raw_data.state) || '—',
-                pincode: pin || null, serviceable: s ? s.serviceable : null, courierCount: s ? (s.courier_count != null ? s.courier_count : null) : null, block,
-                type: isNew ? 'new' : 'repeat', cityRto: cr, score, band, reasons,
-            };
-        }).filter(o => o.band !== 'Low').sort((a, b) => (b.block ? 1 : 0) - (a.block ? 1 : 0) || b.score - a.score);   // non-serviceable first
+        const { computeRiskList } = require('./cod_risk');
+        const scored = (await computeRiskList())
+            .filter(o => o.band !== 'Low')
+            .sort((a, b) => (b.block ? 1 : 0) - (a.block ? 1 : 0) || b.score - a.score);   // non-serviceable first
 
         const highValue = scored.filter(o => o.band === 'High').reduce((s, o) => s + (o.value || 0), 0);
         res.json({

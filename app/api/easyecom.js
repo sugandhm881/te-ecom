@@ -26,6 +26,7 @@ function seedTokenFromEnv() {
     if (jwt.startsWith('Bearer ')) jwt = jwt.slice(7);
     try {
         const payload = JSON.parse(Buffer.from(jwt.split('.')[1], 'base64').toString());
+        if (payload.exp * 1000 < Date.now()) return;   // stale .env token — the DB cache / login handles it
         _tokenCache = { token: jwt, expiresAt: payload.exp * 1000 };
         console.log('[EasyEcom] JWT loaded from .env, expires:', new Date(payload.exp * 1000).toISOString());
     } catch (e) {
@@ -42,6 +43,18 @@ async function getEasyecomToken(forceRefresh = false) {
     const now = Date.now();
     if (!forceRefresh && _tokenCache.token && now < _tokenCache.expiresAt - 5 * 60 * 1000) {
         return _tokenCache.token;
+    }
+
+    // Shared DB cache — ONE token serves every process (server, CLI scripts, restarts). Without this,
+    // each new process seeded from the stale .env JWT and re-logged-in via email/password every time.
+    if (!forceRefresh) {
+        try {
+            const { data } = await supabase.from('easyecom_token_cache').select('jwt_token, expires_at').eq('id', 1).maybeSingle();
+            if (data && data.jwt_token && new Date(data.expires_at).getTime() > now + 5 * 60 * 1000) {
+                _tokenCache = { token: data.jwt_token, expiresAt: new Date(data.expires_at).getTime() };
+                return _tokenCache.token;
+            }
+        } catch (_) { /* fall through to login */ }
     }
 
     if (!config.EASYECOM_API_KEY) {
@@ -78,7 +91,11 @@ async function getEasyecomToken(forceRefresh = false) {
 
     const payload   = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
     _tokenCache     = { token, expiresAt: payload.exp * 1000 };
-    console.log('[EasyEcom] New JWT cached, expires:', new Date(payload.exp * 1000).toISOString());
+    // Persist for every other process — the next login should be ~90 days away, not next restart.
+    await supabase.from('easyecom_token_cache')
+        .upsert({ id: 1, jwt_token: token, expires_at: new Date(payload.exp * 1000).toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'id' })
+        .then(() => {}).catch(() => {});
+    console.log('[EasyEcom] New JWT cached (memory + DB), expires:', new Date(payload.exp * 1000).toISOString());
     return token;
 }
 
@@ -626,6 +643,70 @@ async function fetchEasyecomOrderById(easyecomOrderId) {
     const orders = extractOrdersFromBody(res.data);
     return orders[0] || null;
 }
+
+// ── Hold / Unhold an order in EasyEcom ──────────────────────────────────────
+// EasyEcom's hold API is keyed by INVOICE id (not order id): PUT /orders/holdOrders
+// { invoice_id, hold_reason } and PUT /orders/unholdOrders { invoice_id } — from their official
+// Postman collection ("V2 > Order > Hold order"). Constraint (per their KB): an order can only be
+// held BEFORE the manifest is generated; EasyEcom rejects it afterwards and we surface that message.
+async function resolveInvoiceId(orderName) {
+    const clean = String(orderName || '').replace('#', '').trim();
+    if (!clean) return null;
+    const { data } = await supabase.from('b2c_order_easycom')
+        .select('order_id, raw_data').or(`reference_code.eq.${clean},order_id.eq.${/^\d+$/.test(clean) ? clean : 0}`)
+        .limit(1).maybeSingle();
+    return data && data.raw_data && data.raw_data.invoice_id ? { invoiceId: data.raw_data.invoice_id, eeOrderId: data.order_id } : null;
+}
+async function eeHoldCall(path, body) {
+    const jwt = await getEasyecomToken();
+    const headers = { 'x-api-key': config.EASYECOM_API_KEY, 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' };
+    let r = await axios.put(`${EASYECOM_API_BASE}${path}`, body, { headers, timeout: 20000, validateStatus: () => true });
+    if (r.status === 429) { await new Promise(x => setTimeout(x, 6000)); r = await axios.put(`${EASYECOM_API_BASE}${path}`, body, { headers, timeout: 20000, validateStatus: () => true }); }
+    return r;
+}
+router.post('/hold-order', tokenRequired, async (req, res) => {
+    try {
+        const { orderName, reason } = req.body || {};
+        if (!orderName) return res.status(400).json({ success: false, message: 'orderName is required.' });
+        if (!reason || !String(reason).trim()) return res.status(400).json({ success: false, message: 'A hold reason is required.' });
+        const inv = await resolveInvoiceId(orderName);
+        if (!inv) return res.status(404).json({ success: false, message: 'Order not found in EasyEcom (no invoice id in the synced data yet).' });
+        const r = await eeHoldCall('/orders/holdOrders', { invoice_id: inv.invoiceId, hold_reason: String(reason).trim().slice(0, 200) });
+        const body = r.data || {};
+        await supabase.from('api_logs_ecom').insert({ action: 'easyecom_hold_order', status_code: r.status, payload: { orderName, invoice_id: inv.invoiceId, reason }, response: body }).then(() => {}).catch(() => {});
+        const ok = (r.status === 200 && (body.code === 200 || body.status === true || body.success === true || /success/i.test(String(body.message || ''))))
+            || /already.{0,25}(on ?hold|hold status)/i.test(String(body.message || ''));   // held inside EasyEcom already → same end state
+        if (ok) {
+            // Live hold-state mark → the dashboard shows "On Hold" + Unhold instantly (EasyEcom's own
+            // status only reflects after their next sync). api_logs_ecom above is the permanent history.
+            const mark = { order_name: String(orderName).replace('#', '').trim(), mark_type: 'ee_hold', note: String(reason).trim().slice(0, 200), created_by: req.user && req.user.sub, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+            await supabase.from('order_marks_ecom').upsert(mark, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
+            return res.json({ success: true, message: `Order ${orderName} put on hold in EasyEcom.`, hold: { reason: mark.note, by: mark.created_by, at: mark.created_at } });
+        }
+        return res.status(502).json({ success: false, message: body.message || `EasyEcom rejected the hold (HTTP ${r.status}).` });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+router.post('/unhold-order', tokenRequired, async (req, res) => {
+    try {
+        const { orderName } = req.body || {};
+        if (!orderName) return res.status(400).json({ success: false, message: 'orderName is required.' });
+        const inv = await resolveInvoiceId(orderName);
+        if (!inv) return res.status(404).json({ success: false, message: 'Order not found in EasyEcom (no invoice id in the synced data yet).' });
+        const r = await eeHoldCall('/orders/unholdOrders', { invoice_id: inv.invoiceId });
+        const body = r.data || {};
+        await supabase.from('api_logs_ecom').insert({ action: 'easyecom_unhold_order', status_code: r.status, payload: { orderName, invoice_id: inv.invoiceId }, response: body }).then(() => {}).catch(() => {});
+        const ok = r.status === 200 && (body.code === 200 || body.status === true || body.success === true || /success/i.test(String(body.message || '')));
+        // "Already in Unhold status" (released directly inside EasyEcom) → the desired end state is
+        // already true, so treat it as success and clear our stale mark instead of erroring.
+        const alreadyUnheld = /already.{0,25}unhold|not.{0,15}on ?hold/i.test(String(body.message || ''));
+        if (ok || alreadyUnheld) {
+            // Clear the live hold-state mark (the unhold event itself is preserved in api_logs_ecom).
+            await supabase.from('order_marks_ecom').delete().eq('order_name', String(orderName).replace('#', '').trim()).eq('mark_type', 'ee_hold').then(() => {}).catch(() => {});
+            return res.json({ success: true, message: alreadyUnheld ? `Order ${orderName} was already released in EasyEcom — dashboard updated.` : `Order ${orderName} released from hold — it returns to its previous status.` });
+        }
+        return res.status(502).json({ success: false, message: body.message || `EasyEcom rejected the unhold (HTTP ${r.status}).` });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
 
 module.exports = router;
 module.exports.getEasyecomToken = getEasyecomToken;

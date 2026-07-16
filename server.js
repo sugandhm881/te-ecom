@@ -94,15 +94,23 @@ const _VIEW_PERMS = [
     [/^\/docpharma/i, 'docpharma-recon'],
     [/^\/fba\//i, 'amazon-fba'],
     [/^\/ops-control/i, 'ops-control'],
+    [/^\/ndr-action/i, ['ops-control', 'delivery-perf']],   // NDR reattempt/return — both ops surfaces use it
+    // Shared shipment-detail lookup — used by BOTH the Delivery Performance table and the Silent-RTO & SLA
+    // expandable rows, so allow either permission. Must precede the general /delivery-performance rule.
+    [/^\/delivery-performance\/shipment/i, ['delivery-perf', 'claims-sla']],
     [/^\/delivery-performance/i, 'delivery-perf'],
+    [/^\/order-marks/i, 'delivery-perf'],
+    [/^\/likely-fake-insight/i, 'delivery-perf'],
+    [/^\/escalation-emails/i, 'delivery-perf'],
     [/^\/silent-rto-claims/i, 'claims-sla'],
     [/^\/late-deliveries/i, 'claims-sla'],
+    [/^\/intransit-late/i, 'claims-sla'],
 ];
 app.use('/api', (req, res, next) => {
     const perms = (req.user && req.user.permissions) || [];
     if (perms.includes('*')) return next();
     for (const [rx, need] of _VIEW_PERMS) {
-        if (rx.test(req.path)) return perms.includes(need) ? next() : res.status(403).json({ message: 'You do not have access to this section.' });
+        if (rx.test(req.path)) return [].concat(need).some(n => perms.includes(n)) ? next() : res.status(403).json({ message: 'You do not have access to this section.' });
     }
     next();
 });
@@ -122,6 +130,7 @@ app.use('/api', deliveryReportsRoutes);
 app.use('/api', opsControlRoutes);
 app.use('/api', amazonFbaRoutes);
 app.use('/api', require('./app/api/teams').router);
+app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll
 app.use('/api', docpharmaReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
 app.use('/api', docpharmaLedgerRoutes);
@@ -135,6 +144,13 @@ initFbaLocationCron();
 cron.schedule('45 */6 * * *', async () => {
     console.log('[Journey] 6-hr gap-fill — refreshing non-final shipment journeys…');
     await backfillJourneys(30).catch(e => console.error('[Journey] gap-fill error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// Escalation reply poll — every 10 min, read the mail inbox (IMAP) for replies to sent critical
+// emails, save them and AI-score resolution. No-op when no escalations were sent recently.
+cron.schedule('*/10 * * * *', async () => {
+    const { pollEscalationReplies } = require('./app/api/email_replies');
+    await pollEscalationReplies().catch(e => console.error('[EscMail] cron error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // RapidShyp charges sync — nightly at 3:15 AM IST. Fetches freight (final_freights) + invoice value

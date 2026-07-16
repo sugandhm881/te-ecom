@@ -266,6 +266,15 @@
     }
     .filter-select:hover { border-color: #c7d2fe; }
     .filter-select:focus { outline: none; border-color: #a5b4fc; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
+    /* Matching input + button so filter rows read as one set (same height/radius/focus as .filter-select). */
+    .filter-input { height: 38px; padding: 0 0.8rem; border: 1px solid #e2e8f0; border-radius: 0.6rem; background: #fff; color: #334155; font-size: 0.875rem; line-height: 1.2; transition: border-color .15s ease, box-shadow .15s ease; }
+    .filter-input:focus { outline: none; border-color: #a5b4fc; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
+    .filter-input::placeholder { color: #94a3b8; }
+    .filter-btn { height: 38px; padding: 0 1rem; border: 1px solid #e2e8f0; border-radius: 0.6rem; background: #fff; color: #64748b; font-size: 0.875rem; font-weight: 500; cursor: pointer; transition: all .15s ease; }
+    .filter-btn:hover { border-color: #c7d2fe; color: #4f46e5; background: #eef2ff; }
+    /* Expanded order-detail: soft fade+slide so open/close feels smooth, not jumpy. */
+    @keyframes ord-fade-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .ord-detail-fade { animation: ord-fade-in .18s ease; }
 
     /* Custom-styled dropdown — a native <select class="filter-select"> is progressively enhanced into this so
        the OPEN option list matches the app's panel look. The native select stays hidden as the value/events source. */
@@ -629,7 +638,6 @@
                                     <th class="py-4 px-4 w-32 text-center">COD Status</th>
                                     <th class="py-4 px-4 w-24 text-right">Total</th>
                                     <th class="py-4 px-4 w-32 text-center">Status</th>
-                                    <th class="py-4 px-4 w-36 text-center">EDD</th>
                                     <th class="py-4 px-4 w-16 text-right"></th>
                                 </tr>
                             </thead>
@@ -1058,19 +1066,19 @@
                 <div class="flex items-center gap-1 mt-4 border-b border-slate-200 -mb-5">
                     <button data-tab="srto" class="claims-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-indigo-600 text-indigo-700">Silent-RTO Claims</button>
                     <button data-tab="late" class="claims-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">Late Deliveries</button>
+                    <button data-tab="intransit" class="claims-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">In-transit · Overdue</button>
                 </div>
             </header>
 
             <div class="p-8 w-full">
                 <!-- Shared filters (client-side, apply to the active tab) -->
                 <div class="flex flex-wrap items-center gap-2 mb-6">
-                    <input id="claims-search" type="text" placeholder="Search order / AWB…" class="px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 outline-none w-56">
-                    <select id="claims-f-payment" class="px-3 py-2 rounded-lg border border-slate-200 text-sm bg-white focus:ring-2 focus:ring-indigo-500 outline-none">
-                        <option value="">All payments</option><option value="COD">COD</option><option value="Prepaid">Prepaid</option>
-                    </select>
-                    <select id="claims-f-courier" class="px-3 py-2 rounded-lg border border-slate-200 text-sm bg-white focus:ring-2 focus:ring-indigo-500 outline-none"><option value="">All couriers</option></select>
-                    <select id="claims-f-zone" class="px-3 py-2 rounded-lg border border-slate-200 text-sm bg-white focus:ring-2 focus:ring-indigo-500 outline-none"><option value="">All zones</option></select>
-                    <button id="claims-clear" class="px-3 py-2 rounded-lg border border-slate-200 text-sm text-slate-500 hover:bg-slate-50">Clear</button>
+                    <input id="claims-search" type="text" placeholder="Search order / AWB…" class="filter-input w-56">
+                    <select id="claims-f-platform" class="filter-select"><option value="">All platforms</option><option value="rapidshyp">RapidShyp</option><option value="docpharma">DocPharma</option></select>
+                    <select id="claims-f-payment" class="filter-select"><option value="">All payments</option><option value="COD">COD</option><option value="Prepaid">Prepaid</option></select>
+                    <select id="claims-f-courier" class="filter-select"><option value="">All couriers</option></select>
+                    <select id="claims-f-zone" class="filter-select"><option value="">All zones</option></select>
+                    <button id="claims-clear" class="filter-btn">Clear</button>
                     <span id="claims-count" class="text-sm text-slate-400 ml-1"></span>
                 </div>
                 <!-- Silent-RTO panel -->
@@ -1134,6 +1142,39 @@
                                     <th data-sort="days_late" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Days late <span class="claims-caret"></span></th>
                                 </tr></thead>
                                 <tbody id="late-tbody"><tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- In-transit · Overdue panel (past promise date, not yet delivered) -->
+                <div id="claims-panel-intransit" style="display:none">
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Overdue in-transit</p><p id="itl-kpi-count" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Avg days overdue</p><p id="itl-kpi-avg" class="text-2xl font-bold text-amber-600 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Worst</p><p id="itl-kpi-max" class="text-2xl font-bold text-rose-600 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Over 5 days</p><p id="itl-kpi-severe" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
+                    </div>
+                    <div class="flex items-center gap-3 mb-4">
+                        <button id="itl-send" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-amber-600 hover:bg-amber-700 transition-colors inline-flex items-center gap-2" style="display:none">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                            Email chase list
+                        </button>
+                        <span id="itl-status" class="text-sm"></span>
+                    </div>
+                    <div class="card overflow-hidden">
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead class="bg-slate-50 text-slate-500 select-none"><tr>
+                                    <th data-sort="order_name" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Order <span class="claims-caret"></span></th>
+                                    <th data-sort="awb" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">AWB <span class="claims-caret"></span></th>
+                                    <th data-sort="courier" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Courier <span class="claims-caret"></span></th>
+                                    <th data-sort="order_date" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Order date <span class="claims-caret"></span></th>
+                                    <th data-sort="first_edd" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Promised (EDD) <span class="claims-caret"></span></th>
+                                    <th data-sort="zone" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Zone <span class="claims-caret"></span></th>
+                                    <th data-sort="days_overdue" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Days overdue <span class="claims-caret"></span></th>
+                                </tr></thead>
+                                <tbody id="itl-tbody"><tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr></tbody>
                             </table>
                         </div>
                     </div>
@@ -1733,11 +1774,23 @@
               <p class="text-xs text-slate-400 mb-3">Returns and RTO-rate per courier</p>
               <div id="dp-courier"></div>
             </div>
+            <div class="card p-5">
+              <h2 class="text-sm font-bold text-slate-700">FASR vs NDR — Prepaid vs COD</h2>
+              <p class="text-xs text-slate-400 mb-4">First-attempt success, NDR and RTO rates by payment mode</p>
+              <div id="dp-payment-split"></div>
+            </div>
+            <div class="card p-5">
+              <h2 class="text-sm font-bold text-slate-700">🚩 Likely-Fake tracking</h2>
+              <p class="text-xs text-slate-400 mb-4">Orders your team flagged as likely-fake attempts — and how many were actually delivered</p>
+              <div id="dp-likely-fake"></div>
+            </div>
             <div>
               <div class="flex items-center gap-2 mb-3 flex-wrap" id="dp-table-toolbar">
                 <h2 class="text-sm font-bold text-slate-700 mr-1">Shipment explorer</h2>
-                <select id="dp-state" class="text-sm px-3 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700">
+                <select id="dp-state" class="filter-select">
                   <option value="all">All shipments</option>
+                  <option value="marked_fake">🚩 Marked likely-fake</option>
+                  <option value="mail_sent">✉️ Critical mail sent</option>
                   <option value="delivered_first">Delivered · 1st attempt</option>
                   <option value="delivered_ndr">Delivered · after NDR</option>
                   <option value="rto">RTO (all)</option>
@@ -1748,10 +1801,10 @@
                   <option value="in_transit">In-transit</option>
                   <option value="ndr_cohort">NDR cohort (≥1 failed attempt)</option>
                 </select>
-                <select id="dp-courier-filter" class="text-sm px-3 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700">
+                <select id="dp-courier-filter" class="filter-select">
                   <option value="all">All couriers</option>
                 </select>
-                <input id="dp-search" type="text" placeholder="Search order / AWB…" class="text-sm px-3 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700 w-48">
+                <input id="dp-search" type="text" placeholder="Search order / AWB…" class="filter-input w-48">
                 <span id="dp-count" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
               </div>
               <div class="card p-0 overflow-x-auto" id="dp-table"></div>

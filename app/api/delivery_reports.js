@@ -9,6 +9,7 @@ const { fetchRsShipment, parseScanDate, parseDpDate } = require('./delivery_jour
 const { fetchDocpharmaDetails } = require('./helpers');
 const { requireAdmin } = require('../auth');
 const { getEmailConfig, sendMail } = require('./email_settings');
+const { aiComplete, isConfigured: aiConfigured } = require('./ai');
 
 const pct = (n, d) => (d > 0 ? Math.round((n / d) * 1000) / 10 : 0); // 1-dp percentage
 // Calendar day in IST (en-CA → YYYY-MM-DD). Timestamps are stored as UTC instants; slicing the raw
@@ -106,6 +107,30 @@ function summarizeAll(rows) {
         deliveredRate: pct(delivered.length, tracked), ndrRecoveryRate: pct(ndrDelivered.length, ndr.length),
         avgAttempts, otdAvg: otd.avg, dtdAvg: dtd.avg,
     };
+}
+
+// #1 — FASR vs NDR split by payment mode (Prepaid vs COD). COD typically has far worse NDR/RTO.
+function paymentSplit(rows) {
+    const groups = { COD: [], Prepaid: [] };
+    rows.forEach(r => {
+        const p = /cod/i.test(r.payment_mode || '') ? 'COD' : /prepaid|pre-?paid|paid/i.test(r.payment_mode || '') ? 'Prepaid' : null;
+        if (p) groups[p].push(r);
+    });
+    const stat = arr => {
+        const tracked = arr.length;
+        const delivered = arr.filter(r => r.outcome === 'delivered');
+        const first = delivered.filter(r => r.first_attempt_success);
+        const rto = arr.filter(r => r.outcome === 'rto');
+        const ndr = arr.filter(r => (r.ndr_count || 0) > 0);
+        const ndrDelivered = ndr.filter(r => r.outcome === 'delivered');
+        return {
+            tracked, delivered: delivered.length, ndrTotal: ndr.length, rto: rto.length,
+            fasr: pct(first.length, tracked), ndrRate: pct(ndr.length, tracked),
+            ndrRecoveryRate: pct(ndrDelivered.length, ndr.length), rtoRate: pct(rto.length, tracked),
+            deliveredRate: pct(delivered.length, tracked),
+        };
+    };
+    return { COD: stat(groups.COD), Prepaid: stat(groups.Prepaid) };
 }
 
 router.get('/delivery-performance', async (req, res) => {
@@ -267,6 +292,22 @@ router.get('/delivery-performance', async (req, res) => {
         // ── Unified, searchable drill-down list — EVERY tracked shipment with its state, so the
         // table can filter to any segment (any status chip / funnel slice) and search by order/AWB.
         const CAP = 6000;
+        // Manual per-order marks → flag shipments so the dashboard shows a badge + can filter on them.
+        const [fmRes, msRes] = await Promise.all([
+            supabase.from('order_marks_ecom').select('order_name').eq('mark_type', 'likely_fake'),
+            supabase.from('order_marks_ecom').select('order_name').eq('mark_type', 'critical_mail_sent'),
+        ]);
+        const fakeSet = new Set((fmRes.data || []).map(m => m.order_name));
+        const mailSet = new Set((msRes.data || []).map(m => m.order_name));
+        // Broke its promise date? Delivered later than EDD, or still in-transit past EDD (RTO/lost = n/a).
+        const nowMs = Date.now();
+        const pastPromise = r => {
+            if (!r.first_edd) return false;
+            const eddMs = new Date(r.first_edd).getTime();
+            if (r.outcome === 'delivered') return r.delivered_at ? new Date(r.delivered_at).getTime() > eddMs : false;
+            if (r.outcome === 'rto' || r.outcome === 'lost') return false;
+            return eddMs < nowMs;   // in-transit / ndr_pending → overdue once the promise passed
+        };
         const shipments = rows
             .map(r => ({
                 order: r.order_name, awb: r.awb, source: r.source, courier: r.courier,
@@ -276,6 +317,10 @@ router.get('/delivery-performance', async (req, res) => {
                 dest_state: r.dest_state || null, dest_city: r.dest_city || null, dest_pincode: r.dest_pincode || null,
                 reasons: (r.ndr_reasons || []).slice(0, 5),
                 status_code: r.status_code || null,
+                edd: r.first_edd || null,                 // promise date (for the Promise column)
+                pastPromise: pastPromise(r),
+                marked_fake: fakeSet.has(r.order_name),   // manually flagged as a likely fake attempt
+                mail_sent: mailSet.has(r.order_name),     // an escalation email was sent for this order
                 otdHrs: diff(r.order_date, r.dispatched_at, 'hrs'),   // Order→Dispatch hours (null if not yet dispatched)
                 order_date: dayKey(r.order_date),        // IST calendar day (see dayKey)
                 delivered_at: dayKey(r.delivered_at),
@@ -297,6 +342,7 @@ router.get('/delivery-performance', async (req, res) => {
             // NDR funnel is the cohort with ≥1 failed attempt; directRto reconciles it to TOTAL RTO.
             ndrFunnel: { total: ndr.length, recovered: ndrDelivered.length, lost: ndrRto.length, pending: ndrPending.length, directRto, totalRto: rto.length },
             fasrTrend, rtoByCourier,
+            byPayment: paymentSplit(rows),   // #1 — Prepaid vs COD FASR/NDR/RTO comparison
             shipments: shipments.slice(0, CAP), shipmentsTruncated, shipmentsTotal: shipments.length,
         });
     } catch (e) {
@@ -514,7 +560,7 @@ async function fetchSilentRto(fromISO, toISO) {
     const rows = []; const PAGE = 1000;
     for (let offset = 0; ; offset += PAGE) {
         const { data, error } = await supabase.from('shipment_journey_ecom')
-            .select('awb, order_name, courier, order_date, rto_at, updated_at, payment_mode, zone, dest_state, dest_city, freight_total, freight_forward, freight_rto, cod_charges, shipment_value, charges_fetched_at')
+            .select('awb, order_name, source, courier, order_date, rto_at, updated_at, payment_mode, zone, dest_state, dest_city, freight_total, freight_forward, freight_rto, cod_charges, shipment_value, charges_fetched_at')
             .eq('source', 'rapidshyp').eq('outcome', 'rto').eq('rto_no_attempt', true)
             .gte('order_date', fromISO).lte('order_date', toISO)
             .order('order_date', { ascending: false }).range(offset, offset + PAGE - 1);
@@ -567,8 +613,8 @@ async function fetchLateDeliveries(fromISO, toISO) {
     const rows = []; const PAGE = 1000;
     for (let offset = 0; ; offset += PAGE) {
         const { data, error } = await supabase.from('shipment_journey_ecom')
-            .select('awb, order_name, courier, order_date, first_edd, delivered_at, payment_mode, zone, dest_state, dest_city, shipment_value')
-            .eq('source', 'rapidshyp').eq('outcome', 'delivered')
+            .select('awb, order_name, source, courier, order_date, first_edd, delivered_at, payment_mode, zone, dest_state, dest_city, shipment_value')
+            .eq('outcome', 'delivered')                            // both platforms (RapidShyp + DocPharma)
             .not('first_edd', 'is', null).not('delivered_at', 'is', null)
             .gte('order_date', fromISO).lte('order_date', toISO)
             .order('order_date', { ascending: false }).range(offset, offset + PAGE - 1);
@@ -617,6 +663,61 @@ async function sendLateDeliveriesReport(opts = {}) {
     return { ok: true, to: r.to, count: rows.length };
 }
 
+// ── In-transit but PAST promise date: overdue shipments not yet delivered/RTO (proactive chase list).
+function overdueDays(edd) {
+    const e = dayKey(edd), t = dayKey(new Date().toISOString());
+    if (!e || !t || t <= e) return 0;
+    return Math.round((new Date(t + 'T00:00:00Z') - new Date(e + 'T00:00:00Z')) / 86400000);
+}
+async function fetchIntransitLate(fromISO, toISO) {
+    const nowISO = new Date().toISOString();
+    const rows = []; const PAGE = 1000;
+    for (let offset = 0; ; offset += PAGE) {
+        const { data, error } = await supabase.from('shipment_journey_ecom')
+            .select('awb, order_name, source, courier, order_date, first_edd, payment_mode, zone, dest_state, dest_city, outcome, status_code, ndr_count, shipment_value')
+            .in('outcome', ['in_transit', 'ndr_pending'])          // still on the way (not delivered/rto/lost)
+            .not('first_edd', 'is', null).lt('first_edd', nowISO)   // promise date already passed
+            .gte('order_date', fromISO).lte('order_date', toISO)
+            .order('first_edd', { ascending: true }).range(offset, offset + PAGE - 1);
+        if (error) throw new Error(error.message);
+        rows.push(...(data || []));
+        if (!data || data.length < PAGE) break;
+    }
+    return rows.map(r => ({ ...r, days_overdue: overdueDays(r.first_edd) }))
+        .filter(r => r.days_overdue > 0).sort((a, b) => b.days_overdue - a.days_overdue);
+}
+function intransitSummary(rows) {
+    const n = rows.length;
+    const buckets = { '1-2 days': 0, '3-5 days': 0, '6-10 days': 0, '10+ days': 0 };
+    rows.forEach(r => { const x = r.days_overdue; buckets[x <= 2 ? '1-2 days' : x <= 5 ? '3-5 days' : x <= 10 ? '6-10 days' : '10+ days']++; });
+    return { count: n, avgOverdue: n ? round2(rows.reduce((a, r) => a + r.days_overdue, 0) / n) : 0, maxOverdue: rows.reduce((m, r) => Math.max(m, r.days_overdue), 0), severe: buckets['6-10 days'] + buckets['10+ days'], buckets };
+}
+function buildIntransitMail(rows, rangeLabel) {
+    const s = intransitSummary(rows);
+    const body = rows.map((r, i) => `<tr style="background:${i % 2 ? '#f8fafc' : '#fff'}">
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.order_name)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.awb)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.courier || '')}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dayKey(r.order_date) || ''}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dayKey(r.first_edd) || ''}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;text-align:right;font-weight:700;color:${r.days_overdue >= 6 ? '#b91c1c' : '#b45309'};">${r.days_overdue}</td></tr>`).join('');
+    const html = mailShell('In-Transit — Overdue (Promise Date Passed)',
+        'Shipments still in transit whose promised delivery date has already passed — please chase.',
+        rangeLabel,
+        ['Order', 'AWB', 'Courier', 'Order date', 'Promised (EDD)', 'Days overdue'],
+        [5], body,
+        `${s.count} overdue · avg ${s.avgOverdue} days · worst ${s.maxOverdue} days · ${s.severe} over 5 days.`);
+    return { subject: `In-Transit Overdue — ${s.count} shipments past promise date (${rangeLabel})`, html };
+}
+async function sendIntransitLateReport(opts = {}) {
+    const rg = opts.fromISO ? opts : resolveRange({ from: null, to: null }, 30);
+    const rows = await fetchIntransitLate(rg.fromISO, rg.toISO);
+    if (!rows.length) return { ok: false, skipped: true, reason: 'No overdue in-transit shipments in the selected range.' };
+    const mail = buildIntransitMail(rows, rg.rangeLabel);
+    const r = await sendMail({ to: opts.to, subject: mail.subject, html: mail.html });
+    return { ok: true, to: r.to, count: rows.length };
+}
+
 // Shared email chrome — a titled card with a striped table; `rightCols` are right-aligned header cells.
 function mailShell(title, subtitle, rangeLabel, headers, rightCols, bodyRows, footNote) {
     const th = headers.map((h, i) => `<th style="text-align:${rightCols.includes(i) ? 'right' : 'left'};padding:8px 10px;border-bottom:2px solid #cbd5e1;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:#475569;">${esc(h)}</th>`).join('');
@@ -660,9 +761,172 @@ router.post('/late-deliveries/send', requireAdmin, async (req, res) => {
         res.json({ success: true, message: `Sent ${out.count} row(s) to ${out.to.join(', ')}` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
+router.get('/intransit-late', async (req, res) => {
+    try {
+        const rg = resolveRange(req);
+        const rows = await fetchIntransitLate(rg.fromISO, rg.toISO);
+        res.json({ success: true, range: { from: rg.fromLabel, to: rg.toLabel }, summary: intransitSummary(rows), rows });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+router.post('/intransit-late/send', requireAdmin, async (req, res) => {
+    try {
+        const rg = resolveRange(req.body || {});
+        const out = await sendIntransitLateReport({ ...rg, to: (req.body && req.body.to) || undefined });
+        if (out.skipped) return res.status(400).json({ success: false, message: out.reason });
+        res.json({ success: true, message: `Sent ${out.count} row(s) to ${out.to.join(', ')}` });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// ── #4 Critical escalation email (AI-polished) ──────────────────────────────
+function buildCriticalTable(rows) {
+    const body = rows.map((r, i) => `<tr style="background:${i % 2 ? '#f8fafc' : '#fff'}">
+        <td style="padding:6px 10px;border-bottom:1px solid #eef2f7;">${esc(r.order_name)}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eef2f7;">${esc(r.awb)}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eef2f7;">${esc(r.courier || '')}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eef2f7;">${esc((r.outcome || '').replace('_', ' '))}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eef2f7;text-align:right;">${r.ndr_count || 0}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eef2f7;">${esc((r.ndr_reasons || []).join('; '))}</td></tr>`).join('');
+    return `<table style="border-collapse:collapse;width:100%;font-size:12px;margin-top:16px;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
+      <thead><tr>${['Order', 'AWB', 'Courier', 'Status', 'NDRs', 'NDR reasons'].map(h => `<th style="text-align:left;padding:7px 10px;border-bottom:2px solid #cbd5e1;font-size:11px;text-transform:uppercase;color:#475569;">${h}</th>`).join('')}</tr></thead>
+      <tbody>${body}</tbody></table>`;
+}
+// Email tones the admin can pick in the compose modal (default: formal).
+const MAIL_TONES = {
+    polite: 'Polite and courteous — respectful, collaborative, assumes good faith, yet still requests concrete corrective action.',
+    direct: 'Straightforward and firm — short sentences, minimal pleasantries, states the problem plainly and demands specific corrective action with a clear timeline.',
+    formal: 'Formal business escalation — professional corporate register, well structured, references the partnership and service-level expectations.',
+};
+// Internal outcome values → plain business English (internal codes must NEVER appear in an external email).
+const OUTCOME_EN = { delivered: 'delivered', rto: 'returned to origin (RTO)', ndr_pending: 'still undelivered after failed attempt(s)', in_transit: 'in transit', lost: 'lost in transit' };
+const NO_CODES_RULE = 'Write in plain business English — NEVER use internal system codes or field values (e.g. "ndr_pending", "in_transit", "rto_no_attempt"); describe statuses naturally. Keep every order number, AWB and count EXACTLY as given.';
+
+// Compose a critical escalation email from selected shipments; AI-polishes the wording (falls back to a
+// built-in template when AI isn't configured). Returns the editable draft — NOT sent yet.
+router.post('/critical-email/compose', requireAdmin, async (req, res) => {
+    try {
+        const awbs = Array.isArray(req.body && req.body.awbs) ? req.body.awbs.filter(Boolean).slice(0, 60) : [];
+        if (!awbs.length) return res.status(400).json({ success: false, message: 'No shipments selected — filter the table (e.g. Likely fake attempts) first.' });
+        const { data } = await supabase.from('shipment_journey_ecom')
+            .select('order_name, awb, courier, outcome, ndr_count, ndr_reasons, first_edd, order_date, payment_mode, zone, dest_city, dest_state')
+            .in('awb', awbs);
+        const rows = data || [];
+        if (!rows.length) return res.status(400).json({ success: false, message: 'Selected shipments not found.' });
+        const toneLine = MAIL_TONES[req.body && req.body.tone] || MAIL_TONES.formal;
+        // Destination phrased unambiguously — "IDUKKI zone E" once made the AI write "the Idukki zone".
+        const lines = rows.slice(0, 40).map(r => {
+            const dest = [r.dest_city, r.dest_state].filter(Boolean).join(', ');
+            return `- ${r.order_name} (AWB ${r.awb}), courier ${r.courier || 'unknown'}, status: ${OUTCOME_EN[r.outcome] || r.outcome}, failed attempts (NDRs): ${r.ndr_count || 0}${(r.ndr_reasons && r.ndr_reasons.length) ? ` ["${r.ndr_reasons.join('; ')}"]` : ''}${dest ? `, destination: ${dest}` : ''}${r.zone ? ` (delivery zone ${r.zone})` : ''}`;
+        }).join('\n');
+        const sys = `You are an operations manager at an Indian D2C skincare brand (The Element) writing an escalation email to the courier partner RapidShyp. Tone: ${toneLine} Be concise, specific and action-oriented. Do NOT invent facts beyond the data given. ${NO_CODES_RULE} Respond ONLY with strict JSON {"subject":"...","body":"..."} — body is plain text with \\n line breaks, under 180 words, no markdown.`;
+        const usr = `Write an escalation email about likely FAKE delivery attempts. These ${rows.length} shipments were marked as failed/NDR ("customer unavailable" etc.) but the addresses were fine — several were delivered on the very next attempt. Ask RapidShyp to (1) investigate the delivery agents, (2) stop fake NDR markings, (3) reattempt and confirm. Reference the count, not each AWB (a table is attached).\n\nShipments:\n${lines}`;
+        let draft = await aiComplete([{ role: 'system', content: sys }, { role: 'user', content: usr }], { temperature: 0.4 });
+        let subject, body;
+        if (draft) { try { const j = JSON.parse(draft.replace(/```json?/gi, '').replace(/```/g, '').trim()); subject = j.subject; body = j.body; } catch (_) { body = draft; } }
+        if (!subject) subject = `Escalation: ${rows.length} shipments with likely fake delivery attempts`;
+        if (!body) body = `Hi RapidShyp team,\n\nWe've identified ${rows.length} shipments flagged with failed/NDR delivery attempts that appear to be fake — several were delivered successfully on the very next attempt to the same address. Please investigate the delivery agents involved, stop the fake "customer unavailable" markings, and ensure prompt reattempts with confirmation.\n\nThe affected shipments are listed in the table below.\n\nThank you,\nThe Element — Operations`;
+        res.json({ success: true, subject, body, count: rows.length, aiUsed: !!draft, aiAvailable: aiConfigured(), tableHtml: buildCriticalTable(rows), orders: rows.map(r => ({ order_name: r.order_name, awb: r.awb })) });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+// Re-polish the admin's CURRENT (possibly hand-edited) draft in the chosen tone. Pure rewrite — facts,
+// order numbers, AWBs and counts must survive verbatim. Polishing IS the AI action, so no template fallback.
+router.post('/critical-email/polish', requireAdmin, async (req, res) => {
+    try {
+        const { subject, body, tone } = req.body || {};
+        if (!body || !String(body).trim()) return res.status(400).json({ success: false, message: 'Nothing to polish — the message is empty.' });
+        if (!aiConfigured()) return res.status(400).json({ success: false, message: 'AI is not configured — set AI_API_KEY / AI_API_URL / AI_MODEL in .env.' });
+        const toneLine = MAIL_TONES[tone] || MAIL_TONES.formal;
+        const sys = `You are an expert business-communication editor. Rewrite and polish the given escalation email draft from The Element (D2C skincare brand) to its courier partner. Tone: ${toneLine} Keep ALL facts intact — do not add, drop or alter order numbers, AWBs, counts or claims. ${NO_CODES_RULE} Respond ONLY with strict JSON {"subject":"...","body":"..."} — body is plain text with \\n line breaks, under 200 words, no markdown.`;
+        const usr = `Polish this draft:\n\nSubject: ${subject || '(none)'}\n\nBody:\n${body}`;
+        const draft = await aiComplete([{ role: 'system', content: sys }, { role: 'user', content: usr }], { temperature: 0.4 });
+        if (!draft) return res.status(502).json({ success: false, message: 'AI polish failed — please try again.' });
+        let out = {};
+        try { out = JSON.parse(draft.replace(/```json?/gi, '').replace(/```/g, '').trim()); } catch (_) { out = { subject, body: draft }; }
+        res.json({ success: true, subject: out.subject || subject, body: out.body || body });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+router.post('/critical-email/send', requireAdmin, async (req, res) => {
+    try {
+        const { subject, body, to, tableHtml } = req.body || {};
+        if (!subject || !body) return res.status(400).json({ success: false, message: 'Subject and body are required.' });
+        const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#0f172a;max-width:840px;white-space:pre-wrap;line-height:1.5;">${esc(body)}</div>${tableHtml || ''}`;
+        let recipient = to;
+        if (!recipient) { const cfg = await getEmailConfig(); recipient = cfg && cfg.rapidshyp; }
+        const r = await sendMail({ to: recipient || undefined, subject, html, text: body });
+        // Log which orders were escalated (audit + the row shows "mail sent", prevents accidental dupes).
+        const orders = Array.isArray(req.body.orders) ? req.body.orders.filter(o => o && o.order_name) : [];
+        if (orders.length) {
+            const now = new Date().toISOString();
+            const marks = orders.map(o => ({ order_name: String(o.order_name).trim(), awb: (o.awb || '') || null, mark_type: 'critical_mail_sent', created_by: req.user.sub, updated_at: now }));
+            await supabase.from('order_marks_ecom').upsert(marks, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
+        }
+        // Log the thread so inbox replies can be matched back (reply tracking + AI resolution scoring).
+        await require('./email_replies').logSentEscalation({ messageId: r.messageId, subject, to: r.to, body, orders });
+        res.json({ success: true, message: `Sent to ${r.to.join(', ')}` });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// ── Manual per-order marks (Likely-Fake) + insight ──────────────────────────
+// Toggle a mark on/off for an order. Any dashboard user may mark (it's an ops judgement call).
+router.post('/order-marks', async (req, res) => {
+    try {
+        const b = req.body || {};
+        const order_name = String(b.order_name || '').trim();
+        const mark_type = String(b.mark_type || 'likely_fake').trim();
+        if (!order_name) return res.status(400).json({ success: false, message: 'order_name required' });
+        const { data: existing } = await supabase.from('order_marks_ecom').select('id').eq('order_name', order_name).eq('mark_type', mark_type).maybeSingle();
+        if (existing) { await supabase.from('order_marks_ecom').delete().eq('id', existing.id); return res.json({ success: true, marked: false }); }
+        const { error } = await supabase.from('order_marks_ecom').insert({ order_name, awb: (b.awb || '').trim() || null, mark_type, note: (b.note || '').trim() || null, created_by: req.user.sub });
+        if (error) return res.status(500).json({ success: false, message: error.message });
+        res.json({ success: true, marked: true });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+router.get('/order-marks', async (req, res) => {
+    try {
+        const type = req.query.type || 'likely_fake';
+        const { data, error } = await supabase.from('order_marks_ecom').select('order_name, awb, mark_type, created_by, created_at, note').eq('mark_type', type).order('created_at', { ascending: false });
+        if (error) return res.status(500).json({ success: false, message: error.message });
+        res.json({ success: true, marks: data || [] });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+// Insight: of orders manually marked "likely fake", how many actually got DELIVERED (= the fake attempt
+// is proven), how many RTO'd, how many still moving — plus how many were escalated by email.
+router.get('/likely-fake-insight', async (req, res) => {
+    try {
+        const { data: marks } = await supabase.from('order_marks_ecom').select('order_name, awb, created_at, created_by').eq('mark_type', 'likely_fake').order('created_at', { ascending: false });
+        const list = marks || [];
+        const { data: mailMarks } = await supabase.from('order_marks_ecom').select('order_name').eq('mark_type', 'critical_mail_sent');
+        const mailSet = new Set((mailMarks || []).map(m => m.order_name));
+        const names = list.map(m => m.order_name);
+        const jByName = {};
+        for (let i = 0; i < names.length; i += 300) {
+            const { data: js } = await supabase.from('shipment_journey_ecom')
+                .select('order_name, awb, courier, outcome, delivered_at, first_attempt_success, zone, payment_mode')
+                .in('order_name', names.slice(i, i + 300));
+            (js || []).forEach(j => { jByName[j.order_name] = j; });
+        }
+        let delivered = 0, rto = 0, inTransit = 0, other = 0;
+        const rows = list.map(m => {
+            const j = jByName[m.order_name] || {};
+            const oc = j.outcome || 'unknown';
+            if (oc === 'delivered') delivered++;
+            else if (oc === 'rto') rto++;
+            else if (oc === 'in_transit' || oc === 'ndr_pending') inTransit++;
+            else other++;
+            return { order_name: m.order_name, awb: m.awb || j.awb || null, courier: j.courier || null, zone: j.zone || null,
+                payment_mode: j.payment_mode || null, outcome: oc, marked_at: m.created_at, marked_by: m.created_by, mail_sent: mailSet.has(m.order_name) };
+        });
+        const total = list.length;
+        res.json({ success: true, summary: {
+            total, delivered, rto, inTransit, other, mailsSent: mailSet.size,
+            conversionPct: pct(delivered, total),   // marked → delivered = the flagged attempt was fake
+            rtoPct: pct(rto, total),
+        }, rows });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
 
 // Expose the send helpers for the scheduled crons (router is a function → attaching props is safe).
 router.sendSilentRtoReport = sendSilentRtoReport;
 router.sendLateDeliveriesReport = sendLateDeliveriesReport;
+router.sendIntransitLateReport = sendIntransitLateReport;
 
 module.exports = router;

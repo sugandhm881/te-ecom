@@ -45,43 +45,7 @@ function normalizeSupabaseOrder(order) {
     };
 }
 
-// ─────────────────────────────────────────────────────
-// NORMALIZE: Supabase Amazon order → dashboard format
-// ─────────────────────────────────────────────────────
-function normalizeSupabaseAmazonOrder(order) {
-    const addr = order.shipping_address || {};
-    const items = order.amazon_order_items || [];
-
-    let status = 'Processing';
-    const amzStatus = order.order_status || '';
-    if (['Pending', 'Unshipped'].includes(amzStatus)) status = 'New';
-    if (amzStatus === 'Shipped') status = 'Shipped';
-    if (amzStatus === 'Canceled') status = 'Cancelled';
-
-    const customerName = order.buyer_name ||
-        (addr.Name) || 'N/A';
-
-    return {
-        platform: 'Amazon',
-        id: order.amazon_order_id,
-        originalId: order.amazon_order_id,
-        date: order.purchase_date
-            ? moment(order.purchase_date).tz('Asia/Kolkata').format('DD-MM-YYYY')
-            : '',
-        timestamp: order.purchase_date ? moment(order.purchase_date).valueOf() : 0, // <-- ADD THIS LINE
-        name: customerName,
-        total: parseFloat(order.order_total_amount || 0),
-        status,
-        items: items.map(i => ({
-            name: i.title,
-            sku: i.seller_sku,
-            qty: i.quantity_ordered
-        })),
-        address: `${addr.AddressLine1 || ''}, ${addr.City || ''}`.replace(/^, /, '') || 'No address',
-        paymentMethod: order.payment_method || 'N/A',
-        awb: null
-    };
-}
+// (Amazon-order normalization removed 2026-07 — the Orders dashboard no longer merges Amazon orders.)
 
 // ─────────────────────────────────────────────────────
 // ROUTE: GET /api/get-orders
@@ -92,13 +56,15 @@ router.get('/get-orders', async (req, res) => {
         const thirtyDaysAgo = moment().subtract(30, 'days').toISOString();
 
         // ── 1. FETCH ALL DATA IN PARALLEL ──────────────────
+        // (Amazon orders removed 2026-07 — the Orders dashboard is Shopify/EasyEcom only now; Amazon
+        //  has its own dashboards. Skipping that query + payload makes this endpoint noticeably faster.)
         const [
             shopifyRes,
-            amazonRes,
             shipmentRows,
             awbRows,
             trackingRows,
-            easyecomRows
+            easyecomRows,
+            holdMarkRows
         ] = await Promise.all([
             // Shopify orders from Supabase with embedded line items + shipping address
             supabase
@@ -114,18 +80,6 @@ router.get('/get-orders', async (req, res) => {
                 .order('created_at', { ascending: false })
                 .limit(500),
 
-            // Amazon orders from Supabase
-            supabase
-                .from('amazon_orders')
-                .select(`
-                    amazon_order_id, purchase_date, order_status, payment_method,
-                    buyer_name, buyer_email, order_total_amount, shipping_address,
-                    amazon_order_items(seller_sku, title, quantity_ordered)
-                `)
-                .gte('purchase_date', thirtyDaysAgo)
-                .order('purchase_date', { ascending: false })
-                .limit(200),
-
             // Supabase workflow caches (replaces MongoDB)
             supabase.from('shipment_cache_ecom').select('order_id, shipment_id'),
             supabase.from('awb_cache_ecom').select('*'),
@@ -137,14 +91,15 @@ router.get('/get-orders', async (req, res) => {
                 .select('*')
                 .gte('order_date', thirtyDaysAgo)
                 .order('order_date', { ascending: false })
-                .limit(1000)
+                .limit(1000),
+
+            // Live EasyEcom-hold marks (set/cleared by /easyecom/hold-order|unhold-order) — the
+            // dashboard shows On-Hold instantly, without waiting for EasyEcom's own status to sync.
+            supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold')
         ]);
 
         if (shopifyRes.error) {
             console.error('[Supabase] orders error:', shopifyRes.error.message);
-        }
-        if (amazonRes.error) {
-            console.error('[Supabase] amazon_orders error:', amazonRes.error.message);
         }
         if (easyecomRows.error) {
             console.error('[Supabase] b2c_order_easycom error:', easyecomRows.error.message);
@@ -182,10 +137,9 @@ router.get('/get-orders', async (req, res) => {
 
         // ── 3. NORMALIZE ORDERS ─────────────────────────────
         const shopifyOrders  = (shopifyRes.data || []).map(normalizeSupabaseOrder);
-        const amazonOrders   = (amazonRes.data  || []).map(normalizeSupabaseAmazonOrder);
         const easyecomOrders = (easyecomRows.data || []).map(dbRowToDashboard);
 
-        // Merge: Start with Shopify + Amazon, then add EasyEcom-only orders
+        // Merge: Start with Shopify, then add EasyEcom-only orders
         // (orders in EasyEcom that don't exist in Shopify by order name)
         const shopifyNameSet = new Set(shopifyOrders.map(o => String(o.id).trim()));
 
@@ -208,9 +162,9 @@ router.get('/get-orders', async (req, res) => {
             return !shopifyNameSet.has(ecId) && !shopifyNameSet.has('#' + ecId);
         });
 
-        console.log(`[get-orders] Shopify: ${shopifyOrders.length}, Amazon: ${amazonOrders.length}, EasyEcom-only: ${easyecomOnly.length} (total EC: ${easyecomOrders.length})`);
+        console.log(`[get-orders] Shopify: ${shopifyOrders.length}, EasyEcom-only: ${easyecomOnly.length} (total EC: ${easyecomOrders.length})`);
 
-        let allOrders = [...shopifyOrders, ...amazonOrders, ...easyecomOnly]
+        let allOrders = [...shopifyOrders, ...easyecomOnly]
             .sort((a, b) => {
                 // Priority: Use the exact millisecond timestamp we added
                 if (a.timestamp && b.timestamp) {
@@ -228,8 +182,34 @@ router.get('/get-orders', async (req, res) => {
                 return parseDate(b.date) - parseDate(a.date);
             });
 
+        // Live EasyEcom-hold state by order name (without '#') — RECONCILED against the synced EasyEcom
+        // status: if EasyEcom's row was refreshed AFTER we set the mark and no longer says "On Hold"
+        // (e.g. someone released it inside the EasyEcom panel), the mark is stale → auto-clear it.
+        const eeStatusByName = {};
+        (easyecomRows.data || []).forEach(row => {
+            [row.reference_code, row.store_order_id, row.marketplace_order_id].filter(Boolean).forEach(k => {
+                eeStatusByName[String(k).trim()] = { status: row.order_status || '', syncedAt: row.updated_at || row.fetched_at || null };
+            });
+        });
+        const holdByName = {}, staleMarks = [];
+        (holdMarkRows.data || []).forEach(m => {
+            const ee = eeStatusByName[m.order_name];
+            if (ee && ee.syncedAt && m.created_at && new Date(ee.syncedAt) > new Date(m.created_at) && !/hold/i.test(ee.status)) {
+                staleMarks.push(m.order_name);   // unheld directly in EasyEcom → drop the mark
+                return;
+            }
+            holdByName[m.order_name] = { reason: m.note || '', by: m.created_by || null, at: m.created_at || null };
+        });
+        if (staleMarks.length) {
+            supabase.from('order_marks_ecom').delete().in('order_name', staleMarks).eq('mark_type', 'ee_hold')
+                .then(() => console.log(`[get-orders] auto-cleared ${staleMarks.length} stale hold mark(s): ${staleMarks.join(', ')}`))
+                .catch(() => {});
+        }
+
         // ── 4. ENRICH WITH SUPABASE WORKFLOW CACHE ──────────
         allOrders = allOrders.map(order => {
+            const eeHold = holdByName[String(order.id || '').replace('#', '').trim()];
+            if (eeHold) order.eeHold = eeHold;
             const shipmentData = shipmentCache[String(order.originalId)];
             const shipmentId = shipmentData ? shipmentData.shipment_id : null;
 

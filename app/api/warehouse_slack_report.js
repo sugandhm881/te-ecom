@@ -60,9 +60,12 @@ function normName(n) { return String(n || '').replace('#', '').trim(); }
 // is NEVER DocPharma-checked again — MWH re-ships it and it's tracked via RapidShyp instead.
 const HANDLED_TABLE = 'dp_rejected_handled_ecom';
 
+// Returns the Set of already-reported order names, or NULL if the read failed. Callers that de-dupe on
+// this list MUST treat null as "can't verify" and skip posting — returning an empty Set here would
+// silently disable dedup and re-spam every handled order (the cause of the duplicate reports).
 async function fetchHandledNames() {
     const { data, error } = await supabase.from(HANDLED_TABLE).select('order_name');
-    if (error) { console.warn(`[WH Report] handled-list read failed (table missing?): ${error.message}`); return new Set(); }
+    if (error) { console.warn(`[WH Report] handled-list read failed (table missing?): ${error.message}`); return null; }
     return new Set((data || []).map(r => normName(r.order_name)));
 }
 
@@ -280,18 +283,20 @@ async function postSlack(payload, channel = WH_CHANNEL) {
         console.log(`\n════ DRY RUN — would post to ${channel} (no Slack message sent) ════\n${preview}\n════════════════════════════════════════════════════════════\n`);
         return true;
     }
-    // Teams — sent alongside Slack during the transition; becomes the only target once SLACK_BOT_TOKEN is cleared.
+    // Teams is the ONLY target (migration complete). Slack posting stays off unless SLACK_ENABLED=true —
+    // this prevents a stray SLACK_BOT_TOKEN on the server from re-posting every report to Slack.
     const teamsUrl = _teamsUrlFor(channel);
-    if (teamsUrl) postTeams(teamsUrl, payload).catch(() => {});
-    const token = config.SLACK_BOT_TOKEN;
-    if (!token) { if (!teamsUrl) console.warn('[WH Report] no SLACK_BOT_TOKEN and no Teams webhook set'); return; }
-    const res = await axios.post(
-        'https://slack.com/api/chat.postMessage',
-        { channel, ...payload },
-        { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
-    );
-    if (!res.data.ok) console.error('[WH Report] Slack error:', res.data.error);
-    return res.data.ok;
+    if (teamsUrl) await postTeams(teamsUrl, payload).catch(() => {});
+    else console.warn('[WH Report] no Teams webhook set for channel', channel);
+    if (config.SLACK_ENABLED && config.SLACK_BOT_TOKEN) {
+        try {
+            const res = await axios.post('https://slack.com/api/chat.postMessage',
+                { channel, ...payload },
+                { headers: { Authorization: `Bearer ${config.SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } });
+            if (!res.data.ok) console.error('[WH Report] Slack error:', res.data.error);
+        } catch (e) { console.error('[WH Report] Slack post failed:', e.message); }
+    }
+    return true;
 }
 
 // For pending orders with NO RapidShyp status, ask DocPharma and collect the ones
@@ -634,6 +639,9 @@ async function sendDocpharmaRejectedReport(announceEmpty = false) {
     const { groups, rsMap, awbByName } = res;
 
     const handledSet = await fetchHandledNames();
+    // FAIL-SAFE: if the handled list couldn't load, ABORT — posting now would re-report every already-handled
+    // order (this is exactly what produced the duplicate reports). Better to skip a run than to re-spam.
+    if (handledSet === null) { console.error('[WH Report] DP report aborted — handled list unavailable; not posting to avoid duplicate reports.'); return; }
     const rejected = await getDpRejectedOrders(groups, rsMap, handledSet, awbByName);
     if (rejected.length) {
         await postSlack(buildDpRejectedPayload(rejected, start, end), DP_CHANNEL);
@@ -696,7 +704,8 @@ async function pollDpTrigger() {
 }
 
 function initDpSlackTrigger(intervalMs = 30000) {
-    if (!config.SLACK_BOT_TOKEN) { console.warn('[DP Trigger] SLACK_BOT_TOKEN not set — trigger disabled'); return; }
+    // Teams-only: the Teams keyword listener handles "rejected" now. Slack trigger stays off unless SLACK_ENABLED=true.
+    if (!config.SLACK_ENABLED || !config.SLACK_BOT_TOKEN) { console.log('[DP Trigger] Slack keyword trigger disabled (Teams-only)'); return; }
     _dpPollTs = String(Date.now() / 1000); // ignore history before startup
     setInterval(() => { pollDpTrigger().catch(() => {}); }, intervalMs);
     console.log(`[DP Trigger] Listening for "${DP_TRIGGER_WORD}" in dp-to-mwh-orders…`);

@@ -24,6 +24,14 @@ module.exports = {
     // Falls back to a key derived from JWT_SECRET so the feature works without a new env var; set a
     // dedicated 32-byte (64 hex chars) EMAIL_ENC_KEY in prod for clean key rotation.
     EMAIL_ENC_KEY: process.env.EMAIL_ENC_KEY,
+
+    // --- AI (for the critical-email polish). Any OpenAI-compatible chat/completions provider works —
+    // Groq, OpenRouter, Together, DeepInfra, or Gemini's OpenAI-compat endpoint. All three must be set
+    // for AI polish to activate; otherwise the email falls back to a plain built-in template.
+    //   e.g. AI_API_URL=https://openrouter.ai/api/v1/chat/completions  AI_MODEL=meta-llama/llama-3.1-8b-instruct:free
+    AI_API_KEY: process.env.AI_API_KEY,
+    AI_API_URL: process.env.AI_API_URL,
+    AI_MODEL:   process.env.AI_MODEL,
     
     // --- Shopify ---
     SHOPIFY_TOKEN: process.env.SHOPIFY_TOKEN,
@@ -69,6 +77,9 @@ module.exports = {
     // --- Amazon Auto Review ---
     SLACK_BOT_TOKEN:   process.env.SLACK_BOT_TOKEN,
     SLACK_CHANNEL_ID:  process.env.SLACK_CHANNEL_ID || 'C0BDDKPE3PS',
+    // Reports migrated to Teams-only (2026-07). Slack posting + Slack keyword trigger stay OFF unless
+    // SLACK_ENABLED=true is explicitly set — so a stray SLACK_BOT_TOKEN on the server never re-posts to Slack.
+    SLACK_ENABLED:     process.env.SLACK_ENABLED === 'true',
 
     // --- Microsoft Teams (report webhooks) — Workflows "incoming webhook" URLs, one per channel ---
     TEAMS_WEBHOOK_WAREHOUSE: process.env.TEAMS_WEBHOOK_WAREHOUSE,

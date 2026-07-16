@@ -1,5 +1,6 @@
 // --- STATE ---
 let allOrders = [];
+const _ordersById = new Map();   // order.id → order, for lazy expanded-row detail building
 let performanceData = [];
 let adsetPerformanceData = [];
 let selectedOrderId = null;
@@ -152,9 +153,12 @@ function getStatusBadge(status) {
         default: return 'bg-slate-50 text-slate-700 border border-slate-200';
     }
 }
+// Inline SVG initials avatar (data URI) — zero network requests. The old placehold.co URLs fired an
+// external image fetch per line item per order on every render, a big source of dashboard jank.
 function createFallbackImage(itemName) {
-    const initials = (itemName || 'N/A').split(' ').map(word => word[0]).join('').substring(0, 2).toUpperCase();
-    return `https://placehold.co/100x100/f1f5f9/94a3b8?text=${initials}`;
+    const initials = (itemName || 'N/A').split(' ').map(word => word[0]).join('').substring(0, 2).toUpperCase().replace(/[^A-Z0-9]/g, '') || 'NA';
+    return 'data:image/svg+xml,' + encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#f1f5f9"/><text x="50" y="50" font-family="Arial,sans-serif" font-size="34" fill="#94a3b8" text-anchor="middle" dominant-baseline="central">${initials}</text></svg>`);
 }
 
 // Debounce: run fn only after `ms` of quiet — keeps typing smooth on heavy table re-renders.
@@ -535,7 +539,7 @@ function navigate(view) {
 // --- DASHBOARD FILTERS RENDERING (Added COD Filter) ---
 function renderDashboardFilters() {
     // 1. Platform Buttons
-    platformFiltersEl.innerHTML = ['All', 'Shopify', 'Amazon'].map(p =>
+    platformFiltersEl.innerHTML = ['All', 'Shopify'].map(p =>
         `<button data-filter="${p}" class="filter-btn px-3 py-1 text-sm rounded-md ${activePlatformFilter===p ? 'active' : ''}">${p}</button>`
     ).join('');
     
@@ -591,6 +595,7 @@ function renderDashboardFilters() {
             renderAllDashboard();
         });
     }
+
 }
 
 // --- UPDATED RENDER DASHBOARD (With COD Filter Logic) ---
@@ -761,10 +766,11 @@ function renderSearchInput() {
 let _ordersRenderToken = 0; // cancels an in-flight progressive render when a newer one starts
 function renderOrders(o) {
     ordersListEl.innerHTML = '';
-    updateBulkActionBar(); 
+    _ordersById.clear();   // fresh map for the lazy detail-row builder
+    updateBulkActionBar();
 
     if (o.length === 0) {
-        ordersListEl.innerHTML = `<tr><td colspan="11" class="p-8 text-center text-slate-400">No orders found.</td></tr>`;
+        ordersListEl.innerHTML = `<tr><td colspan="10" class="p-8 text-center text-slate-400">No orders found.</td></tr>`;
         return;
     }
 
@@ -897,28 +903,13 @@ function renderOrders(o) {
             }
         }
 
-        // --- ADDRESS ---
-        let detailedAddress = order.address || 'No address provided';
-        if (order.shipping_address && typeof order.shipping_address === 'object') {
-            const { address1, address2, city, province, zip } = order.shipping_address;
-            detailedAddress = [address1, address2, city, province, zip ? `(${zip})` : ''].filter(Boolean).join(', ');
-        }
-
-        // --- EDD (estimated delivery) ---
-        // Only meaningful for orders awaiting dispatch; shipped/closed orders show "—".
-        const eddPin = getOrderPincode(order);
-        const eddApplies = EDD_PENDING_STATUSES.has(order.status) && /^\d{6}$/.test(eddPin || '');
-        const eddCell = eddApplies
-            ? `<span class="edd-cell text-xs text-slate-400" data-pin="${eddPin}" data-wt="0.5" title="Estimated delivery if dispatched today">…</span>`
-            : `<span class="text-[11px] text-slate-300">—</span>`;
-
         mainRow.innerHTML = `
             <td class="p-4 w-10">
                 <input type="checkbox" class="order-checkbox w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer" 
                     value="${order.originalId}" ${isSelected ? 'checked' : ''}
                     onclick="toggleOrderSelection('${order.originalId}', this)">
             </td>
-            <td class="p-4"><img src="${platformLogos[order.platform]||''}" class="w-6 h-6 grayscale hover:grayscale-0 transition-all" alt="${escapeHtml(order.platform)}"></td>
+            <td class="p-4"><img src="${platformLogos[order.platform]||''}" loading="lazy" decoding="async" class="w-6 h-6 opacity-70" alt="${escapeHtml(order.platform)}"></td>
             <td class="p-4 text-slate-500 text-sm font-medium">${order.date}</td>
             <td class="p-4 font-semibold text-slate-900 group relative">
                 <span title="${escapeHtml(hoverText)}" class="cursor-help border-b border-dotted border-slate-400">${escapeHtml(order.id)}</span>
@@ -949,8 +940,7 @@ function renderOrders(o) {
                 ${codBadge}
             </td>
             <td class="p-4 font-medium text-slate-900">${formatCurrency(order.total)}</td>
-            <td class="p-4"><span class="px-3 py-1 text-xs font-semibold rounded-full whitespace-nowrap ${getStatusBadge(order.status)}">${order.status}</span></td>
-            <td class="p-4 text-center">${eddCell}</td>
+            <td class="p-4 ord-status-cell"><span class="px-3 py-1 text-xs font-semibold rounded-full whitespace-nowrap ${getStatusBadge(order.status)}">${order.status}</span>${order.eeHold ? ' <span class="ord-hold-chip px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-700 rounded-full border border-amber-200 whitespace-nowrap">⏸ HOLD</span>' : ''}</td>
             <td class="p-4 text-right">
                  <button class="text-slate-400 hover:text-indigo-600 focus:outline-none" onclick="toggleDetails('${order.id}')">
                     <svg class="w-5 h-5 transform transition-transform duration-200" id="arrow-${order.id}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
@@ -958,90 +948,15 @@ function renderOrders(o) {
             </td>
         `;
 
-        // Details Row
+        // Details Row — LAZY: an empty hidden placeholder. The heavy content (item images, workflow
+        // buttons) is built on FIRST expand only. Pre-building it for every order doubled the DOM and
+        // fired hundreds of image loads per render (browsers fetch imgs even in display:none rows).
         const detailsRow = document.createElement('tr');
         detailsRow.id = `details-${order.id}`;
         detailsRow.className = 'hidden bg-slate-50/50';
-        
-        const orderItems = order.line_items || order.items || [];
-        const itemsHtml = orderItems.map(item => {
-            const itemName = item.title || item.name || 'Unknown Item';
-            const itemQty = item.quantity || item.qty || 1;
-            return `
-                <div class="flex items-center gap-3 p-2 bg-white rounded border border-slate-100 mb-1">
-                    <img src="${createFallbackImage(itemName)}" class="w-8 h-8 rounded object-cover">
-                    <div class="flex-1 text-sm text-slate-700 truncate">${escapeHtml(itemName)}</div>
-                    <div class="text-xs font-bold text-slate-500">x${itemQty}</div>
-                </div>`;
-        }).join('');
-
-        let workflowHtml = '';
-        const tags = (order.tags || '').toLowerCase();
-        const hasInProgress = tags.includes('docpharma: in-progress');
-        const shouldShow = (order.platform === 'Shopify') && (!hasInProgress);
-
-        if (shouldShow) {
-             const status = order.status;
-
-             const isConfirmed = order.easyecomStatus && !['new', 'unconfirmed', 'open', ''].includes((order.easyecomStatus || '').toLowerCase());
-             const hasEasyecomId = !!order.easyecomOrderId;
-
-             if (status !== 'Cancelled') {
-                workflowHtml = `
-                    <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mt-2">
-                        <div class="flex justify-between items-center mb-4">
-                            <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wide">EasyEcom Order Processing</h4>
-                            <span class="px-2 py-1 rounded text-[10px] font-bold uppercase ${getStatusBadge(status)}">${status}</span>
-                        </div>
-                        <div class="space-y-3">
-                            <div class="flex justify-between items-center">
-                                <div>
-                                    <p class="text-sm font-semibold text-slate-800">Confirm Order</p>
-                                    <p class="text-[10px] text-slate-400 mt-0.5">${hasEasyecomId ? 'EasyEcom ID: ' + escapeHtml(order.easyecomOrderId) : 'EasyEcom ID not mapped yet'}</p>
-                                    ${order.easyecomStatus ? `<p class="text-[10px] text-slate-500 mt-0.5">EasyEcom Status: <span class="font-semibold">${escapeHtml(order.easyecomStatus)}</span></p>` : ''}
-                                </div>
-                                ${ isConfirmed ?
-                                    `<span class="px-3 py-1 bg-emerald-100 text-emerald-700 text-xs font-bold rounded border border-emerald-200">Confirmed</span>` :
-                                    hasEasyecomId ?
-                                        `<button onclick="handleManualStep1('${order.originalId}', '${uniqueId}')" id="btn-step1-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm">Approve</button>` :
-                                        `<span class="px-3 py-1 bg-amber-50 text-amber-600 text-xs font-medium rounded border border-amber-200">Syncing...</span>`
-                                }
-                            </div>
-                            ${order.awb ? `
-                            <div class="flex justify-between items-center pt-2 border-t border-slate-100">
-                                <div>
-                                    <p class="text-sm font-semibold text-slate-800">Shipping</p>
-                                    <p class="text-[10px] text-slate-400 font-mono">${escapeHtml(order.courier || '')} ${escapeHtml(order.awb)}</p>
-                                </div>
-                                <span class="text-xs font-bold text-emerald-600">Assigned</span>
-                            </div>` : ''}
-                        </div>
-                    </div>
-                `;
-             }
-        }
-
-        detailsRow.innerHTML = `
-            <td colspan="11" class="p-0">
-                <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-8 border-t border-slate-100">
-                    <div class="space-y-4">
-                        <div>
-                            <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Customer Details</h4>
-                            <div class="bg-white p-3 rounded border border-slate-200 text-sm">
-                                <p class="font-bold text-slate-800">${escapeHtml(displayName)}</p>
-                                <p class="text-slate-500 mt-1 leading-relaxed">${escapeHtml(detailedAddress)}</p>
-                                <p class="text-slate-400 text-xs mt-1 border-t border-slate-100 pt-1">${escapeHtml(order.email || '')}</p>
-                            </div>
-                        </div>
-                        <div>
-                            <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Order Items</h4>
-                            <div class="max-h-40 overflow-y-auto pr-2 custom-scrollbar">${itemsHtml}</div>
-                        </div>
-                    </div>
-                    <div>${workflowHtml}</div>
-                </div>
-            </td>
-        `;
+        detailsRow.dataset.lazy = '1';
+        detailsRow.innerHTML = '<td colspan="10" class="p-0"></td>';
+        _ordersById.set(String(order.id), order);
 
         return [mainRow, detailsRow];
     };
@@ -1057,113 +972,194 @@ function renderOrders(o) {
         for (; _ri < end; _ri++) { const r = buildRow(o[_ri]); frag.appendChild(r[0]); frag.appendChild(r[1]); }
         ordersListEl.appendChild(frag);
         if (_ri < o.length) requestAnimationFrame(() => step(150));
-        else eddEnrichVisible();
     };
     step(40); // tiny first chunk fills the viewport instantly; the rest stream in at 150/frame
 }
 
-// ─── EDD (Estimated Delivery Date) column ──────────────────────────────────
-// Statuses still awaiting dispatch — EDD ("if dispatched today") is relevant here.
-const EDD_PENDING_STATUSES = new Set(['New', 'Processing', 'Ready To Ship', 'Confirmed']);
-// Client-side cache: "<pin>-<wt>" -> summary (mirrors server cache, avoids refetch on re-render)
-const eddClientCache = {};
+// (Live-EDD column removed 2026-07 — it fired a serviceability batch call on every render and slowed
+//  the Orders dashboard. Full EDD lookup still lives on the Serviceability page.)
 
-// Pull a 6-digit delivery pincode off whatever address shape the order has.
-function getOrderPincode(order) {
-    const a = order.shipping_address || {};
-    const raw = a.zip || a.pincode || a.postal_code || a.pin_code || a.Pincode || a.PostalCode || '';
-    const m = String(raw).match(/\d{6}/);
-    return m ? m[0] : '';
+// Build one order's expanded detail content — called on FIRST expand only (lazy).
+function buildOrderDetailHtml(order) {
+    const displayName = (order.name === 'N/A' && order.buyerName) ? order.buyerName : order.name;
+    const uniqueId = String(order.id).replace(/\W/g, '');
+    let detailedAddress = order.address || 'No address provided';
+    if (order.shipping_address && typeof order.shipping_address === 'object') {
+        const { address1, address2, city, province, zip } = order.shipping_address;
+        detailedAddress = [address1, address2, city, province, zip ? `(${zip})` : ''].filter(Boolean).join(', ');
+    }
+    const orderItems = order.line_items || order.items || [];
+    const itemsHtml = orderItems.map(item => {
+        const itemName = item.title || item.name || 'Unknown Item';
+        const itemQty = item.quantity || item.qty || 1;
+        return `
+            <div class="flex items-center gap-3 p-2 bg-white rounded border border-slate-100 mb-1">
+                <img src="${createFallbackImage(itemName)}" loading="lazy" decoding="async" class="w-8 h-8 rounded object-cover">
+                <div class="flex-1 text-sm text-slate-700 truncate">${escapeHtml(itemName)}</div>
+                <div class="text-xs font-bold text-slate-500">x${itemQty}</div>
+            </div>`;
+    }).join('');
+
+    let workflowHtml = '';
+    const tags = (order.tags || '').toLowerCase();
+    const shouldShow = (order.platform === 'Shopify') && !tags.includes('docpharma: in-progress');
+    if (shouldShow && order.status !== 'Cancelled') {
+        const isConfirmed = order.easyecomStatus && !['new', 'unconfirmed', 'open', ''].includes((order.easyecomStatus || '').toLowerCase());
+        const hasEasyecomId = !!order.easyecomOrderId;
+        workflowHtml = `
+            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mt-2">
+                <div class="flex justify-between items-center mb-4">
+                    <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wide">EasyEcom Order Processing</h4>
+                    <span class="px-2 py-1 rounded text-[10px] font-bold uppercase ${getStatusBadge(order.status)}">${order.status}</span>
+                </div>
+                <div class="space-y-3">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <p class="text-sm font-semibold text-slate-800">Confirm Order</p>
+                            <p class="text-[10px] text-slate-400 mt-0.5">${hasEasyecomId ? 'EasyEcom ID: ' + escapeHtml(order.easyecomOrderId) : 'EasyEcom ID not mapped yet'}</p>
+                            ${order.easyecomStatus ? `<p class="text-[10px] text-slate-500 mt-0.5">EasyEcom Status: <span class="font-semibold">${escapeHtml(order.easyecomStatus)}</span></p>` : ''}
+                        </div>
+                        ${ isConfirmed ?
+                            `<span class="px-3 py-1 bg-emerald-100 text-emerald-700 text-xs font-bold rounded border border-emerald-200">Confirmed</span>` :
+                            hasEasyecomId ?
+                                `<button onclick="handleManualStep1('${order.originalId}', '${uniqueId}')" id="btn-step1-${uniqueId}" class="px-3 py-1 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 shadow-sm">Approve</button>` :
+                                `<span class="px-3 py-1 bg-amber-50 text-amber-600 text-xs font-medium rounded border border-amber-200">Syncing...</span>`
+                        }
+                    </div>
+                    ${order.awb ? `
+                    <div class="flex justify-between items-center pt-2 border-t border-slate-100">
+                        <div>
+                            <p class="text-sm font-semibold text-slate-800">Shipping</p>
+                            <p class="text-[10px] text-slate-400 font-mono">${escapeHtml(order.courier || '')} ${escapeHtml(order.awb)}</p>
+                        </div>
+                        <span class="text-xs font-bold text-emerald-600">Assigned</span>
+                    </div>` : ''}
+                    ${hasEasyecomId ? (() => {
+                        const held = order.eeHold || (/hold/i.test(order.easyecomStatus || '') ? {} : null);
+                        if (held) {
+                            const meta = [held.reason ? `“${escapeHtml(held.reason)}”` : '', held.by ? 'by ' + escapeHtml(held.by) : '', held.at ? new Date(held.at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''].filter(Boolean).join(' · ');
+                            return `
+                    <div class="pt-2 border-t border-slate-100">
+                        <div class="flex justify-between items-center p-2.5 rounded-lg bg-amber-50 border border-amber-200">
+                            <div>
+                                <p class="text-sm font-bold text-amber-700">⏸ Order is ON HOLD</p>
+                                <p class="text-[10px] text-amber-600 mt-0.5">${meta || 'Held in EasyEcom'}</p>
+                            </div>
+                            <button onclick="holdOrderModal('${escapeHtml(String(order.id))}', 'unhold')" class="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shadow-sm whitespace-nowrap">▶ Unhold</button>
+                        </div>
+                    </div>`;
+                        }
+                        return `
+                    <div class="flex justify-between items-center pt-2 border-t border-slate-100">
+                        <div>
+                            <p class="text-sm font-semibold text-slate-800">Hold Order</p>
+                            <p class="text-[10px] text-slate-400 mt-0.5">Pause processing in EasyEcom (before manifest only)</p>
+                        </div>
+                        <button onclick="holdOrderModal('${escapeHtml(String(order.id))}', 'hold')" class="px-3 py-1.5 bg-amber-500 text-white text-xs font-semibold rounded-lg hover:bg-amber-600 shadow-sm">⏸ Hold</button>
+                    </div>`;
+                    })() : ''}
+                </div>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="ord-detail-fade p-6 grid grid-cols-1 md:grid-cols-2 gap-8 border-t border-slate-100">
+            <div class="space-y-4">
+                <div>
+                    <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Customer Details</h4>
+                    <div class="bg-white p-3 rounded border border-slate-200 text-sm">
+                        <p class="font-bold text-slate-800">${escapeHtml(displayName)}</p>
+                        <p class="text-slate-500 mt-1 leading-relaxed">${escapeHtml(detailedAddress)}</p>
+                        <p class="text-slate-400 text-xs mt-1 border-t border-slate-100 pt-1">${escapeHtml(order.email || '')}</p>
+                    </div>
+                </div>
+                <div>
+                    <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Order Items</h4>
+                    <div class="max-h-40 overflow-y-auto pr-2 custom-scrollbar">${itemsHtml}</div>
+                </div>
+            </div>
+            <div>${workflowHtml}</div>
+        </div>`;
 }
 
-// Render one EDD summary into a cell: a fastest→slowest date range + cutoff note.
-function eddFormatCell(span, s) {
-    if (!s || s.serviceable === null || s.error) {
-        span.textContent = '—';
-        span.className = 'edd-cell text-[11px] text-slate-300';
-        return;
-    }
-    if (s.serviceable === false) {
-        span.textContent = 'Not serviceable';
-        span.className = 'edd-cell text-[11px] font-semibold text-rose-500';
-        span.title = 'No courier services this pincode';
-        return;
-    }
-    // "Dispatch missed" — if current IST time is past the earliest cutoff, today's
-    // dispatch slot is gone, so real EDD slips a day. Reflect that in the estimate.
-    let bump = 0;
-    if (s.earliest_cutoff && /^\d{2}:\d{2}$/.test(s.earliest_cutoff)) {
-        const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-        const [ch, cm] = s.earliest_cutoff.split(':').map(Number);
-        const cutoff = new Date(nowIST); cutoff.setHours(ch, cm, 0, 0);
-        if (nowIST > cutoff) bump = 1;
-    }
-    const fast = (s.fastest_days == null ? null : s.fastest_days + bump);
-    const slow = (s.slowest_days == null ? null : s.slowest_days + bump);
-    const fmt = (d) => {
-        if (d == null) return '—';
-        const dt = new Date(); dt.setHours(0, 0, 0, 0); dt.setDate(dt.getDate() + Math.max(0, d));
-        return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
-    };
-    const range = (fast != null && slow != null && fast !== slow) ? `${fmt(fast)} – ${fmt(slow)}` : fmt(fast);
-    const fastLabel = fast == null ? '' : fast <= 0 ? 'Today' : fast === 1 ? '1 day' : `${fast} days`;
-    span.className = 'edd-cell leading-tight inline-block';
-    span.title = `${s.courier_count} courier(s)` +
-        (s.earliest_cutoff ? ` · dispatch before ${s.earliest_cutoff}${bump ? ' (missed today)' : ''}` : '') +
-        (s.cheapest_freight != null ? ` · from ₹${Number(s.cheapest_freight).toFixed(0)}` : '');
-    span.innerHTML =
-        `<span class="text-xs font-semibold text-slate-700">${range}</span>` +
-        (fastLabel ? `<br><span class="text-[10px] ${bump ? 'text-amber-500' : 'text-slate-400'}">${bump ? 'after cutoff' : fastLabel}</span>` : '');
+// ── Hold / Unhold an order in EasyEcom — custom in-app modal (no browser prompt) ──
+function holdOrderModal(orderName, mode) {
+    document.getElementById('ee-hold-modal')?.remove();
+    const order = _ordersById.get(String(orderName));
+    const isHold = mode === 'hold';
+    const heldMeta = order && order.eeHold ? [order.eeHold.reason ? `“${escapeHtml(order.eeHold.reason)}”` : '', order.eeHold.by ? 'held by ' + escapeHtml(order.eeHold.by) : ''].filter(Boolean).join(' · ') : '';
+    const wrap = document.createElement('div');
+    wrap.id = 'ee-hold-modal';
+    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-md flex flex-col">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+        <div><h3 class="text-lg font-bold text-slate-800">${isHold ? '⏸ Hold order' : '▶ Release hold'}</h3>
+          <p class="text-xs text-slate-400 mt-0.5">${escapeHtml(orderName)} · EasyEcom</p></div>
+        <button id="eeh-close" class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button>
+      </div>
+      <div class="p-6 space-y-3">
+        ${isHold ? `
+        <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Hold reason <span class="text-rose-500">*</span></label>
+          <textarea id="eeh-reason" rows="3" maxlength="200" class="filter-input w-full !h-auto py-2 resize-none" placeholder="e.g. Customer asked to change address / payment check / stock issue"></textarea>
+          <p class="text-[11px] text-slate-400 mt-1.5">Processing pauses in EasyEcom until released. Works only before the manifest is generated.</p></div>`
+        : `
+        <div class="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-700">
+          <b>Currently on hold</b>${heldMeta ? ' — ' + heldMeta : ''}.<br>Releasing returns the order to its previous status and processing resumes.</div>`}
+      </div>
+      <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200">
+        <span id="eeh-status" class="text-sm mr-auto"></span>
+        <button id="eeh-cancel" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
+        <button id="eeh-submit" class="px-4 py-2 rounded-lg text-sm font-semibold text-white ${isHold ? 'bg-amber-500 hover:bg-amber-600' : 'bg-emerald-600 hover:bg-emerald-700'}">${isHold ? '⏸ Hold order' : '▶ Unhold order'}</button>
+      </div></div>`;
+    document.body.appendChild(wrap);
+    const close = () => wrap.remove();
+    document.getElementById('eeh-close').addEventListener('click', close);
+    document.getElementById('eeh-cancel').addEventListener('click', close);
+    wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+    if (isHold) setTimeout(() => document.getElementById('eeh-reason')?.focus(), 50);
+    document.getElementById('eeh-submit').addEventListener('click', () => eeHoldSubmit(orderName, isHold));
 }
-
-let _eddFetchInFlight = false;
-// Gather all "…" EDD cells on screen, serve from cache, fetch the rest in one batch.
-async function eddEnrichVisible() {
-    const spans = Array.from(document.querySelectorAll('span.edd-cell'));
-    if (!spans.length) return;
-
-    const misses = new Map(); // "<pin>-<wt>" -> { pincode, weight }
-    spans.forEach(span => {
-        const pin = span.dataset.pin;
-        const wt = span.dataset.wt || '0.5';
-        if (!/^\d{6}$/.test(pin || '')) return;
-        const key = `${pin}-${wt}`;
-        if (eddClientCache[key]) {
-            eddFormatCell(span, eddClientCache[key]);
-        } else if (!misses.has(key)) {
-            misses.set(key, { pincode: pin, weight: Number(wt) });
-        }
-    });
-
-    if (!misses.size || _eddFetchInFlight) return;
-    _eddFetchInFlight = true;
+async function eeHoldSubmit(orderName, isHold) {
+    const st = document.getElementById('eeh-status'), btn = document.getElementById('eeh-submit');
+    const reason = (document.getElementById('eeh-reason')?.value || '').trim();
+    if (isHold && !reason) { st.textContent = 'Hold reason is required'; st.className = 'text-sm text-rose-600 mr-auto'; return; }
+    btn.disabled = true; st.textContent = isHold ? 'Holding…' : 'Releasing…'; st.className = 'text-sm text-slate-500 mr-auto';
     try {
-        // Direct fetch (not fetchApiData) so the global loader doesn't flash on every render.
-        const headers = { 'Content-Type': 'application/json', ...getAuthHeaders() };
-        if (!headers.Authorization) return;
-        const r = await fetch('/api/serviceability/edd-batch', {
-            method: 'POST', headers,
-            body: JSON.stringify({ items: Array.from(misses.values()) })
+        const r = await fetch('/api/easyecom/' + (isHold ? 'hold-order' : 'unhold-order'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+            body: JSON.stringify(isHold ? { orderName, reason } : { orderName })
         });
-        if (!r.ok) return;
-        const resp = await r.json();
-        const results = (resp && resp.results) || {};
-        Object.keys(results).forEach(k => { eddClientCache[k] = results[k]; });
-        // Re-apply to all matching cells now on screen.
-        document.querySelectorAll('span.edd-cell').forEach(span => {
-            const key = `${span.dataset.pin}-${span.dataset.wt || '0.5'}`;
-            if (eddClientCache[key]) eddFormatCell(span, eddClientCache[key]);
-        });
-    } catch (e) {
-        // leave cells as "…"; a later render will retry
-    } finally {
-        _eddFetchInFlight = false;
-    }
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || 'Failed');
+        // Update local state so the UI flips to held/unheld INSTANTLY (no wait for the next sync).
+        const order = _ordersById.get(String(orderName));
+        if (order) order.eeHold = isHold ? (d.hold || { reason, at: new Date().toISOString() }) : null;
+        refreshOrderDetailRow(orderName);
+        st.textContent = 'Done ✓'; st.className = 'text-sm text-emerald-600 mr-auto';
+        showNotification(d.message || 'Done.');
+        setTimeout(() => document.getElementById('ee-hold-modal')?.remove(), 700);
+    } catch (e) { st.textContent = e.message; st.className = 'text-sm text-rose-600 mr-auto'; btn.disabled = false; }
+}
+// Rebuild an order's expanded detail content in place (after hold/unhold etc.).
+function refreshOrderDetailRow(orderId) {
+    const details = document.getElementById(`details-${orderId}`);
+    const order = _ordersById.get(String(orderId));
+    if (details && order && !details.dataset.lazy) details.firstElementChild.innerHTML = buildOrderDetailHtml(order);
+    // Patch the main row's status cell chip too.
+    const row = document.querySelector(`tr[data-order-id="${(window.CSS && CSS.escape) ? CSS.escape(String(orderId)) : String(orderId)}"]`);
+    const cell = row && row.querySelector('.ord-status-cell');
+    if (cell) { const chip = cell.querySelector('.ord-hold-chip'); if (order && order.eeHold) { if (!chip) cell.insertAdjacentHTML('beforeend', ' <span class="ord-hold-chip px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-700 rounded-full border border-amber-200 whitespace-nowrap">⏸ HOLD</span>'); } else if (chip) chip.remove(); }
 }
 
 function toggleDetails(id) {
     const details = document.getElementById(`details-${id}`);
     const arrow = document.getElementById(`arrow-${id}`);
+    if (details && details.classList.contains('hidden') && details.dataset.lazy) {
+        // First open → build the content now (lazy). Subsequent toggles just show/hide.
+        const order = _ordersById.get(String(id));
+        if (order) { details.firstElementChild.innerHTML = buildOrderDetailHtml(order); delete details.dataset.lazy; }
+    }
     if(details) details.classList.toggle('hidden');
     if(arrow) arrow.classList.toggle('rotate-180');
 }
@@ -2198,7 +2194,7 @@ function renderAdsetPerformanceDashboard() {
 
 function renderPlatformFilters() {
     const container = document.getElementById('platform-filters');
-    const platforms = ['All', 'Shopify', 'Amazon'];
+    const platforms = ['All', 'Shopify'];
 
     container.innerHTML = platforms.map(p => `
         <button
@@ -2249,7 +2245,7 @@ function renderSourceFilters() {
 }
 
 
-function renderInsightsPlatformFilters(){insightsPlatformFiltersEl.innerHTML=['All','Amazon','Shopify'].map(p=>`<button data-filter="${p}" class="filter-btn px-3 py-1 text-sm rounded-md ${insightsPlatformFilter===p?'active':''}">${p}</button>`).join('');insightsPlatformFiltersEl.querySelectorAll('.filter-btn').forEach(b=>{b.addEventListener('click',()=>{insightsPlatformFilter=b.dataset.filter;renderAllInsights()})})}
+function renderInsightsPlatformFilters(){insightsPlatformFiltersEl.innerHTML=['All','Shopify'].map(p=>`<button data-filter="${p}" class="filter-btn px-3 py-1 text-sm rounded-md ${insightsPlatformFilter===p?'active':''}">${p}</button>`).join('');insightsPlatformFiltersEl.querySelectorAll('.filter-btn').forEach(b=>{b.addEventListener('click',()=>{insightsPlatformFilter=b.dataset.filter;renderAllInsights()})})}
 function renderAllInsights(silent) {
     const [s, e] = calculateDateRange(insightsDatePreset, insightsStartDateFilterEl.value, insightsEndDateFilterEl.value);
     let o = [...allOrders];
@@ -2751,8 +2747,13 @@ let _claimsWired = false, _claimsTab = 'srto';
 const _claimsState = {
   srto: { rows: [], sortKey: 'freight_total', dir: -1 },
   late: { rows: [], sortKey: 'days_late', dir: -1 },
+  intransit: { rows: [], sortKey: 'days_overdue', dir: -1 },
 };
-const _claimsFilter = { q: '', payment: '', courier: '', zone: '' };
+const _CLAIMS_TABS = ['srto', 'late', 'intransit'];
+const _CLAIMS_PANEL = { srto: 'claims-panel-srto', late: 'claims-panel-late', intransit: 'claims-panel-intransit' };
+let _claimsOpenAwb = null;            // the currently-expanded row (one at a time)
+const _claimsDetail = {};             // awb → { loading, journey, scans, dp, live, edd, error }
+const _claimsFilter = { q: '', platform: '', payment: '', courier: '', zone: '' };
 const _inr = n => '₹' + (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 // DD-MM-YYYY in IST (dashboard-wide date format for the new views).
 const _dmy = ts => { if(!ts) return ''; const s = new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); const p = s.split('-'); return p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : s; };
@@ -2766,79 +2767,148 @@ function claimsInit(){
     document.querySelectorAll('.claims-tab').forEach(b => b.addEventListener('click', () => claimsSwitch(b.dataset.tab)));
     document.getElementById('srto-send')?.addEventListener('click', () => claimsSend('srto'));
     document.getElementById('late-send')?.addEventListener('click', () => claimsSend('late'));
+    document.getElementById('itl-send')?.addEventListener('click', () => claimsSend('intransit'));
     document.getElementById('claims-search')?.addEventListener('input', e => { _claimsFilter.q = e.target.value.trim(); claimsRender(); });
+    document.getElementById('claims-f-platform')?.addEventListener('change', e => { _claimsFilter.platform = e.target.value; claimsRender(); });
     document.getElementById('claims-f-payment')?.addEventListener('change', e => { _claimsFilter.payment = e.target.value; claimsRender(); });
     document.getElementById('claims-f-courier')?.addEventListener('change', e => { _claimsFilter.courier = e.target.value; claimsRender(); });
     document.getElementById('claims-f-zone')?.addEventListener('change', e => { _claimsFilter.zone = e.target.value; claimsRender(); });
     document.getElementById('claims-clear')?.addEventListener('click', claimsClearFilters);
     // Sortable headers (delegated per panel).
-    ['claims-panel-srto', 'claims-panel-late'].forEach(pid => {
-      document.getElementById(pid)?.querySelector('thead')?.addEventListener('click', e => {
+    _CLAIMS_TABS.forEach(which => {
+      document.getElementById(_CLAIMS_PANEL[which])?.querySelector('thead')?.addEventListener('click', e => {
         const th = e.target.closest('th[data-sort]'); if(!th) return;
-        const which = pid === 'claims-panel-srto' ? 'srto' : 'late', st = _claimsState[which], key = th.dataset.sort;
+        const st = _claimsState[which], key = th.dataset.sort;
         if(st.sortKey === key) st.dir *= -1; else { st.sortKey = key; st.dir = ['order_name', 'awb', 'courier', 'zone'].includes(key) ? 1 : -1; }
         claimsRender();
       });
     });
-    if(currentUser && currentUser.isAdmin){ const a = document.getElementById('srto-send'), b = document.getElementById('late-send'); if(a) a.style.display = ''; if(b) b.style.display = ''; }
+    if(currentUser && currentUser.isAdmin){ ['srto-send', 'late-send', 'itl-send'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = ''; }); }
+    // Click a row to expand its full detail (date log + scan log). Delegated per panel body.
+    ['srto-tbody', 'late-tbody', 'itl-tbody'].forEach(id => {
+      document.getElementById(id)?.addEventListener('click', e => {
+        if(e.target.closest('a')) return;                       // let links inside the detail work
+        const tr = e.target.closest('tr[data-awb]'); if(!tr) return;
+        const awb = tr.dataset.awb; if(!awb) return;
+        _claimsOpenAwb = (_claimsOpenAwb === awb) ? null : awb;
+        if(_claimsOpenAwb && !_claimsDetail[awb]) claimsLoadDetail(awb);
+        claimsRender();
+      });
+    });
   }
   claimsLoad();
 }
+// Fetch the full journey + scan log for one AWB (shared shipment-detail endpoint; cached).
+async function claimsLoadDetail(awb){
+  _claimsDetail[awb] = { loading: true };
+  try{
+    const r = await fetch(`/api/delivery-performance/shipment/${encodeURIComponent(awb)}`, { headers: getAuthHeaders() });
+    const d = await r.json(); if(!d.success) throw new Error(d.error || 'failed');
+    _claimsDetail[awb] = { loading: false, journey: d.journey, scans: d.scans || [], dp: d.dp || null, live: !!d.live, edd: (d.journey && d.journey.ts && d.journey.ts.edd) || null };
+  }catch(e){ _claimsDetail[awb] = { loading: false, error: e.message }; }
+  if(_claimsOpenAwb === awb) claimsRender();
+}
+// Expanded detail row (colspan 7): Date log (timeline) + Scan log, plus destination/payment/freight meta.
+function claimsDetailRow(r, which){
+  const d = _claimsDetail[r.awb], j = d && d.journey, ts = (j && j.ts) || {};
+  const step = (label, iso, color) => { const on = !!iso; return `<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:${on?color:'#cbd5e1'}"></span><span class="w-28 text-slate-500">${label}</span><span class="tabular-nums ${on?'text-slate-700 font-medium':'text-slate-300'}">${dpFmtTs(iso)}</span></div>`; };
+  const eddVal = ts.edd || r.first_edd || (d && d.edd) || null;
+  const isRto = which === 'srto' || r.outcome === 'rto';
+  const timeline = step('Order placed', ts.order || r.order_date, '#6366f1') + step('Dispatched', ts.dispatched, '#0ea5e9') +
+    step('Out for delivery', ts.ofd, '#f59e0b') +
+    (isRto ? step('RTO', ts.rto, '#ef4444') : step('Delivered', ts.delivered || r.delivered_at, '#16a34a')) +
+    step('Promised EDD', eddVal, '#8b5cf6');
+  const dest = [r.dest_city, r.dest_state].filter(Boolean).join(', ');
+  const pieces = [`📍 <b class="text-slate-700">${ecEsc(dest || '—')}</b>${r.zone ? ` · Zone ${ecEsc(r.zone)}` : ''}`];
+  if(r.payment_mode) pieces.push(`Payment: <b class="text-slate-700">${/cod/i.test(r.payment_mode) ? 'COD' : 'Prepaid'}</b>`);
+  if(r.source) pieces.push(`Platform: <b class="text-slate-700">${/docpharma/i.test(r.source) ? 'DocPharma' : 'RapidShyp'}</b>`);
+  if(j){ pieces.push(`Attempts: <b class="text-slate-700">${j.attempts || 0}</b>`); pieces.push(`NDRs: <b class="text-slate-700">${j.ndr_count || 0}</b>`); }
+  if(which === 'srto'){
+    pieces.push(`Forward freight: <b class="text-slate-700">${r.freight_forward != null ? _inr(r.freight_forward) : '—'}</b>`);
+    pieces.push(`RTO freight: <b class="text-slate-700">${r.freight_rto != null ? _inr(r.freight_rto) : '—'}</b>`);
+    pieces.push(`Total: <b class="text-rose-600">${r.freight_total != null ? _inr(r.freight_total) : '—'}</b>`);
+    pieces.push(`Invoice: <b class="text-slate-700">${r.shipment_value != null ? _inr(r.shipment_value) : '—'}</b>`);
+  } else if(which === 'late'){ pieces.push(`Days late: <b class="text-rose-600">${r.days_late}</b>`); }
+  else { pieces.push(`Days overdue: <b class="text-amber-600">${r.days_overdue}</b>`); }
+  const reasons = (j && j.ndr_reasons && j.ndr_reasons.length) ? `<span>Reasons: <b class="text-slate-700">${ecEsc(j.ndr_reasons.join('; '))}</b></span>` : '';
+  const meta = `<div class="text-xs text-slate-500 mt-3 flex flex-wrap gap-x-4 gap-y-1">${pieces.map(p => `<span>${p}</span>`).join('')}${reasons}</div>`;
+  let scanHtml;
+  const scanRows = arr => `<div class="space-y-1 max-h-56 overflow-auto pr-1">${arr.map(s => `<div class="flex gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${ecEsc(s.desc)}${s.code ? ` <span class="text-slate-400">(${ecEsc(s.code)})</span>` : ''}${s.location ? ` <span class="text-slate-400">· ${ecEsc(s.location)}</span>` : ''}</span></div>`).join('')}</div>`;
+  if(!d || d.loading) scanHtml = '<div class="text-slate-400 text-xs py-3">Loading scan log…</div>';
+  else if(d.error) scanHtml = `<div class="text-rose-400 text-xs py-3">${ecEsc(d.error)}</div>`;
+  else if(d.dp){
+    const dp = d.dp;
+    const badge = dp.current_status ? `<span class="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200 text-[11px] font-semibold">${ecEsc(dp.current_status)}</span>` : '';
+    const link = dp.tracking_url ? `<a href="${ecEsc(dp.tracking_url)}" target="_blank" rel="noopener" class="text-indigo-600 hover:underline text-xs font-medium">Track on DocPharma ↗</a>` : '';
+    scanHtml = `<div class="flex items-center gap-3 mb-2">${badge}${link}</div>${(d.scans && d.scans.length) ? scanRows(d.scans) : ''}<div class="text-[11px] text-slate-400 mt-2">${ecEsc(dp.note || '')}</div>`;
+  }
+  else if(!d.scans || !d.scans.length) scanHtml = '<div class="text-slate-400 text-xs py-3">No scan log available for this shipment.</div>';
+  else scanHtml = `${scanRows(d.scans)}${d.live ? '<div class="text-[10px] text-emerald-500 mt-1">● fetched live from courier</div>' : ''}`;
+  return `<tr class="claims-detail"><td colspan="7" class="px-6 py-4 bg-slate-50 border-b border-slate-100">
+    <div class="grid md:grid-cols-2 gap-6">
+      <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Date log</div>${timeline}${meta}</div>
+      <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log</div>${scanHtml}</div>
+    </div></td></tr>`;
+}
 function claimsClearFilters(){
-  _claimsFilter.q = ''; _claimsFilter.payment = ''; _claimsFilter.courier = ''; _claimsFilter.zone = '';
+  _claimsFilter.q = ''; _claimsFilter.platform = ''; _claimsFilter.payment = ''; _claimsFilter.courier = ''; _claimsFilter.zone = '';
   const s = document.getElementById('claims-search'); if(s) s.value = '';
-  ['claims-f-payment', 'claims-f-courier', 'claims-f-zone'].forEach(id => { const el = document.getElementById(id); if(el) el.value = ''; });
+  ['claims-f-platform', 'claims-f-payment', 'claims-f-courier', 'claims-f-zone'].forEach(id => { const el = document.getElementById(id); if(el) el.value = ''; });
   claimsRender();
 }
 function claimsSwitch(tab){
-  _claimsTab = tab;
+  _claimsTab = tab; _claimsOpenAwb = null;
   document.querySelectorAll('.claims-tab').forEach(b => { const on = b.dataset.tab === tab;
     b.classList.toggle('border-indigo-600', on); b.classList.toggle('text-indigo-700', on);
     b.classList.toggle('border-transparent', !on); b.classList.toggle('text-slate-500', !on); });
-  document.getElementById('claims-panel-srto').style.display = tab === 'srto' ? '' : 'none';
-  document.getElementById('claims-panel-late').style.display = tab === 'late' ? '' : 'none';
+  _CLAIMS_TABS.forEach(t => { const p = document.getElementById(_CLAIMS_PANEL[t]); if(p) p.style.display = t === tab ? '' : 'none'; });
   claimsRender();
 }
 async function claimsLoad(){
   const from = document.getElementById('claims-from')?.value, to = document.getElementById('claims-to')?.value;
   const qs = `?from=${from}&to=${to}`;
-  ['srto-tbody', 'late-tbody'].forEach(id => { const t = document.getElementById(id); if(t) t.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr>'; });
+  _claimsOpenAwb = null;
+  ['srto-tbody', 'late-tbody', 'itl-tbody'].forEach(id => { const t = document.getElementById(id); if(t) t.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr>'; });
   try{
-    const [a, b] = await Promise.all([
+    const [a, b, c] = await Promise.all([
       fetch('/api/silent-rto-claims' + qs, { headers: getAuthHeaders() }).then(r => r.json()),
       fetch('/api/late-deliveries' + qs, { headers: getAuthHeaders() }).then(r => r.json()),
+      fetch('/api/intransit-late' + qs, { headers: getAuthHeaders() }).then(r => r.json()),
     ]);
     _claimsState.srto.rows = (a && a.success && a.rows) ? a.rows : [];
     _claimsState.late.rows = (b && b.success && b.rows) ? b.rows : [];
+    _claimsState.intransit.rows = (c && c.success && c.rows) ? c.rows : [];
     claimsPopulateFilters();
     claimsRender();
   }catch(e){
-    const t = document.getElementById(_claimsTab === 'srto' ? 'srto-tbody' : 'late-tbody');
+    const t = document.getElementById(_CLAIMS_PANEL[_claimsTab] ? _claimsTab === 'srto' ? 'srto-tbody' : _claimsTab === 'late' ? 'late-tbody' : 'itl-tbody' : 'srto-tbody');
     if(t) t.innerHTML = `<tr><td colspan="7" class="px-4 py-8 text-center text-rose-500">${ecEsc(e.message)}</td></tr>`;
   }
 }
-// Populate courier/zone dropdowns from the union of both datasets (options stable across tabs).
+// Populate courier/zone dropdowns from the union of all datasets (options stable across tabs).
 function claimsPopulateFilters(){
-  const all = [..._claimsState.srto.rows, ..._claimsState.late.rows];
+  const all = [..._claimsState.srto.rows, ..._claimsState.late.rows, ..._claimsState.intransit.rows];
   const uniq = k => [...new Set(all.map(r => r[k]).filter(Boolean))].sort();
   const fill = (id, vals, cur) => { const el = document.getElementById(id); if(!el) return;
     const first = el.querySelector('option'); el.innerHTML = ''; el.appendChild(first);
     vals.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; el.appendChild(o); });
     el.value = cur && vals.includes(cur) ? cur : ''; };
-  fill('claims-f-courier', uniq('courier'), _claimsFilter.courier);
+  // DocPharma is a shipping platform, not a courier → keep it out of the courier list (use the Platform filter).
+  fill('claims-f-courier', uniq('courier').filter(c => c.toLowerCase() !== 'docpharma'), _claimsFilter.courier);
   fill('claims-f-zone', uniq('zone'), _claimsFilter.zone);
 }
 // Apply the shared filters + the tab's sort to a tab's rows.
 function claimsApply(which){
   const st = _claimsState[which], f = _claimsFilter;
   const rows = st.rows.filter(r => {
+    if(f.platform && String(r.source || '').toLowerCase() !== f.platform) return false;
     if(f.payment && String(r.payment_mode || '').toLowerCase() !== f.payment.toLowerCase()) return false;
     if(f.courier && (r.courier || '') !== f.courier) return false;
     if(f.zone && (r.zone || '') !== f.zone) return false;
     if(f.q){ const q = f.q.toLowerCase(); if(!String(r.order_name || '').toLowerCase().includes(q) && !String(r.awb || '').toLowerCase().includes(q)) return false; }
     return true;
   });
-  const k = st.sortKey, dir = st.dir, dateKeys = ['order_date', 'first_edd', 'delivered_at', 'rto_at'], numKeys = ['freight_total', 'shipment_value', 'days_late'];
+  const k = st.sortKey, dir = st.dir, dateKeys = ['order_date', 'first_edd', 'delivered_at', 'rto_at'], numKeys = ['freight_total', 'shipment_value', 'days_late', 'days_overdue'];
   rows.sort((a, b) => {
     let av = a[k], bv = b[k];
     if(dateKeys.includes(k)){ av = av ? new Date(av).getTime() : 0; bv = bv ? new Date(bv).getTime() : 0; }
@@ -2849,14 +2919,14 @@ function claimsApply(which){
   return rows;
 }
 function claimsCaret(which){
-  const st = _claimsState[which], pid = which === 'srto' ? 'claims-panel-srto' : 'claims-panel-late';
+  const st = _claimsState[which], pid = _CLAIMS_PANEL[which];
   document.getElementById(pid)?.querySelectorAll('th[data-sort]').forEach(th => {
     const active = th.dataset.sort === st.sortKey, c = th.querySelector('.claims-caret');
     if(c) c.textContent = active ? (st.dir === 1 ? ' ▲' : ' ▼') : '';
     th.classList.toggle('text-slate-700', active);
   });
 }
-function claimsRender(){ if(_claimsTab === 'srto') claimsRenderSrto(); else claimsRenderLate(); }
+function claimsRender(){ if(_claimsTab === 'srto') claimsRenderSrto(); else if(_claimsTab === 'late') claimsRenderLate(); else claimsRenderIntransit(); }
 function claimsRenderSrto(){
   const rows = claimsApply('srto'), count = rows.length;
   const freight = rows.reduce((a, r) => a + (Number(r.freight_total) || 0), 0);
@@ -2866,14 +2936,17 @@ function claimsRenderSrto(){
   document.getElementById('srto-kpi-freight').textContent = _inr(freight);
   document.getElementById('srto-kpi-value').textContent = _inr(value);
   document.getElementById('srto-kpi-priced').textContent = `${priced}/${count}`;
-  document.getElementById('srto-tbody').innerHTML = count ? rows.map(r => `<tr class="border-t border-slate-100 hover:bg-slate-50">
-    <td class="px-4 py-2.5 font-medium text-slate-700">${ecEsc(r.order_name)}</td>
+  document.getElementById('srto-tbody').innerHTML = count ? rows.map(r => { const open = r.awb === _claimsOpenAwb;
+    let out = `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer ${open?'bg-indigo-50/60':''}" data-awb="${ecEsc(r.awb)}">
+    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
     <td class="px-4 py-2.5 text-slate-500">${_dmy(r.order_date)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.zone || '')}</td>
     <td class="px-4 py-2.5 text-right font-semibold text-rose-600">${r.freight_total != null ? _inr(r.freight_total) : '—'}</td>
-    <td class="px-4 py-2.5 text-right text-slate-600">${r.shipment_value != null ? _inr(r.shipment_value) : '—'}</td></tr>`).join('')
+    <td class="px-4 py-2.5 text-right text-slate-600">${r.shipment_value != null ? _inr(r.shipment_value) : '—'}</td></tr>`;
+    if(open) out += claimsDetailRow(r, 'srto');
+    return out; }).join('')
     : '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">No silent RTOs match.</td></tr>';
   claimsCaret('srto');
   const cc = document.getElementById('claims-count'); if(cc) cc.textContent = `${count} shown`;
@@ -2887,28 +2960,57 @@ function claimsRenderLate(){
   document.getElementById('late-kpi-avg').textContent = avg;
   document.getElementById('late-kpi-max').textContent = max + 'd';
   document.getElementById('late-kpi-severe').textContent = severe;
-  document.getElementById('late-tbody').innerHTML = count ? rows.map(r => `<tr class="border-t border-slate-100 hover:bg-slate-50">
-    <td class="px-4 py-2.5 font-medium text-slate-700">${ecEsc(r.order_name)}</td>
+  document.getElementById('late-tbody').innerHTML = count ? rows.map(r => { const open = r.awb === _claimsOpenAwb;
+    let out = `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer ${open?'bg-indigo-50/60':''}" data-awb="${ecEsc(r.awb)}">
+    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
     <td class="px-4 py-2.5 text-slate-500">${_dmy(r.first_edd)}</td>
     <td class="px-4 py-2.5 text-slate-500">${_dmy(r.delivered_at)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.zone || '')}</td>
-    <td class="px-4 py-2.5 text-right font-bold ${r.days_late >= 4 ? 'text-rose-600' : 'text-amber-600'}">${r.days_late}</td></tr>`).join('')
+    <td class="px-4 py-2.5 text-right font-bold ${r.days_late >= 4 ? 'text-rose-600' : 'text-amber-600'}">${r.days_late}</td></tr>`;
+    if(open) out += claimsDetailRow(r, 'late');
+    return out; }).join('')
     : '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">No late deliveries match.</td></tr>';
   claimsCaret('late');
   const cc = document.getElementById('claims-count'); if(cc) cc.textContent = `${count} shown`;
 }
+function claimsRenderIntransit(){
+  const rows = claimsApply('intransit'), count = rows.length;
+  const avg = count ? Math.round(rows.reduce((a, r) => a + r.days_overdue, 0) / count * 100) / 100 : 0;
+  const max = rows.reduce((m, r) => Math.max(m, r.days_overdue), 0);
+  const severe = rows.filter(r => r.days_overdue > 5).length;
+  document.getElementById('itl-kpi-count').textContent = count;
+  document.getElementById('itl-kpi-avg').textContent = avg;
+  document.getElementById('itl-kpi-max').textContent = max + 'd';
+  document.getElementById('itl-kpi-severe').textContent = severe;
+  document.getElementById('itl-tbody').innerHTML = count ? rows.map(r => { const open = r.awb === _claimsOpenAwb;
+    let out = `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer ${open?'bg-indigo-50/60':''}" data-awb="${ecEsc(r.awb)}">
+    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
+    <td class="px-4 py-2.5 text-slate-500">${_dmy(r.order_date)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${_dmy(r.first_edd)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.zone || '')}</td>
+    <td class="px-4 py-2.5 text-right font-bold ${r.days_overdue > 5 ? 'text-rose-600' : 'text-amber-600'}">${r.days_overdue}</td></tr>`;
+    if(open) out += claimsDetailRow(r, 'intransit');
+    return out; }).join('')
+    : '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">No overdue in-transit shipments match.</td></tr>';
+  claimsCaret('intransit');
+  const cc = document.getElementById('claims-count'); if(cc) cc.textContent = `${count} shown`;
+}
 async function claimsSend(which){
   const from = document.getElementById('claims-from')?.value, to = document.getElementById('claims-to')?.value;
-  const isSrto = which === 'srto';
-  const st = document.getElementById(isSrto ? 'srto-status' : 'late-status');
-  const confirmMsg = isSrto ? 'Email the silent-RTO claim list to RapidShyp for this date range?' : 'Email the late-delivery report to the configured recipients?';
-  if(!confirm(confirmMsg)) return;
+  const cfg = {
+    srto: { url: '/api/silent-rto-claims/send', status: 'srto-status', msg: 'Email the silent-RTO claim list to RapidShyp for this date range?' },
+    late: { url: '/api/late-deliveries/send', status: 'late-status', msg: 'Email the late-delivery report to the configured recipients?' },
+    intransit: { url: '/api/intransit-late/send', status: 'itl-status', msg: 'Email the overdue in-transit chase list to the configured recipients?' },
+  }[which];
+  const st = document.getElementById(cfg.status);
+  if(!confirm(cfg.msg)) return;
   if(st){ st.textContent = 'Sending…'; st.className = 'text-sm text-slate-500'; }
   try{
-    const r = await fetch(isSrto ? '/api/silent-rto-claims/send' : '/api/late-deliveries/send',
-      { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ from, to }) });
+    const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ from, to }) });
     const d = await r.json();
     if(!r.ok || !d.success) throw new Error(d.message || 'Send failed');
     if(st){ st.textContent = d.message || 'Sent ✓'; st.className = 'text-sm text-emerald-600'; }
@@ -3011,7 +3113,7 @@ async function loadInitialData() {
     navigate(viewFromHash() || 'orders-dashboard');   // honor a deep-linked #view on first load
     const ordersList = document.getElementById('orders-list');
     // Branded ecom-central logo + spinner shown right in the table area while orders load (non-blocking).
-    if (ordersList) ordersList.innerHTML = `<tr><td colspan="11" class="py-16"><div class="flex flex-col items-center justify-center gap-3"><span class="relative inline-flex items-center justify-center w-14 h-14"><span class="absolute w-14 h-14 rounded-full border-[3px] border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/ecom-logo.png" class="w-9 h-9 rounded-lg"></span><span class="text-slate-400 text-sm font-medium">Loading latest orders…</span></div></td></tr>`;
+    if (ordersList) ordersList.innerHTML = `<tr><td colspan="10" class="py-16"><div class="flex flex-col items-center justify-center gap-3"><span class="relative inline-flex items-center justify-center w-14 h-14"><span class="absolute w-14 h-14 rounded-full border-[3px] border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/ecom-logo.png" class="w-9 h-9 rounded-lg"></span><span class="text-slate-400 text-sm font-medium">Loading latest orders…</span></div></td></tr>`;
 
     // Background load — orders FIRST (render as soon as they arrive); COD & EDD fill their columns in after,
     // so a slow /cod-confirmations or /edd-batch can never delay the orders table.
@@ -3024,7 +3126,7 @@ async function loadInitialData() {
         } catch (error) {
             console.error("Critical Error loading orders:", error);
             if (ordersList && currentView === 'orders-dashboard' && !(allOrders && allOrders.length)) {
-                ordersList.innerHTML = '<tr><td colspan="11" class="py-12 text-center text-rose-400 text-sm">Could not load orders — tap Refresh to retry.</td></tr>';
+                ordersList.innerHTML = '<tr><td colspan="10" class="py-12 text-center text-rose-400 text-sm">Could not load orders — tap Refresh to retry.</td></tr>';
             }
         }
         // COD status fills its column when ready — independent of the orders table render.
@@ -4361,10 +4463,52 @@ async function opsSetAction(tab,order,status,note,snooze){
 function opsActionCell(tab,order){ const a=opsActOf(tab,order);
     if(a&&a.status&&!(a.status==='snoozed'&&!(a.snooze_until&&new Date(a.snooze_until)>new Date()))){
         const lbl=a.status==='snoozed'?'Snoozed':a.status;
-        return `<div class="flex items-center gap-1 whitespace-nowrap"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700">✓ ${_opsEsc(lbl)}</span><button class="ops-act text-xs text-slate-400 hover:text-rose-600" data-tab="${tab}" data-o="${_opsEsc(order)}" data-s="clear" title="Undo">✕</button></div>`;
+        const noteHtml=a.note?`<span class="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 max-w-[200px] truncate inline-block align-middle" title="${_opsEsc(a.note)}">📝 ${_opsEsc(a.note)}</span>`:'';
+        const noteBtn=(tab==='ndr'||tab==='prepaidrisk')?`<button class="ops-note-edit text-xs text-slate-400 hover:text-indigo-600" data-tab="${tab}" data-o="${_opsEsc(order)}" title="${a.note?'Edit customer response':'Add customer response'}">${a.note?'✎':'📝+'}</button>`:'';
+        return `<div class="flex items-center gap-1.5 flex-wrap"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700 whitespace-nowrap">✓ ${_opsEsc(lbl)}</span>${noteHtml}${noteBtn}<button class="ops-act text-xs text-slate-400 hover:text-rose-600" data-tab="${tab}" data-o="${_opsEsc(order)}" data-s="clear" title="Undo">✕</button></div>`;
     }
     return `<div class="flex items-center gap-1 whitespace-nowrap">`+(OPS_ACTS[tab]||[]).map(([s,l])=>`<button class="ops-act text-[11px] px-1.5 py-0.5 rounded border border-slate-200 text-slate-600 hover:border-indigo-400 hover:text-indigo-600" data-tab="${tab}" data-o="${_opsEsc(order)}" data-s="${s}">${l}</button>`).join('')+`</div>`;
 }
+// Customer-response capture — opens after a call-type action (NDR "Called"/"Reattempt asked",
+// prepaid-risk "Contacted") and via the ✎ edit button. Saves the response into ops_actions_ecom.note.
+function opsResponseModal(tab, order, status, existing){
+  document.getElementById('ops-resp-modal')?.remove();
+  const statusLbl=((OPS_ACTS[tab]||[]).find(x=>x[0]===status)||[status,status])[1];
+  const wrap=document.createElement('div');
+  wrap.id='ops-resp-modal';
+  wrap.className='fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-xl w-full max-w-md flex flex-col">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+      <div><h3 class="text-lg font-bold text-slate-800">Customer response</h3>
+        <p class="text-xs text-slate-400 mt-0.5">${_opsEsc(order)} · <span class="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 font-semibold">${_opsEsc(statusLbl)}</span></p></div>
+      <button id="opsr-close" class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button>
+    </div>
+    <div class="p-6">
+      <label class="block text-xs font-semibold text-slate-500 mb-1.5">What did the customer say?</label>
+      <textarea id="opsr-note" rows="3" maxlength="300" class="filter-input w-full !h-auto py-2 resize-none" placeholder="e.g. Will accept tomorrow after 5 PM / asked to cancel / number unreachable / wants address change"></textarea>
+      <p class="text-[11px] text-slate-400 mt-1.5">Saved on the order — visible to the whole team in the NDR queue.</p>
+    </div>
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200">
+      <span id="opsr-status" class="text-sm mr-auto"></span>
+      ${existing?'':'<button id="opsr-skip" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-500 hover:bg-slate-100" title="Mark the action without a note">Skip note</button>'}
+      <button id="opsr-save" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">Save</button>
+    </div></div>`;
+  document.body.appendChild(wrap);
+  const ta=document.getElementById('opsr-note'); ta.value=existing||''; setTimeout(()=>ta.focus(),50);
+  const close=()=>wrap.remove();
+  document.getElementById('opsr-close').addEventListener('click',close);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  const submit=async(note)=>{
+    const st=document.getElementById('opsr-status'), btn=document.getElementById('opsr-save');
+    btn.disabled=true; if(st){ st.textContent='Saving…'; st.className='text-sm text-slate-500 mr-auto'; }
+    try{ await opsSetAction(tab,order,status,note||null,null); _opsRerender(tab); close(); }
+    catch(e){ if(st){ st.textContent=e.message||'Failed'; st.className='text-sm text-rose-600 mr-auto'; } btn.disabled=false; }
+  };
+  document.getElementById('opsr-save').addEventListener('click',()=>submit(ta.value.trim()));
+  document.getElementById('opsr-skip')?.addEventListener('click',()=>submit(''));
+  ta.addEventListener('keydown',e=>{ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)) submit(ta.value.trim()); });
+}
+
 function opsToolbar(tab,total,count){
     const dcfg={ndr:45,courier:90,exceptions:90,cost:90}[tab];
     const dsel=dcfg?`<select class="ops-days text-xs border border-slate-200 rounded-md bg-white px-2 py-1 text-slate-600" data-tab="${tab}">${[7,15,30,45,60,90,120].map(v=>`<option value="${v}" ${(_opsDays[tab]||dcfg)==v?'selected':''}>Last ${v}d</option>`).join('')}</select>`:'';
@@ -4420,7 +4564,11 @@ function opsInit(){
         const view=document.getElementById('ops-control-view');
         view?.addEventListener('click', async e=>{
             const sub=e.target.closest('#ops-subtabs button[data-sub]'); if(sub){ opsSubSwitch(sub.dataset.tab, sub.dataset.sub); return; }
-            const act=e.target.closest('.ops-act'); if(act){ e.preventDefault(); const {tab,o,s}=act.dataset; let sn=null; if(s==='snoozed') sn=new Date(Date.now()+3*86400000).toISOString(); await opsSetAction(tab,o,s,null,sn); _opsRerender(tab); return; }
+            const noteBtn=e.target.closest('.ops-note-edit'); if(noteBtn){ e.preventDefault(); const a=opsActOf(noteBtn.dataset.tab,noteBtn.dataset.o); opsResponseModal(noteBtn.dataset.tab,noteBtn.dataset.o,(a&&a.status)||'called',(a&&a.note)||''); return; }
+            const act=e.target.closest('.ops-act'); if(act){ e.preventDefault(); const {tab,o,s}=act.dataset;
+                // Call-type actions → capture what the customer said before saving (custom modal).
+                if(s!=='clear' && s!=='snoozed' && (tab==='ndr'||tab==='prepaidrisk')){ opsResponseModal(tab,o,s,''); return; }
+                let sn=null; if(s==='snoozed') sn=new Date(Date.now()+3*86400000).toISOString(); await opsSetAction(tab,o,s,null,sn); _opsRerender(tab); return; }
             const exp=e.target.closest('.ops-export'); if(exp){ opsExport(exp.dataset.tab); return; }
         });
         view?.addEventListener('change', e=>{
@@ -4519,13 +4667,90 @@ function opsTable(){ const c=document.getElementById('ops-table'); const d=_opsD
           `<td class="${td}">${r.courier||'—'}<div class="text-xs text-slate-400">Zone ${r.zone||'—'}</div></td>`+
           `<td class="${td} text-right tabular-nums">${r.ndrs}</td>`+
           `<td class="${td} text-slate-500 text-xs">${(r.reasons||[]).join('; ')||'—'}</td>`+
-          `<td class="${td}">${opsActionCell('ndr',r.order)}</td>`+
+          `<td class="${td}"><div class="flex items-center gap-1.5 flex-wrap">${r.awb?`<button onclick="ndrActionModal('${escapeHtml(r.awb)}','${escapeHtml(r.order||'')}','${escapeHtml(r.phone||'')}')" title="Reattempt / Return via RapidShyp" class="px-2 py-1 rounded-lg text-[11px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 whitespace-nowrap">🔁 NDR action</button>`:''}${opsActionCell('ndr',r.order)}</div></td>`+
         `</tr>`; }).join('');
     const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
     c.innerHTML=opsToolbar('ndr',_tot,list.length)+`<table class="w-full"><thead><tr>${H('daysInNdr','Aging')}${H('order','Order / AWB')}${Hp('Customer')}${H('value','Value')}${Hp('Pay / Type')}${H('courier','Courier')}${H('ndrs','NDRs','text-right')}${Hp('Reasons')}${Hp('Action')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
 }
 const OPS_TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
 const OPS_TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
+
+// ── NDR Action (RapidShyp reattempt / return) — shared by Ops Control NDR queue + Delivery Performance ──
+function ndrActionModal(awb, order, phone){
+  document.getElementById('ndr-act-modal')?.remove();
+  const wrap=document.createElement('div');
+  wrap.id='ndr-act-modal';
+  wrap.className='fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-xl w-full max-w-md flex flex-col">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+      <div><h3 class="text-lg font-bold text-slate-800">NDR Action</h3>
+        <p class="text-xs text-slate-400 mt-0.5">${escapeHtml(order||'')} · AWB ${escapeHtml(awb)}</p></div>
+      <button id="ndr-close" class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button>
+    </div>
+    <div class="p-6 space-y-4">
+      <div class="flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200">
+        <button id="ndr-opt-re" class="flex-1 px-3 py-2 bg-indigo-600 text-white font-semibold">🔁 Reattempt delivery</button>
+        <button id="ndr-opt-ret" class="flex-1 px-3 py-2 text-slate-600 font-semibold">↩ Return to origin</button>
+      </div>
+      <div id="ndr-re-fields" class="space-y-3">
+        <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Customer phone <span class="text-rose-500">*</span></label>
+          <input id="ndr-phone" type="tel" maxlength="10" class="filter-input w-full" placeholder="10-digit mobile"></div>
+        <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Address line 1 <span class="text-rose-500">*</span></label>
+          <input id="ndr-addr1" type="text" class="filter-input w-full" placeholder="Updated / confirmed address"></div>
+        <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Address line 2</label>
+          <input id="ndr-addr2" type="text" class="filter-input w-full" placeholder="Optional"></div>
+        <p class="text-[11px] text-slate-400">Confirm the address with the customer first (call / WhatsApp) — this is sent to the courier as the corrected delivery info.</p>
+      </div>
+      <p id="ndr-ret-note" class="hidden text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">⚠️ This asks the courier to RETURN the shipment to origin. The order will RTO — use only when the customer cancelled or is unreachable.</p>
+    </div>
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200">
+      <span id="ndr-status" class="text-sm mr-auto"></span>
+      <button id="ndr-cancel" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="ndr-send" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">Submit to RapidShyp</button>
+    </div></div>`;
+  document.body.appendChild(wrap);
+  const ph=String(phone||'').replace(/\D/g,'').slice(-10);
+  if(ph) document.getElementById('ndr-phone').value=ph;
+  let mode='RE_ATTEMPT';
+  const setMode=m=>{ mode=m;
+    const re=document.getElementById('ndr-opt-re'), ret=document.getElementById('ndr-opt-ret');
+    const on='bg-indigo-600 text-white', off='text-slate-600';
+    re.className='flex-1 px-3 py-2 font-semibold '+(m==='RE_ATTEMPT'?on:off);
+    ret.className='flex-1 px-3 py-2 font-semibold '+(m==='RETURN'?'bg-rose-600 text-white':off);
+    document.getElementById('ndr-re-fields').classList.toggle('hidden', m!=='RE_ATTEMPT');
+    document.getElementById('ndr-ret-note').classList.toggle('hidden', m!=='RETURN');
+    const send=document.getElementById('ndr-send');
+    send.className='px-4 py-2 rounded-lg text-sm font-semibold text-white '+(m==='RETURN'?'bg-rose-600 hover:bg-rose-700':'bg-indigo-600 hover:bg-indigo-700');
+  };
+  document.getElementById('ndr-opt-re').addEventListener('click',()=>setMode('RE_ATTEMPT'));
+  document.getElementById('ndr-opt-ret').addEventListener('click',()=>setMode('RETURN'));
+  const close=()=>wrap.remove();
+  document.getElementById('ndr-close').addEventListener('click',close);
+  document.getElementById('ndr-cancel').addEventListener('click',close);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  document.getElementById('ndr-send').addEventListener('click',()=>ndrActionSend(awb,order,mode));
+}
+async function ndrActionSend(awb,order,mode){
+  const st=document.getElementById('ndr-status'), btn=document.getElementById('ndr-send');
+  const phone=(document.getElementById('ndr-phone')?.value||'').replace(/\D/g,'').slice(-10);
+  const address1=(document.getElementById('ndr-addr1')?.value||'').trim();
+  const address2=(document.getElementById('ndr-addr2')?.value||'').trim();
+  if(mode==='RE_ATTEMPT'){
+    if(!/^\d{10}$/.test(phone)){ st.textContent='Valid 10-digit phone required'; st.className='text-sm text-rose-600 mr-auto'; return; }
+    if(!address1){ st.textContent='Address line 1 required'; st.className='text-sm text-rose-600 mr-auto'; return; }
+  }
+  if(!confirm(mode==='RETURN'?'Ask the courier to RETURN this shipment to origin?':'Request a delivery REATTEMPT with the updated details?')) return;
+  btn.disabled=true; st.textContent='Submitting…'; st.className='text-sm text-slate-500 mr-auto';
+  try{
+    const r=await fetch('/api/ndr-action',{ method:'POST', headers:{'Content-Type':'application/json',...getAuthHeaders()},
+      body: JSON.stringify({ awb, order, action:mode, phone, address1, address2 }) });
+    const d=await r.json();
+    if(!r.ok||!d.success) throw new Error(d.message||'Failed');
+    st.textContent=d.message||'Done ✓'; st.className='text-sm text-emerald-600 mr-auto';
+    setTimeout(()=>{ document.getElementById('ndr-act-modal')?.remove();
+      if(typeof opsLoad==='function' && currentView==='ops-control') opsLoad(); }, 1200);
+  }catch(e){ st.textContent=e.message; st.className='text-sm text-rose-600 mr-auto'; btn.disabled=false; }
+}
 
 // ── Pre-dispatch Risk ──
 async function opsLoadRisk(){
@@ -4565,7 +4790,8 @@ function opsRiskTable(){ const c=document.getElementById('ops-risk-table'); cons
           `<td class="${OPS_TD}">${pay} ${typ}</td>`+
           `<td class="${OPS_TD}">${r.city||'—'}${r.serviceable===false?' <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-700 align-middle">🛑 NOT SERVICEABLE</span>':''}<div class="text-xs text-slate-400">${r.pincode?r.pincode+' · ':''}${r.state||''}${r.cityRto!=null?` · ${r.cityRto}% RTO`:''}${r.courierCount!=null&&r.courierCount<=1?' · 1 courier':''}</div></td>`+
           `<td class="${OPS_TD} text-slate-500 text-xs">${(r.reasons||[]).join(' · ')||'—'}</td>`+
-          `<td class="${OPS_TD}">${opsActionCell('risk',r.order)}</td>`+
+          `<td class="${OPS_TD}"><div class="flex items-center gap-1.5">${(()=>{ const ph=String(r.phone||'').replace(/\D/g,'').slice(-10);
+              return ph?`<a href="https://wa.me/91${ph}?text=${encodeURIComponent('Hi! This is The Element. Please confirm your Cash-on-Delivery order '+r.order+' by replying YES. To cancel or switch to prepaid, just reply here. Thank you!')}" target="_blank" rel="noopener" title="Verify with the customer on WhatsApp" class="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-sm">📱</a>`:''; })()}${opsActionCell('risk',r.order)}</div></td>`+
         `</tr>`; }).join('');
     const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:'';
     c.innerHTML=opsToolbar('risk',_tot,list.length)+`<table class="w-full"><thead><tr>${H('score','Risk')}${H('order','Order')}${H('value','Value')}${Hp('Pay / Type')}${H('city','Destination')}${Hp('Why flagged')}${Hp('Action')}</tr></thead><tbody>${rows}</tbody></table>${more}`;
@@ -5784,7 +6010,7 @@ function dpSortVal(r,key){ switch(key){
   case 'order_date': return r.ts&&r.ts.order?r.ts.order:'';
   case 'order': return (r.order||'').toLowerCase(); case 'state': return r.state||'';
   case 'courier': return (r.courier||'').toLowerCase(); case 'zone': return r.zone||'';
-  case 'type': return r.order_type||''; default: return ''; } }
+  case 'type': return r.order_type||''; case 'edd': return r.edd||''; default: return ''; } }
 function dpDaysAgo(d){ const t=new Date(); t.setDate(t.getDate()-d); return t.toISOString().slice(0,10); }
 function dpPresetRange(preset){
     const iso=d=>d.toISOString().slice(0,10), today=new Date();
@@ -5898,7 +6124,7 @@ function dpRender(d){
     dpStatus(d.statusBreakdown, c);
     dpRto(d.rtoBreakdown, c);
     dpMulti('zone', d.zones); dpMulti('state', d.states); dpCouriers(d.couriers); dpTat(d.tat, c);
-    dpFasr(d.fasrTrend); dpFunnel(d.ndrFunnel); dpCourier(d.rtoByCourier); dpTableRender();
+    dpFasr(d.fasrTrend); dpFunnel(d.ndrFunnel); dpCourier(d.rtoByCourier); dpPaymentSplit(d.byPayment); dpTableRender(); dpLoadLikelyFake();
 }
 // Populate the Zone dropdown from the window's zones (preserves current selection).
 // Multi-select checkbox dropdown for Zone / State — with search + Select all / Clear all.
@@ -5928,7 +6154,8 @@ function dpMultiFilter(panel, term){ const t=String(term||'').trim().toLowerCase
 function dpCouriers(couriers){ const sel=document.getElementById('dp-courier-filter'); if(!sel) return;
     const cur=_dpCourier;
     let html='<option value="all">All couriers</option>';
-    (couriers||[]).forEach(c=>{ const nm=(c.courier||'').replace(/"/g,'&quot;'); html+=`<option value="${nm}">${c.courier} (${c.count})</option>`; });
+    // DocPharma is a shipping platform, not a courier — it's covered by the Shipping Platform toggle above.
+    (couriers||[]).filter(c=>String(c.courier||'').toLowerCase()!=='docpharma').forEach(c=>{ const nm=(c.courier||'').replace(/"/g,'&quot;'); html+=`<option value="${nm}">${c.courier} (${c.count})</option>`; });
     sel.innerHTML=html; sel.value=cur; if(sel.value!==cur){ _dpCourier='all'; sel.value='all'; }
 }
 // TAT Dashboard — two cards: Order→Dispatch and Dispatch→Delivery, avg + bucket bars (0-1/1-3/3-5/5+).
@@ -6014,6 +6241,205 @@ function dpFasr(rows){ const el=document.getElementById('dp-fasr'); if(!rows||!r
     el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%">${g}${avgLine}<polyline points="${pts}" fill="none" stroke="#4f46e5" stroke-width="2" stroke-linejoin="round"/>${dots}${xl}</svg>`;
     el.querySelectorAll('circle').forEach(c=>{ c.addEventListener('mousemove',e=>{const r=rows[+c.dataset.i];dpShow(`<b>${r.date}</b> · FASR ${r.fasr}% (${r.first}/${r.reached})`,e.clientX,e.clientY);}); c.addEventListener('mouseleave',dpHide); });
 }
+// #1 — FASR vs NDR by payment mode (Prepaid vs COD), side-by-side metric bars.
+function dpPaymentSplit(bp){ const el=document.getElementById('dp-payment-split'); if(!el) return;
+  if(!bp){ el.innerHTML='<div class="text-slate-400 text-sm py-6 text-center">No data</div>'; return; }
+  const metrics=[['First-attempt (FASR)','fasr','#16a34a'],['NDR rate','ndrRate','#d97706'],['RTO rate','rtoRate','#dc2626'],['NDR recovery','ndrRecoveryRate','#4f46e5']];
+  const col=(label,s)=>{
+    if(!s||!s.tracked) return `<div><div class="flex items-center justify-between mb-3"><span class="text-sm font-bold text-slate-700">${label}</span><span class="text-xs text-slate-400">no shipments</span></div></div>`;
+    const rows=metrics.map(([lab,key,c])=>{ const v=s[key]||0;
+      return `<div class="mb-2.5"><div class="flex items-center justify-between text-xs mb-1"><span class="text-slate-500">${lab}</span><b class="tabular-nums text-slate-700">${v}%</b></div>
+        <div class="h-1.5 rounded-full bg-slate-100 overflow-hidden"><div class="h-full rounded-full" style="width:${Math.min(100,v)}%;background:${c}"></div></div></div>`; }).join('');
+    return `<div><div class="flex items-center justify-between mb-3"><span class="text-sm font-bold text-slate-700">${label}</span><span class="text-xs text-slate-400 tabular-nums">${s.tracked} tracked · ${s.deliveredRate}% delivered</span></div>${rows}</div>`;
+  };
+  el.innerHTML=`<div class="grid grid-cols-1 sm:grid-cols-2 gap-6">${col('Prepaid',bp.Prepaid)}${col('COD',bp.COD)}</div>`;
+}
+// #4 — Compose a critical escalation email from the shipments currently shown, AI-polished, review + send.
+// Compose a critical escalation for one AWB (per-order) or many (batch of marked orders), then review + send.
+async function dpComposeCritical(awbs){
+  awbs = (awbs||[]).filter(Boolean).slice(0,60);
+  if(!awbs.length){ showNotification('No shipment selected.', true); return; }
+  showNotification('Drafting escalation email…');
+  try{
+    const r = await fetch('/api/critical-email/compose', { method:'POST', headers:{'Content-Type':'application/json',...getAuthHeaders()}, body: JSON.stringify({ awbs, kind:'fake_attempts' }) });
+    const d = await r.json();
+    if(!r.ok || !d.success) throw new Error(d.message||'Compose failed');
+    dpCriticalModal(d);
+  }catch(e){ showNotification(e.message, true); }
+}
+function dpCriticalModal(d){
+  document.getElementById('dp-crit-modal')?.remove();
+  const wrap = document.createElement('div');
+  wrap.id='dp-crit-modal';
+  wrap.className='fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+      <div><h3 class="text-lg font-bold text-slate-800">Critical escalation email</h3>
+        <p class="text-xs text-slate-400 mt-0.5">${d.count} shipments · ${d.aiUsed?'✨ AI-polished':(d.aiAvailable?'AI unavailable — using template':'AI not configured — using template')}</p></div>
+      <button id="crit-close" class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button>
+    </div>
+    <div class="p-6 space-y-4 overflow-y-auto">
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Recipient</label>
+        <input id="crit-to" type="text" class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="RapidShyp email (default from Settings)"></div>
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Subject</label>
+        <input id="crit-subject" type="text" class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"></div>
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Message <span class="text-slate-400 font-normal">(editable)</span></label>
+        <textarea id="crit-body" rows="9" class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-y"></textarea></div>
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="text-xs font-semibold text-slate-500">Tone</span>
+        <div id="crit-tone" class="flex bg-slate-100 rounded-lg overflow-hidden text-xs border border-slate-200">
+          <button type="button" data-tone="polite" class="px-3 py-1.5 text-slate-600">Polite</button>
+          <button type="button" data-tone="direct" class="px-3 py-1.5 text-slate-600">Direct</button>
+          <button type="button" data-tone="formal" class="px-3 py-1.5 bg-indigo-600 text-white">Formal</button>
+        </div>
+        <button id="crit-polish" type="button" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100">✨ Polish with AI</button>
+        <span class="text-[11px] text-slate-400">edit freely, pick a tone, then Polish</span>
+      </div>
+      <p class="text-xs text-slate-400">A table of the ${d.count} shipments (order, AWB, courier, status, NDR reasons) is attached automatically below your message.</p>
+    </div>
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200">
+      <span id="crit-status" class="text-sm mr-auto"></span>
+      <button id="crit-cancel" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="crit-send" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700">Send email</button>
+    </div></div>`;
+  document.body.appendChild(wrap);
+  document.getElementById('crit-subject').value = d.subject||'';
+  document.getElementById('crit-body').value = d.body||'';
+  const close=()=>wrap.remove();
+  document.getElementById('crit-close').addEventListener('click', close);
+  document.getElementById('crit-cancel').addEventListener('click', close);
+  wrap.addEventListener('click', e=>{ if(e.target===wrap) close(); });
+  document.getElementById('crit-send').addEventListener('click', ()=>dpSendCritical(d));
+  // Tone pills (default formal) + Polish — re-polishes the CURRENT (hand-edited) draft in the chosen tone.
+  _critTone='formal';
+  wrap.querySelectorAll('#crit-tone button').forEach(b=>b.addEventListener('click',()=>{
+    _critTone=b.dataset.tone;
+    wrap.querySelectorAll('#crit-tone button').forEach(x=>{ const on=x===b;
+      x.classList.toggle('bg-indigo-600',on); x.classList.toggle('text-white',on); x.classList.toggle('text-slate-600',!on); });
+  }));
+  document.getElementById('crit-polish').addEventListener('click', dpPolishCritical);
+}
+// ── Escalation thread viewer (sent mail + replies with AI resolution score) ──
+const _dpThreadCache = {};   // awb → { loading, threads, error } | undefined = collapsed
+const _ESC_STATUS_BADGE = {
+  resolved:    ['Resolved',    'bg-emerald-100 text-emerald-700'],
+  in_progress: ['In progress', 'bg-sky-100 text-sky-700'],
+  needs_action:['Needs action','bg-amber-100 text-amber-700'],
+  unresolved:  ['Unresolved',  'bg-rose-100 text-rose-700'],
+};
+function dpThreadHtml(awb){
+  const t = _dpThreadCache[awb];
+  if(!t) return '';
+  if(t.loading) return '<div class="mt-3 text-xs text-slate-400">Loading escalation thread…</div>';
+  if(t.error) return `<div class="mt-3 text-xs text-rose-500">${ecEsc(t.error)}</div>`;
+  if(!t.threads || !t.threads.length) return '<div class="mt-3 text-xs text-slate-400">Escalation sent — thread will appear here once logged (older sends before reply-tracking have no thread).</div>';
+  // Proper sender/receiver mail thread: The Element (us, outbound → indigo, right-shifted) vs the
+  // courier (inbound → white, left). AI score/next-action only makes sense on THEIR replies.
+  return t.threads.map(th => {
+    const sent = `<div class="rounded-lg border border-indigo-200 bg-indigo-50/60 p-3 mr-6">
+        <div class="flex flex-wrap items-center gap-2 text-[11px]"><span class="px-1.5 py-0.5 rounded bg-indigo-600 text-white font-bold">THE ELEMENT</span><span class="text-slate-400">→ RapidShyp (${ecEsc(th.to_email||'')}) · ${_dmy(th.created_at)}</span></div>
+        <div class="text-xs font-semibold text-slate-700 mt-1.5">${ecEsc(th.subject||'')}</div>
+        <div class="text-xs text-slate-500 mt-1 whitespace-pre-wrap max-h-28 overflow-auto">${ecEsc((th.body||'').slice(0,600))}</div></div>`;
+    const reps = (th.replies||[]).map(rp => {
+      if (rp.direction === 'outbound') {
+        // Our own follow-up in the same thread.
+        return `<div class="rounded-lg border border-indigo-200 bg-indigo-50/60 p-3 mr-6 ml-4">
+          <div class="flex flex-wrap items-center gap-2 text-[11px]"><span class="px-1.5 py-0.5 rounded bg-indigo-600 text-white font-bold">THE ELEMENT</span><span class="text-slate-400">→ RapidShyp · ${_dmy(rp.created_at)}</span></div>
+          <div class="text-xs text-slate-600 mt-1.5 whitespace-pre-wrap max-h-32 overflow-auto">${ecEsc((rp.body||'').slice(0,800))}</div></div>`;
+      }
+      const b = _ESC_STATUS_BADGE[rp.ai_status] || ['Reply','bg-slate-100 text-slate-600'];
+      const scoreColor = rp.ai_score==null?'':rp.ai_score>=70?'text-emerald-600':rp.ai_score>=40?'text-amber-600':'text-rose-600';
+      return `<div class="rounded-lg border border-slate-200 bg-white p-3 ml-6 mr-0">
+        <div class="flex flex-wrap items-center gap-2 text-[11px]"><span class="px-1.5 py-0.5 rounded bg-slate-700 text-white font-bold">RAPIDSHYP</span><span class="text-slate-400">from ${ecEsc(rp.from_email||'')} · ${_dmy(rp.created_at)}</span>
+          <span class="px-1.5 py-0.5 rounded ${b[1]} font-semibold">${b[0]}</span>
+          ${rp.ai_score!=null?`<span class="font-bold tabular-nums ${scoreColor}">${rp.ai_score}/100 resolved</span>`:''}</div>
+        <div class="text-xs text-slate-600 mt-1.5 whitespace-pre-wrap max-h-32 overflow-auto">${ecEsc((rp.body||'').slice(0,800))}</div>
+        ${rp.ai_suggestion?`<div class="text-xs mt-2 px-2 py-1.5 rounded bg-amber-50 text-amber-800">💡 <b>Next:</b> ${ecEsc(rp.ai_suggestion)}</div>`:''}</div>`;
+    }).join('');
+    const none = (th.replies||[]).length ? '' : '<div class="text-xs text-slate-400 ml-6">No reply from RapidShyp yet — the inbox is checked every 10 minutes.</div>';
+    return `<div class="mt-3 pt-3 border-t border-slate-200 space-y-2"><div class="text-xs font-bold text-slate-600 uppercase tracking-wide">📧 Escalation thread</div>${sent}${reps}${none}</div>`;
+  }).join('');
+}
+async function dpToggleThread(awb){
+  if(_dpThreadCache[awb]){ delete _dpThreadCache[awb]; dpTableRender(); return; }   // collapse
+  _dpThreadCache[awb] = { loading: true }; dpTableRender();
+  try{
+    const r = await fetch('/api/escalation-emails?awb='+encodeURIComponent(awb), { headers: getAuthHeaders() });
+    const d = await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    _dpThreadCache[awb] = { loading: false, threads: d.threads||[] };
+  }catch(e){ _dpThreadCache[awb] = { loading: false, error: e.message }; }
+  dpTableRender();
+}
+let _critTone='formal';
+async function dpPolishCritical(){
+  const st=document.getElementById('crit-status'), btn=document.getElementById('crit-polish');
+  const subject=document.getElementById('crit-subject').value.trim();
+  const body=document.getElementById('crit-body').value.trim();
+  if(!body){ if(st){ st.textContent='Nothing to polish — message is empty'; st.className='text-sm text-rose-600'; } return; }
+  const orig=btn.textContent; btn.disabled=true; btn.textContent='Polishing…';
+  if(st){ st.textContent=''; }
+  try{
+    const r=await fetch('/api/critical-email/polish',{ method:'POST', headers:{'Content-Type':'application/json',...getAuthHeaders()}, body: JSON.stringify({ subject, body, tone:_critTone }) });
+    const d=await r.json();
+    if(!r.ok||!d.success) throw new Error(d.message||'Polish failed');
+    document.getElementById('crit-subject').value=d.subject||subject;
+    document.getElementById('crit-body').value=d.body||body;
+    if(st){ st.textContent=`Polished ✨ (${_critTone})`; st.className='text-sm text-emerald-600'; }
+  }catch(e){ if(st){ st.textContent=e.message; st.className='text-sm text-rose-600'; } }
+  finally{ btn.disabled=false; btn.textContent=orig; }
+}
+async function dpSendCritical(draft){
+  const st=document.getElementById('crit-status');
+  const subject=document.getElementById('crit-subject').value.trim();
+  const body=document.getElementById('crit-body').value.trim();
+  const to=document.getElementById('crit-to').value.trim();
+  if(!subject||!body){ if(st){ st.textContent='Subject and message required'; st.className='text-sm text-rose-600'; } return; }
+  if(!confirm('Send this escalation email'+(to?(' to '+to):' to the RapidShyp address in Settings')+'?')) return;
+  if(st){ st.textContent='Sending…'; st.className='text-sm text-slate-500'; }
+  try{
+    const r=await fetch('/api/critical-email/send',{ method:'POST', headers:{'Content-Type':'application/json',...getAuthHeaders()}, body: JSON.stringify({ subject, body, to:to||undefined, tableHtml: draft.tableHtml, orders: draft.orders }) });
+    const d=await r.json();
+    if(!r.ok||!d.success) throw new Error(d.message||'Send failed');
+    if(st){ st.textContent=d.message||'Sent ✓'; st.className='text-sm text-emerald-600'; }
+    setTimeout(()=>{ document.getElementById('dp-crit-modal')?.remove(); dpLoad(); }, 1200);   // refresh mail-sent badges + insight
+  }catch(e){ if(st){ st.textContent=e.message; st.className='text-sm text-rose-600'; } }
+}
+// Toggle the "likely-fake" mark on an order (per-order button in the expanded row).
+async function dpToggleMark(btn){
+  const order=btn.dataset.order, awb=btn.dataset.awb;
+  const st=btn.parentElement.querySelector('.dp-action-status');
+  btn.disabled=true;
+  try{
+    const r=await fetch('/api/order-marks',{ method:'POST', headers:{'Content-Type':'application/json',...getAuthHeaders()}, body: JSON.stringify({ order_name:order, awb, mark_type:'likely_fake' }) });
+    const d=await r.json(); if(!r.ok||!d.success) throw new Error(d.message||'Failed');
+    const row=(_dpData&&_dpData.shipments||[]).find(x=>x.order===order); if(row) row.marked_fake=d.marked;
+    if(st){ st.textContent=d.marked?'Marked ✓':'Unmarked'; st.className='dp-action-status text-xs text-emerald-600'; }
+    dpTableRender(); dpLoadLikelyFake();
+  }catch(e){ if(st){ st.textContent=e.message; st.className='dp-action-status text-xs text-rose-600'; } btn.disabled=false; }
+}
+// Likely-Fake insight card — marked count, delivered-conversion %, RTO %, mails sent + batch escalate.
+async function dpLoadLikelyFake(){
+  const el=document.getElementById('dp-likely-fake'); if(!el) return;
+  try{
+    const r=await fetch('/api/likely-fake-insight',{ headers:getAuthHeaders() });
+    const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    const s=d.summary;
+    if(!s.total){ el.innerHTML='<div class="text-slate-400 text-sm py-4">No orders marked likely-fake yet. Expand any order and use <b>“🚩 Mark as likely-fake”</b>.</div>'; return; }
+    const kpi=(label,val,color)=>`<div class="text-center"><div class="text-2xl font-bold ${color}">${val}</div><div class="text-xs text-slate-400 mt-0.5">${label}</div></div>`;
+    el.innerHTML=`<div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-4">
+      ${kpi('Marked', s.total, 'text-slate-800')}
+      ${kpi('Delivered — fake ✓', s.delivered+' · '+s.conversionPct+'%', 'text-emerald-600')}
+      ${kpi('RTO', s.rto+' · '+s.rtoPct+'%', 'text-rose-600')}
+      ${kpi('Still moving', s.inTransit, 'text-amber-600')}
+      ${kpi('Mails sent', s.mailsSent, 'text-indigo-600')}
+    </div>
+    <p class="text-xs text-slate-400 mb-3">“Delivered — fake ✓” = orders you flagged that were then delivered fine, confirming the earlier failed attempt was fake.</p>
+    ${(currentUser&&currentUser.isAdmin)?`<button id="dp-batch-escalate" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700">✉️ Escalate all ${s.total} marked to RapidShyp</button>`:''}`;
+    document.getElementById('dp-batch-escalate')?.addEventListener('click', ()=>dpComposeCritical((d.rows||[]).map(x=>x.awb).filter(Boolean)));
+  }catch(e){ el.innerHTML=`<div class="text-rose-400 text-sm py-4">${ecEsc(e.message)}</div>`; }
+}
+// (Global "latest escalation replies" list removed — each order's mail thread shows inside its
+//  expanded row instead, auto-loaded on expand.)
 function dpFunnel(f){ const el=document.getElementById('dp-funnel'); const total=f&&f.total||0;
     if(!total){ el.innerHTML='<div class="text-slate-400 text-sm py-8 text-center">No NDR shipments in range</div>'; return; }
     const seg=[['Recovered → Delivered',f.recovered,'#16a34a'],['Lost → RTO',f.lost,'#dc2626'],['Still pending',f.pending,'#d97706']];
@@ -6068,6 +6494,8 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
     const q=(document.getElementById('dp-search')?.value||'').trim().toLowerCase();
     let list=all;
     if(state==='ndr_cohort') list=list.filter(r=>(r.ndr_count||0)>0);
+    else if(state==='marked_fake') list=list.filter(r=>r.marked_fake);   // manually flagged likely-fake
+    else if(state==='mail_sent') list=list.filter(r=>r.mail_sent);       // escalation email sent
     else if(state==='rto_attempted') list=list.filter(r=>r.state==='rto' && (r.ndr_count||0)>0);
     else if(state==='rto_silent') list=list.filter(r=>r.state==='rto' && (r.ndr_count||0)===0);
     else if(state!=='all') list=list.filter(r=>r.state===state);
@@ -6084,7 +6512,7 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
     const td='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
     const cols=[{k:'order',l:'Order / AWB'},{k:'state',l:'State'},{k:'type',l:'Type'},{k:'courier',l:'Courier'},
         {k:'attempts',l:'Att',a:1},{k:'ndr_count',l:'NDR',a:1},{k:null,l:'Pay'},{k:null,l:'Zone',c:1},
-        {k:'order_date',l:'Ordered'},{k:'otdHrs',l:'O→Disp'},{k:null,l:'NDR reasons'}];
+        {k:'order_date',l:'Ordered'},{k:'edd',l:'Promise'},{k:'otdHrs',l:'O→Disp'},{k:null,l:'NDR reasons'}];
     const head=cols.map(col=>{ const al=col.a?' text-right':col.c?' text-center':'';
         if(!col.k) return `<th class="${th}${al}">${col.l}</th>`;
         const act=_dpSort.key===col.k;
@@ -6101,7 +6529,7 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
         const reasons=(r.reasons||[]).join(' · ');
         let out=`<tr class="dp-row cursor-pointer transition-colors ${rowCls}" data-awb="${r.awb||''}">`+
           `<td class="${td}" style="${stripe}"><div class="flex items-center gap-1.5"><span class="text-slate-300 text-xs w-3">${open?'▾':'▸'}</span><div><div class="font-semibold text-slate-800 leading-tight">${r.order||'—'}${r.source==='docpharma'?'<span class="text-slate-400 text-[10px] font-normal ml-1">DP</span>':''}</div><div class="text-[11px] text-slate-400 leading-tight">${r.awb||''}</div></div></div></td>`+
-          `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${b[1]}">${b[0]}</span></td>`+
+          `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${b[1]}">${b[0]}</span>${r.marked_fake?' <span title="Marked likely-fake">🚩</span>':''}${r.mail_sent?' <span title="Critical mail sent">✉️</span>':''}</td>`+
           `<td class="${td}">${typ}</td>`+
           `<td class="${td} text-slate-600"><div class="truncate max-w-[130px]" title="${r.courier||''}">${r.courier||'—'}</div></td>`+
           `<td class="${td} text-right tabular-nums ${r.attempts>1?'text-slate-800 font-medium':'text-slate-400'}">${r.attempts}</td>`+
@@ -6109,6 +6537,7 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
           `<td class="${td}">${pay}</td>`+
           `<td class="${td} text-center text-slate-500 font-medium">${r.zone||'<span class="text-slate-300">—</span>'}</td>`+
           `<td class="${td} text-slate-500 tabular-nums">${dpShortDate(r.order_date)}</td>`+
+          `<td class="${td} tabular-nums ${r.pastPromise?'text-rose-600 font-semibold':'text-slate-500'}" title="${r.pastPromise?'Past promise date':''}">${r.edd?dpShortDate(new Date(r.edd).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'})):'—'}</td>`+
           `<td class="${td}">${otdCell}</td>`+
           `<td class="px-3 py-2.5 text-sm border-b border-slate-100 align-middle"><div class="truncate max-w-[240px] text-xs text-slate-500" title="${reasons.replace(/"/g,'&quot;')}">${reasons||'—'}</div></td>`+
         `</tr>`;
@@ -6122,7 +6551,14 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
         dpTableRender(); }));
     c.querySelectorAll('.dp-row').forEach(row=>row.addEventListener('click',()=>{ const awb=row.dataset.awb; if(!awb) return;
         _dpOpenAwb=(_dpOpenAwb===awb)?null:awb; dpTableRender();
-        if(_dpOpenAwb && !_dpScanCache[awb]) dpLoadScans(awb); }));
+        if(_dpOpenAwb && !_dpScanCache[awb]) dpLoadScans(awb);
+        // Auto-load this order's escalation mail thread on expand (no extra click needed).
+        if(_dpOpenAwb){ const r=(_dpData&&_dpData.shipments||[]).find(x=>x.awb===awb); if(r&&r.mail_sent && !_dpThreadCache[awb]) dpToggleThread(awb); } }));
+    // Per-order action buttons inside the expanded row.
+    c.querySelectorAll('.dp-mark-fake').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpToggleMark(b); }));
+    c.querySelectorAll('.dp-send-critical').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpComposeCritical([b.dataset.awb]); }));
+    c.querySelectorAll('.dp-view-thread').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpToggleThread(b.dataset.awb); }));
+    c.querySelectorAll('.dp-ndr-action').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); ndrActionModal(b.dataset.awb, b.dataset.order, ''); }));
 }
 // Expanded detail row — date-log (instant, from stored timeline) + scan-log (fetched on demand).
 function dpRenderDetail(r,td){ const ts=r.ts||{};
@@ -6154,11 +6590,20 @@ function dpRenderDetail(r,td){ const ts=r.ts||{};
     }
     else if(!sc.scans||!sc.scans.length) scanHtml='<div class="text-slate-400 text-xs py-3">No scan log available for this shipment.</div>';
     else scanHtml=`${scanRows(sc.scans)}${sc.live?'<div class="text-[10px] text-emerald-500 mt-1">● fetched live from courier</div>':''}`;
-    return `<tr class="dp-detail"><td colspan="11" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
+    const actions = `<div class="mt-4 pt-3 border-t border-slate-200 flex flex-wrap items-center gap-2">
+        <span class="text-xs font-bold text-slate-500 uppercase tracking-wide mr-1">Actions</span>
+        <button class="dp-mark-fake px-3 py-1.5 rounded-lg text-xs font-semibold ${r.marked_fake?'bg-rose-600 text-white hover:bg-rose-700':'bg-white border border-slate-200 text-slate-600 hover:border-rose-300'}" data-order="${ecEsc(r.order||'')}" data-awb="${ecEsc(r.awb||'')}">${r.marked_fake?'🚩 Marked likely-fake — click to unmark':'🚩 Mark as likely-fake'}</button>
+        ${r.mail_sent
+            ? `<button class="dp-view-thread px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100" data-awb="${ecEsc(r.awb||'')}">📧 ${_dpThreadCache[r.awb]?'Hide email':'View email & replies'}</button>`
+            : ((currentUser&&currentUser.isAdmin)?`<button class="dp-send-critical px-3 py-1.5 rounded-lg text-xs font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300" data-awb="${ecEsc(r.awb||'')}">✉️ Send critical email</button>`:'')}
+        ${(r.state==='ndr_pending'&&r.awb)?`<button class="dp-ndr-action px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100" data-awb="${ecEsc(r.awb)}" data-order="${ecEsc(r.order||'')}">🔁 NDR action (reattempt / return)</button>`:''}
+        <span class="dp-action-status text-xs"></span>
+      </div>`;
+    return `<tr class="dp-detail"><td colspan="12" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
         <div class="grid md:grid-cols-2 gap-6">
           <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Date log</div>${timeline}${meta}</div>
           <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log</div>${scanHtml}</div>
-        </div></td></tr>`;
+        </div>${actions}${dpThreadHtml(r.awb)}</td></tr>`;
 }
 // Fetch the full scan log for one AWB (cached; served from DB if stored, else 1 live courier call).
 async function dpLoadScans(awb){ _dpScanCache[awb]={loading:true}; try{

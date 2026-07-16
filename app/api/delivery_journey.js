@@ -19,7 +19,8 @@ function classifyScan(desc) {
     // word char), so match a boundary BEFORE "rto" only. Also catch courier "Returned as per…" phrasing.
     if (/\brto|return to origin|returned to|returned as per|reverse pickup|rto initiated/.test(s)) return 'rto';
     if (/out for delivery|out for del/.test(s))                          return 'attempt';
-    if (/\bdelivered\b|delivery successful|shipment delivered/.test(s))  return 'delivered';
+    // Actual delivery only — "not delivered"/"undelivered" phrasings must fall through to the NDR branch below.
+    if (/\bdelivered\b|delivery successful|shipment delivered/.test(s) && !/not[\s_-]*delivered|undeliver/.test(s)) return 'delivered';
     // Pickup / dispatch — the shipment left the origin. Marks the Order→Dispatch TAT boundary.
     // "out for pickup" is NOT a pickup done, so it must not match here.
     if (/picked up|pickup done|pickup completed|shipment picked/.test(s)) return 'pickup';
@@ -121,11 +122,14 @@ function parseRapidshypJourney(scans, currentStatus, courier, zone, statusCode, 
     }
     // Authoritative current-status code wins; else fall back to scan-derived flags + text.
     const codeOut   = codeOutcome(statusCode);
-    const delivered = codeOut === 'delivered' || !!deliveredAt || (/deliver/.test(status) && !/rto/.test(status));
+    // "delivered" must be an ACTUAL delivery. \bdelivered\b matches "DELIVERED" but NOT "OUT_FOR_DELIVERY"
+    // or "UNDELIVERED" (the old /deliver/ test froze every shipment caught mid-OFD as delivered+is_final —
+    // 344 rows). "NOT delivered" phrasings are excluded explicitly.
+    const delivered = codeOut === 'delivered' || !!deliveredAt || (/\bdelivered\b/.test(status) && !/not[\s_-]*delivered|rto/.test(status));
     // Match a boundary BEFORE "rto" only — "rto_initiated"/"rto_in_transit"/"rto_delivered" all count as RTO.
     const rto       = codeOut === 'rto' || !!rtoAt || /\brto|return/.test(status);
     const lost      = codeOut === 'lost' || !!lostAt || /\blost\b/.test(status);   // terminal loss (LST/DMG/DPO codes)
-    const reached_delivery = seenOFD || delivered || /out for delivery/.test(status);
+    const reached_delivery = seenOFD || delivered || /out[\s_]for[\s_]delivery/.test(status);
     const outcome   = delivered ? 'delivered' : rto ? 'rto' : lost ? 'lost' : (ndr_count > 0 ? 'ndr_pending' : 'in_transit');
 
     return {
