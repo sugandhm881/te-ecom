@@ -3,7 +3,8 @@
 **Company:** Shifupro Technologies Pvt Ltd · Brand: **The Element** (D2C skincare)
 **Application:** Internal e-commerce operations & analytics dashboard
 **Version:** 1.0.0 · **Runtime:** Node.js (Express) · **Database:** Supabase (PostgreSQL)
-**Production:** `http://72.60.97.42:5002` (pm2-managed)
+**Live (production):** `https://dashboard.theelement.skin:8443/` — HTTPS via Caddy reverse-proxy (see `Caddyfile.example`), pm2-managed
+**Staging / local dev:** port `5002` — `http://localhost:5002` (`npm start`); `72.60.97.42:5002` is the staging server
 
 ---
 
