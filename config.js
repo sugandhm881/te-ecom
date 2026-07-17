@@ -8,7 +8,7 @@ const CACHE_DIR = process.env.CACHE_DIR || '.';
 
 module.exports = {
     PORT: _envFile.PORT || process.env.PORT || 5001,
-    SECRET_KEY: process.env.JWT_SECRET,
+    SECRET_KEY: _envFile.JWT_SECRET || process.env.JWT_SECRET,   // prefer the .env FILE (like PORT) so a stale pm2-cached JWT_SECRET can't shadow it
 
     // --- Dashboard Login ---
     // 2FA login OTP (ALL accounts) is EMAILED via the shared sendMail — sender comes from
