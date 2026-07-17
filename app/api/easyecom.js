@@ -11,7 +11,9 @@ const axios = require('axios');
 const moment = require('moment-timezone');
 const config = require('../../config');
 const { supabase, getOrderFromSupabase } = require('../supabase');
-const { tokenRequired } = require('../auth');
+const { tokenRequired, requireAdmin } = require('../auth');
+const { encrypt, decrypt } = require('./crypto_util');
+const APP_BASE = 'https://app.easyecom.io';
 
 const TOKEN_ENDPOINT = 'https://api.easyecom.io/access/token';
 const EASYECOM_API_BASE = 'https://api.easyecom.io';
@@ -686,6 +688,183 @@ router.post('/hold-order', tokenRequired, async (req, res) => {
         return res.status(502).json({ success: false, message: body.message || `EasyEcom rejected the hold (HTTP ${r.status}).` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
+// ── Change an order's fulfillment warehouse (route it) ──────────────────────────────
+// Panel-internal endpoint (found by capturing app.easyecom.io/Orders/UpdateVendor): POST
+// /Orders/UpdateVendor { invoice_id, vendor_c_id (target warehouse), c_id (logged-in company) }.
+// KEY CONSTRAINT: EasyEcom only lets you route an order while the API session is logged into the
+// order's CURRENT owning location ("...can only be routed from that company. Please login to (X)
+// location and try routing again."). So we mint a token scoped to the SOURCE warehouse's location
+// key, then call UpdateVendor. Primary use: re-route DocPharma-rejected orders to Shifupro so we
+// can fulfil them ourselves.
+//
+// Warehouse registry — c_id → { name, locationKey } (location keys live in .env). Only warehouses
+// with a location key can be routed FROM (we must be able to log into them); any can be a target.
+const EE_WAREHOUSES = [
+    { cId: 257282, name: 'Shifupro Technologies Pvt. Ltd.', keyEnv: 'EASYECOM_WH_KEY' },
+    { cId: 271096, name: 'DP Bangalore', keyEnv: 'EASYECOM_WH2_KEY' },
+    { cId: 288922, name: 'Amazon_FBA_DEL5', keyEnv: null },
+    { cId: 288927, name: 'Amazon_FBA_DEL4', keyEnv: null },
+];
+const eeLocationKeyFor = cId => { const w = EE_WAREHOUSES.find(w => String(w.cId) === String(cId)); return w && w.keyEnv ? config[w.keyEnv] : null; };
+const eeWarehouseName = cId => { const w = EE_WAREHOUSES.find(w => String(w.cId) === String(cId)); return w ? w.name : String(cId); };
+const eeDecode = t => { try { return JSON.parse(Buffer.from(String(t).split('.')[1], 'base64').toString()); } catch (_) { return {}; } };
+
+// Mint a FRESH token scoped to a specific location key (login as that warehouse). Not cached in the
+// main _tokenCache — this is a short-lived, purpose-scoped session for one routing call.
+async function mintTokenForLocation(locationKey) {
+    if (!config.EASYECOM_EMAIL || !config.EASYECOM_PASSWORD) throw new Error('EASYECOM_EMAIL/PASSWORD required to mint a location token.');
+    const res = await axios.post(TOKEN_ENDPOINT, { email: config.EASYECOM_EMAIL, password: config.EASYECOM_PASSWORD, location_key: locationKey },
+        { headers: { 'x-api-key': config.EASYECOM_API_KEY, 'Content-Type': 'application/json' }, validateStatus: () => true, timeout: 20000 });
+    if (res.status !== 200) throw new Error(`Location login failed (${res.status}): ${JSON.stringify(res.data).slice(0, 200)}`);
+    const body = res.data || {};
+    const token = (body.data && body.data.token && body.data.token.jwt_token) || (body.data && body.data.token) || body.token || body.jwt;
+    if (!token || typeof token !== 'string') throw new Error('No token in location-login response.');
+    return token;
+}
+
+// Resolve an order's invoice_id AND current warehouse c_id from the synced EasyEcom row.
+async function resolveInvoiceAndWarehouse(orderName) {
+    const clean = String(orderName || '').replace('#', '').trim();
+    if (!clean) return null;
+    const { data } = await supabase.from('b2c_order_easycom')
+        .select('order_id, raw_data').or(`reference_code.eq.${clean},order_id.eq.${/^\d+$/.test(clean) ? clean : 0}`)
+        .limit(1).maybeSingle();
+    if (!data || !data.raw_data) return null;
+    const rd = data.raw_data;
+    return { invoiceId: rd.invoice_id || null, currentCid: rd.warehouse_id || rd.warehouseId || null, eeOrderId: data.order_id };
+}
+
+// Our company c_id (the panel session's company) — used as the UpdateVendor `c_id` param.
+async function ourCompanyCid() { try { return eeDecode(await getEasyecomToken()).company_id || 257282; } catch (_) { return 257282; } }
+
+// Record a successful warehouse route as a mark (same pattern as ee_hold) so the Orders dashboard can
+// show "Moved: <from> → <to>" and disable the Move button. note = "<from> → <to>".
+async function markWarehouseRouted(orderName, fromCid, toCid, by) {
+    await supabase.from('order_marks_ecom').upsert({
+        order_name: String(orderName).replace('#', '').trim(), mark_type: 'warehouse_routed',
+        note: `${eeWarehouseName(fromCid)} → ${eeWarehouseName(toCid)}`, awb: null,
+        created_by: by || null, created_at: new Date().toISOString(),
+    }, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
+}
+
+// Shared UpdateVendor caller (cookie replay). Returns { status, raw, data, ok, expired }.
+// SUCCESS = literal "0"; business error = {"code":400,"message":...}; expired = 302/HTML/Unauthenticated.
+async function callUpdateVendor(cookie, invoiceId, vendorCid, cId, eeOrderId) {
+    const body = `invoice_id=${encodeURIComponent(invoiceId)}&vendor_c_id=${encodeURIComponent(vendorCid)}&c_id=${encodeURIComponent(cId)}`;
+    const r = await axios.post(`${APP_BASE}/Orders/UpdateVendor`, body, {
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150 Safari/537.36',
+            'Origin': APP_BASE, 'Referer': `${APP_BASE}/V2/Orders/Details/${eeOrderId || ''}`, 'Cookie': cookie,
+        }, timeout: 25000, maxRedirects: 0, validateStatus: () => true,
+    });
+    const raw = typeof r.data === 'object' ? JSON.stringify(r.data) : String(r.data);
+    const data = (typeof r.data === 'object') ? r.data : (() => { try { return JSON.parse(raw); } catch (_) { return {}; } })();
+    const expired = r.status === 302 || r.status === 401 || /unauthenticated|<!doctype|<html|sign ?in|please log ?in/i.test(raw);
+    const ok = r.status === 200 && !expired && (raw.trim() === '0' || data.code === 200 || data.status === true || data.success === true) && data.code !== 400;
+    return { status: r.status, raw, data, ok, expired };
+}
+
+// GET /api/easyecom/warehouses — the warehouse list.
+router.get('/warehouses', tokenRequired, (req, res) => {
+    res.json({ success: true, warehouses: EE_WAREHOUSES.map(w => ({ cId: w.cId, name: w.name })) });
+});
+
+// ── EasyEcom panel-session cookie (admin) ────────────────────────────────────────────
+// Warehouse routing (/Orders/UpdateVendor) is a legacy PHP feature that ONLY accepts the
+// interactive panel session — the API JWT is refused with "please login to <location>". So the
+// admin pastes their EasyEcom browser session cookie (laravel_session + PHPSESSID from DevTools);
+// we store it AES-GCM encrypted and replay it for the routing call. It expires with the browser
+// session (~a few hours/days), after which the admin re-pastes it. c_id is our company from the JWT.
+async function getPanelCookie() {
+    const { data } = await supabase.from('easyecom_panel_session').select('cookie_enc, updated_at, updated_by').eq('id', 1).maybeSingle();
+    return data ? { cookie: decrypt(data.cookie_enc), updatedAt: data.updated_at, updatedBy: data.updated_by } : null;
+}
+router.get('/session', tokenRequired, requireAdmin, async (req, res) => {
+    const s = await getPanelCookie();
+    res.json({ success: true, hasSession: !!(s && s.cookie), updatedAt: s && s.updatedAt, updatedBy: s && s.updatedBy });
+});
+router.post('/session', tokenRequired, requireAdmin, async (req, res) => {
+    try {
+        let cookie = String((req.body || {}).cookie || '').trim();
+        if (!cookie) return res.status(400).json({ success: false, message: 'Paste your EasyEcom session cookie.' });
+        // Accept either a full document.cookie string or a copied Cookie header; must contain the session cookie.
+        if (!/laravel_session=/.test(cookie)) return res.status(400).json({ success: false, message: 'That doesn\'t look like an EasyEcom session — it must include laravel_session=…' });
+        const { error } = await supabase.from('easyecom_panel_session').upsert({ id: 1, cookie_enc: encrypt(cookie), updated_by: req.user && req.user.sub, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+        if (error) throw new Error(error.message);
+        res.json({ success: true, message: 'EasyEcom session saved.' });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// POST /api/easyecom/change-warehouse  { orderName, targetCid } — via the stored panel session cookie.
+router.post('/change-warehouse', tokenRequired, async (req, res) => {
+    try {
+        const { orderName, targetCid } = req.body || {};
+        if (!orderName || !targetCid) return res.status(400).json({ success: false, message: 'orderName and a target warehouse are required.' });
+        if (!EE_WAREHOUSES.some(w => String(w.cId) === String(targetCid))) return res.status(400).json({ success: false, message: 'Unknown target warehouse.' });
+        const sess = await getPanelCookie();
+        if (!sess || !sess.cookie) return res.status(400).json({ success: false, message: 'No EasyEcom session saved yet. Click "Update EasyEcom session" and paste your panel cookie first.', needSession: true });
+        const info = await resolveInvoiceAndWarehouse(orderName);
+        if (!info || !info.invoiceId) return res.status(404).json({ success: false, message: 'Order not found in EasyEcom (no invoice id synced yet).' });
+        const cId = await ourCompanyCid();
+        const out = await callUpdateVendor(sess.cookie, info.invoiceId, targetCid, cId, info.eeOrderId);
+        await supabase.from('api_logs_ecom').insert({ action: 'easyecom_change_warehouse', status_code: out.status, payload: { orderName, invoice_id: info.invoiceId, to: targetCid, c_id: cId }, response: (out.data && Object.keys(out.data).length) ? out.data : out.raw.slice(0, 300) }).then(() => {}).catch(() => {});
+        if (out.expired) return res.status(401).json({ success: false, needSession: true, message: 'Your saved EasyEcom session has expired. Click "Update session" and paste a fresh cookie from the panel.' });
+        if (out.ok) { await markWarehouseRouted(orderName, info.currentCid, targetCid, req.user && req.user.sub); return res.json({ success: true, message: `Order ${orderName} routed to ${eeWarehouseName(targetCid)}.`, to: eeWarehouseName(targetCid), response: out.data }); }
+        return res.status(422).json({ success: false, message: String(out.data.message || '') || `EasyEcom rejected the warehouse change (code ${out.data.code || out.status}).`, response: out.data });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// GET /api/easyecom/session/check — live validity ping (non-destructive: invoice_id=0).
+router.get('/session/check', tokenRequired, async (req, res) => {
+    try {
+        const sess = await getPanelCookie();
+        if (!sess || !sess.cookie) return res.json({ success: true, hasSession: false, valid: false });
+        const out = await callUpdateVendor(sess.cookie, 0, 257282, await ourCompanyCid(), 0);
+        // Authenticated (session alive) → we reach business validation ("Invalid Company ID"), NOT an auth wall.
+        res.json({ success: true, hasSession: true, valid: !out.expired, updatedAt: sess.updatedAt });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// Keep the panel session warm — a light authenticated ping extends the rolling session so the cookie
+// rarely needs re-pasting. Returns 'alive' | 'expired' | 'none'. Called by a cron.
+async function pingPanelSession() {
+    const sess = await getPanelCookie();
+    if (!sess || !sess.cookie) return 'none';
+    try {
+        const out = await callUpdateVendor(sess.cookie, 0, 257282, await ourCompanyCid(), 0);
+        if (out.expired) { console.warn('[EE Session] panel session EXPIRED — admin must re-paste the cookie.'); return 'expired'; }
+        return 'alive';
+    } catch (e) { console.warn('[EE Session] keep-alive ping failed:', e.message); return 'error'; }
+}
+
+// Auto-route DocPharma-rejected orders to Shifupro (MWH). For each order name: resolve invoice + current
+// warehouse; skip if already on Shifupro or has an AWB (EasyEcom blocks routing once a shipment exists);
+// otherwise cookie-route to Shifupro. Returns [{ order, result }] for logging/reporting.
+const SHIFUPRO_CID = 257282;
+async function autoRouteRejectedToShifupro(orderNames) {
+    const results = [];
+    const sess = await getPanelCookie();
+    if (!sess || !sess.cookie) { console.warn('[EE AutoRoute] no panel session saved — cannot auto-route.'); return orderNames.map(o => ({ order: o, result: 'no-session' })); }
+    const cId = await ourCompanyCid();
+    for (const name of orderNames) {
+        try {
+            const info = await resolveInvoiceAndWarehouse(name);
+            if (!info || !info.invoiceId) { results.push({ order: name, result: 'not-synced' }); continue; }
+            if (String(info.currentCid) === String(SHIFUPRO_CID)) { results.push({ order: name, result: 'already-shifupro' }); continue; }
+            const out = await callUpdateVendor(sess.cookie, info.invoiceId, SHIFUPRO_CID, cId, info.eeOrderId);
+            await supabase.from('api_logs_ecom').insert({ action: 'easyecom_autoroute_warehouse', status_code: out.status, payload: { order: name, invoice_id: info.invoiceId, to: SHIFUPRO_CID }, response: (out.data && Object.keys(out.data).length) ? out.data : out.raw.slice(0, 200) }).then(() => {}).catch(() => {});
+            if (out.expired) { results.push({ order: name, result: 'session-expired' }); }
+            else if (out.ok) { await markWarehouseRouted(name, info.currentCid, SHIFUPRO_CID, 'auto-route'); results.push({ order: name, result: 'routed' }); }
+            else { results.push({ order: name, result: (out.data.message || 'rejected').slice(0, 80) }); }   // e.g. "shipment already assigned"
+        } catch (e) { results.push({ order: name, result: 'error:' + e.message.slice(0, 60) }); }
+        await new Promise(r => setTimeout(r, 1500));   // deliberately slow — one order at a time, never bursts
+    }
+    const routed = results.filter(r => r.result === 'routed').length;
+    if (routed) console.log(`[EE AutoRoute] routed ${routed}/${orderNames.length} rejected order(s) → Shifupro`);
+    return results;
+}
+
 router.post('/unhold-order', tokenRequired, async (req, res) => {
     try {
         const { orderName } = req.body || {};
@@ -714,3 +893,5 @@ module.exports.syncEasyecomOrders = syncEasyecomOrders;
 module.exports.dbRowToDashboard = dbRowToDashboard;
 module.exports.rawToDbRow = rawToDbRow;
 module.exports.fetchEasyecomOrderById = fetchEasyecomOrderById;
+module.exports.autoRouteRejectedToShifupro = autoRouteRejectedToShifupro;
+module.exports.pingPanelSession = pingPanelSession;

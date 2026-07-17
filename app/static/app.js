@@ -51,6 +51,7 @@ let adAnalysisDatePreset = 'last_7_days';  // Default for Ad Analysis
 let codConfirmations = [];
 let currentSearchTerm = '';
 let activeCodFilter = 'All';
+let activeHoldFilter = 'All';   // Orders dashboard: All | On Hold | Not Held
 
 // --- NEW STATE FOR BULK ACTIONS ---
 let selectedOrders = new Set(); 
@@ -395,7 +396,39 @@ async function fetchApiData(endpoint, errorMessage, options = {}) {
 
 // Shopify order data enriched with EasyEcom order IDs for confirm/approve.
 // noLoader: loads quietly — the home page renders its shell first, and the 60s auto-refresh no longer flashes the overlay.
-const fetchOrdersFromServer = () => fetchApiData(`/get-orders`, 'Failed to fetch orders.', { noLoader: true });
+// Server order fetch is now DATE-AWARE: the table is capped but the KPI cards get accurate full-window
+// counts (so 7-day vs 30-day show different numbers). serverOrderMeta holds { total, shown, truncated, kpis }.
+let serverOrderMeta = null;
+function ordersWindowDays() {
+    try {
+        const [s, e] = calculateDateRange(activeDatePreset, startDateFilterEl && startDateFilterEl.value, endDateFilterEl && endDateFilterEl.value);
+        if (s && e) return Math.min(90, Math.max(1, Math.round((e - s) / 86400000) + 1));
+    } catch (_) {}
+    return 30;
+}
+const fetchOrdersFromServer = async (days) => {
+    const n = days || ordersWindowDays();
+    const d = await fetchApiData(`/get-orders?days=${n}`, 'Failed to fetch orders.', { noLoader: true });
+    if (Array.isArray(d)) { serverOrderMeta = null; return d; }                                  // legacy array shape
+    if (d && Array.isArray(d.orders)) { serverOrderMeta = { total: d.total, shown: d.shown, truncated: d.truncated, kpis: d.kpis }; return d.orders; }
+    serverOrderMeta = null; return [];
+};
+// Date-preset change on the Orders dashboard must RE-FETCH (server-side window), not just client-filter.
+// Shows an instant branded loader (so it never feels frozen) and guards against overlapping fetches.
+let _ordersReloading = false;
+async function reloadOrdersForDate() {
+    if (_ordersReloading) return;
+    _ordersReloading = true;
+    const list = document.getElementById('orders-list');
+    if (list) list.innerHTML = `<tr><td colspan="10" class="py-14 text-center">${typeof brandLoader === 'function' ? brandLoader('Loading orders…') : 'Loading…'}</td></tr>`;
+    // Dim the KPI strip while the new window loads, so the numbers don't look stale.
+    const kpiWrap = document.getElementById('kpi-dashboard-all')?.parentElement;
+    if (kpiWrap) { kpiWrap.style.transition = 'opacity .2s ease'; kpiWrap.style.opacity = '0.45'; }
+    try { allOrders = await fetchOrdersFromServer(); } catch (_) {}
+    if (kpiWrap) kpiWrap.style.opacity = '1';
+    _ordersReloading = false;
+    renderAllDashboard();
+}
 
 // --- Silent background refresh (auto every 1 min) ---
 async function silentRefreshOrders() {
@@ -617,6 +650,36 @@ function navigate(view) {
             activeViewElement = document.getElementById('amazon-fba-view');
             if (typeof fbaInit === 'function') fbaInit();
             break;
+        case 'inf-dashboard':
+            activeLinkElement = document.getElementById('nav-inf-dashboard');
+            activeViewElement = document.getElementById('inf-dashboard-view');
+            if (typeof infDashInit === 'function') infDashInit();
+            break;
+        case 'inf-discover':
+            activeLinkElement = document.getElementById('nav-inf-discover');
+            activeViewElement = document.getElementById('inf-discover-view');
+            if (typeof infDiscoverInit === 'function') infDiscoverInit();
+            break;
+        case 'inf-influencers':
+            activeLinkElement = document.getElementById('nav-inf-influencers');
+            activeViewElement = document.getElementById('inf-influencers-view');
+            if (typeof infListInit === 'function') infListInit();
+            break;
+        case 'inf-lists':
+            activeLinkElement = document.getElementById('nav-inf-lists');
+            activeViewElement = document.getElementById('inf-lists-view');
+            if (typeof infListsInit === 'function') infListsInit();
+            break;
+        case 'inf-calendar':
+            activeLinkElement = document.getElementById('nav-inf-calendar');
+            activeViewElement = document.getElementById('inf-calendar-view');
+            if (typeof infCalInit === 'function') infCalInit();
+            break;
+        case 'inf-mentions':
+            activeLinkElement = document.getElementById('nav-inf-mentions');
+            activeViewElement = document.getElementById('inf-mentions-view');
+            if (typeof infMentionsInit === 'function') infMentionsInit();
+            break;
         case 'users':
             activeLinkElement = document.getElementById('nav-users');
             activeViewElement = document.getElementById('users-view');
@@ -640,54 +703,45 @@ function navigate(view) {
 
 // checkAndUpdateWorkflow removed — EasyEcom handles order processing now
 
-// --- DASHBOARD FILTERS RENDERING (Added COD Filter) ---
+// --- DASHBOARD FILTERS RENDERING — clean toolbar; containers live in index.html, JS just populates ---
 function renderDashboardFilters() {
-    // 1. Platform Buttons
-    platformFiltersEl.innerHTML = ['All', 'Shopify'].map(p =>
-        `<button data-filter="${p}" class="filter-btn px-3 py-1 text-sm rounded-md ${activePlatformFilter===p ? 'active' : ''}">${p}</button>`
-    ).join('');
-    
-    // 2. Source Buttons (RapidShyp/DocPharma)
-    let sourceContainer = document.getElementById('source-filters');
-    if (!sourceContainer) {
-        sourceContainer = document.createElement('div');
-        sourceContainer.id = 'source-filters';
-        sourceContainer.className = 'flex bg-slate-100 rounded-lg p-1 gap-1 ml-4';
-        platformFiltersEl.parentNode.insertBefore(sourceContainer, platformFiltersEl.nextSibling);
-    }
-    sourceContainer.innerHTML = ['All', 'RapidShyp', 'DocPharma'].map(s => 
-        `<button data-source="${s}" class="source-btn px-3 py-1 text-sm font-medium rounded-md transition-all ${activeSourceFilter===s ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}">${s}</button>`
-    ).join('');
+    // Shared pill-toggle style (platform + source), so both segmented controls look identical.
+    const pill = (attr, val, active, label) =>
+        `<button ${attr}="${val}" class="px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${active ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}">${label}</button>`;
 
-    // 3. NEW: COD Status Filter Dropdown
-    let codFilterContainer = document.getElementById('cod-filter-container');
-    if (!codFilterContainer) {
-        codFilterContainer = document.createElement('div');
-        codFilterContainer.id = 'cod-filter-container';
-        codFilterContainer.className = 'ml-4 relative';
-        // Insert it right after the Status Filter (status-filter is usually before date preset)
-        const statusEl = document.getElementById('status-filter');
-        if(statusEl && statusEl.parentNode) {
-            statusEl.parentNode.insertBefore(codFilterContainer, statusEl.nextSibling);
-        }
-    }
+    // 1. Platform segmented control (All / Shopify)
+    platformFiltersEl.innerHTML = ['All', 'Shopify'].map(p => pill('data-filter', p, activePlatformFilter === p, p)).join('');
 
-    codFilterContainer.innerHTML = `
+    // 2. Source segmented control (All / RapidShyp / DocPharma) — container is in the HTML toolbar.
+    const sourceContainer = document.getElementById('source-filters');
+    if (sourceContainer) sourceContainer.innerHTML = ['All', 'RapidShyp', 'DocPharma'].map(s => pill('data-source', s, activeSourceFilter === s, s)).join('');
+
+    // 3. COD-status dropdown
+    const codFilterContainer = document.getElementById('cod-filter-container');
+    if (codFilterContainer) codFilterContainer.innerHTML = `
         <select id="cod-filter-select" class="filter-select">
             <option value="All">All COD Status</option>
             <option value="Confirmed">✓ Confirmed</option>
-            <option value="Waiting">Waiting...</option>
+            <option value="Waiting">Waiting…</option>
             <option value="Cancelled">Cancelled</option>
             <option value="No Data">No Data</option>
-        </select>
-    `;
+        </select>`;
+
+    // 3b. Hold-status dropdown
+    const holdFilterContainer = document.getElementById('hold-filter-container');
+    if (holdFilterContainer) holdFilterContainer.innerHTML = `
+        <select id="hold-filter-select" class="filter-select">
+            <option value="All">All Hold Status</option>
+            <option value="OnHold">⏸ On Hold</option>
+            <option value="NotHeld">Not Held</option>
+        </select>`;
 
     // 4. Attach Listeners
-    platformFiltersEl.querySelectorAll('.filter-btn').forEach(b => {
+    platformFiltersEl.querySelectorAll('button[data-filter]').forEach(b => {
         b.addEventListener('click', () => { activePlatformFilter = b.dataset.filter; renderAllDashboard(); });
     });
     
-    sourceContainer.querySelectorAll('.source-btn').forEach(b => {
+    sourceContainer?.querySelectorAll('button[data-source]').forEach(b => {
         b.addEventListener('click', () => { activeSourceFilter = b.dataset.source; renderAllDashboard(); });
     });
 
@@ -696,6 +750,15 @@ function renderDashboardFilters() {
         codSelect.value = activeCodFilter;
         codSelect.addEventListener('change', (e) => {
             activeCodFilter = e.target.value;
+            renderAllDashboard();
+        });
+    }
+
+    const holdSelect = document.getElementById('hold-filter-select');
+    if(holdSelect) {
+        holdSelect.value = activeHoldFilter;
+        holdSelect.addEventListener('change', (e) => {
+            activeHoldFilter = e.target.value;
             renderAllDashboard();
         });
     }
@@ -748,15 +811,23 @@ function renderAllDashboard() {
         }
     }
 
-    // 4. Source Filter
+    // 4. Source / Shipping-Platform Filter (RapidShyp vs DocPharma).
+    // Primary signal = EasyEcom `shipPlatform` (the synced `location`: 'docpharma' / 'rapidshyp');
+    // falls back to the Shopify "docpharma: in-progress" tag for orders not yet in EasyEcom.
     if (activeSourceFilter !== 'All') {
         o = o.filter(order => {
+            const sp = String(order.shipPlatform || '').toLowerCase();
             const tags = (order.tags || '').toLowerCase();
-            const isDocPharma = tags.includes('docpharma: in-progress');
+            const isDocPharma = sp.includes('docpharma') || sp.includes('dp bangalore') || (!sp && tags.includes('docpharma'));
             if (activeSourceFilter === 'DocPharma') return isDocPharma;
             if (activeSourceFilter === 'RapidShyp') return !isDocPharma;
             return true;
         });
+    }
+
+    // 4b. Hold-status filter (EasyEcom On Hold)
+    if (activeHoldFilter !== 'All') {
+        o = o.filter(order => activeHoldFilter === 'OnHold' ? !!order.eeHold : !order.eeHold);
     }
 
     // 5. [NEW] COD Status Filter
@@ -819,29 +890,24 @@ function renderSearchInput() {
 
     const searchContainer = document.createElement('div');
     searchContainer.id = 'search-container-custom';
-    // Changed: Reduced left margin (ml-2) and added right margin (mr-2)
-    // Added 'flex-shrink-0' so it doesn't get squashed weirdly
-    searchContainer.className = 'relative ml-2 md:ml-4 mr-2 flex items-center flex-shrink-0'; 
-    
-    // Search Icon & Input HTML
+    searchContainer.className = 'relative group';
+
+    // Search Icon & Input HTML — matches the 38px filter-control height for a clean toolbar row.
     searchContainer.innerHTML = `
-        <div class="relative group">
-            <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400 group-focus-within:text-indigo-500 transition-colors">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-            </span>
-            <input type="text" id="global-order-search" 
-                placeholder="Search..." 
-                class="pl-10 pr-4 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition-all duration-300 w-32 md:w-48 lg:w-64 focus:w-64"
-                autocomplete="off">
-        </div>
+        <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400 group-focus-within:text-indigo-500 transition-colors pointer-events-none">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+        </span>
+        <input type="text" id="global-order-search"
+            placeholder="Search orders…"
+            class="filter-input w-44 md:w-56 focus:w-64 transition-all duration-300"
+            style="padding-left:2.25rem; padding-right:0.8rem;"
+            autocomplete="off">
     `;
 
-    // Append next to other filters (Ensure platformFiltersEl exists)
-    if (platformFiltersEl && platformFiltersEl.parentNode) {
-        // Ensure the parent container allows wrapping if screen is too small
-        platformFiltersEl.parentNode.classList.add('flex-wrap'); 
-        platformFiltersEl.parentNode.appendChild(searchContainer);
-    }
+    // Drop it into the dedicated toolbar slot (falls back to the old parent if the slot's absent).
+    const slot = document.getElementById('orders-search-slot');
+    if (slot) { slot.innerHTML = ''; slot.appendChild(searchContainer); }
+    else if (platformFiltersEl && platformFiltersEl.parentNode) { platformFiltersEl.parentNode.appendChild(searchContainer); }
 
     // Add Event Listener
     const inputEl = document.getElementById('global-order-search');
@@ -874,7 +940,18 @@ function renderOrders(o) {
     updateBulkActionBar();
 
     if (o.length === 0) {
-        ordersListEl.innerHTML = `<tr><td colspan="10" class="p-8 text-center text-slate-400">No orders found.</td></tr>`;
+        const activeBits = [];
+        if (activeHoldFilter === 'OnHold') activeBits.push('on-hold');
+        if (activeSourceFilter !== 'All') activeBits.push(activeSourceFilter);
+        if (activeStatusFilter !== 'All') activeBits.push(activeStatusFilter.toLowerCase());
+        if (activeCodFilter !== 'All') activeBits.push('COD ' + activeCodFilter.toLowerCase());
+        const hint = activeBits.length ? `No <b>${activeBits.join(' · ')}</b> orders in this date range.` : 'No orders match your filters.';
+        ordersListEl.innerHTML = `<tr><td colspan="10" class="py-16 text-center">
+            <div class="inline-flex flex-col items-center gap-2 text-slate-400">
+                <svg class="w-10 h-10 text-slate-300" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                <p class="text-sm">${hint}</p>
+                ${activeBits.length ? '<p class="text-xs text-slate-300">Try widening the date range or clearing a filter.</p>' : ''}
+            </div></td></tr>`;
         return;
     }
 
@@ -922,7 +999,14 @@ function renderOrders(o) {
         const custBadge = getCustomerBadge(order.email, null, order.id, emailCountNoTrim.get((order.email || '').toLowerCase()) || 0);
 
         const mainRow = document.createElement('tr');
-        mainRow.className = `order-row border-b border-slate-100 hover:bg-slate-50 transition-colors ${isSelected ? 'bg-indigo-50/50' : ''}`;
+        // DocPharma-rejected & not yet moved to our warehouse → red tint (needs action). Once handled
+        // (auto-routed / logged move / already on Shifupro) → soft green.
+        const _whMoved = order.warehouseChange || order.dpRejectHandled;
+        const dpNeedsAction = order.docpharmaRejected && !_whMoved;
+        const dpRouted = order.docpharmaRejected && _whMoved;
+        const rowTint = dpNeedsAction ? 'bg-rose-50/70 hover:bg-rose-50' : dpRouted ? 'bg-emerald-50/40 hover:bg-emerald-50' : 'hover:bg-slate-50';
+        mainRow.className = `order-row border-b border-slate-100 transition-colors ${rowTint} ${isSelected ? 'bg-indigo-50/50' : ''}`;
+        if (dpNeedsAction) mainRow.classList.add('border-l-2', 'border-l-rose-400');
         mainRow.dataset.orderId = order.id;
 
         // =========================================================================
@@ -976,6 +1060,14 @@ function renderOrders(o) {
         // VIP Check
         if (history.length > 5 || parseFloat(order.total) > 5000 || shopifyTags.includes('vip')) {
              tagsHtml += `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-amber-600 bg-amber-50 rounded border border-amber-100 uppercase tracking-wide mr-1 mb-1">VIP</span>`;
+        }
+
+        // DocPharma rejected/cancelled — needs to be re-fulfilled from our warehouse.
+        if (order.docpharmaRejected) {
+            const moved = order.warehouseChange || order.dpRejectHandled;
+            tagsHtml += moved
+                ? `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-emerald-700 bg-emerald-50 rounded border border-emerald-200 uppercase tracking-wide mr-1 mb-1" title="DocPharma rejected · moved${order.warehouseChange ? ' ' + escapeHtml(order.warehouseChange.change||'') : ' to Shifupro'}">DP Rejected → MWH</span>`
+                : `<span class="inline-block px-1.5 py-0.5 text-[10px] font-bold text-rose-700 bg-rose-100 rounded border border-rose-200 uppercase tracking-wide mr-1 mb-1" title="Rejected / Cancelled by DocPharma — needs warehouse action">DP Rejected</span>`;
         }
 
         // --- PREPARE DISPLAY DATA ---
@@ -1096,11 +1188,15 @@ function buildOrderDetailHtml(order) {
     const itemsHtml = orderItems.map(item => {
         const itemName = item.title || item.name || 'Unknown Item';
         const itemQty = item.quantity || item.qty || 1;
+        const itemSku = item.sku || '';
         return `
             <div class="flex items-center gap-3 p-2 bg-white rounded border border-slate-100 mb-1">
                 <img src="${createFallbackImage(itemName)}" loading="lazy" decoding="async" class="w-8 h-8 rounded object-cover">
-                <div class="flex-1 text-sm text-slate-700 truncate">${escapeHtml(itemName)}</div>
-                <div class="text-xs font-bold text-slate-500">x${itemQty}</div>
+                <div class="flex-1 min-w-0">
+                    <div class="text-sm text-slate-700 truncate">${escapeHtml(itemName)}</div>
+                    ${itemSku ? `<div class="text-[10px] text-slate-400 font-mono mt-0.5">SKU: <span class="text-slate-600 font-semibold">${escapeHtml(itemSku)}</span></div>` : ''}
+                </div>
+                <div class="text-xs font-bold text-slate-500 shrink-0">x${itemQty}</div>
             </div>`;
     }).join('');
 
@@ -1153,6 +1249,10 @@ function buildOrderDetailHtml(order) {
                         </div>
                     </div>`;
                         }
+                        // Hold works any time BEFORE the courier PICKS UP the order — including Ready-To-Ship
+                        // (AWB assigned but not yet picked). order.holdable is computed server-side from the
+                        // real tracking signal (not the ambiguous 'Shipped' status), so it's true until pickup.
+                        if (order.holdable === false) return '';
                         return `
                     <div class="flex justify-between items-center pt-2 border-t border-slate-100">
                         <div>
@@ -1165,6 +1265,22 @@ function buildOrderDetailHtml(order) {
                 </div>
             </div>
         `;
+    }
+
+    // Warehouse change is ONLY relevant for DocPharma orders (they may need to be re-fulfilled from
+    // Shifupro). Orders already on Shifupro / RapidShyp never show the Move button.
+    const _sp = String(order.shipPlatform || '').toLowerCase();
+    const isDpOrder = _sp.includes('docpharma') || _sp.includes('dp bangalore') || order.docpharmaRejected || (order.tags || '').toLowerCase().includes('docpharma');
+    const _whMovedD = order.warehouseChange || order.dpRejectHandled;   // already routed to Shifupro
+    let standaloneWhHtml = '';
+    if (order.easyecomOrderId && isDpOrder) {
+        standaloneWhHtml = _whMovedD
+            ? `<div class="bg-white p-4 rounded-xl border border-emerald-200 shadow-sm mt-2"><div class="flex justify-between items-center">
+                 <div><p class="text-sm font-semibold text-slate-800">Warehouse ✓ Assigned</p><p class="text-[10px] text-emerald-600 mt-0.5 font-semibold">Moved: ${escapeHtml(order.warehouseChange ? order.warehouseChange.change : 'DocPharma → Shifupro')}</p></div>
+                 <button disabled class="px-3 py-1.5 bg-emerald-50 text-emerald-600 text-xs font-semibold rounded-lg border border-emerald-200 cursor-default whitespace-nowrap">✓ Moved</button></div></div>`
+            : `<div class="bg-white p-4 rounded-xl border ${order.docpharmaRejected ? 'border-rose-200' : 'border-slate-200'} shadow-sm mt-2"><div class="flex justify-between items-center">
+                 <div><p class="text-sm font-semibold text-slate-800">Change warehouse</p><p class="text-[10px] ${order.docpharmaRejected ? 'text-rose-500 font-semibold' : 'text-slate-400'} mt-0.5">${order.docpharmaRejected ? 'DocPharma rejected — re-route to Shifupro (MWH)' : 'Re-route this DocPharma order to Shifupro'}</p></div>
+                 <button onclick="changeWarehouseModal('${escapeHtml(String(order.id))}')" class="px-3 py-1.5 bg-indigo-600 text-white text-xs font-semibold rounded-lg hover:bg-indigo-700 shadow-sm whitespace-nowrap">🏬 Move</button></div></div>`;
     }
 
     return `
@@ -1183,7 +1299,7 @@ function buildOrderDetailHtml(order) {
                     <div class="max-h-40 overflow-y-auto pr-2 custom-scrollbar">${itemsHtml}</div>
                 </div>
             </div>
-            <div>${workflowHtml}</div>
+            <div>${workflowHtml}${standaloneWhHtml}</div>
         </div>`;
 }
 
@@ -1240,6 +1356,11 @@ async function eeHoldSubmit(orderName, isHold) {
         const order = _ordersById.get(String(orderName));
         if (order) order.eeHold = isHold ? (d.hold || { reason, at: new Date().toISOString() }) : null;
         refreshOrderDetailRow(orderName);
+        // Bust the shared ⏸-HOLD map so every other dashboard (Ops/DP/Claims/Support) reflects it on next load.
+        const _hk = String(orderName || '').replace('#', '').trim();
+        if (isHold) _eeHold[_hk] = { order_name: _hk, note: reason, created_by: currentUser && currentUser.email, created_at: new Date().toISOString() };
+        else delete _eeHold[_hk];
+        _eeHoldAt = 0;
         st.textContent = 'Done ✓'; st.className = 'text-sm text-emerald-600 mr-auto';
         showNotification(d.message || 'Done.');
         setTimeout(() => document.getElementById('ee-hold-modal')?.remove(), 700);
@@ -1254,6 +1375,84 @@ function refreshOrderDetailRow(orderId) {
     const row = document.querySelector(`tr[data-order-id="${(window.CSS && CSS.escape) ? CSS.escape(String(orderId)) : String(orderId)}"]`);
     const cell = row && row.querySelector('.ord-status-cell');
     if (cell) { const chip = cell.querySelector('.ord-hold-chip'); if (order && order.eeHold) { if (!chip) cell.insertAdjacentHTML('beforeend', ' <span class="ord-hold-chip px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-700 rounded-full border border-amber-200 whitespace-nowrap">⏸ HOLD</span>'); } else if (chip) chip.remove(); }
+}
+
+// ── Change an order's fulfilment warehouse in EasyEcom — own modal (routes a rejected order out) ──
+// Uses the stored EasyEcom panel session cookie server-side (the only thing UpdateVendor accepts).
+async function changeWarehouseModal(orderName) {
+    document.getElementById('ee-wh-modal')?.remove();
+    const _o = (typeof _ordersById !== 'undefined') ? _ordersById.get(String(orderName)) : null;
+    const _panelUrl = _o && _o.easyecomOrderId ? `https://app.easyecom.io/V2/Orders/Details/${_o.easyecomOrderId}` : 'https://app.easyecom.io/';
+    const wrap = document.createElement('div'); wrap.id = 'ee-wh-modal';
+    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+        <div class="flex items-center justify-between mb-1"><h3 class="text-lg font-bold text-slate-800">🏬 Change warehouse</h3>
+          <button data-x class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div>
+        <p class="text-xs text-slate-400 mb-4">Re-route <b>${escapeHtml(String(orderName))}</b> to another fulfilment warehouse in EasyEcom. Works only before a shipment/AWB is assigned.</p>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Move to warehouse</label>
+        <select id="eewh-target" class="filter-select w-full"><option>Loading…</option></select>
+        <p id="eewh-status" class="text-sm text-slate-500 min-h-[20px] mt-3"></p>
+        <div class="mt-3 pt-3 border-t border-slate-100">
+          <div class="flex items-center justify-between">
+            <span class="text-xs text-slate-500">EasyEcom session: <b id="eewh-sess" class="text-slate-700">checking…</b></span>
+            <button id="eewh-sess-toggle" class="text-xs text-indigo-600 font-semibold hover:underline">Update session</button>
+          </div>
+          <div id="eewh-sess-box" class="hidden mt-2">
+            <p class="text-[11px] text-slate-400 mb-1.5">In the EasyEcom panel: open DevTools (F12) → Network → click any request → copy the whole <b>Cookie</b> value (must include <code>laravel_session</code>) → paste below.</p>
+            <textarea id="eewh-cookie" class="filter-input w-full text-xs" style="height:64px" placeholder="PHPSESSID=…; laravel_session=…"></textarea>
+            <button id="eewh-sess-save" class="mt-1.5 px-3 py-1.5 text-xs rounded-lg bg-slate-800 text-white font-semibold hover:bg-slate-700">Save session</button>
+          </div>
+          <p class="text-[11px] text-slate-400 mt-2">Can't route (shipment assigned, or session issue)? <a href="${_panelUrl}" target="_blank" class="text-indigo-600 hover:underline">Open order in EasyEcom ↗</a></p>
+        </div>
+        <div class="flex justify-end gap-2 mt-3">
+          <button data-x class="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm hover:bg-slate-100">Cancel</button>
+          <button id="eewh-submit" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">Move order</button></div></div>`;
+    document.body.appendChild(wrap);
+    wrap.addEventListener('click', e => { if (e.target === wrap || e.target.closest('[data-x]')) wrap.remove(); });
+    const st = document.getElementById('eewh-status');
+    // warehouses
+    try {
+        const d = await (await fetch('/api/easyecom/warehouses', { headers: getAuthHeaders() })).json();
+        document.getElementById('eewh-target').innerHTML = (d.warehouses || []).map(w => `<option value="${w.cId}">${escapeHtml(w.name)}</option>`).join('');
+    } catch (e) { st.textContent = 'Could not load warehouses: ' + e.message; }
+    // live session health (pings EasyEcom with the stored cookie)
+    const sessEl = document.getElementById('eewh-sess');
+    (async () => {
+        try {
+            const s = await (await fetch('/api/easyecom/session/check', { headers: getAuthHeaders() })).json();
+            if (!s || !s.success) { sessEl.textContent = '—'; return; }
+            if (!s.hasSession) { sessEl.innerHTML = '<span class="text-amber-600">● not set</span>'; }
+            else if (s.valid) { sessEl.innerHTML = `<span class="text-emerald-600">● healthy</span>${s.updatedAt ? ' · ' + supRelTime(s.updatedAt) : ''}`; }
+            else { sessEl.innerHTML = '<span class="text-rose-600 font-semibold">● expired — paste a fresh cookie</span>'; document.getElementById('eewh-sess-box').classList.remove('hidden'); }
+        } catch (_) { sessEl.textContent = '—'; }
+    })();
+    document.getElementById('eewh-sess-toggle').addEventListener('click', () => document.getElementById('eewh-sess-box').classList.toggle('hidden'));
+    document.getElementById('eewh-sess-save').addEventListener('click', async () => {
+        const cookie = document.getElementById('eewh-cookie').value.trim();
+        if (!cookie) return;
+        try {
+            const r = await fetch('/api/easyecom/session', { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ cookie }) });
+            const d = await r.json(); if (!r.ok || !d.success) throw new Error(d.message || 'Failed');
+            showNotification('EasyEcom session saved'); document.getElementById('eewh-sess-box').classList.add('hidden');
+            document.getElementById('eewh-cookie').value = ''; sessEl.innerHTML = '<span class="text-emerald-600">saved</span> · just now';
+        } catch (e) { showNotification(e.message, true); }
+    });
+    document.getElementById('eewh-submit').addEventListener('click', async () => {
+        const target = document.getElementById('eewh-target').value;
+        const btn = document.getElementById('eewh-submit');
+        btn.disabled = true; st.textContent = 'Routing in EasyEcom…'; st.className = 'text-sm text-slate-500 min-h-[20px] mt-3';
+        try {
+            const r = await fetch('/api/easyecom/change-warehouse', { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ orderName, targetCid: target }) });
+            const d = await r.json();
+            if (!r.ok || !d.success) {
+                if (d.needSession) { document.getElementById('eewh-sess-box').classList.remove('hidden'); document.getElementById('eewh-cookie').focus(); }
+                throw new Error(d.message || 'Failed');
+            }
+            st.textContent = d.message || 'Done ✓'; st.className = 'text-sm text-emerald-600 min-h-[20px] mt-3';
+            showNotification(d.message || 'Warehouse changed');
+            setTimeout(() => { wrap.remove(); if (currentView === 'orders-dashboard' && typeof silentRefreshOrders === 'function') silentRefreshOrders(); }, 1400);
+        } catch (e) { st.textContent = e.message; st.className = 'text-sm text-rose-600 min-h-[20px] mt-3'; btn.disabled = false; }
+    });
 }
 
 function toggleDetails(id) {
@@ -2400,6 +2599,11 @@ function calculateDateRange(p, s, e) {
             a.setDate(startOfToday.getDate() - 6);
             d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
             break;
+        case 'last_30_days':
+            a = new Date(startOfToday);
+            a.setDate(startOfToday.getDate() - 29);
+            d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+            break;
         case 'mtd': // Month to Date
             a = new Date(now.getFullYear(), now.getMonth(), 1);
             d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
@@ -2487,41 +2691,26 @@ function calculateComparisonMetrics(currentPeriodOrders, allData, preset, curren
 }
 // --- UPDATED KPI LOGIC (Fixing RTO vs In Transit) ---
 function updateDashboardKpis(o) {
-    // 1. Initialize Counters
-    const k = { all: 0, newGroup: 0, shippedGroup: 0, delivered: 0, failedGroup: 0 };
-
-    o.forEach(s => {
-        k.all++; // Total Count
-        
-        // Normalize status for easier checking
-        const status = s.status; 
-        const statusUpper = (status || '').toUpperCase();
-
-        // Group 1: New + Processing (Pending Action)
-        if (status === 'New' || status === 'Processing') {
-            k.newGroup++;
-        }
-        
-        // Group 4: Failed (Cancelled + ANY RTO Status)
-        // Checks if status is 'Cancelled' OR contains 'RTO' (e.g., "RTO Initiated", "RTO In Transit")
-        else if (status === 'Cancelled' || statusUpper.includes('RTO')) {
-            k.failedGroup++;
-        }
-
-        // Group 3: Completed
-        else if (status === 'Delivered') {
-            k.delivered++;
-        }
-
-        // Group 2: Moving (Ready To Ship + Shipped + In Transit + Out For Delivery)
-        // MUST EXCLUDE RTO here to prevent double counting
-        else if (['Ready To Ship', 'Shipped', 'In Transit', 'Out For Delivery'].includes(status)) {
-            // Extra safety: only count if it does NOT have RTO in the name
-            if (!statusUpper.includes('RTO')) {
-                k.shippedGroup++;
-            }
-        }
-    });
+    // Any narrowing filter active? Then the KPIs reflect the FILTERED set (they update as you filter).
+    // With no filter, we use the accurate server-side full-window counts (so 7-day vs 30-day differ).
+    const filtersActive = (activeStatusFilter !== 'All') || (activeSourceFilter !== 'All') || (activeCodFilter !== 'All')
+        || (activeHoldFilter !== 'All') || (activePlatformFilter !== 'All') || (typeof currentSearchTerm === 'string' && currentSearchTerm.length > 0);
+    let k;
+    if (!filtersActive && serverOrderMeta && serverOrderMeta.kpis) {
+        const s = serverOrderMeta.kpis;
+        k = { all: s.total || 0, newGroup: s.newProcessing || 0, shippedGroup: s.inTransit || 0, delivered: s.delivered || 0, failedGroup: s.cancelled || 0 };
+    } else {
+        k = { all: 0, newGroup: 0, shippedGroup: 0, delivered: 0, failedGroup: 0 };
+        o.forEach(s => {
+            k.all++;
+            const status = s.status;
+            const statusUpper = (status || '').toUpperCase();
+            if (status === 'New' || status === 'Processing') k.newGroup++;
+            else if (status === 'Cancelled' || statusUpper.includes('RTO')) k.failedGroup++;
+            else if (status === 'Delivered') k.delivered++;
+            else if (['Ready To Ship', 'Shipped', 'In Transit', 'Out For Delivery'].includes(status)) { if (!statusUpper.includes('RTO')) k.shippedGroup++; }
+        });
+    }
 
     // 2. Helper to Render Cards
     const renderKpi = (e, t, v, i, subText = "") => {
@@ -2538,9 +2727,13 @@ function updateDashboardKpis(o) {
     };
 
     // 3. Render the 5 Cards
-    // Card 1: All Orders
-    renderKpi(dashboardKpiElements.all, 'Total Orders', k.all, 
-        `<svg class="w-6 h-6 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>`
+    // Card 1: All Orders — hint reflects whether the numbers are filtered or the full-window total.
+    const totalSub = filtersActive
+        ? 'matching current filters'
+        : ((serverOrderMeta && serverOrderMeta.truncated) ? `most recent ${Number(serverOrderMeta.shown).toLocaleString('en-IN')} shown in table` : '');
+    renderKpi(dashboardKpiElements.all, 'Total Orders', (k.all || 0).toLocaleString('en-IN'),
+        `<svg class="w-6 h-6 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>`,
+        totalSub
     );
 
     // Card 2: Pending (New / Processing)
@@ -2982,6 +3175,7 @@ async function claimsLoad(){
     _claimsState.srto.rows = (a && a.success && a.rows) ? a.rows : [];
     _claimsState.late.rows = (b && b.success && b.rows) ? b.rows : [];
     _claimsState.intransit.rows = (c && c.success && c.rows) ? c.rows : [];
+    await eeHoldRefresh();
     claimsPopulateFilters();
     claimsRender();
   }catch(e){
@@ -3042,7 +3236,7 @@ function claimsRenderSrto(){
   document.getElementById('srto-kpi-priced').textContent = `${priced}/${count}`;
   document.getElementById('srto-tbody').innerHTML = count ? rows.map(r => { const open = r.awb === _claimsOpenAwb;
     let out = `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer ${open?'bg-indigo-50/60':''}" data-awb="${ecEsc(r.awb)}">
-    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}</td>
+    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}${eeHoldChip(r.order_name)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
     <td class="px-4 py-2.5 text-slate-500">${_dmy(r.order_date)}</td>
@@ -3066,7 +3260,7 @@ function claimsRenderLate(){
   document.getElementById('late-kpi-severe').textContent = severe;
   document.getElementById('late-tbody').innerHTML = count ? rows.map(r => { const open = r.awb === _claimsOpenAwb;
     let out = `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer ${open?'bg-indigo-50/60':''}" data-awb="${ecEsc(r.awb)}">
-    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}</td>
+    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}${eeHoldChip(r.order_name)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
     <td class="px-4 py-2.5 text-slate-500">${_dmy(r.first_edd)}</td>
@@ -3090,7 +3284,7 @@ function claimsRenderIntransit(){
   document.getElementById('itl-kpi-severe').textContent = severe;
   document.getElementById('itl-tbody').innerHTML = count ? rows.map(r => { const open = r.awb === _claimsOpenAwb;
     let out = `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer ${open?'bg-indigo-50/60':''}" data-awb="${ecEsc(r.awb)}">
-    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}</td>
+    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}${eeHoldChip(r.order_name)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
     <td class="px-4 py-2.5 text-slate-500">${_dmy(r.order_date)}</td>
@@ -3203,7 +3397,7 @@ function supSyncInfo(lock){ const el=document.getElementById('sup-sync-info'); i
   const res=lock.last_result||{}; el.textContent = lock.is_running?'Sync running…':(lock.last_finished_at?`Last sync ${new Date(lock.last_finished_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}${res.updated!=null?` · ${res.updated} updated`:''}`:''); }
 async function supLoadQueue(){
   const c=document.getElementById('sup-queue-table'); if(c) c.innerHTML=brandLoader('Loading queue…');
-  try{ const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS()); _supQueueRows=d.rows||[]; supSyncInfo(d.lock); supQueueTable(); }
+  try{ const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS()); await eeHoldRefresh(); _supQueueRows=d.rows||[]; supSyncInfo(d.lock); supQueueTable(); }
   catch(e){ if(c) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }
 }
 function supQueueTable(){
@@ -3231,7 +3425,7 @@ function supQueueTable(){
   c.innerHTML=`<table class="w-full"><thead><tr>${['Order','Customer','Bucket','Age','Courier','Actions'].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
     list.slice(0,500).map(r=>{ const ph=String(r.phone||'').replace(/\D/g,'').slice(-10);
       return `<tr class="sup-row cursor-pointer hover:bg-slate-50 ${r.msg91_confirmed?'bg-sky-50/50':''}" data-oid="${escapeHtml(r.order_id)}">
-      <td class="${TD} font-mono font-semibold">${escapeHtml(r.order_name||r.order_id)}</td>
+      <td class="${TD} font-mono font-semibold">${escapeHtml(r.order_name||r.order_id)}${eeHoldChip(r.order_name)}</td>
       <td class="${TD}">${ph?`<a href="tel:+91${ph}" onclick="event.stopPropagation()" class="text-indigo-600 font-medium hover:underline">${ph}</a>`:'<span class="text-slate-300">no phone</span>'}
         ${r.orders_count?` <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-violet-100 text-violet-700">${r.orders_count} orders</span>`:''}
         ${r.msg91_confirmed?' <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}</td>
@@ -3437,13 +3631,14 @@ async function supOrderModal(orderId){
   wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
   try{
     const d=await supFetch('/api/support/order/'+encodeURIComponent(orderId));
+    await eeHoldRefresh();
     const o=d.order, a=d.address||{}, ph=String(o.phone||'').replace(/\D/g,'').slice(-10);
     const days=Math.round((Date.now()-new Date(o.created_at))/86400000);
     const esc=d.escalation;
     wrap.firstElementChild.innerHTML=`
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div><div class="flex items-center gap-2 flex-wrap"><span class="font-mono text-lg font-bold text-slate-800">${escapeHtml(o.order_name||o.order_id)}</span>${supBadge(o.bucket)}
-          ${o.msg91_confirmed?'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}</div>
+          ${o.msg91_confirmed?'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}${eeHoldChip(o.order_name)}</div>
           <p class="text-xs text-slate-400 mt-1">Placed ${new Date(o.created_at).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})} · ${days} days ago</p></div>
         <div class="flex items-center gap-2"><button id="supd-logcall" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">📞 Log a call</button>
           <button class="supd-close text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div></div>
@@ -3536,6 +3731,7 @@ async function supOrdersLoad(){
   try{
     const f=_supoFilters; const qs=new URLSearchParams({ ...(f.q?{q:f.q}:{}) , ...(f.bucket?{bucket:f.bucket}:{}), ...(f.partner?{partner:f.partner}:{}), ...(f.courier?{courier:f.courier}:{}), ...(f.status?{status:f.status}:{}), page:f.page||1, from:_supRange.from, to:_supRange.to });
     const d=await supFetch('/api/support/orders?'+qs.toString());
+    await eeHoldRefresh();
     // facets
     const csel=document.getElementById('supo-courier'), ssel=document.getElementById('supo-status');
     if(csel.options.length<=1) d.facets.couriers.forEach(x=>{ const o=document.createElement('option'); o.value=x; o.textContent=x; csel.appendChild(o); });
@@ -3548,7 +3744,7 @@ async function supOrdersLoad(){
     c.innerHTML=d.rows.length?`<table class="w-full"><thead><tr>${['Order','Customer','Bucket','Partner / Courier / AWB','Status','Created','Total'].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
       d.rows.map(r=>{ const ph=String(r.phone||'').replace(/\D/g,'').slice(-10);
         return `<tr class="supo-row cursor-pointer hover:bg-slate-50" data-oid="${escapeHtml(r.order_id)}">
-        <td class="${TD} font-mono font-semibold">${escapeHtml(r.order_name||r.order_id)}</td>
+        <td class="${TD} font-mono font-semibold">${escapeHtml(r.order_name||r.order_id)}${eeHoldChip(r.order_name)}</td>
         <td class="${TD}"><div>${ph||'—'}</div><div class="text-xs text-slate-400 truncate max-w-[160px]">${escapeHtml(r.email||'')}</div></td>
         <td class="${TD}">${supBadge(r.bucket)}</td>
         <td class="${TD} text-xs"><div>${escapeHtml(r.partner||'—')} · ${escapeHtml(r.courier||'—')}</div><div class="text-slate-400 font-mono">${escapeHtml(r.awb_number||'')}</div></td>
@@ -3668,7 +3864,9 @@ const NAV_HREF = {
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-users': 'users',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
-    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts'
+    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts',
+    'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
+    'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions'
 };
 const VALID_VIEWS = new Set(Object.values(NAV_HREF));
 function viewFromHash() { const v = (location.hash || '').replace(/^#/, ''); return VALID_VIEWS.has(v) ? v : null; }
@@ -3799,6 +3997,7 @@ function initializeAllFilters() {
         'today': 'Today',
         'yesterday': 'Yesterday',
         'last_7_days': 'Last 7 Days',
+        'last_30_days': 'Last 30 Days',
         'mtd': 'Month to Date',
         'last_month': 'Last Month',
         'custom': 'Custom Range...'
@@ -3807,7 +4006,7 @@ function initializeAllFilters() {
     // 3. Initialize ALL Date Filters (Added Customer & Ad Analysis)
     initializeDateFilters(insightsDatePresetFilter, insightsCustomDateContainer, insightsStartDateFilterEl, insightsEndDateFilterEl, 'insightsDatePreset', renderAllInsights, d);
     initializeDateFilters(adsetDatePresetFilter, adsetCustomDateContainer, adsetStartDateFilterEl, adsetEndDateFilterEl, 'adsetDatePreset', () => handleAdsetDateChange(false), d);
-    initializeDateFilters(orderDatePresetFilter, customDateContainer, startDateFilterEl, endDateFilterEl, 'activeDatePreset', renderAllDashboard, d);
+    initializeDateFilters(orderDatePresetFilter, customDateContainer, startDateFilterEl, endDateFilterEl, 'activeDatePreset', reloadOrdersForDate, d);
     initializeDateFilters(profitDatePresetFilter, profitCustomDateContainer, profitStartDateFilterEl, profitEndDateFilterEl, 'profitDatePreset', handleProfitabilityChange, d);
     initializeDateFilters(rankingDatePresetFilter, null, null, null, 'adsetDatePreset', () => handleAdsetDateChange(true), d);
     initializeDateFilters(returnsDatePresetFilter, returnsCustomDateContainer, returnsStartDateFilterEl, returnsEndDateFilterEl, 'returnsDatePreset', renderReturnsAnalysis, d);
@@ -4383,6 +4582,7 @@ const PERM_GROUPS = [
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
   ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts']]],
+  ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]]
 ];
 const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
@@ -4395,6 +4595,19 @@ function _avatar(email){ const local=(email||'?').split('@')[0]; const parts=loc
 function _permGroupOf(key){ for(const [g,items] of PERM_GROUPS) if(items.some(p=>p[0]===key)) return g; return ''; }
 function _usersUpdateCount(card){ const n=card.querySelectorAll('.perm-chip.is-on').length; const el=card.querySelector('.dpu-count'); if(el) el.textContent=n; }
 function ecEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// ── EasyEcom ⏸ HOLD indicator — shared across ALL dashboards (Ops, DP, Claims, Support) ──
+// The Orders dashboard bakes hold state into /get-orders; every other dashboard refreshes this
+// small marks map (60s cache) at load time and decorates its rows via eeHoldChip(orderName).
+let _eeHold={},_eeHoldAt=0;
+async function eeHoldRefresh(){ if(Date.now()-_eeHoldAt<60000) return _eeHold;
+  try{ const r=await fetch('/api/ee-hold-marks',{headers:getAuthHeaders()}); const d=await r.json();
+    if(d&&d.success){ _eeHold={}; (d.marks||[]).forEach(m=>{ _eeHold[String(m.order_name||'').replace('#','').trim()]=m; }); _eeHoldAt=Date.now(); }
+  }catch(_){}
+  return _eeHold; }
+function eeHoldChip(name){ const h=_eeHold[String(name||'').replace('#','').trim()]; if(!h) return '';
+  const tip=('On hold in EasyEcom'+(h.note?': '+h.note:'')+(h.created_by?' — '+h.created_by:'')).replace(/"/g,'&quot;');
+  return ` <span class="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-orange-100 text-orange-700 whitespace-nowrap align-middle" title="${tip}">⏸ HOLD</span>`; }
 let _usersWired = false;
 function usersInit(){
   if(!_usersWired){
@@ -5321,6 +5534,7 @@ async function opsLoad(){
     try{
         const r=await fetch('/api/ops-control/ndr-queue?days='+(_opsDays.ndr||45), { headers: getAuthHeaders() });
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        await eeHoldRefresh();
         _opsData=d; opsRender(d);
     }catch(e){ if(kpi) kpi.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
 }
@@ -5364,7 +5578,7 @@ function opsTable(){ const c=document.getElementById('ops-table'); const d=_opsD
         const ph=r.phone?`<a href="tel:${r.phone}" class="text-indigo-600 font-medium hover:underline">${r.phone}</a> <a href="https://wa.me/91${String(r.phone).replace(/\D/g,'').slice(-10)}" target="_blank" class="inline-flex items-center text-emerald-600 ml-1" title="WhatsApp">🟢</a>`:'<span class="text-slate-300">no phone</span>';
         return `<tr>`+
           `<td class="${td}"><span class="inline-flex px-2 py-0.5 rounded-md text-xs font-bold ${urg} tabular-nums">${dn}</span></td>`+
-          `<td class="${td} font-semibold">${r.order||'—'}<div class="text-xs text-slate-400 font-normal">${r.awb||''}</div></td>`+
+          `<td class="${td} font-semibold">${r.order||'—'}${eeHoldChip(r.order)}<div class="text-xs text-slate-400 font-normal">${r.awb||''}</div></td>`+
           `<td class="${td}">${ph}</td>`+
           `<td class="${td} font-semibold tabular-nums">${inr(r.value)}</td>`+
           `<td class="${td}">${pay} ${typ}</td>`+
@@ -5562,6 +5776,7 @@ function opsCitiesTable(){ const el=document.getElementById('ops-cities'); const
 async function opsLoadExceptions(){
     const k=document.getElementById('ops-exc-kpis'); if(k) k.innerHTML=brandLoader('Loading exceptions…');
     try{ const r=await fetch('/api/ops-control/exceptions?days='+(_opsDays.exceptions||90),{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        await eeHoldRefresh();
         _opsExc=d; const s=d.summary||{};
         k.innerHTML =
             opsKpi('Claim from couriers','#e11d48','#fff1f2',DP_ICONS.uturn, OPS_INR(s.claimValue), `${s.claimCount||0} orders · lost / damaged / silent-RTO`)+
@@ -5594,7 +5809,7 @@ function opsExcTable(){ const c=document.getElementById('ops-exc-table'); const 
         return `<tr>`+
           `<td class="${OPS_TD}">${tb(r.type)}${r.slaDelay?` <span class="ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-700" title="${r.slaDelay} days past first EDD">🕒 ${r.slaDelay}d</span>`:''}</td>`+
           `<td class="${OPS_TD}">${ab(r.action)}</td>`+
-          `<td class="${OPS_TD} font-semibold">${r.order||'—'}<div class="text-xs text-slate-400 font-normal">${r.awb||''}</div></td>`+
+          `<td class="${OPS_TD} font-semibold">${r.order||'—'}${eeHoldChip(r.order)}<div class="text-xs text-slate-400 font-normal">${r.awb||''}</div></td>`+
           `<td class="${OPS_TD} font-semibold tabular-nums">${r.value!=null?OPS_INR(r.value):'—'}</td>`+
           `<td class="${OPS_TD}">${pay}</td>`+
           `<td class="${OPS_TD}">${r.courier||'—'}<div class="text-xs text-slate-400">Zone ${r.zone||'—'}</div></td>`+
@@ -5611,6 +5826,7 @@ async function opsLoadPrepaidRisk(){
     const k=document.getElementById('ops-pr-kpis'); if(k) k.innerHTML='<div class="text-slate-400 text-sm p-6">Scoring in-transit prepaid orders…</div>';
     const days=document.getElementById('ops-pr-days')?.value||'60';
     try{ const r=await fetch('/api/ops-control/prepaid-risk?days='+days,{headers:getAuthHeaders()}); const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        await eeHoldRefresh();
         _opsPr=d; const s=d.summary||{};
         k.innerHTML =
             opsKpi('High-risk prepaid','#e11d48','#fff1f2',DP_ICONS.bolt, s.high||0, 'likely lost/misrouted — redispatch now')+
@@ -5669,7 +5885,7 @@ function opsPrTable(){ const c=document.getElementById('ops-pr-table'); const d=
         const open=r.awb===_opsPrOpen;
         let out=`<tr class="ops-pr-row cursor-pointer ${open?'bg-indigo-50/60':''}" data-awb="${r.awb||''}">`+
           `<td class="${OPS_TD}"><div class="flex items-center gap-2"><span class="inline-flex px-2 py-0.5 rounded-md text-xs font-bold ${badge} tabular-nums">${r.risk}%</span><div class="w-14 h-1.5 bg-slate-100 rounded overflow-hidden"><div class="${bar} h-1.5" style="width:${r.risk}%"></div></div></div></td>`+
-          `<td class="${OPS_TD} font-semibold"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${r.order||'—'}<div class="text-xs text-slate-400 font-normal ml-4">${r.awb||''}</div></td>`+
+          `<td class="${OPS_TD} font-semibold"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${r.order||'—'}${eeHoldChip(r.order)}<div class="text-xs text-slate-400 font-normal ml-4">${r.awb||''}</div></td>`+
           `<td class="${OPS_TD} font-semibold tabular-nums">${r.value!=null?OPS_INR(r.value):'—'}</td>`+
           `<td class="${OPS_TD}">${r.courier||'—'}<div class="text-xs text-slate-400">Zone ${r.zone||'—'}</div></td>`+
           `<td class="${OPS_TD} text-right tabular-nums">${r.daysInTransit!=null?r.daysInTransit+'d':'—'}</td>`+
@@ -6779,6 +6995,7 @@ async function dpLoad(){
     try{
         const r=await fetch(`/api/delivery-performance?from=${_dpFrom}&to=${_dpTo}&source=${_dpSource}&payment=${_dpPayment}&zone=${encodeURIComponent(_dpZone.join(','))}&state=${encodeURIComponent(_dpState.join(','))}&order_type=${_dpOrderType}&compare=1`, { headers: getAuthHeaders() });
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        await eeHoldRefresh();
         _dpData=d; dpRender(d);
     }catch(e){ if(kpi) kpi.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
 }
@@ -7232,7 +7449,7 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
         const typ=r.order_type==='repeat'?'<span class="px-1.5 py-0.5 rounded text-[11px] font-medium bg-violet-100 text-violet-700">Repeat</span>':r.order_type==='new'?'<span class="px-1.5 py-0.5 rounded text-[11px] font-medium bg-blue-100 text-blue-700">New</span>':'<span class="text-slate-300">—</span>';
         const reasons=(r.reasons||[]).join(' · ');
         let out=`<tr class="dp-row cursor-pointer transition-colors ${rowCls}" data-awb="${r.awb||''}">`+
-          `<td class="${td}" style="${stripe}"><div class="flex items-center gap-1.5"><span class="text-slate-300 text-xs w-3">${open?'▾':'▸'}</span><div><div class="font-semibold text-slate-800 leading-tight">${r.order||'—'}${r.source==='docpharma'?'<span class="text-slate-400 text-[10px] font-normal ml-1">DP</span>':''}</div><div class="text-[11px] text-slate-400 leading-tight">${r.awb||''}</div></div></div></td>`+
+          `<td class="${td}" style="${stripe}"><div class="flex items-center gap-1.5"><span class="text-slate-300 text-xs w-3">${open?'▾':'▸'}</span><div><div class="font-semibold text-slate-800 leading-tight">${r.order||'—'}${r.source==='docpharma'?'<span class="text-slate-400 text-[10px] font-normal ml-1">DP</span>':''}${eeHoldChip(r.order)}</div><div class="text-[11px] text-slate-400 leading-tight">${r.awb||''}</div></div></div></td>`+
           `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${b[1]}">${b[0]}</span>${r.marked_fake?' <span title="Marked likely-fake">🚩</span>':''}${r.mail_sent?' <span title="Critical mail sent">✉️</span>':''}</td>`+
           `<td class="${td}">${typ}</td>`+
           `<td class="${td} text-slate-600"><div class="truncate max-w-[130px]" title="${r.courier||''}">${r.courier||'—'}</div></td>`+
@@ -8360,3 +8577,736 @@ function srvRenderResult(data) {
   resultsEl.innerHTML = hero + stats + table + raw;
 }
 // ── End Serviceability ────────────────────────────────────────────────────────
+
+// ═══════════════ INFLUENCER MARKETING CRM (port of the standalone Influencer CRM) ═══════════════
+// Views: inf-dashboard · inf-discover · inf-influencers · inf-lists · inf-calendar · inf-mentions
+async function infFetch(url, opts){ const r=await fetch(url,{...(opts||{}),headers:{'Content-Type':'application/json',...getAuthHeaders(),...((opts||{}).headers||{})}}); const d=await r.json().catch(()=>({})); if(!r.ok||d.success===false) throw new Error(d.error||d.message||('HTTP '+r.status)); return d; }
+const INF_STATUS={not_contacted:['Not contacted','bg-slate-100 text-slate-600'],reached_out:['Reached out','bg-sky-50 text-sky-700'],in_discussion:['In discussion','bg-amber-50 text-amber-700'],partnered:['Partnered','bg-emerald-50 text-emerald-700'],rejected:['Rejected','bg-rose-50 text-rose-600']};
+function infBadge(s){ const [l,c]=INF_STATUS[s]||[s||'—','bg-slate-100 text-slate-500']; return `<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap ${c}">${escapeHtml(l)}</span>`; }
+function infN(n){ if(n==null||n==='') return '—'; n=Number(n); if(!isFinite(n)) return '—'; if(n>=1e6) return (n/1e6).toFixed(1).replace(/\.0$/,'')+'Mn'; if(n>=1e3) return (n/1e3).toFixed(1).replace(/\.0$/,'')+'K'; return n.toLocaleString('en-IN'); }
+function infMoney(n){ return '₹'+Math.round(Number(n||0)).toLocaleString('en-IN'); }
+function infAvatar(inf,cls){ const av=_avatar(inf.instagram_handle||inf.name||'?');
+  return `<span class="relative inline-flex items-center justify-center rounded-full ${av.color} text-white font-bold shrink-0 ${cls||'w-9 h-9 text-xs'}">${av.initials}${inf.profile_image_url?`<img src="${escapeHtml(inf.profile_image_url)}" class="absolute inset-0 w-full h-full rounded-full object-cover" onerror="this.remove()">`:''}</span>`; }
+function infBucketOf(fc){ fc=Number(fc||0); if(fc>=1e6) return 'mega'; if(fc>=1e5) return 'macro'; if(fc>=1e4) return 'micro'; return 'nano'; }
+const INF_ACT_CHIP={note:'bg-indigo-50 text-indigo-700',status_change:'bg-slate-100 text-slate-600',video_added:'bg-violet-50 text-violet-700',payment:'bg-emerald-50 text-emerald-700',product_sent:'bg-amber-50 text-amber-700',email_sent:'bg-sky-50 text-sky-700'};
+function infActChip(t){ return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${INF_ACT_CHIP[t]||'bg-slate-100 text-slate-500'}">${escapeHtml(String(t||'').replace(/_/g,' '))}</span>`; }
+function infModal(id, html, maxW){ document.getElementById(id)?.remove();
+  const wrap=document.createElement('div'); wrap.id=id;
+  wrap.className='fixed inset-0 z-[75] bg-slate-900/40 backdrop-blur-[2px] flex items-center justify-center p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-2xl w-full ${maxW||'max-w-2xl'} max-h-[92vh] overflow-y-auto sup-pop">${html}</div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap||e.target.closest('[data-x]')) wrap.remove(); });
+  return wrap; }
+const INF_MODAL_HEAD=(title,sub)=>`<div class="flex items-center justify-between px-5 py-4 border-b border-slate-100 sticky top-0 bg-white rounded-t-2xl z-10">
+  <div><h3 class="font-bold text-slate-800">${title}</h3>${sub?`<p class="text-xs text-slate-400 mt-0.5">${sub}</p>`:''}</div>
+  <button data-x class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>`;
+
+// ── Influencer Dashboard ─────────────────────────────────────────────────────
+let _infdWired=false;
+async function infDashInit(){
+  if(!_infdWired){ _infdWired=true;
+    document.getElementById('infd-refresh')?.addEventListener('click',infDashInit);
+    document.getElementById('infd-quick-discover')?.addEventListener('click',()=>navigate('inf-discover'));
+    document.getElementById('infd-quick-add')?.addEventListener('click',()=>infAddModal());
+  }
+  const k=document.getElementById('infd-kpis'); if(k) k.innerHTML='<div class="col-span-full">'+brandLoader()+'</div>';
+  try{
+    const d=await infFetch('/api/inf/summary');
+    const tile=(label,val,view,accent)=>`<button class="card p-5 text-left hover:ring-2 hover:ring-indigo-200 transition-all" data-nav="${view||''}">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">${label}</p>
+      <p class="text-2xl font-bold ${accent||'text-slate-800'} mt-1">${val}</p></button>`;
+    k.innerHTML=tile('Total influencers',(d.kpis.total||0).toLocaleString('en-IN'),'inf-influencers')
+      +tile('Partnered',d.kpis.partnered,'inf-influencers','text-emerald-600')
+      +tile('In discussion',d.kpis.in_discussion,'inf-influencers','text-amber-600')
+      +tile('Reached out',d.kpis.reached_out,'inf-influencers','text-sky-600')
+      +tile('Lists',d.kpis.lists,'inf-lists','text-indigo-600');
+    k.querySelectorAll('[data-nav]').forEach(b=>b.addEventListener('click',()=>{ if(b.dataset.nav) navigate(b.dataset.nav); }));
+    const a=document.getElementById('infd-activity');
+    a.innerHTML=(d.activities||[]).map(x=>`<div class="flex items-start gap-2.5 py-2 border-b border-slate-50 last:border-0">
+      ${infActChip(x.activity_type)}
+      <div class="min-w-0 flex-1"><p class="text-sm text-slate-700">${escapeHtml(x.description||'')}</p>
+        <p class="text-xs text-slate-400 mt-0.5">${x.influencer?`<a href="#" class="text-indigo-500 hover:underline" data-inf="${x.influencer_id}">@${escapeHtml(x.influencer.handle||'')}</a> · `:''}${supRelTime(x.created_at)}</p></div></div>`).join('')||'<p class="text-sm text-slate-400">No activity yet.</p>';
+    a.querySelectorAll('[data-inf]').forEach(el=>el.addEventListener('click',e=>{ e.preventDefault(); infDetailModal(el.dataset.inf); }));
+  }catch(e){ if(k) k.innerHTML=`<p class="col-span-full text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
+}
+
+// ── Influencers table ────────────────────────────────────────────────────────
+let _infRows=null,_infiWired=false,_infSel=new Set(),_infSort={k:'created_at',d:'desc'},_infListsCache=null;
+async function infListInit(){
+  if(!_infiWired){ _infiWired=true;
+    document.getElementById('infi-q').addEventListener('input',debounce(infRenderTable,300));
+    ['infi-status','infi-niche','infi-bucket','infi-contact'].forEach(id=>document.getElementById(id).addEventListener('change',infRenderTable));
+    document.getElementById('infi-reset').addEventListener('click',()=>{ ['infi-q','infi-status','infi-niche','infi-bucket','infi-contact'].forEach(id=>document.getElementById(id).value=''); infRenderTable(); });
+    document.getElementById('infi-add').addEventListener('click',()=>infAddModal());
+    document.getElementById('infi-export').addEventListener('click',infExportCsv);
+    document.getElementById('infi-refresh-metrics').addEventListener('click',infRefreshMetrics);
+    document.getElementById('infi-bulk-clear').addEventListener('click',()=>{ _infSel.clear(); infBulkPaint(); infRenderTable(); });
+    document.getElementById('infi-bulk-status').addEventListener('change',async e=>{ const v=e.target.value; e.target.value=''; if(!v||!_infSel.size) return;
+      if(!(await supConfirm({title:'Change status?',message:`Set ${_infSel.size} influencer(s) to "${(INF_STATUS[v]||[v])[0]}".`,confirmLabel:'Change'}))) return;
+      try{ await infFetch('/api/inf/influencers/bulk',{method:'POST',body:JSON.stringify({ids:[..._infSel],action:'status',status:v})}); showNotification('Status updated'); _infSel.clear(); infBulkPaint(); await infLoadRows(); }catch(err){ showNotification(err.message,true); } });
+    document.getElementById('infi-bulk-list').addEventListener('change',async e=>{ const v=e.target.value; e.target.value=''; if(!v||!_infSel.size) return;
+      try{ const r=await infFetch('/api/inf/influencers/bulk',{method:'POST',body:JSON.stringify({ids:[..._infSel],action:'add-to-list',listId:Number(v)})}); showNotification(`Added ${r.added} (${r.skipped} already in list)`); _infSel.clear(); infBulkPaint(); infRenderTable(); }catch(err){ showNotification(err.message,true); } });
+  }
+  await infLoadRows();
+  infLoadListsInto('infi-bulk-list','Add to list…');
+}
+async function infLoadRows(){
+  const c=document.getElementById('infi-table'); if(c) c.innerHTML=brandLoader('Loading influencers…');
+  try{ const d=await infFetch('/api/inf/influencers'); _infRows=d.influencers||[];
+    const nsel=document.getElementById('infi-niche');
+    if(nsel.options.length<=1){ [...new Set(_infRows.map(r=>r.niche).filter(Boolean))].sort().forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; nsel.appendChild(o); }); }
+    infRenderTable();
+  }catch(e){ if(c) c.innerHTML=`<p class="text-sm text-rose-500 p-6">${escapeHtml(e.message)}</p>`; }
+}
+async function infLoadListsInto(selId,placeholder){
+  try{ if(!_infListsCache) _infListsCache=(await infFetch('/api/inf/lists')).lists||[];
+    const sel=document.getElementById(selId); if(!sel) return;
+    sel.innerHTML=`<option value="">${placeholder}</option>`+_infListsCache.map(l=>`<option value="${l.id}">${escapeHtml(l.name)}</option>`).join('');
+  }catch(_){}
+}
+function infFiltered(){
+  if(!_infRows) return [];
+  const q=(document.getElementById('infi-q').value||'').trim().toLowerCase();
+  const st=document.getElementById('infi-status').value, ni=document.getElementById('infi-niche').value;
+  const bu=document.getElementById('infi-bucket').value, co=document.getElementById('infi-contact').value;
+  let rows=_infRows.filter(r=>
+    (!q||String(r.name||'').toLowerCase().includes(q)||String(r.instagram_handle||'').toLowerCase().includes(q))
+    &&(!st||r.outreach_status===st)&&(!ni||r.niche===ni)
+    &&(!bu||infBucketOf(r.follower_count)===bu)
+    &&(!co||(co==='phone'?!!r.phone:co==='email'?!!r.email:(!r.phone&&!r.email))));
+  const {k,d}=_infSort, dir=d==='asc'?1:-1;
+  rows.sort((a,b)=>{ let av=a[k],bv=b[k];
+    if(k==='follower_count'||k==='engagement_rate'){ av=Number(av||0); bv=Number(bv||0); return (av-bv)*dir; }
+    return String(av||'').localeCompare(String(bv||''))*dir; });
+  return rows;
+}
+function infBulkPaint(){ const bar=document.getElementById('infi-bulkbar'); bar.classList.toggle('hidden',!_infSel.size); document.getElementById('infi-selcount').textContent=_infSel.size; }
+function infRenderTable(){
+  const c=document.getElementById('infi-table'); if(!c||!_infRows) return;
+  const rows=infFiltered();
+  document.getElementById('infi-count').textContent=`${rows.length.toLocaleString('en-IN')} of ${_infRows.length.toLocaleString('en-IN')}`;
+  const TH=(k,label,cls)=>`<th data-k="${k}" class="px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap cursor-pointer hover:text-slate-600 ${cls||''}">${label}${_infSort.k===k?(_infSort.d==='asc'?' ▲':' ▼'):''}</th>`;
+  const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
+  const head=`<thead><tr><th class="px-3 py-2.5 border-b border-slate-200 bg-slate-50/60 w-8"><input type="checkbox" id="infi-selall" class="accent-indigo-600"></th>
+    ${TH('name','Influencer')}${TH('follower_count','Followers')}${TH('niche','Niche')}${TH('outreach_status','Status')}${TH('engagement_rate','Engagement')}${TH('city','City')}<th class="px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60">Contact</th>${TH('created_at','Added')}</tr></thead>`;
+  if(!rows.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">No influencers match</div>'; return; }
+  c.innerHTML=`<table class="w-full">${head}<tbody id="infi-tbody"></tbody></table>`;
+  const tb=document.getElementById('infi-tbody');
+  let i=0; const CHUNK=200;
+  (function paint(){
+    const slice=rows.slice(i,i+CHUNK).map(r=>`<tr class="infi-row cursor-pointer hover:bg-slate-50" data-id="${r.id}">
+      <td class="${TD}" data-stop><input type="checkbox" class="infi-cb accent-indigo-600" data-id="${r.id}" ${_infSel.has(r.id)?'checked':''}></td>
+      <td class="${TD}"><div class="flex items-center gap-2.5">${infAvatar(r)}<div class="min-w-0"><div class="font-semibold text-slate-800 truncate max-w-[180px]">${escapeHtml(r.name||'—')}</div><div class="text-xs text-indigo-500">@${escapeHtml(r.instagram_handle||'')}</div></div></div></td>
+      <td class="${TD} tabular-nums font-semibold">${infN(r.follower_count)}<span class="ml-1.5 text-[10px] text-slate-400 uppercase">${infBucketOf(r.follower_count)}</span></td>
+      <td class="${TD} text-xs">${escapeHtml(r.niche||'—')}</td>
+      <td class="${TD}">${infBadge(r.outreach_status)}</td>
+      <td class="${TD} text-xs">${r.engagement_rate!=null?Number(r.engagement_rate).toFixed(1)+'%':(r.engagement_quality||'—')}</td>
+      <td class="${TD} text-xs">${escapeHtml(r.city||r.location||'—')}</td>
+      <td class="${TD} text-xs">${r.phone?'📞 ':''}${r.email?'✉️':''}${!r.phone&&!r.email?'<span class="text-slate-300">—</span>':''}</td>
+      <td class="${TD} text-xs tabular-nums">${_dmy(r.created_at)}</td></tr>`).join('');
+    tb.insertAdjacentHTML('beforeend',slice);
+    i+=CHUNK; if(i<rows.length) requestAnimationFrame(paint); else infWireTable(rows);
+  })();
+}
+function infWireTable(rows){
+  const c=document.getElementById('infi-table');
+  c.querySelectorAll('th[data-k]').forEach(th=>th.addEventListener('click',()=>{ const k=th.dataset.k;
+    _infSort=_infSort.k===k?{k,d:_infSort.d==='asc'?'desc':'asc'}:{k,d:k==='follower_count'||k==='created_at'?'desc':'asc'}; infRenderTable(); }));
+  document.getElementById('infi-selall')?.addEventListener('change',e=>{ rows.forEach(r=>e.target.checked?_infSel.add(r.id):_infSel.delete(r.id)); infBulkPaint(); infRenderTable(); });
+  c.querySelectorAll('.infi-cb').forEach(cb=>cb.addEventListener('change',e=>{ const id=Number(cb.dataset.id); e.target.checked?_infSel.add(id):_infSel.delete(id); infBulkPaint(); }));
+  c.querySelectorAll('.infi-row').forEach(tr=>tr.addEventListener('click',e=>{ if(e.target.closest('[data-stop]')) return; infDetailModal(tr.dataset.id); }));
+}
+function infExportCsv(){
+  const rows=infFiltered(); if(!rows.length) return showNotification('Nothing to export',true);
+  const cols=['instagram_handle','name','follower_count','niche','outreach_status','engagement_rate','city','state','phone','email','quoted_price','final_price','created_at'];
+  const csv=[cols.join(',')].concat(rows.map(r=>cols.map(k=>{ const v=r[k]==null?'':String(r[k]); return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; }).join(','))).join('\n');
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'})); a.download='influencers.csv'; a.click(); URL.revokeObjectURL(a.href);
+}
+// "Refresh last 10 days" — bulk re-scrape reel metrics with a live progress bar
+let _infRefTimer=null;
+async function infRefreshMetrics(){
+  const btn=document.getElementById('infi-refresh-metrics');
+  try{ btn.disabled=true;
+    const r=await infFetch('/api/inf/refresh-videos',{method:'POST',body:JSON.stringify({days:10})});
+    if(!r.scheduled){ showNotification('No recent videos to refresh.'); btn.disabled=false; return; }
+    const card=document.getElementById('infi-progress'), bar=document.getElementById('infi-progress-bar'), lab=document.getElementById('infi-progress-label');
+    card.classList.remove('hidden'); bar.style.width='0%'; lab.textContent=`0 / ${r.scheduled}`;
+    const deadline=Date.now()+20*60*1000;
+    clearInterval(_infRefTimer);
+    _infRefTimer=setInterval(async()=>{
+      try{ const p=await infFetch('/api/inf/refresh-progress?since='+encodeURIComponent(r.startedAt));
+        const done=Math.min(p.done,r.scheduled);
+        bar.style.width=Math.round(done/r.scheduled*100)+'%'; lab.textContent=`${done} / ${r.scheduled}`;
+        if(done>=r.scheduled||Date.now()>deadline){ clearInterval(_infRefTimer); lab.textContent+=Date.now()>deadline?' (timed out — some may still finish)':' ✓ done';
+          setTimeout(()=>card.classList.add('hidden'),8000); btn.disabled=false; }
+      }catch(_){}},5000);
+    showNotification(`Refreshing metrics for ${r.scheduled} video(s)…`);
+  }catch(e){ showNotification(e.message,true); btn.disabled=false; }
+}
+
+// ── Add / edit influencer modals ─────────────────────────────────────────────
+function infAddModal(prefill){
+  const p=prefill||{};
+  const F=(id,label,ph,val,type)=>`<div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">${label}</label><input id="${id}" type="${type||'text'}" class="filter-input w-full" placeholder="${ph||''}" value="${escapeHtml(val==null?'':String(val))}"></div>`;
+  const wrap=infModal('inf-add-modal',`${INF_MODAL_HEAD('Add influencer')}
+    <div class="p-5 grid sm:grid-cols-2 gap-4">
+      ${F('infa-handle','Instagram handle *','@handle',p.instagram_handle)}${F('infa-name','Name','',p.name)}
+      ${F('infa-phone','Phone','',p.phone)}${F('infa-email','Email','',p.email,'email')}
+      ${F('infa-niche','Niche','Beauty, Lifestyle…',p.niche)}${F('infa-city','City','',p.city)}
+      ${F('infa-followers','Followers','',p.follower_count,'number')}${F('infa-quoted','Quoted price (₹)','',p.quoted_price,'number')}
+      <div class="sm:col-span-2"><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Notes</label><textarea id="infa-notes" class="filter-input w-full" style="height:70px">${escapeHtml(p.notes||'')}</textarea></div>
+      <p id="infa-err" class="text-xs text-rose-500 hidden sm:col-span-2"></p>
+    </div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="infa-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Add influencer</button></div>`);
+  document.getElementById('infa-save').addEventListener('click',async()=>{
+    const val=id=>document.getElementById(id).value.trim();
+    if(!val('infa-handle').replace(/^@/,'')){ const e=document.getElementById('infa-err'); e.textContent='Instagram handle is required.'; e.classList.remove('hidden'); return; }
+    try{ const r=await infFetch('/api/inf/influencers',{method:'POST',body:JSON.stringify({
+        instagram_handle:val('infa-handle'),name:val('infa-name'),phone:val('infa-phone'),email:val('infa-email'),
+        niche:val('infa-niche'),city:val('infa-city'),follower_count:val('infa-followers'),quoted_price:val('infa-quoted'),
+        notes:document.getElementById('infa-notes').value.trim(),source:p.source})});
+      wrap.remove(); showNotification('Influencer added'); _infRows=null; if(currentView==='inf-influencers') infLoadRows(); infDetailModal(r.id);
+    }catch(e){ const el=document.getElementById('infa-err'); el.textContent=e.message; el.classList.remove('hidden'); }
+  });
+  setTimeout(()=>document.getElementById('infa-handle')?.focus(),50);
+}
+function infEditModal(inf, onDone){
+  const F=(id,label,val,type)=>`<div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">${label}</label><input id="${id}" type="${type||'text'}" class="filter-input w-full" value="${escapeHtml(val==null?'':String(val))}"></div>`;
+  const wrap=infModal('inf-edit-modal',`${INF_MODAL_HEAD('Edit profile','@'+escapeHtml(inf.instagram_handle||''))}
+    <div class="p-5 grid sm:grid-cols-2 gap-4">
+      ${F('infe-name','Name',inf.name)}${F('infe-niche','Niche',inf.niche)}
+      ${F('infe-phone','Phone',inf.phone)}${F('infe-email','Email',inf.email,'email')}
+      ${F('infe-followers','Followers',inf.follower_count,'number')}${F('infe-engagement','Engagement rate %',inf.engagement_rate,'number')}
+      ${F('infe-quoted','Quoted price (₹)',inf.quoted_price,'number')}${F('infe-final','Final price (₹)',inf.final_price,'number')}
+      ${F('infe-address1','Address line 1',inf.address1)}${F('infe-address2','Address line 2',inf.address2)}
+      ${F('infe-city','City',inf.city)}${F('infe-state','State',inf.state)}
+      ${F('infe-pincode','Pincode',inf.pincode)}${F('infe-next','Next video expected',inf.next_video_expected_date,'date')}
+      <div class="sm:col-span-2"><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Notes</label><textarea id="infe-notes" class="filter-input w-full" style="height:70px">${escapeHtml(inf.notes||'')}</textarea></div>
+    </div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="infe-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Save</button></div>`);
+  document.getElementById('infe-save').addEventListener('click',async()=>{
+    const v=id=>document.getElementById(id).value.trim();
+    try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({
+        name:v('infe-name'),niche:v('infe-niche'),phone:v('infe-phone'),email:v('infe-email'),
+        follower_count:v('infe-followers'),engagement_rate:v('infe-engagement'),quoted_price:v('infe-quoted'),final_price:v('infe-final'),
+        address1:v('infe-address1'),address2:v('infe-address2'),city:v('infe-city'),state:v('infe-state'),pincode:v('infe-pincode'),
+        next_video_expected_date:v('infe-next'),notes:document.getElementById('infe-notes').value.trim()})});
+      wrap.remove(); showNotification('Saved'); _infRows=null; if(onDone) onDone();
+    }catch(e){ showNotification(e.message,true); }
+  });
+}
+
+// ── Influencer detail modal (sidebar + Videos / Activity tabs) ───────────────
+let _infDetTab='videos';
+async function infDetailModal(id){
+  _infDetTab='videos';
+  const wrap=infModal('inf-detail-modal',`${INF_MODAL_HEAD('Influencer')}<div class="p-6">${brandLoader('Loading profile…')}</div>`,'max-w-5xl');
+  try{ const d=await infFetch('/api/inf/influencer/'+id); wrap._data=d; infDetailRender(wrap); }
+  catch(e){ wrap.querySelector('.sup-pop').innerHTML=INF_MODAL_HEAD('Influencer')+`<p class="p-6 text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
+}
+async function infDetailReload(wrap){
+  try{ const d=await infFetch('/api/inf/influencer/'+wrap._data.influencer.id); wrap._data=d; infDetailRender(wrap); }catch(_){}
+}
+function infDetailRender(wrap){
+  const {influencer:inf,videos,activities,lists}=wrap._data;
+  const statusSel=`<select id="infd-status" class="filter-select">${Object.entries(INF_STATUS).map(([k,[l]])=>`<option value="${k}" ${inf.outreach_status===k?'selected':''}>${l}</option>`).join('')}</select>`;
+  const info=(label,val)=>`<div class="flex justify-between gap-3 py-1.5 border-b border-slate-50 last:border-0"><span class="text-xs text-slate-400">${label}</span><span class="text-xs font-semibold text-slate-700 text-right break-all">${val||'—'}</span></div>`;
+  const vidCard=v=>{
+    const overdue=v.expected_date&&!v.live_date&&v.expected_date<new Date().toISOString().slice(0,10);
+    return `<div class="rounded-xl border border-slate-100 p-4" data-vid="${v.id}">
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        ${v.live_date?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700">LIVE ${_dmy(v.live_date)}</span>`:overdue?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-rose-50 text-rose-600">OVERDUE — expected ${_dmy(v.expected_date)}</span>`:v.expected_date?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-50 text-amber-700">Expected ${_dmy(v.expected_date)}</span>`:'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-100 text-slate-500">Unscheduled</span>'}
+        ${v.is_ad_run?'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-violet-50 text-violet-700">Ad run</span>':''}
+        ${v.product_sent?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-50 text-sky-700">Product sent</span>`:''}
+        <span class="ml-auto flex items-center gap-1.5 text-xs">Payment:
+          <select class="infv-pay filter-select" style="height:30px;padding:0 26px 0 8px" data-vid="${v.id}">
+            ${['pending','partial','paid'].map(s=>`<option value="${s}" ${v.payment_status===s?'selected':''}>${s}</option>`).join('')}</select></span>
+      </div>
+      ${v.video_url?`<a href="${escapeHtml(v.video_url)}" target="_blank" class="text-xs text-indigo-500 hover:underline break-all">${escapeHtml(v.video_url)}</a>`:'<span class="text-xs text-slate-400">No reel URL yet</span>'}
+      <div class="grid grid-cols-4 gap-2 mt-3 text-center">
+        ${[['Views',infN(v.views)],['Likes',infN(v.likes)],['Comments',infN(v.comments)],['Shares',infN(v.shares)]].map(([l,x])=>`<div class="rounded-lg bg-slate-50 py-2"><p class="text-sm font-bold text-slate-800">${x}</p><p class="text-[10px] text-slate-400 uppercase">${l}</p></div>`).join('')}
+      </div>
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-xs text-slate-500">
+        <span>Quoted <b class="text-slate-700">${v.quoted_price!=null?infMoney(v.quoted_price):'—'}</b></span>
+        <span>Final <b class="text-slate-700">${v.final_price!=null?infMoney(v.final_price):'—'}</b></span>
+        <span>GST <b class="text-slate-700">${v.gst_applicable?'18%':'No'}</b></span>
+        ${v.ad_code?`<span>Code <b class="text-slate-700">${escapeHtml(v.ad_code)}</b></span>`:''}
+        ${v.metrics_fetched_at?`<span class="text-slate-400">metrics ${supRelTime(v.metrics_fetched_at)}</span>`:''}
+      </div>
+      <div class="flex flex-wrap gap-1.5 mt-3">
+        ${v.video_url?`<button class="infv-fetch filter-btn" style="height:30px" data-vid="${v.id}">↻ Fetch metrics</button>`:''}
+        <button class="infv-edit filter-btn" style="height:30px" data-vid="${v.id}">Edit</button>
+        <button class="infv-send filter-btn" style="height:30px" data-vid="${v.id}">📦 Send product</button>
+        ${v.shopify_draft_order_url?`<a href="${escapeHtml(v.shopify_draft_order_url)}" target="_blank" class="filter-btn inline-flex items-center" style="height:30px">Draft order ↗</a>`:''}
+        <button class="infv-invoice filter-btn" style="height:30px" data-vid="${v.id}">🧾 Invoice</button>
+        <button class="infv-del text-rose-500 hover:bg-rose-50 rounded-lg px-2.5 text-xs" data-vid="${v.id}">Delete</button>
+      </div></div>`; };
+  const tabBtn=(k,l)=>`<button class="infd-tab px-3.5 py-2 text-sm font-semibold rounded-lg ${_infDetTab===k?'bg-indigo-600 text-white':'text-slate-500 hover:bg-slate-100'}" data-tab="${k}">${l}</button>`;
+  wrap.querySelector('.sup-pop').innerHTML=`${INF_MODAL_HEAD('&nbsp;')}
+    <div class="px-6 pb-6 -mt-2">
+      <div class="flex flex-wrap items-center gap-4">
+        ${infAvatar(inf,'w-16 h-16 text-xl')}
+        <div class="min-w-0 flex-1">
+          <h2 class="text-lg font-bold text-slate-800">${escapeHtml(inf.name||'@'+(inf.instagram_handle||''))}</h2>
+          <a href="https://instagram.com/${escapeHtml(inf.instagram_handle||'')}" target="_blank" class="text-sm text-indigo-500 hover:underline">@${escapeHtml(inf.instagram_handle||'')} ↗</a>
+          <div class="flex flex-wrap gap-x-4 gap-y-0.5 mt-1 text-xs text-slate-500">
+            <span><b class="text-slate-700">${infN(inf.follower_count)}</b> followers</span>
+            ${inf.engagement_rate!=null?`<span><b class="text-slate-700">${Number(inf.engagement_rate).toFixed(1)}%</b> engagement</span>`:''}
+            ${inf.niche?`<span>${escapeHtml(inf.niche)}</span>`:''}
+            ${lists.length?`<span>Lists: ${lists.map(l=>escapeHtml(l.name)).join(', ')}</span>`:''}
+          </div>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">${statusSel}
+          <button id="infd-dm" class="filter-btn" title="Open Instagram DM & mark reached out">💬 DM</button>
+          <button id="infd-edit" class="filter-btn">✏ Edit</button>
+          <button id="infd-del" class="text-rose-500 hover:bg-rose-50 rounded-lg px-3 text-sm" title="Delete influencer">🗑</button>
+        </div>
+      </div>
+      <div class="grid lg:grid-cols-3 gap-5 mt-5">
+        <div class="space-y-4">
+          <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Contact & address</p>
+            ${info('Phone',escapeHtml(inf.phone||''))}${info('Email',escapeHtml(inf.email||''))}
+            ${info('Address',escapeHtml([inf.address1,inf.address2,inf.city,inf.state,inf.pincode].filter(Boolean).join(', ')))}
+          </div>
+          <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Deal terms</p>
+            ${info('Quoted',inf.quoted_price!=null?infMoney(inf.quoted_price):'')}${info('Final',inf.final_price!=null?infMoney(inf.final_price):'')}
+            ${info('Next video',inf.next_video_expected_date?_dmy(inf.next_video_expected_date):'')}
+          </div>
+          ${inf.bio?`<div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Bio</p><p class="text-xs text-slate-600 whitespace-pre-wrap">${escapeHtml(inf.bio)}</p></div>`:''}
+          ${inf.notes?`<div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Notes</p><p class="text-xs text-slate-600 whitespace-pre-wrap">${escapeHtml(inf.notes)}</p></div>`:''}
+        </div>
+        <div class="lg:col-span-2">
+          <div class="flex items-center gap-1.5 mb-3">${tabBtn('videos','Videos ('+videos.length+')')}${tabBtn('activity','Activity ('+activities.length+')')}
+            <button id="infd-addvid" class="ml-auto text-sm px-3 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">+ Add video</button></div>
+          <div id="infd-tabbody">
+            ${_infDetTab==='videos'
+              ?(videos.length?`<div class="space-y-3">${videos.map(vidCard).join('')}</div>`:'<p class="text-sm text-slate-400 p-6 text-center">No videos yet — add the first deliverable.</p>')
+              :`<div class="flex gap-2 mb-3"><input id="infd-note" class="filter-input flex-1" placeholder="Add a note to the timeline…"><button id="infd-note-save" class="text-sm px-3 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Add</button></div>
+                <div class="space-y-2 max-h-[50vh] overflow-auto">${activities.map(a=>`<div class="rounded-lg ${a.activity_type==='note'?'bg-indigo-50/50 ring-1 ring-indigo-100':'bg-slate-50/60'} px-3 py-2">
+                  <div class="flex items-center gap-2">${infActChip(a.activity_type)}<span class="text-[11px] text-slate-400">${supRelTime(a.created_at)}</span></div>
+                  <p class="text-xs text-slate-700 mt-1">${escapeHtml(a.description||'')}</p></div>`).join('')||'<p class="text-sm text-slate-400">No activity yet.</p>'}</div>`}
+          </div>
+        </div>
+      </div>
+    </div>`;
+  // wiring
+  wrap.querySelectorAll('.infd-tab').forEach(b=>b.addEventListener('click',()=>{ _infDetTab=b.dataset.tab; infDetailRender(wrap); }));
+  wrap.querySelector('#infd-status').addEventListener('change',async e=>{
+    try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({outreach_status:e.target.value})}); showNotification('Status updated'); _infRows=null; if(currentView==='inf-influencers') infLoadRows(); }
+    catch(err){ showNotification(err.message,true); } });
+  wrap.querySelector('#infd-dm').addEventListener('click',async()=>{
+    window.open('https://ig.me/m/'+encodeURIComponent(inf.instagram_handle||''),'_blank');
+    if(inf.outreach_status==='not_contacted'){ try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({outreach_status:'reached_out'})}); _infRows=null; infDetailReload(wrap); }catch(_){}}
+  });
+  wrap.querySelector('#infd-edit').addEventListener('click',()=>infEditModal(inf,()=>infDetailReload(wrap)));
+  wrap.querySelector('#infd-del').addEventListener('click',async()=>{
+    if(!(await supConfirm({title:'Delete this influencer?',message:`@${inf.instagram_handle} plus all their videos, notes and list memberships will be removed permanently.`,confirmLabel:'Delete',danger:true}))) return;
+    try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'DELETE'}); wrap.remove(); showNotification('Deleted'); _infRows=null; if(currentView==='inf-influencers') infLoadRows(); }catch(e){ showNotification(e.message,true); } });
+  wrap.querySelector('#infd-addvid').addEventListener('click',()=>infVideoModal(inf.id,null,()=>infDetailReload(wrap)));
+  wrap.querySelector('#infd-note-save')?.addEventListener('click',async()=>{
+    const t=wrap.querySelector('#infd-note').value.trim(); if(!t) return;
+    try{ await infFetch('/api/inf/activities',{method:'POST',body:JSON.stringify({influencer_id:inf.id,description:t})}); infDetailReload(wrap); }catch(e){ showNotification(e.message,true); } });
+  const vidById=vid=>wrap._data.videos.find(v=>String(v.id)===String(vid));
+  wrap.querySelectorAll('.infv-pay').forEach(s=>s.addEventListener('change',async()=>{
+    try{ await infFetch('/api/inf/videos/'+s.dataset.vid,{method:'POST',body:JSON.stringify({payment_status:s.value,...(s.value==='paid'?{payment_date:new Date().toISOString().slice(0,10)}:{})})}); showNotification('Payment status saved'); }catch(e){ showNotification(e.message,true); } }));
+  wrap.querySelectorAll('.infv-edit').forEach(b=>b.addEventListener('click',()=>infVideoModal(inf.id,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
+  wrap.querySelectorAll('.infv-send').forEach(b=>b.addEventListener('click',()=>infSendProductModal(inf,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
+  wrap.querySelectorAll('.infv-invoice').forEach(b=>b.addEventListener('click',()=>infInvoice(inf,vidById(b.dataset.vid))));
+  wrap.querySelectorAll('.infv-del').forEach(b=>b.addEventListener('click',async()=>{
+    if(!(await supConfirm({title:'Delete this video?',message:'The deliverable and its metrics will be removed.',confirmLabel:'Delete',danger:true}))) return;
+    try{ await infFetch('/api/inf/videos/'+b.dataset.vid,{method:'DELETE'}); infDetailReload(wrap); }catch(e){ showNotification(e.message,true); } }));
+  wrap.querySelectorAll('.infv-fetch').forEach(b=>b.addEventListener('click',async()=>{
+    const v=vidById(b.dataset.vid); const prev=v&&v.metrics_fetched_at;
+    try{ b.disabled=true; b.textContent='Fetching…';
+      await infFetch('/api/inf/videos/'+b.dataset.vid+'/metrics',{method:'POST'});
+      const deadline=Date.now()+120000;
+      const poll=setInterval(async()=>{
+        try{ const r=await infFetch('/api/inf/videos/'+b.dataset.vid);
+          if(r.video.metrics_fetched_at&&r.video.metrics_fetched_at!==prev){ clearInterval(poll); showNotification('Metrics updated'); infDetailReload(wrap); }
+          else if(Date.now()>deadline){ clearInterval(poll); b.disabled=false; b.textContent='↻ Fetch metrics'; showNotification('Still processing — reopen the profile in a minute.',true); }
+        }catch(_){}},5000);
+    }catch(e){ b.disabled=false; b.textContent='↻ Fetch metrics'; showNotification(e.message,true); } }));
+}
+
+// ── Video add/edit modal ─────────────────────────────────────────────────────
+function infVideoModal(influencerId, video, onDone){
+  const v=video||{};
+  const F=(id,label,val,type)=>`<div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">${label}</label><input id="${id}" type="${type||'text'}" class="filter-input w-full" value="${escapeHtml(val==null?'':String(val))}"></div>`;
+  const wrap=infModal('inf-video-modal',`${INF_MODAL_HEAD(video?'Edit video':'Add video')}
+    <div class="p-5 grid sm:grid-cols-2 gap-4">
+      <div class="sm:col-span-2">${F('infv-url','Reel URL',v.video_url)}</div>
+      ${F('infv-expected','Expected date',v.expected_date,'date')}${F('infv-live','Live date',v.live_date,'date')}
+      ${F('infv-quoted','Quoted price (₹)',v.quoted_price,'number')}${F('infv-final','Final price (₹)',v.final_price,'number')}
+      ${F('infv-adcode','Ad / discount code',v.ad_code)}${F('infv-lang','Language',v.language)}
+      ${F('infv-due','Payment due date',v.payment_due_date,'date')}
+      <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Payment status</label>
+        <select id="infv-pay" class="filter-select w-full">${['pending','partial','paid'].map(s=>`<option value="${s}" ${ (v.payment_status||'pending')===s?'selected':''}>${s}</option>`).join('')}</select></div>
+      <label class="flex items-center gap-2 text-sm text-slate-600"><input id="infv-gst" type="checkbox" class="accent-indigo-600" ${v.gst_applicable?'checked':''}> GST applicable (18%)</label>
+      <label class="flex items-center gap-2 text-sm text-slate-600"><input id="infv-adrun" type="checkbox" class="accent-indigo-600" ${v.is_ad_run?'checked':''}> Boosted as ad</label>
+      <div class="sm:col-span-2"><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Notes</label><textarea id="infv-notes" class="filter-input w-full" style="height:60px">${escapeHtml(v.notes||'')}</textarea></div>
+    </div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="infv-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">${video?'Save':'Add video'}</button></div>`);
+  document.getElementById('infv-save').addEventListener('click',async()=>{
+    const g=id=>document.getElementById(id).value.trim();
+    const body={ video_url:g('infv-url'),expected_date:g('infv-expected'),live_date:g('infv-live'),
+      quoted_price:g('infv-quoted'),final_price:g('infv-final'),ad_code:g('infv-adcode'),language:g('infv-lang'),
+      payment_due_date:g('infv-due'),payment_status:document.getElementById('infv-pay').value,
+      gst_applicable:document.getElementById('infv-gst').checked,is_ad_run:document.getElementById('infv-adrun').checked,
+      notes:document.getElementById('infv-notes').value.trim() };
+    try{
+      if(video) await infFetch('/api/inf/videos/'+video.id,{method:'POST',body:JSON.stringify(body)});
+      else await infFetch('/api/inf/videos',{method:'POST',body:JSON.stringify({influencer_id:influencerId,...body})});
+      wrap.remove(); showNotification(video?'Video updated':'Video added'); if(onDone) onDone();
+    }catch(e){ showNotification(e.message,true); }
+  });
+}
+
+// ── Send product (Shopify draft order) ───────────────────────────────────────
+let _infProducts=null;
+async function infSendProductModal(inf, video, onDone){
+  if(!video) return;
+  const wrap=infModal('inf-send-modal',`${INF_MODAL_HEAD('Send product','Creates a Shopify draft order for @'+escapeHtml(inf.instagram_handle||''))}<div class="p-6">${brandLoader('Loading catalog…')}</div>`,'max-w-3xl');
+  try{ if(!_infProducts) _infProducts=(await infFetch('/api/inf/products')).products||[]; }
+  catch(e){ wrap.querySelector('.sup-pop').innerHTML=INF_MODAL_HEAD('Send product')+`<p class="p-6 text-sm text-rose-500">${escapeHtml(e.message)}</p>`; return; }
+  const groups={};
+  _infProducts.forEach(p=>{ (groups[p.shopify_product_id]=groups[p.shopify_product_id]||{title:p.product_title,img:p.image_url,price:p.price,stock:0}).stock+=(p.inventory_quantity||0); });
+  const F=(id,label,val)=>`<div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">${label}</label><input id="${id}" class="filter-input w-full" value="${escapeHtml(val==null?'':String(val))}"></div>`;
+  wrap.querySelector('.sup-pop').innerHTML=`${INF_MODAL_HEAD('Send product','Creates a Shopify draft order for @'+escapeHtml(inf.instagram_handle||''))}
+    <div class="p-5 space-y-4">
+      <div><input id="infsp-q" class="filter-input w-full" placeholder="Search products…">
+        <div id="infsp-list" class="mt-2 max-h-56 overflow-auto rounded-xl border border-slate-100 divide-y divide-slate-50">
+          ${Object.entries(groups).map(([pid,g])=>`<label class="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 cursor-pointer infsp-item" data-t="${escapeHtml((g.title||'').toLowerCase())}">
+            <input type="checkbox" class="infsp-cb accent-indigo-600" value="${escapeHtml(pid)}">
+            ${g.img?`<img src="${escapeHtml(g.img)}" class="w-9 h-9 rounded-lg object-cover" onerror="this.remove()">`:''}
+            <span class="text-sm text-slate-700 flex-1">${escapeHtml(g.title||pid)}</span>
+            <span class="text-xs text-slate-400">₹${Number(g.price||0)} · ${g.stock} in stock</span></label>`).join('')}
+        </div></div>
+      <div class="grid sm:grid-cols-2 gap-3">
+        ${F('infsp-name','Name',inf.name)}${F('infsp-phone','Phone *',inf.phone)}
+        <div class="sm:col-span-2">${F('infsp-addr1','Address line 1 *',inf.address1)}</div>
+        <div class="sm:col-span-2">${F('infsp-addr2','Address line 2',inf.address2)}</div>
+        ${F('infsp-city','City',inf.city)}${F('infsp-state','State',inf.state)}
+        ${F('infsp-pin','Pincode *',inf.pincode)}${F('infsp-email','Email',inf.email)}
+      </div>
+      <p id="infsp-err" class="text-xs text-rose-500 hidden"></p>
+    </div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="infsp-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Create draft order</button></div>`;
+  document.getElementById('infsp-q').addEventListener('input',e=>{ const q=e.target.value.toLowerCase();
+    wrap.querySelectorAll('.infsp-item').forEach(el=>el.style.display=el.dataset.t.includes(q)?'':'none'); });
+  document.getElementById('infsp-save').addEventListener('click',async()=>{
+    const g=id=>document.getElementById(id).value.trim();
+    const ids=[...wrap.querySelectorAll('.infsp-cb:checked')].map(c=>c.value);
+    const err=t=>{ const p=document.getElementById('infsp-err'); p.textContent=t; p.classList.remove('hidden'); };
+    if(!ids.length) return err('Pick at least one product.');
+    if(!g('infsp-addr1')||!g('infsp-pin')||!g('infsp-phone')) return err('Address line 1, pincode and phone are required.');
+    const btn=document.getElementById('infsp-save'); btn.disabled=true; btn.textContent='Creating…';
+    try{ const r=await infFetch('/api/inf/send-product',{method:'POST',body:JSON.stringify({
+        videoId:video.id,influencerId:inf.id,productIds:ids,name:g('infsp-name'),phone:g('infsp-phone'),
+        address1:g('infsp-addr1'),address2:g('infsp-addr2'),city:g('infsp-city'),state:g('infsp-state'),pincode:g('infsp-pin'),email:g('infsp-email')})});
+      wrap.remove(); showNotification('Draft order created'); window.open(r.draftOrderUrl,'_blank'); if(onDone) onDone();
+    }catch(e){ btn.disabled=false; btn.textContent='Create draft order'; err(e.message); }
+  });
+}
+
+// ── Invoice generator (printable, Shifupro Technologies Pvt Ltd) ─────────────
+function infInvoice(inf, video){
+  if(!video) return;
+  const base=Number(video.final_price||video.quoted_price||0);
+  const gst=video.gst_applicable?Math.round(base*0.18):0;
+  const w=window.open('','_blank','width=760,height=900');
+  w.document.write(`<html><head><title>Invoice INV-${video.id}</title><style>
+    body{font-family:Arial,Helvetica,sans-serif;color:#1e293b;max-width:680px;margin:24px auto;padding:0 16px}
+    h1{color:#4338ca;font-size:22px;margin:0} table{width:100%;border-collapse:collapse;margin-top:18px}
+    th,td{border:1px solid #e2e8f0;padding:10px;text-align:left;font-size:14px} th{background:#f8fafc}
+    .r{text-align:right} .muted{color:#64748b;font-size:12px} .tot{font-weight:bold;background:#f8fafc}
+    @media print{.noprint{display:none}}</style></head><body>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div><h1>Shifupro Technologies Pvt Ltd</h1><p class="muted">The Element Skin · theelement.skin</p></div>
+      <div class="r"><p style="font-weight:bold">INVOICE INV-${video.id}</p><p class="muted">Date: ${new Date().toLocaleDateString('en-IN')}</p></div>
+    </div>
+    <p style="margin-top:20px"><b>Bill to:</b><br>${escapeHtml(inf.name||'@'+(inf.instagram_handle||''))}<br>
+      ${escapeHtml([inf.address1,inf.address2,inf.city,inf.state,inf.pincode].filter(Boolean).join(', ')||'—')}<br>
+      ${escapeHtml(inf.phone||'')} ${escapeHtml(inf.email||'')}</p>
+    <table><tr><th>Description</th><th class="r">Amount</th></tr>
+      <tr><td>Instagram video deliverable — @${escapeHtml(inf.instagram_handle||'')}${video.video_url?`<br><span class="muted">${escapeHtml(video.video_url)}</span>`:''}</td><td class="r">₹${base.toLocaleString('en-IN')}</td></tr>
+      ${gst?`<tr><td>GST @ 18%</td><td class="r">₹${gst.toLocaleString('en-IN')}</td></tr>`:''}
+      <tr class="tot"><td>Total</td><td class="r">₹${(base+gst).toLocaleString('en-IN')}</td></tr></table>
+    <p class="muted" style="margin-top:16px">Payment status: ${escapeHtml(video.payment_status||'pending')}${video.payment_due_date?' · Due '+escapeHtml(video.payment_due_date):''}</p>
+    <button class="noprint" style="margin-top:20px;padding:10px 22px;background:#4f46e5;color:#fff;border:0;border-radius:8px;cursor:pointer" onclick="window.print()">Print / Save PDF</button>
+    </body></html>`);
+  w.document.close();
+}
+
+// ── Discover ─────────────────────────────────────────────────────────────────
+let _infdisWired=false,_infdisRows=[];
+async function infDiscoverInit(){
+  if(!_infdisWired){ _infdisWired=true;
+    document.getElementById('infdis-analyze').addEventListener('click',infDiscoverRun);
+    document.getElementById('infdis-handle').addEventListener('keypress',e=>{ if(e.key==='Enter') infDiscoverRun(); });
+    document.getElementById('infdis-process-queue').addEventListener('click',async()=>{
+      try{ await infFetch('/api/inf/discover/process-queue',{method:'POST'}); showNotification('Queue worker started — pending handles are being analyzed.'); }catch(e){ showNotification(e.message,true); } });
+  }
+  infDiscoverHistory();
+}
+async function infDiscoverRun(){
+  const handle=document.getElementById('infdis-handle').value.trim();
+  if(!handle) return showNotification('Enter an Instagram handle.',true);
+  const st=document.getElementById('infdis-status'), out=document.getElementById('infdis-result'), btn=document.getElementById('infdis-analyze');
+  btn.disabled=true; st.textContent='Scraping profile + reels & analyzing… up to 2 minutes.';
+  out.innerHTML=brandLoader('Analyzing @'+handle.replace(/^@/,'')+'…');
+  try{ const d=await infFetch('/api/inf/discover',{method:'POST',body:JSON.stringify({handle})});
+    st.textContent='';
+    if(d.result&&d.result.queued){ out.innerHTML=`<div class="rounded-xl bg-amber-50 ring-1 ring-amber-200 p-4 text-sm text-amber-800">Instagram scraping timed out — <b>@${escapeHtml(handle.replace(/^@/,''))}</b> was queued for background analysis. Use “Process pending queue”, then check history.</div>`; }
+    else infDiscoverRenderResult(d.result);
+    infDiscoverHistory();
+  }catch(e){ st.textContent=''; out.innerHTML=`<div class="rounded-xl bg-rose-50 ring-1 ring-rose-100 p-4 text-sm text-rose-600">${escapeHtml(e.message)}</div>`; }
+  finally{ btn.disabled=false; }
+}
+function infDiscoverRenderResult(r){
+  if(!r) return;
+  const out=document.getElementById('infdis-result');
+  const recCls={'Recommended':'bg-emerald-50 text-emerald-700 ring-emerald-200','Maybe':'bg-amber-50 text-amber-700 ring-amber-200','Not Recommended':'bg-rose-50 text-rose-600 ring-rose-200'}[r.recommendation]||'bg-slate-100 text-slate-600 ring-slate-200';
+  out.innerHTML=`<div class="rounded-2xl ring-1 ring-slate-100 p-5">
+    <div class="flex flex-wrap items-center gap-3">
+      ${infAvatar({instagram_handle:r.handle,name:r.name,profile_image_url:r.profile_pic_url},'w-12 h-12 text-sm')}
+      <div class="flex-1 min-w-0"><p class="font-bold text-slate-800">${escapeHtml(r.name||'@'+(r.handle||''))} ${r.is_verified?'✔':''}</p>
+        <p class="text-xs text-slate-400">@${escapeHtml(r.handle||'')} · ${infN(r.follower_count||r.estimated_followers)} followers · ${escapeHtml(r.niche||'—')} · via ${r.data_source==='apify'?'live scrape':'AI estimate'}</p></div>
+      <span class="px-3 py-1 rounded-full text-sm font-bold ring-1 ${recCls}">${escapeHtml(r.recommendation||'—')}</span>
+    </div>
+    <p class="text-sm text-slate-700 mt-3">${escapeHtml(r.recommendation_summary||'')}</p>
+    <div class="grid sm:grid-cols-2 gap-4 mt-4">
+      <div><p class="text-xs font-bold text-emerald-600 uppercase tracking-wide mb-1">Pros</p><ul class="text-xs text-slate-600 space-y-1">${(r.pros||[]).map(p=>`<li>+ ${escapeHtml(p)}</li>`).join('')||'<li>—</li>'}</ul></div>
+      <div><p class="text-xs font-bold text-rose-500 uppercase tracking-wide mb-1">Cons</p><ul class="text-xs text-slate-600 space-y-1">${(r.cons||[]).map(p=>`<li>− ${escapeHtml(p)}</li>`).join('')||'<li>—</li>'}</ul></div>
+    </div>
+    <div class="rounded-xl bg-slate-50 p-3 mt-4 text-xs text-slate-600">
+      <b>Brand fit:</b> ${escapeHtml(r.brand_fit_verdict||'—')}<br>
+      <b>Conversion potential:</b> ${escapeHtml(r.conversion_potential||'—')} · <b>Engagement:</b> ${escapeHtml(r.engagement_quality||'—')}${r.engagement_reasoning?' — '+escapeHtml(r.engagement_reasoning):''} · <b>Confidence:</b> ${escapeHtml(r.confidence||'—')}
+      ${r.audience_type?`<br><b>Audience:</b> ${escapeHtml(r.audience_type)}`:''}${r.content_style?`<br><b>Style:</b> ${escapeHtml(r.content_style)}`:''}
+    </div>
+    <div class="flex flex-wrap items-center gap-2 mt-4">
+      <button id="infdis-addcrm" class="text-sm px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">➕ Add to CRM</button>
+      <select id="infdis-addlist" class="filter-select hidden"><option value="">Add to list…</option></select>
+      <span id="infdis-added" class="text-sm text-emerald-600 font-semibold hidden">Added ✓</span>
+    </div></div>`;
+  document.getElementById('infdis-addcrm').addEventListener('click',async()=>{
+    try{ const resp=await infFetch('/api/inf/influencers',{method:'POST',body:JSON.stringify({
+        instagram_handle:r.handle,name:r.name,niche:r.niche,location:r.location,
+        follower_count:r.follower_count||r.estimated_followers,engagement_rate:r.avg_engagement_rate,
+        engagement_quality:r.engagement_quality,bio:r.bio,profile_image_url:r.profile_pic_url,source:'discover'})});
+      document.getElementById('infdis-addcrm').classList.add('hidden');
+      document.getElementById('infdis-added').classList.remove('hidden');
+      const sel=document.getElementById('infdis-addlist'); sel.classList.remove('hidden');
+      _infListsCache=null; await infLoadListsInto('infdis-addlist','Add to list…');
+      sel.addEventListener('change',async e=>{ if(!e.target.value) return;
+        try{ await infFetch('/api/inf/lists/'+e.target.value+'/members',{method:'POST',body:JSON.stringify({influencerId:resp.id})}); showNotification('Added to list'); }catch(err){ showNotification(err.message,true); } e.target.value=''; });
+      _infRows=null; showNotification('@'+r.handle+' added to CRM');
+    }catch(e){ showNotification(e.message,true); } });
+}
+async function infDiscoverHistory(){
+  const h=document.getElementById('infdis-history'); if(h) h.innerHTML=brandLoaderSm();
+  try{ const d=await infFetch('/api/inf/discover/history'); _infdisRows=d.rows||[];
+    h.innerHTML=_infdisRows.length?`<div class="divide-y divide-slate-50">${_infdisRows.map((r,i)=>{
+      const rec=r.result&&r.result.recommendation;
+      const recCls={'Recommended':'text-emerald-600','Maybe':'text-amber-600','Not Recommended':'text-rose-500'}[rec]||'text-slate-400';
+      const stCls={completed:'bg-emerald-50 text-emerald-700',complete:'bg-emerald-50 text-emerald-700',pending:'bg-amber-50 text-amber-700',processing:'bg-sky-50 text-sky-700',failed:'bg-rose-50 text-rose-600'}[r.status]||'bg-slate-100 text-slate-500';
+      return `<div class="flex items-center gap-3 py-2.5 ${r.result?'cursor-pointer hover:bg-slate-50 rounded-lg px-2 -mx-2':''}" data-i="${i}">
+        <span class="font-semibold text-indigo-600 text-sm">@${escapeHtml(r.handle)}</span>
+        <span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${stCls}">${escapeHtml(r.status)}</span>
+        ${rec?`<span class="text-xs font-semibold ${recCls}">${escapeHtml(rec)}</span>`:''}
+        ${r.source==='brand_mention'?`<span class="text-[10px] text-slate-400">via @${escapeHtml(r.source_brand||'scan')}</span>`:''}
+        <span class="text-xs text-slate-400 ml-auto whitespace-nowrap">${supRelTime(r.created_at)}</span></div>`; }).join('')}</div>`
+      :'<p class="text-sm text-slate-400">No analyses yet — try a handle above.</p>';
+    h.querySelectorAll('[data-i]').forEach(el=>el.addEventListener('click',()=>{ const r=_infdisRows[Number(el.dataset.i)]; if(r&&r.result&&r.result.recommendation) infDiscoverRenderResult(r.result); }));
+  }catch(e){ if(h) h.innerHTML=`<p class="text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
+}
+
+// ── Lists & campaigns ────────────────────────────────────────────────────────
+let _inflWired=false;
+async function infListsInit(){
+  if(!_inflWired){ _inflWired=true;
+    document.getElementById('infl-add').addEventListener('click',()=>{
+      const wrap=infModal('infl-add-modal',`${INF_MODAL_HEAD('New list')}
+        <div class="p-5 space-y-4">
+          <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Name</label><input id="infl-name" class="filter-input w-full" placeholder="e.g. Diwali 2026"></div>
+          <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Description</label><input id="infl-desc" class="filter-input w-full"></div>
+          <p class="text-[11px] text-slate-400">Tip: put a month/festival + year in the name (e.g. “Diwali 2026”) — the campaign date range and view rollups are auto-detected from it.</p></div>
+        <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+          <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+          <button id="infl-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Create</button></div>`,'max-w-md');
+      document.getElementById('infl-save').addEventListener('click',async()=>{
+        try{ await infFetch('/api/inf/lists',{method:'POST',body:JSON.stringify({name:document.getElementById('infl-name').value,description:document.getElementById('infl-desc').value})});
+          wrap.remove(); _infListsCache=null; infListsLoad(); showNotification('List created');
+        }catch(e){ showNotification(e.message,true); } });
+      setTimeout(()=>document.getElementById('infl-name')?.focus(),50);
+    });
+  }
+  document.getElementById('infl-detail').classList.add('hidden');
+  document.getElementById('infl-grid').classList.remove('hidden');
+  infListsLoad();
+}
+async function infListsLoad(){
+  const g=document.getElementById('infl-grid'); g.innerHTML='<div class="col-span-full">'+brandLoader()+'</div>';
+  try{ const d=await infFetch('/api/inf/lists'); _infListsCache=d.lists||[];
+    g.innerHTML=_infListsCache.map(l=>`<button class="card p-5 text-left hover:ring-2 hover:ring-indigo-200 transition-all" data-list="${l.id}">
+      <p class="font-bold text-slate-800">${escapeHtml(l.name)}</p>
+      ${l.description?`<p class="text-xs text-slate-400 mt-0.5">${escapeHtml(l.description)}</p>`:''}
+      <div class="flex items-center gap-3 mt-3 text-xs text-slate-500">
+        <span><b class="text-slate-700">${l.member_count}</b> member${l.member_count!==1?'s':''}</span>
+        ${l.range?`<span class="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 font-semibold">${escapeHtml(l.range.label)}</span>`:''}
+      </div></button>`).join('')||'<p class="col-span-full text-sm text-slate-400">No lists yet — create the first campaign.</p>';
+    g.querySelectorAll('[data-list]').forEach(b=>b.addEventListener('click',()=>infListDetail(b.dataset.list)));
+  }catch(e){ g.innerHTML=`<p class="col-span-full text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
+}
+async function infListDetail(id){
+  const grid=document.getElementById('infl-grid'), det=document.getElementById('infl-detail');
+  grid.classList.add('hidden'); det.classList.remove('hidden'); det.innerHTML=brandLoader('Loading campaign…');
+  try{ const d=await infFetch('/api/inf/lists/'+id);
+    const t=d.totals;
+    const tile=(l,v)=>`<div class="card p-4"><p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${l}</p><p class="text-lg font-bold text-slate-800 mt-0.5">${v}</p></div>`;
+    det.innerHTML=`
+      <div class="flex flex-wrap items-center gap-3 mb-5">
+        <button id="infl-back" class="filter-btn">← All lists</button>
+        <div><h2 class="text-lg font-bold text-slate-800">${escapeHtml(d.list.name)}</h2>
+          <p class="text-xs text-slate-400">${escapeHtml(d.list.description||'')} ${d.range?`· rollups for <b>${escapeHtml(d.range.label)}</b> (${_dmy(d.range.from)} – ${_dmy(d.range.to)})`:'· all-time rollups (no date in list name)'}</p></div>
+        <div class="ml-auto flex gap-2">
+          <select id="infl-addmem" class="filter-select w-56"><option value="">+ Add influencer…</option></select>
+          <button id="infl-del" class="text-rose-500 hover:bg-rose-50 rounded-lg px-3 text-sm">Delete list</button></div>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-5">
+        ${tile('Views (range)',infN(t.views))}${tile('Total quoted',infMoney(t.quoted))}${tile('Total final',infMoney(t.final))}${tile('GST',infMoney(t.gst))}${tile('Total spend',infMoney(t.spend))}${tile('Blended CPM',t.cpm!=null?infMoney(t.cpm):'—')}
+      </div>
+      <div class="card overflow-x-auto"><table class="w-full">
+        <thead><tr>${['Influencer','Followers','Videos','Views in range','Quoted','Spend (incl GST)','CPM',''].map(h=>`<th class="px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap">${h}</th>`).join('')}</tr></thead>
+        <tbody>${d.members.map(m=>`<tr class="hover:bg-slate-50">
+          <td class="px-3 py-2.5 border-b border-slate-100"><a href="#" class="flex items-center gap-2 infl-open" data-id="${m.id}">${infAvatar(m)}<span><span class="font-semibold text-slate-800 text-sm">${escapeHtml(m.name||'—')}</span><br><span class="text-xs text-indigo-500">@${escapeHtml(m.instagram_handle)}</span></span></a></td>
+          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${infN(m.follower_count)}</td>
+          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${m.videos}</td>
+          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums font-semibold">${infN(m.views_in_range)}</td>
+          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${infMoney(m.quoted)}</td>
+          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${infMoney(m.spend)}</td>
+          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${m.cpm!=null?infMoney(m.cpm):'—'}</td>
+          <td class="px-3 py-2.5 border-b border-slate-100"><button class="infl-rm text-slate-400 hover:text-rose-500 text-sm" title="Remove from list" data-id="${m.id}">✕</button></td></tr>`).join('')||'<tr><td colspan="8" class="px-4 py-8 text-center text-sm text-slate-400">No members yet.</td></tr>'}</tbody></table></div>`;
+    document.getElementById('infl-back').addEventListener('click',()=>{ det.classList.add('hidden'); grid.classList.remove('hidden'); infListsLoad(); });
+    document.getElementById('infl-del').addEventListener('click',async()=>{
+      if(!(await supConfirm({title:'Delete this list?',message:`"${d.list.name}" will be removed (influencers themselves are kept).`,confirmLabel:'Delete',danger:true}))) return;
+      try{ await infFetch('/api/inf/lists/'+id,{method:'DELETE'}); _infListsCache=null; det.classList.add('hidden'); grid.classList.remove('hidden'); infListsLoad(); showNotification('List deleted'); }catch(e){ showNotification(e.message,true); } });
+    det.querySelectorAll('.infl-open').forEach(a=>a.addEventListener('click',e=>{ e.preventDefault(); infDetailModal(a.dataset.id); }));
+    det.querySelectorAll('.infl-rm').forEach(b=>b.addEventListener('click',async()=>{
+      try{ await infFetch(`/api/inf/lists/${id}/members/${b.dataset.id}`,{method:'DELETE'}); infListDetail(id); }catch(e){ showNotification(e.message,true); } }));
+    // add-member dropdown (all influencers not already members)
+    try{ if(!_infRows){ _infRows=(await infFetch('/api/inf/influencers')).influencers||[]; }
+      const have=new Set(d.members.map(m=>m.id));
+      const sel=document.getElementById('infl-addmem');
+      sel.innerHTML='<option value="">+ Add influencer…</option>'+_infRows.filter(r=>!have.has(r.id)).map(r=>`<option value="${r.id}">@${escapeHtml(r.instagram_handle)} — ${escapeHtml(r.name||'')}</option>`).join('');
+      sel.addEventListener('change',async e=>{ if(!e.target.value) return;
+        try{ await infFetch('/api/inf/lists/'+id+'/members',{method:'POST',body:JSON.stringify({influencerId:Number(e.target.value)})}); infListDetail(id); }catch(err){ showNotification(err.message,true); } });
+    }catch(_){}
+  }catch(e){ det.innerHTML=`<p class="text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
+}
+
+// ── Video calendar ───────────────────────────────────────────────────────────
+let _infcWired=false,_infcY=null,_infcM=null;
+function infCalInit(){
+  if(!_infcWired){ _infcWired=true;
+    document.getElementById('infc-prev').addEventListener('click',()=>{ _infcM--; if(_infcM<1){_infcM=12;_infcY--;} infCalLoad(); });
+    document.getElementById('infc-next').addEventListener('click',()=>{ _infcM++; if(_infcM>12){_infcM=1;_infcY++;} infCalLoad(); });
+    document.getElementById('infc-today').addEventListener('click',()=>{ const n=new Date(); _infcY=n.getFullYear(); _infcM=n.getMonth()+1; infCalLoad(); });
+  }
+  if(!_infcY){ const n=new Date(); _infcY=n.getFullYear(); _infcM=n.getMonth()+1; }
+  infCalLoad();
+}
+async function infCalLoad(){
+  const g=document.getElementById('infc-grid');
+  document.getElementById('infc-label').textContent=new Date(_infcY,_infcM-1,1).toLocaleString('en-IN',{month:'long',year:'numeric'});
+  g.innerHTML=brandLoader('Loading calendar…');
+  try{ const d=await infFetch(`/api/inf/calendar?year=${_infcY}&month=${_infcM}`);
+    const today=new Date().toISOString().slice(0,10);
+    const byDay={};
+    (d.videos||[]).forEach(v=>{
+      const day=v.live_date&&v.live_date>=d.from&&v.live_date<=d.to?v.live_date:(v.expected_date&&v.expected_date>=d.from&&v.expected_date<=d.to?v.expected_date:null);
+      if(!day) return;
+      const kind=v.live_date?'live':(v.expected_date<today?'overdue':'expected');
+      (byDay[day]=byDay[day]||[]).push({...v,kind});
+    });
+    const first=new Date(_infcY,_infcM-1,1), days=new Date(_infcY,_infcM,0).getDate(), startDow=first.getDay();
+    const kindCls={live:'bg-emerald-100 text-emerald-800',expected:'bg-amber-100 text-amber-800',overdue:'bg-rose-100 text-rose-700'};
+    let cells='';
+    for(let i=0;i<startDow;i++) cells+='<div class="min-h-[92px] bg-slate-50/40 rounded-lg"></div>';
+    for(let day=1;day<=days;day++){
+      const key=`${_infcY}-${String(_infcM).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+      const items=byDay[key]||[];
+      cells+=`<div class="min-h-[92px] rounded-lg ring-1 ring-slate-100 p-1.5 ${key===today?'ring-2 ring-indigo-400 bg-indigo-50/30':''}">
+        <p class="text-[11px] font-semibold ${key===today?'text-indigo-600':'text-slate-400'}">${day}</p>
+        <div class="space-y-1 mt-0.5">${items.slice(0,4).map(v=>`<button class="infc-badge block w-full text-left px-1.5 py-0.5 rounded text-[10px] font-semibold truncate ${kindCls[v.kind]}" data-inf="${v.influencer_id}" title="@${escapeHtml(v.influencer&&v.influencer.handle||'')} (${v.kind})">@${escapeHtml(v.influencer&&v.influencer.handle||'?')}</button>`).join('')}
+        ${items.length>4?`<p class="text-[10px] text-slate-400 px-1">+${items.length-4} more</p>`:''}</div></div>`;
+    }
+    g.innerHTML=`<div class="grid grid-cols-7 gap-1.5 mb-1.5">${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=>`<p class="text-[11px] font-bold text-slate-400 uppercase text-center">${d}</p>`).join('')}</div>
+      <div class="grid grid-cols-7 gap-1.5">${cells}</div>`;
+    g.querySelectorAll('.infc-badge').forEach(b=>b.addEventListener('click',()=>infDetailModal(b.dataset.inf)));
+  }catch(e){ g.innerHTML=`<p class="text-sm text-rose-500 p-4">${escapeHtml(e.message)}</p>`; }
+}
+
+// ── Brand mentions ───────────────────────────────────────────────────────────
+let _infmWired=false,_infmPoll=null;
+function infMentionsInit(){
+  if(!_infmWired){ _infmWired=true;
+    document.getElementById('infm-refresh').addEventListener('click',infMentionsLoad);
+    document.getElementById('infm-scan').addEventListener('click',async()=>{
+      const handle=document.getElementById('infm-handle').value.trim();
+      if(!handle) return showNotification('Enter a brand handle.',true);
+      const st=document.getElementById('infm-status'), btn=document.getElementById('infm-scan');
+      btn.disabled=true; st.textContent='Starting Apify scan…';
+      try{ const r=await infFetch('/api/inf/mentions/scan',{method:'POST',body:JSON.stringify({
+          brandHandle:handle,maxPosts:document.getElementById('infm-max').value,
+          minViews:document.getElementById('infm-views').value,minComments:document.getElementById('infm-comments').value,
+          filterMode:document.getElementById('infm-mode').value})});
+        st.textContent='Scan running — new profiles will be queued for AI vetting…';
+        infMentionsLoad(); infMentionsWatch(r.scanId);
+      }catch(e){ st.textContent=''; showNotification(e.message,true); }
+      finally{ btn.disabled=false; }
+    });
+  }
+  infMentionsLoad();
+}
+function infMentionsWatch(scanId){
+  clearInterval(_infmPoll);
+  const st=document.getElementById('infm-status');
+  const deadline=Date.now()+10*60*1000;
+  _infmPoll=setInterval(async()=>{
+    try{ const r=await infFetch('/api/inf/mentions/check',{method:'POST',body:JSON.stringify({scanId})});
+      if(r.status==='completed'){ clearInterval(_infmPoll); st.textContent=''; showNotification(`Scan done — ${r.profilesQueued} new handle(s) queued (${r.skippedExisting} already known).`); infMentionsLoad(); }
+      else if(r.status==='failed'){ clearInterval(_infmPoll); st.textContent=''; showNotification('Scan failed: '+(r.errorMessage||'unknown'),true); infMentionsLoad(); }
+      else if(Date.now()>deadline){ clearInterval(_infmPoll); st.textContent='Still running — use Refresh later.'; }
+    }catch(_){}
+  },8000);
+}
+async function infMentionsLoad(){
+  const c=document.getElementById('infm-list'); c.innerHTML=brandLoaderSm();
+  try{ const d=await infFetch('/api/inf/mentions');
+    const stCls={completed:'bg-emerald-50 text-emerald-700',running:'bg-sky-50 text-sky-700',processing:'bg-sky-50 text-sky-700',pending:'bg-amber-50 text-amber-700',failed:'bg-rose-50 text-rose-600'};
+    c.innerHTML=(d.scans||[]).length?`<table class="w-full"><thead><tr>${['Brand','When','Status','Found','Queued','Skipped','Queued handles',''].map(h=>`<th class="px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap">${h}</th>`).join('')}</tr></thead>
+      <tbody>${d.scans.map(s=>`<tr class="hover:bg-slate-50">
+        <td class="px-3 py-2.5 border-b border-slate-100 text-sm font-semibold text-indigo-600">@${escapeHtml(s.brand_handle)}</td>
+        <td class="px-3 py-2.5 border-b border-slate-100 text-xs text-slate-500 whitespace-nowrap">${supRelTime(s.created_at)}</td>
+        <td class="px-3 py-2.5 border-b border-slate-100"><span class="px-2 py-0.5 rounded-full text-[11px] font-bold ${stCls[s.status]||'bg-slate-100 text-slate-500'}">${escapeHtml(s.status)}</span>${s.error_message?`<p class="text-[10px] text-rose-500 mt-0.5">${escapeHtml(s.error_message)}</p>`:''}</td>
+        <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${s.profiles_found??'—'}</td>
+        <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums font-semibold text-emerald-600">${s.profiles_queued??'—'}</td>
+        <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums text-slate-400">${s.skipped_existing??'—'}</td>
+        <td class="px-3 py-2.5 border-b border-slate-100 text-xs text-slate-500 max-w-[280px]"><div class="truncate" title="${escapeHtml((s.queued_handles||[]).join(', '))}">${(s.queued_handles||[]).slice(0,6).map(h=>'@'+escapeHtml(h)).join(', ')}${(s.queued_handles||[]).length>6?` +${s.queued_handles.length-6}`:''}</div></td>
+        <td class="px-3 py-2.5 border-b border-slate-100">${['running','processing','pending'].includes(s.status)?`<button class="infm-check filter-btn" style="height:28px" data-id="${s.id}">Check now</button>`:''}</td></tr>`).join('')}</tbody></table>`
+      :'<p class="text-sm text-slate-400">No scans yet.</p>';
+    c.querySelectorAll('.infm-check').forEach(b=>b.addEventListener('click',async()=>{
+      b.disabled=true;
+      try{ const r=await infFetch('/api/inf/mentions/check',{method:'POST',body:JSON.stringify({scanId:Number(b.dataset.id)})});
+        showNotification('Status: '+r.status); infMentionsLoad(); }catch(e){ showNotification(e.message,true); b.disabled=false; } }));
+  }catch(e){ c.innerHTML=`<p class="text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
+}
+// ═══════════════ End Influencer Marketing CRM ═══════════════

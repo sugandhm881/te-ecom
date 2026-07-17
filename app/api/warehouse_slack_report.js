@@ -2,7 +2,7 @@ const axios  = require('axios');
 const config = require('../../config');
 const { supabase } = require('../supabase');
 const { fetchDocpharmaDetails, extractDocpharmaStatusString } = require('./helpers');
-const { fetchEasyecomOrderById } = require('./easyecom');
+const { fetchEasyecomOrderById, autoRouteRejectedToShifupro } = require('./easyecom');
 
 const GQL_URL   = `https://${config.SHOPIFY_SHOP_URL}/admin/api/2025-01/graphql.json`;
 const WH_CHANNEL = 'C0BA25AFJBG'; // warehouse-ops
@@ -10,7 +10,7 @@ const DP_CHANNEL = 'C0BD64XT519'; // dp-to-mwh-orders
 const HOLD_CHANNEL = 'C0BBQNDH1CG'; // easyecom on-hold orders
 
 function fmtLocal(d) {
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    return `${String(d.getDate()).padStart(2,'0')}-${String(d.getMonth()+1).padStart(2,'0')}-${d.getFullYear()}`;
 }
 
 // A RapidShyp status that means the shipment has left the warehouse (picked up,
@@ -76,6 +76,29 @@ async function recordHandled(rejected) {
     const { error } = await supabase.from(HANDLED_TABLE).upsert(rows, { onConflict: 'order_name' });
     if (error) console.warn(`[WH Report] handled-list write failed: ${error.message}`);
     else console.log(`[WH Report] Recorded ${rows.length} order(s) as handed to MWH (won't re-report)`);
+}
+
+// ── Warehouse auto-route pass — SEPARATE from detection, runs ~9 min later (cron :56). Detection
+// (cron :47) reports rejections + records them here; this pass gently moves the not-yet-routed ones
+// to Shifupro (MWH). Decoupling keeps each run light (no crash-inducing burst). `routed_at` marks the
+// ones finished so they're never retried; transient failures (session/error/not-synced) stay null and
+// retry next hour. Only looks back 24h so it never grinds through ancient backlog.
+async function autoRouteHandledRejections() {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data, error } = await supabase.from(HANDLED_TABLE)
+        .select('order_name, updated_at, routed_at').is('routed_at', null).gte('updated_at', cutoff).limit(80);
+    if (error) { console.warn('[AutoRoute] fetch failed:', error.message); return { processed: 0 }; }
+    const names = (data || []).map(r => r.order_name).filter(Boolean);
+    if (!names.length) { console.log('[AutoRoute] nothing to route'); return { processed: 0 }; }
+    const results = await autoRouteRejectedToShifupro(names);   // gentle: ~1 req/order, paced internally
+    const now = new Date().toISOString();
+    // Mark DONE = successfully routed, already on Shifupro, or a permanent block (shipment already assigned).
+    // Leave transient ones (session-expired / error / not-synced) null so they retry next pass.
+    const done = results.filter(r => ['routed', 'already-shifupro'].includes(r.result) || /shipment.*assigned|already been assigned/i.test(r.result || '')).map(r => normName(r.order));
+    if (done.length) await supabase.from(HANDLED_TABLE).update({ routed_at: now }).in('order_name', done);
+    const routed = results.filter(r => r.result === 'routed').length;
+    console.log(`[AutoRoute] processed ${names.length} · routed ${routed} · marked-done ${done.length}`);
+    return { processed: names.length, routed, done: done.length, results };
 }
 
 // Returns 'CONFIRMED' | 'READY_FOR_PICKUP' | 'UNFULFILLABLE' | null
@@ -264,10 +287,10 @@ const { postTeams } = require('./teams');
 function _teamsUrlFor(channel) {
     if (channel === WH_CHANNEL) return config.TEAMS_WEBHOOK_WAREHOUSE;
     if (channel === DP_CHANNEL) return config.TEAMS_WEBHOOK_DP;
-    if (channel === HOLD_CHANNEL) return config.TEAMS_WEBHOOK_HOLD;
+    if (channel === HOLD_CHANNEL) return config.TEAMS_WEBHOOK_WAREHOUSE_HOLD || config.TEAMS_WEBHOOK_HOLD;
     return null;
 }
-async function postSlack(payload, channel = WH_CHANNEL) {
+async function postSlack(payload, channel = WH_CHANNEL, teamsOpts = {}) {
     if (DRY_RUN) {
         let preview = payload.text || '';
         if (Array.isArray(payload.blocks)) {
@@ -286,7 +309,7 @@ async function postSlack(payload, channel = WH_CHANNEL) {
     // Teams is the ONLY target (migration complete). Slack posting stays off unless SLACK_ENABLED=true —
     // this prevents a stray SLACK_BOT_TOKEN on the server from re-posting every report to Slack.
     const teamsUrl = _teamsUrlFor(channel);
-    if (teamsUrl) await postTeams(teamsUrl, payload).catch(() => {});
+    if (teamsUrl) await postTeams(teamsUrl, payload, teamsOpts).catch(() => {});
     else console.warn('[WH Report] no Teams webhook set for channel', channel);
     if (config.SLACK_ENABLED && config.SLACK_BOT_TOKEN) {
         try {
@@ -368,11 +391,20 @@ async function findDocpharmaRejected(orders) {
 }
 
 // Highlighted alert for the dp-to-mwh-orders channel.
-function buildDpRejectedPayload(rejected, start, end) {
-    const lines = rejected.map(r => `🔴  \`${r.name}\`  —  *${r.status}*`);
+function buildDpRejectedPayload(rejected, start, end, autoResults = []) {
+    const byName = {}; autoResults.forEach(a => { byName[String(a.order).replace('#', '').trim()] = a.result; });
+    const mark = r => { const res = byName[String(r.name).replace('#', '').trim()];
+        if (res === 'routed') return '  ✅ _moved to Shifupro_';
+        if (res === 'already-shifupro') return '  ✅ _already on Shifupro_';
+        if (res === 'session-expired' || res === 'no-session') return '  ⚠️ _auto-move needs EasyEcom session_';
+        if (res && res !== 'not-synced') return `  ⚠️ _${res}_`;
+        return ''; };
+    const lines = rejected.map(r => `🔴  \`${r.name}\`  —  *${r.status}*${mark(r)}`);
+    const routed = autoResults.filter(a => a.result === 'routed').length;
+    const autoLine = autoResults.length ? `\n🏬 *Auto-routed ${routed}/${autoResults.length}* to Shifupro (MWH).` : '';
     const blocks = [
         { type: 'header', text: { type: 'plain_text', text: `🚨 DocPharma Rejected → Warehouse Action`, emoji: true } },
-        { type: 'section', text: { type: 'mrkdwn', text: `*${rejected.length}* order${rejected.length !== 1 ? 's' : ''} with *no RapidShyp tracking* were *Rejected / Cancelled by DocPharma* and need warehouse action _(re-route / re-ship)_.\n_Window: ${start} → ${end}_` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*${rejected.length}* order${rejected.length !== 1 ? 's' : ''} with *no RapidShyp tracking* were *Rejected / Cancelled by DocPharma* and need warehouse action _(re-route / re-ship)_.${autoLine}\n_Window: ${start} → ${end}_` } },
         { type: 'divider' }
     ];
     const CHUNK = 40;
@@ -600,7 +632,7 @@ async function getDpRejectedOrders(groups, rsMap, handledSet, awbByName = {}) {
 async function sendWarehouseOpsReport(endOffsetDays = 2) {
     const { start, end } = reportWindow(endOffsetDays);
     const res = await collectPendingGroups(start, end, `last-30d open orders (cutoff −${endOffsetDays}d)`);
-    if (!res) { await postSlack({ text: '⚠️ Warehouse Ops Report failed to fetch orders.' }); return; }
+    if (!res) { await postSlack({ text: '⚠️ Warehouse Ops Report failed to fetch orders.' }, WH_CHANNEL, { text: true }); return; }
     const { groups, rsMap, awbByName } = res;
 
     // Route currently-rejected DocPharma orders OUT of the warehouse report (they go to dp-to-mwh
@@ -622,10 +654,10 @@ async function sendWarehouseOpsReport(endOffsetDays = 2) {
                 { type: 'section', text: { type: 'mrkdwn', text: '✅ *All clear!* No pending Confirmed / Ready for Pickup / Unfulfillable orders.' } },
                 { type: 'context', elements: [{ type: 'mrkdwn', text: `_Auto-report_` }] }
             ]
-        });
+        }, WH_CHANNEL, { text: true });
         console.log('[WH Report] Sent — all clear');
     } else {
-        await postSlack(buildPayload(groups, start, end));
+        await postSlack(buildPayload(groups, start, end), WH_CHANNEL, { text: true });
         console.log('[WH Report] Sent to warehouse-ops');
     }
 }
@@ -645,10 +677,12 @@ async function sendDocpharmaRejectedReport(announceEmpty = false) {
     const rejected = await getDpRejectedOrders(groups, rsMap, handledSet, awbByName);
     if (rejected.length) {
         await postSlack(buildDpRejectedPayload(rejected, start, end), DP_CHANNEL);
-        // Mark as handed to MWH so they're never re-reported (RapidShyp-first from here on).
+        // Mark as handed to MWH so they're never re-reported (RapidShyp-first from here on). The actual
+        // warehouse auto-routing runs in a SEPARATE, gentler pass ~9 min later (autoRouteHandledRejections,
+        // cron :56) so detection and routing never pile up in one heavy run.
         // Skip in dry-run so a preview never mutates the handled list.
         if (!DRY_RUN) await recordHandled(rejected);
-        console.log(`[WH Report] ${rejected.length} DocPharma-rejected order(s) → dp-to-mwh-orders`);
+        console.log(`[WH Report] ${rejected.length} DocPharma-rejected order(s) → dp-to-mwh-orders (auto-route pass will handle warehouse move)`);
     } else if (announceEmpty) {
         await postSlack({ blocks: [
             { type: 'header', text: { type: 'plain_text', text: '✅ DocPharma → Warehouse — All Clear', emoji: true } },
@@ -761,10 +795,13 @@ async function sendEasyecomHoldReport(announceEmpty = false) {
 
     if (!orders.length) {
         if (announceEmpty) {
+            // Plain HTML twin (for the Teams thread-reply flow — "Reply with a message in a channel").
+            const clearText = `<b>⏸️ EasyEcom On-Hold Orders — Last 30 Days</b><br>`
+                + `✅ <b>All clear!</b> No orders on hold in EasyEcom in the last 30 days.<br><i>${winLabel}</i>`;
             await postSlack({ blocks: [
                 { type: 'header', text: { type: 'plain_text', text: `⏸️ EasyEcom On-Hold Orders — Last 30 Days`, emoji: true } },
                 { type: 'section', text: { type: 'mrkdwn', text: `✅ *All clear!* No orders on hold in EasyEcom in the last 30 days.\n_${winLabel}_` } }
-            ] }, HOLD_CHANNEL);
+            ] }, HOLD_CHANNEL, { text: clearText });
         }
         return;
     }
@@ -780,11 +817,21 @@ async function sendEasyecomHoldReport(announceEmpty = false) {
         blocks.push({ type: 'section', text: { type: 'mrkdwn', text: ids.slice(i, i + CHUNK).map(x => `\`${x}\``).join('  ') } });
     }
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_Auto-report · daily 11 AM IST_' }] });
-    await postSlack({ blocks }, HOLD_CHANNEL);
+
+    // Plain HTML twin of the card, sent alongside it so a Teams flow can post this report as a REPLY
+    // into a specific thread ("Reply with a message in a channel" can't carry an Adaptive Card, only
+    // text/HTML). Title + summary + order IDs as inline-code chips, matching the card's content.
+    const teamsText = `<b>⏸️ EasyEcom On-Hold Orders — ${orders.length} (Last 30 Days)</b><br>`
+        + `<b>${orders.length}</b> order${orders.length !== 1 ? 's are' : ' is'} <b>On Hold</b> in EasyEcom `
+        + `<i>(last 30 days: ${winLabel}, oldest → newest)</i>.<br><br>`
+        + ids.map(x => `<code>${x}</code>`).join(' ')
+        + `<br><br><i>Auto-report · daily 11 AM IST</i>`;
+
+    await postSlack({ blocks }, HOLD_CHANNEL, { text: teamsText });
     console.log('[Hold Report] Sent to channel');
 }
 
-module.exports = { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom };
+module.exports = { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom, autoRouteHandledRejections };
 
 // --- Manual run ---
 // Run on demand and post to Slack immediately, then exit.

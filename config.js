@@ -66,7 +66,8 @@ module.exports = {
     // --- EasyEcom OMS ---
     EASYECOM_BASE_URL: process.env.EASYECOM_BASE_URL || 'https://app.easyecom.io',
     EASYECOM_API_KEY: process.env.EASYECOM_API_KEY,
-    EASYECOM_WH_KEY: process.env.EASYECOM_WH_KEY,
+    EASYECOM_WH_KEY: process.env.EASYECOM_WH_KEY,       // Shifupro location key (c_id 257282)
+    EASYECOM_WH2_KEY: process.env.EASYECOM_WH2_KEY,     // DocPharma / DP Bangalore location key (c_id 271096) — used to route rejected orders out of DocPharma
     EASYECOM_JWT: process.env.EASYECOM_JWT,
     EASYECOM_EMAIL: process.env.EASYECOM_EMAIL,
     EASYECOM_PASSWORD: process.env.EASYECOM_PASSWORD,
@@ -87,6 +88,8 @@ module.exports = {
     TEAMS_WEBHOOK_WAREHOUSE: process.env.TEAMS_WEBHOOK_WAREHOUSE,
     TEAMS_WEBHOOK_DP:        process.env.TEAMS_WEBHOOK_DP,
     TEAMS_WEBHOOK_HOLD:      process.env.TEAMS_WEBHOOK_HOLD,
+    // Newer On-Hold flow that posts as a REPLY into the Ops/Daily Reports thread (preferred over _HOLD).
+    TEAMS_WEBHOOK_WAREHOUSE_HOLD: process.env.TEAMS_WEBHOOK_WAREHOUSE_HOLD,
     TEAMS_WEBHOOK_AMAZON:    process.env.TEAMS_WEBHOOK_AMAZON,
     // --- Teams keyword listener (Graph delegated) ---
     TEAMS_TENANT_ID:     process.env.TEAMS_TENANT_ID,

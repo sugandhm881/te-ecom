@@ -16,6 +16,39 @@ function mrkdwn(s) {
         .replace(/~([^~\n]+)~/g, '~~$1~~');            // ~strike~ → ~~strike~~  (_italic_ already works)
 }
 
+// Slack mrkdwn → HTML, for flows that reply into a thread via "Reply with a message in a channel"
+// (that action renders HTML, not Adaptive Cards). Escape first, convert `code` before _italic_ so
+// underscores inside order names (e.g. TE25-34089_94) can't be misread as italics.
+function mrkdwnHtml(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')   // escape
+        .replace(/`([^`\n]+)`/g, '<code>$1</code>')                          // `code`
+        .replace(/&lt;([^|&]+)\|([^&]+)&gt;/g, '<a href="$1">$2</a>')         // <url|label>
+        .replace(/&lt;(https?:[^&]+)&gt;/g, '<a href="$1">$1</a>')            // <url>
+        .replace(/\*([^*\n]+)\*/g, '<b>$1</b>')                              // *bold*
+        .replace(/_([^_<>\n]+)_/g, '<i>$1</i>')                              // _italic_ (won't cross tags)
+        .replace(/~([^~\n]+)~/g, '<s>$1</s>')                                // ~strike~
+        .replace(/\n/g, '<br>');
+}
+
+// Render a Slack-style payload as one HTML string — the `text` twin used by thread-reply flows.
+// Mirrors slackToCardBody(): header→bold, section→text, fields→stacked lines, context→subtle italic.
+function slackToHtml(payload) {
+    const parts = [];
+    if (Array.isArray(payload.blocks) && payload.blocks.length) {
+        for (const b of payload.blocks) {
+            if (b.type === 'header' && b.text) parts.push(`<b>${mrkdwnHtml(b.text.text)}</b>`);
+            else if (b.type === 'section' && b.text) parts.push(mrkdwnHtml(b.text.text));
+            else if (b.type === 'section' && Array.isArray(b.fields)) parts.push(b.fields.map(f => mrkdwnHtml(f.text)).join('<br>'));
+            else if (b.type === 'context' && Array.isArray(b.elements)) parts.push(mrkdwnHtml(b.elements.map(e => e.text || '').join('  ')));  // context text already carries its own _italics_
+            // dividers dropped — the blank line between parts already separates sections
+        }
+    } else if (payload.text) {
+        parts.push(mrkdwnHtml(payload.text));
+    }
+    return parts.join('<br><br>');
+}
+
 function slackToCardBody(payload) {
     const body = [];
     let pendingSep = false;
@@ -79,8 +112,20 @@ async function postTeams(webhookUrl, payload, opts = {}) {
     if (!webhookUrl) return false;
     const card = buildAdaptiveCard(payload, opts);
     if (!card) return false;
+    const body = { card: JSON.stringify(card) };
+    // Optional plain HTML rendering, sent alongside the card. Used by flows that reply INTO a thread
+    // via "Reply with a message in a channel" (Adaptive Cards can't be posted as channel replies, only
+    // text/HTML). Harmless to flows that only read `card` — they ignore the extra field.
+    if (opts.text) {
+        // opts.text === true → auto-generate HTML from the payload blocks; a string is used verbatim.
+        body.text = (opts.text === true) ? slackToHtml(payload) : opts.text;
+        // That thread-reply flow wraps its Reply action in a `For each` over the request's `attachments`
+        // (leftover card-template structure). Send a single-element attachments array so the loop runs
+        // exactly once → exactly one reply. Also matches the standard Teams card-webhook payload shape.
+        body.attachments = [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }];
+    }
     try {
-        const res = await axios.post(webhookUrl, { card: JSON.stringify(card) }, { headers: { 'Content-Type': 'application/json' }, timeout: 15000, validateStatus: () => true });
+        const res = await axios.post(webhookUrl, body, { headers: { 'Content-Type': 'application/json' }, timeout: 15000, validateStatus: () => true });
         if (res.status >= 200 && res.status < 300) return true;
         console.error('[Teams] webhook', res.status, JSON.stringify(res.data).slice(0, 200));
         return false;

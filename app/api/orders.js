@@ -52,7 +52,15 @@ function normalizeSupabaseOrder(order) {
 // ─────────────────────────────────────────────────────
 router.get('/get-orders', async (req, res) => {
     try {
-        const thirtyDaysAgo = moment().subtract(30, 'days').toISOString();
+        // Date-aware window (default 30d, clamp 1–90). The table is capped for performance; the KPI
+        // cards get ACCURATE full-window counts from cheap count queries below, so 7-day and 30-day
+        // views show genuinely different numbers even when the table itself is truncated.
+        const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 90);
+        const since = moment().subtract(days, 'days').toISOString();
+        // Keep the TABLE light for a snappy render (KPI cards use the accurate full-window counts below,
+        // so the table cap doesn't affect the headline numbers). 500 recent rows renders smoothly.
+        const TABLE_LIMIT = 500;
+        const K = () => supabase.from('orders').select('*', { count: 'exact', head: true }).gte('created_at', since);
 
         // ── 1. FETCH ALL DATA IN PARALLEL ──────────────────
         // (Amazon orders removed 2026-07; EasyEcom-only orders removed 2026-07-17 — the Orders
@@ -64,7 +72,11 @@ router.get('/get-orders', async (req, res) => {
             awbRows,
             trackingRows,
             easyecomRows,
-            holdMarkRows
+            holdMarkRows,
+            dpRejectedRows,
+            routedMarkRows,
+            cntTotal, cntDelivered, cntCancelled, cntNew,
+            heldEeRows
         ] = await Promise.all([
             // Shopify orders from Supabase with embedded line items + shipping address
             supabase
@@ -76,9 +88,9 @@ router.get('/get-orders', async (req, res) => {
                     order_line_items(id, title, name, sku, quantity, price, total_discount, tax_total),
                     order_shipping_addresses(first_name, last_name, name, address1, address2, city, province, zip, phone)
                 `)
-                .gte('created_at', thirtyDaysAgo)
+                .gte('created_at', since)
                 .order('created_at', { ascending: false })
-                .limit(500),
+                .limit(TABLE_LIMIT),
 
             // Supabase workflow caches (replaces MongoDB)
             supabase.from('shipment_cache_ecom').select('order_id, shipment_id'),
@@ -90,15 +102,38 @@ router.get('/get-orders', async (req, res) => {
             // are NOT listed on the Orders dashboard (removed 2026-07-17 per user).
             supabase
                 .from('b2c_order_easycom')
-                .select('order_id, reference_code, store_order_id, marketplace_order_id, order_status, updated_at, fetched_at')
-                .gte('order_date', thirtyDaysAgo)
+                .select('order_id, reference_code, store_order_id, marketplace_order_id, order_status, location, awb_number, updated_at, fetched_at')
+                .gte('order_date', since)
                 .order('order_date', { ascending: false })
-                .limit(1000),
+                .limit(3000),
 
             // Live EasyEcom-hold marks (set/cleared by /easyecom/hold-order|unhold-order) — the
             // dashboard shows On-Hold instantly, without waiting for EasyEcom's own status to sync.
-            supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold')
+            supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold'),
+
+            // DocPharma-rejected orders (the dp-to-mwh detection) → tag + red colour on the dashboard.
+            supabase.from('dp_rejected_handled_ecom').select('order_name, routed_at'),
+
+            // Warehouse-routed marks (set on a successful warehouse move) → "Moved: from → to" + disable button.
+            supabase.from('order_marks_ecom').select('order_name, note, created_at').eq('mark_type', 'warehouse_routed'),
+
+            // ── Accurate KPI counts over the FULL window (cheap head-only counts; classification by the
+            //    synced tracking_status, matching the dashboard's status buckets closely) ──
+            K(),                                                                                        // total
+            K().ilike('tracking_status', 'delivered'),                                                 // delivered (exact — excludes 'RTO Delivered')
+            K().or('cancelled_at.not.is.null,tracking_status.ilike.%rto%,tracking_status.ilike.cancelled,tracking_status.ilike.lost'), // cancelled / RTO
+            K().is('tracking_status', null).is('cancelled_at', null),                                   // new / processing (no tracking yet)
+
+            // Authoritative held-orders list (EasyEcom order_status "On Hold") — a small dedicated query
+            // so it's COMPLETE (the main easyecomRows above is capped and can miss older held orders).
+            supabase.from('b2c_order_easycom').select('reference_code, store_order_id').ilike('order_status', '%hold%').gte('order_date', since).limit(1000)
         ]);
+        // In-transit = everything else (has tracking, moving forward, not delivered/RTO/new).
+        const kTotal = cntTotal.count || 0, kDelivered = cntDelivered.count || 0, kCancelled = cntCancelled.count || 0, kNew = cntNew.count || 0;
+        const kpis = {
+            total: kTotal, delivered: kDelivered, cancelled: kCancelled, newProcessing: kNew,
+            inTransit: Math.max(0, kTotal - kDelivered - kCancelled - kNew),
+        };
 
         if (shopifyRes.error) {
             console.error('[Supabase] orders error:', shopifyRes.error.message);
@@ -117,10 +152,18 @@ router.get('/get-orders', async (req, res) => {
             keys.forEach(k => {
                 easyecomMap[String(k).trim()] = {
                     easyecomOrderId: String(row.order_id),
-                    easyecomStatus:  row.order_status || ''
+                    easyecomStatus:  row.order_status || '',
+                    shipPlatform:    row.location || ''      // 'rapidshyp' | 'docpharma' | warehouse name
                 };
             });
         });
+
+        // DocPharma-rejected + warehouse-routed lookup maps (keyed by normalized order name).
+        const normKey = n => String(n || '').replace('#', '').trim();
+        const dpRejectedMap = {};
+        (dpRejectedRows.data || []).forEach(r => { dpRejectedMap[normKey(r.order_name)] = { routed: !!r.routed_at }; });
+        const routedMap = {};
+        (routedMarkRows.data || []).forEach(r => { routedMap[normKey(r.order_name)] = { change: r.note || '', at: r.created_at }; });
 
         const shipmentCache = {};
         (shipmentRows.data || []).forEach(row => {
@@ -140,7 +183,27 @@ router.get('/get-orders', async (req, res) => {
         // ── 3. NORMALIZE ORDERS — Shopify only ──────────────
         const shopifyOrders = (shopifyRes.data || []).map(normalizeSupabaseOrder);
 
-        // Map EasyEcom ID/status onto matching Shopify orders (hold/unhold needs these).
+        // Held orders need action, so they must ALWAYS be visible (Hold filter) — even if they fell
+        // outside the 500-row table cap. Pull in any held order (local mark OR EasyEcom "On Hold") that
+        // isn't already loaded.
+        const heldNames = new Set();
+        (holdMarkRows.data || []).forEach(m => heldNames.add(normKey(m.order_name)));
+        (heldEeRows.data || []).forEach(r => [r.reference_code, r.store_order_id].filter(Boolean).forEach(x => heldNames.add(normKey(x))));
+        const loadedNames = new Set(shopifyOrders.map(o => normKey(o.id)));
+        const missingHeld = [...heldNames].filter(n => n && !loadedNames.has(n));
+        if (missingHeld.length) {
+            const variants = missingHeld.flatMap(n => [n, '#' + n]);
+            const { data: extra } = await supabase.from('orders').select(`
+                id, order_number, name, created_at, financial_status,
+                fulfillment_status, total_price, cancelled_at, tags,
+                awb_number, courier_name, tracking_status,
+                order_line_items(id, title, name, sku, quantity, price, total_discount, tax_total),
+                order_shipping_addresses(first_name, last_name, name, address1, address2, city, province, zip, phone)
+            `).in('name', variants).limit(300);
+            (extra || []).forEach(o => shopifyOrders.push(normalizeSupabaseOrder(o)));
+        }
+
+        // Map EasyEcom ID/status/platform + DocPharma-rejected + warehouse-routed onto matching Shopify orders.
         shopifyOrders.forEach(o => {
             const ecMatch = easyecomMap[String(o.id)]
                          || easyecomMap[String(o.id).replace('#', '')]
@@ -149,7 +212,11 @@ router.get('/get-orders', async (req, res) => {
             if (ecMatch) {
                 o.easyecomOrderId = ecMatch.easyecomOrderId;
                 o.easyecomStatus  = ecMatch.easyecomStatus;
+                o.shipPlatform    = ecMatch.shipPlatform;    // 'rapidshyp' | 'docpharma' | warehouse name
             }
+            const nk = String(o.id).replace('#', '').trim();
+            if (dpRejectedMap[nk]) { o.docpharmaRejected = true; o.dpRejectHandled = dpRejectedMap[nk].routed; }  // rejected; handled = auto-route already moved/verified it
+            if (routedMap[nk]) o.warehouseChange = routedMap[nk];      // { change:'From → To', at } — a logged move
         });
 
         console.log(`[get-orders] Shopify: ${shopifyOrders.length} (EasyEcom-only orders are not listed)`);
@@ -172,34 +239,19 @@ router.get('/get-orders', async (req, res) => {
                 return parseDate(b.date) - parseDate(a.date);
             });
 
-        // Live EasyEcom-hold state by order name (without '#') — RECONCILED against the synced EasyEcom
-        // status: if EasyEcom's row was refreshed AFTER we set the mark and no longer says "On Hold"
-        // (e.g. someone released it inside the EasyEcom panel), the mark is stale → auto-clear it.
-        const eeStatusByName = {};
-        (easyecomRows.data || []).forEach(row => {
-            [row.reference_code, row.store_order_id, row.marketplace_order_id].filter(Boolean).forEach(k => {
-                eeStatusByName[String(k).trim()] = { status: row.order_status || '', syncedAt: row.updated_at || row.fetched_at || null };
-            });
-        });
-        const holdByName = {}, staleMarks = [];
+        // Live EasyEcom-hold state by order name (without '#'). An order can be held any time BEFORE the
+        // courier picks it up — even a Ready-To-Ship order that already has an AWB. So a hold mark is stale
+        // (auto-cleared) ONLY once the order is genuinely PICKED UP / moving, decided from its REAL tracking
+        // status in the enrich loop below (NOT the AWB and NOT EasyEcom's order_status, neither of which
+        // reflects hold — parsing those wrongly wiped every active hold on each sync).
+        const holdByName = {};
         (holdMarkRows.data || []).forEach(m => {
-            const ee = eeStatusByName[m.order_name];
-            if (ee && ee.syncedAt && m.created_at && new Date(ee.syncedAt) > new Date(m.created_at) && !/hold/i.test(ee.status)) {
-                staleMarks.push(m.order_name);   // unheld directly in EasyEcom → drop the mark
-                return;
-            }
             holdByName[m.order_name] = { reason: m.note || '', by: m.created_by || null, at: m.created_at || null };
         });
-        if (staleMarks.length) {
-            supabase.from('order_marks_ecom').delete().in('order_name', staleMarks).eq('mark_type', 'ee_hold')
-                .then(() => console.log(`[get-orders] auto-cleared ${staleMarks.length} stale hold mark(s): ${staleMarks.join(', ')}`))
-                .catch(() => {});
-        }
+        const staleMarks = [];
 
         // ── 4. ENRICH WITH SUPABASE WORKFLOW CACHE ──────────
         allOrders = allOrders.map(order => {
-            const eeHold = holdByName[String(order.id || '').replace('#', '').trim()];
-            if (eeHold) order.eeHold = eeHold;
             const shipmentData = shipmentCache[String(order.originalId)];
             const shipmentId = shipmentData ? shipmentData.shipment_id : null;
 
@@ -243,15 +295,68 @@ router.get('/get-orders', async (req, res) => {
                 else if (ts === 'SHIPPED')                             order.status = 'Shipped';
             }
 
+            // "Picked up" = the courier has actually scanned/moved it (real tracking), NOT merely
+            // AWB-assigned / Shopify-fulfilled (which we map to 'Shipped' but is still holdable before
+            // pickup). Decide purely from tracking signals; pre-pickup states (AWB generated, pickup
+            // scheduled/generated, manifested, out-for-pickup, plain "shipped") stay holdable.
+            const rawTs = String(order.tracking_status || '').toUpperCase();
+            const cacheRaw = (awbNumber && trackingCache[String(awbNumber)]) ? String(trackingCache[String(awbNumber)].raw_status || '').toUpperCase() : '';
+            const MOVE_RE = /IN.?TRANSIT|OUT.?FOR.?DELIVERY|DELIVERED|\bRTO\b|RETURN|REACHED|UNDELIVERED|PICKUP.?COMPLETED|\bLOST\b/;
+            const pickedUp = MOVE_RE.test(rawTs) || MOVE_RE.test(cacheRaw) || order.status === 'Cancelled';
+            order.holdable = !pickedUp;   // frontend uses this to show/hide the ⏸ Hold button
+
+            // Detect hold from EITHER source: (a) EasyEcom's synced order_status literally says "On Hold"
+            // (authoritative — covers orders held directly in the EasyEcom panel), or (b) our local ee_hold
+            // mark (held via our Hold button, before EasyEcom syncs). This is why holds weren't showing —
+            // the filter only saw local marks, missing EasyEcom-side holds.
+            const _hk = String(order.id || '').replace('#', '').trim();
+            const heldInEE = /hold/i.test(order.easyecomStatus || '') || heldNames.has(_hk);   // authoritative held set
+            const _mark = holdByName[_hk];
+            if (heldInEE) {
+                order.eeHold = _mark || { reason: 'Held in EasyEcom', by: null, at: null };
+            } else if (_mark) {
+                if (pickedUp) staleMarks.push(_hk);   // held via our button but now picked up → drop stale mark
+                else order.eeHold = _mark;            // still holdable → show as ON HOLD
+            }
+
             return order;
         });
 
-        res.json(allOrders);
+        // Clear hold marks for orders that have been picked up (no longer holdable).
+        if (staleMarks.length) {
+            supabase.from('order_marks_ecom').delete().in('order_name', staleMarks).eq('mark_type', 'ee_hold')
+                .then(() => console.log(`[get-orders] auto-cleared ${staleMarks.length} picked-up hold mark(s)`))
+                .catch(() => {});
+        }
+
+        // Object response: orders (capped table) + accurate full-window KPI counts + meta.
+        // (Older callers that expected a bare array are handled by the frontend unwrapper.)
+        res.json({ orders: allOrders, kpis, total: kpis.total, shown: allOrders.length, truncated: kpis.total > allOrders.length, days });
 
     } catch (e) {
         console.error('CRITICAL ERROR in get-orders:', e);
         res.status(500).json({ error: e.message });
     }
+});
+
+// ── Live EasyEcom-hold marks — shared by EVERY dashboard's ⏸ HOLD indicator ──────────
+// (Orders bakes them into /get-orders; Ops Control / Delivery Perf / Claims / Customer
+//  Support fetch this endpoint and decorate rows client-side, so hold status is always
+//  fresh even where responses are cached.) Any authenticated user may read it.
+router.get('/ee-hold-marks', async (req, res) => {
+    // Held = our local ee_hold mark OR EasyEcom's synced order_status "On Hold" (held directly in the
+    // panel). Merge both so the ⏸ HOLD chip shows on every dashboard for either kind of hold.
+    const sinceHold = moment().subtract(60, 'days').toISOString();
+    const [markRes, eeRes] = await Promise.all([
+        supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold'),
+        supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status').ilike('order_status', '%hold%').gte('order_date', sinceHold).limit(2000),
+    ]);
+    if (markRes.error) return res.status(500).json({ success: false, error: markRes.error.message });
+    const nk = n => String(n || '').replace('#', '').trim();
+    const map = {};
+    (markRes.data || []).forEach(m => { const k = nk(m.order_name); if (k) map[k] = { order_name: k, note: m.note, created_by: m.created_by, created_at: m.created_at }; });
+    (eeRes.data || []).forEach(r => { const k = nk(r.reference_code || r.store_order_id); if (k && !map[k]) map[k] = { order_name: k, note: 'Held in EasyEcom', created_by: null, created_at: null }; });
+    res.json({ success: true, marks: Object.values(map) });
 });
 
 module.exports = router;

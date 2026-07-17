@@ -60,7 +60,7 @@ const amazonReviewRoutes = require('./app/api/amazon_review');
 const { router: amazonAutoReviewRoutes, initAutoReviewCron } = require('./app/api/amazon_auto_review');
 const { router: fulfillmentOpsRoutes, syncLast7Days, syncMTD, syncStatusesToShopify } = require('./app/api/fulfillment_ops');
 const serviceabilityRoutes = require('./app/api/serviceability');
-const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom } = require('./app/api/warehouse_slack_report');
+const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom, autoRouteHandledRejections } = require('./app/api/warehouse_slack_report');
 const deliveryReportsRoutes = require('./app/api/delivery_reports');
 const opsControlRoutes = require('./app/api/ops_control');
 const { router: amazonFbaRoutes, initFbaLocationCron } = require('./app/api/amazon_fba');
@@ -107,6 +107,8 @@ const _VIEW_PERMS = [
     [/^\/intransit-late/i, 'claims-sla'],
     // Customer Support console — any support view permission unlocks its API group.
     [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts']],
+    // Influencer Marketing CRM — any influencer view permission unlocks its API group.
+    [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
 ];
 app.use('/api', (req, res, next) => {
     const perms = (req.user && req.user.permissions) || [];
@@ -134,6 +136,7 @@ app.use('/api', amazonFbaRoutes);
 app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll
 app.use('/api', require('./app/api/support_console'));        // Customer Support console (queue/calls/notes/contacts)
+app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
 app.use('/api', docpharmaReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
 app.use('/api', docpharmaLedgerRoutes);
@@ -237,12 +240,23 @@ cron.schedule('0 20 * * *', async () => {
     await sendWarehouseOpsReport(1).catch(e => console.error('[WH Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
-// DocPharma-rejected → dp-to-mwh-orders — separate report, last 30 days. Runs HOURLY from 8 AM to
-// 7 PM IST (first run 08:00, last run 19:00). The Slack "rejected" word + CLI `dp` still trigger it.
-cron.schedule('0 8-19 * * *', async () => {
+// DocPharma-rejected → dp-to-mwh-orders — DETECTION pass, last 30 days. Runs at :47 past each hour,
+// 8 AM–7 PM IST (08:47 … 19:47). Detects + reports rejections and records them; the warehouse move
+// is done by a SEPARATE, gentler auto-route pass 9 min later (:56) so the two never pile up in one
+// heavy run. The Slack "rejected" word + CLI `dp` still trigger detection on demand.
+cron.schedule('47 8-19 * * *', async () => {
     const hr = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false });
-    console.log(`[DP Report] ${hr}:00 IST — sending DocPharma-rejected (last 30 days) report…`);
+    console.log(`[DP Report] ${hr}:47 IST — detecting DocPharma-rejected (last 30 days)…`);
     await sendDocpharmaRejectedReport().catch(e => console.error('[DP Report] Error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// Warehouse AUTO-ROUTE pass — runs at :56 past each hour (08:56 … 19:56), 9 min after detection.
+// Gently moves the just-detected, not-yet-routed rejections to Shifupro (MWH) via the panel-session
+// cookie, paced ~1 order/sec. Kept separate + slow on purpose so it never bursts and crashes.
+cron.schedule('56 8-19 * * *', async () => {
+    const hr = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false });
+    console.log(`[AutoRoute] ${hr}:56 IST — routing rejected orders → Shifupro…`);
+    await autoRouteHandledRejections().catch(e => console.error('[AutoRoute] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // EasyEcom On-Hold report — daily at 11 AM IST. Reads the synced b2c_order_easycom table
@@ -250,6 +264,14 @@ cron.schedule('0 8-19 * * *', async () => {
 cron.schedule('0 11 * * *', async () => {
     console.log('[Hold Report] 11 AM IST — sending EasyEcom On-Hold report…');
     await sendEasyecomHoldReport().catch(e => console.error('[Hold Report] Error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// EasyEcom panel-session keep-alive — a light authenticated ping every 20 min keeps the stored
+// warehouse-routing cookie's rolling session from expiring, so the admin rarely re-pastes it.
+// No-op when no session is saved. Warns (server log) if the session has actually expired.
+cron.schedule('*/20 * * * *', async () => {
+    try { const s = await require('./app/api/easyecom').pingPanelSession(); if (s === 'expired') console.warn('[EE Session] keep-alive: session EXPIRED — admin must re-paste the EasyEcom cookie.'); }
+    catch (e) { console.error('[EE Session] keep-alive error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
 // Silent-RTO claim mail → RapidShyp — weekly, Monday 9:30 AM IST, previous 7 days ending yesterday.

@@ -155,4 +155,47 @@ router.post('/docpharma', async (req, res) => {
     }
 });
 
+// ─── DocPharma NDR-log webhook ───────────────────────────────────────────────
+// Dedicated receiver for DocPharma NDR (Non-Delivery Report) events → stored in `docpharma_ndr_logs`.
+// Point DocPharma's NDR webhook here. Accepts a single event, an array, or {records|data|orders:[...]}.
+// Optional shared secret: set DOCPHARMA_NDR_TOKEN in .env and append ?token=... (or send an
+// x-webhook-token header); if the env is unset the endpoint is open (like the RapidShyp webhook).
+router.post('/docpharma-ndr', async (req, res) => {
+    const secret = process.env.DOCPHARMA_NDR_TOKEN;
+    if (secret) {
+        const got = req.query.token || req.headers['x-webhook-token'];
+        if (got !== secret) return res.status(401).json({ error: 'Unauthorized' });
+    }
+    res.json({ status: 'received' });   // ack immediately so DocPharma doesn't retry/timeout
+    try {
+        const body = req.body || {};
+        const events = Array.isArray(body) ? body
+            : Array.isArray(body.records) ? body.records
+            : Array.isArray(body.data)    ? body.data
+            : Array.isArray(body.orders)  ? body.orders
+            : [body];
+        const pick = (...vals) => vals.find(v => v !== undefined && v !== null && v !== '');
+        const rows = events.map(ev => {
+            const dp = (ev && (ev.data || ev.order || ev)) || {};
+            const sub = (dp.suborders && dp.suborders[0]) || {};
+            const ld = sub.logistic_details || dp.logistic_details || ev.logistic_details || {};
+            const at = pick(ld.ndr_date, ld.ndr_at, ev.ndr_at, ev.ndr_date, ev.timestamp, ev.event_time);
+            let ndrAt = null; if (at) { const d = new Date(at); if (!isNaN(d.getTime())) ndrAt = d.toISOString(); }
+            return {
+                order_name: String(pick(dp.partner_order_no, dp.order_no, dp.reference, ev.order_id, ev.order_name) || '').replace('#', '').trim() || null,
+                awb:        pick(ld.tracking_number, dp.tracking_number, ev.awb, ev.tracking_number) || null,
+                status:     pick(ld.current_status, dp.status, ev.status, ev.ndr_status) || null,
+                ndr_reason: pick(ld.ndr_reason, ld.remarks, dp.ndr_reason, ev.ndr_reason, ev.reason, ev.remark) || null,
+                attempt:    (v => Number.isFinite(Number(v)) ? Number(v) : null)(pick(ld.reattempt_count, dp.reattempt_count, ev.attempt, ev.attempt_count, ev.ndr_attempt)),
+                courier:    pick(ld.courier_name, dp.courier, ev.courier, ev.courier_name) || null,
+                ndr_at:     ndrAt,
+                raw:        ev,
+            };
+        });
+        const { error } = await supabase.from('docpharma_ndr_logs').insert(rows);
+        if (error) console.error('[Webhook DocPharma-NDR] insert error:', error.message);
+        else console.log(`[Webhook DocPharma-NDR] ⬇️ saved ${rows.length} NDR log(s): ${rows.map(r => `${r.order_name || '?'}(${r.status || '-'})`).join(', ')}`);
+    } catch (e) { console.error('[Webhook DocPharma-NDR] error:', e.message); }
+});
+
 module.exports = router;

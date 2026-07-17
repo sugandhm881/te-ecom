@@ -592,6 +592,39 @@
                 </div>
             </div>
 
+            <div class="nav-group">
+                <div class="nav-section-header flex items-center justify-between px-3 py-2 mt-2" data-target="inf-menu">
+                    <span>Influencer Marketing</span>
+                    <svg class="arrow-icon w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+                <div id="inf-menu" class="nav-content collapsed space-y-1">
+                    <a href="#" id="nav-inf-dashboard" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+                        <span class="ml-3 text-sm font-medium">Influencer Dashboard</span>
+                    </a>
+                    <a href="#" id="nav-inf-discover" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Discover</span>
+                    </a>
+                    <a href="#" id="nav-inf-influencers" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Influencers</span>
+                    </a>
+                    <a href="#" id="nav-inf-lists" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>
+                        <span class="ml-3 text-sm font-medium">Lists &amp; Campaigns</span>
+                    </a>
+                    <a href="#" id="nav-inf-calendar" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Video Calendar</span>
+                    </a>
+                    <a href="#" id="nav-inf-mentions" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 12a4 4 0 10-8 0 4 4 0 008 0zm0 0v1.5a2.5 2.5 0 005 0V12a9 9 0 10-9 9m4.5-1.206a8.959 8.959 0 01-4.5 1.207"/></svg>
+                        <span class="ml-3 text-sm font-medium">Brand Mentions</span>
+                    </a>
+                </div>
+            </div>
+
             <div class="nav-category mt-6 px-3 text-xs font-bold text-slate-500 uppercase tracking-widest">System</div>
             <a href="#" id="nav-reports" class="sidebar-link flex items-center px-3 py-2 mt-2">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-6h13M9 7h13M5 7h.01M5 17h.01M5 12h.01"/></svg>
@@ -635,25 +668,39 @@
         </div>
 
         <div id="orders-dashboard-view">
-            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 flex flex-wrap justify-between items-center shadow-sm gap-4">
-                <h1 class="text-xl font-bold text-slate-800">Orders Dashboard</h1>
-                <div class="flex items-center gap-3 flex-wrap">
+            <header class="bg-white/95 backdrop-blur px-8 pt-5 pb-4 border-b border-slate-200 sticky top-0 z-20 shadow-sm">
+                <!-- Title row -->
+                <div class="flex items-center justify-between gap-4 mb-4">
+                    <div>
+                        <h1 class="text-xl font-bold text-slate-800">Orders Dashboard</h1>
+                        <p class="text-xs text-slate-400 mt-0.5">Shopify orders · live fulfilment &amp; warehouse status</p>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span id="last-synced-label" class="text-[11px] text-slate-400 hidden">Synced <span id="last-synced-time" class="font-medium text-slate-500"></span></span>
+                        <button id="refresh-orders-btn" onclick="manualRefreshOrders()" title="Refresh Orders"
+                            class="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-sm shadow-indigo-200 transition-all hover:-translate-y-0.5">
+                            <svg id="refresh-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                            </svg>
+                            <span id="refresh-btn-label">Refresh</span>
+                        </button>
+                    </div>
+                </div>
+                <!-- Filter toolbar -->
+                <div class="flex items-center gap-2 flex-wrap">
+                    <div id="orders-search-slot"></div>
                     <select id="status-filter" class="filter-select"></select>
+                    <div id="cod-filter-container"></div>
+                    <div id="hold-filter-container"></div>
                     <select id="order-date-preset-filter" class="filter-select"></select>
                     <div id="custom-date-container" class="hidden items-center gap-2">
                         <input type="date" id="start-date-filter" class="date-input">
                         <input type="date" id="end-date-filter" class="date-input">
                     </div>
-                    <div id="platform-filters" class="flex items-center gap-2 bg-slate-100 p-1.5 rounded-full"></div>
-                    <button id="refresh-orders-btn" onclick="manualRefreshOrders()" title="Refresh Orders"
-                        class="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-slate-100 hover:bg-blue-50 hover:text-blue-600 text-slate-600 rounded-lg border border-slate-200 transition-all duration-150">
-                        <svg id="refresh-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                        </svg>
-                        <span id="refresh-btn-label">Refresh</span>
-                    </button>
-                    <span id="last-synced-label" class="text-[11px] text-slate-400 hidden">Synced <span id="last-synced-time"></span></span>
-                    </div>
+                    <div class="hidden sm:block w-px h-7 bg-slate-200 mx-1"></div>
+                    <div id="platform-filters" class="flex items-center gap-1 bg-slate-100 p-1 rounded-lg"></div>
+                    <div id="source-filters" class="flex items-center gap-1 bg-slate-100 p-1 rounded-lg"></div>
+                </div>
             </header>
             
             <div class="p-8 max-w-7xl mx-auto w-full">
@@ -2132,6 +2179,138 @@
 
           </div>
         </div><!-- /amazon-fba-view -->
+
+        <!-- ═══════════ Influencer Marketing CRM (port of the standalone Influencer CRM) ═══════════ -->
+        <div id="inf-dashboard-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Influencer Dashboard</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Pipeline overview &amp; recent activity</p></div>
+                <div class="flex items-center gap-2">
+                    <button id="infd-quick-discover" class="filter-btn">🔍 Discover new</button>
+                    <button id="infd-quick-add" class="text-sm px-3 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">+ Add influencer</button>
+                    <button id="infd-refresh" class="filter-btn">Refresh</button>
+                </div>
+            </header>
+            <div class="p-8 space-y-6">
+                <div id="infd-kpis" class="grid grid-cols-2 md:grid-cols-5 gap-4"></div>
+                <div class="card p-5">
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-3">Recent activity</p>
+                    <div id="infd-activity" class="space-y-2"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="inf-discover-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Discover</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">AI-vet any Instagram handle before onboarding (Apify scrape + Gemini analysis)</p></div>
+                <button id="infdis-process-queue" class="filter-btn" title="Analyze pending handles queued by brand scans">⚙ Process pending queue</button>
+            </header>
+            <div class="p-8 space-y-6">
+                <div class="card p-5">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <input id="infdis-handle" type="text" class="filter-input w-64" placeholder="@instagram_handle">
+                        <button id="infdis-analyze" class="text-sm px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Analyze with AI</button>
+                        <span id="infdis-status" class="text-sm text-slate-400"></span>
+                    </div>
+                    <div id="infdis-result" class="mt-5"></div>
+                </div>
+                <div class="card p-5">
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-3">Analysis history</p>
+                    <div id="infdis-history"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="inf-influencers-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Influencers</h1>
+                    <p class="text-sm text-slate-400 mt-0.5" id="infi-sub">The full CRM — every creator in the system</p></div>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <button id="infi-refresh-metrics" class="filter-btn" title="Re-scrape reel metrics for videos created or live in the last 10 days">↻ Refresh last 10 days</button>
+                    <button id="infi-export" class="filter-btn">⬇ Export CSV</button>
+                    <button id="infi-add" class="text-sm px-3 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">+ Add influencer</button>
+                </div>
+            </header>
+            <div class="p-8 space-y-4">
+                <div id="infi-progress" class="hidden card p-4">
+                    <div class="flex items-center justify-between text-sm mb-2"><span class="font-semibold text-slate-700">Refreshing reel metrics…</span><span id="infi-progress-label" class="text-slate-400"></span></div>
+                    <div class="w-full h-2 bg-slate-100 rounded-full overflow-hidden"><div id="infi-progress-bar" class="h-2 bg-indigo-500 rounded-full transition-all" style="width:0%"></div></div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                    <input id="infi-q" type="text" class="filter-input w-56" placeholder="Search name or @handle…">
+                    <select id="infi-status" class="filter-select"><option value="">All statuses</option><option value="not_contacted">Not contacted</option><option value="reached_out">Reached out</option><option value="in_discussion">In discussion</option><option value="partnered">Partnered</option><option value="rejected">Rejected</option></select>
+                    <select id="infi-niche" class="filter-select"><option value="">All niches</option></select>
+                    <select id="infi-bucket" class="filter-select"><option value="">All sizes</option><option value="nano">Nano &lt;10K</option><option value="micro">Micro 10-100K</option><option value="macro">Macro 100K-1M</option><option value="mega">Mega &gt;1M</option></select>
+                    <select id="infi-contact" class="filter-select"><option value="">Contact: any</option><option value="phone">Has phone</option><option value="email">Has email</option><option value="none">No contact info</option></select>
+                    <button id="infi-reset" class="filter-btn">Reset</button>
+                    <span id="infi-count" class="text-sm text-slate-400 ml-auto"></span>
+                </div>
+                <div id="infi-bulkbar" class="hidden card px-4 py-3 flex flex-wrap items-center gap-2 ring-1 ring-indigo-200">
+                    <span class="text-sm font-semibold text-indigo-700"><span id="infi-selcount">0</span> selected</span>
+                    <select id="infi-bulk-status" class="filter-select"><option value="">Change status…</option><option value="not_contacted">Not contacted</option><option value="reached_out">Reached out</option><option value="in_discussion">In discussion</option><option value="partnered">Partnered</option><option value="rejected">Rejected</option></select>
+                    <select id="infi-bulk-list" class="filter-select"><option value="">Add to list…</option></select>
+                    <button id="infi-bulk-clear" class="filter-btn ml-auto">Clear selection</button>
+                </div>
+                <div class="card overflow-x-auto"><div id="infi-table"></div></div>
+            </div>
+        </div>
+
+        <div id="inf-lists-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Lists &amp; Campaigns</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Group influencers into campaigns — views, spend &amp; CPM rollups</p></div>
+                <button id="infl-add" class="text-sm px-3 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">+ New list</button>
+            </header>
+            <div class="p-8">
+                <div id="infl-grid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+                <div id="infl-detail" class="hidden"></div>
+            </div>
+        </div>
+
+        <div id="inf-calendar-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Video Calendar</h1>
+                    <p class="text-sm text-slate-400 mt-0.5"><span class="inline-block w-2 h-2 rounded-full bg-emerald-500"></span> live · <span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span> expected · <span class="inline-block w-2 h-2 rounded-full bg-rose-500"></span> overdue</p></div>
+                <div class="flex items-center gap-2">
+                    <button id="infc-prev" class="filter-btn">←</button>
+                    <button id="infc-today" class="filter-btn">Today</button>
+                    <button id="infc-next" class="filter-btn">→</button>
+                    <span id="infc-label" class="text-sm font-bold text-slate-700 ml-2 w-36 text-center"></span>
+                </div>
+            </header>
+            <div class="p-8"><div class="card p-4 overflow-x-auto"><div id="infc-grid" class="min-w-[840px]"></div></div></div>
+        </div>
+
+        <div id="inf-mentions-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Brand Mentions</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Find creators who tagged a brand — new handles are queued for AI vetting</p></div>
+                <button id="infm-refresh" class="filter-btn">Refresh</button>
+            </header>
+            <div class="p-8 space-y-6">
+                <div class="card p-5">
+                    <div class="flex flex-wrap items-end gap-3">
+                        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Brand handle</label>
+                            <input id="infm-handle" type="text" class="filter-input w-48" placeholder="@brand_handle"></div>
+                        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Max posts</label>
+                            <input id="infm-max" type="number" class="filter-input w-24" value="10" min="1" max="100"></div>
+                        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Min views</label>
+                            <input id="infm-views" type="number" class="filter-input w-24" value="0" min="0"></div>
+                        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Min comments</label>
+                            <input id="infm-comments" type="number" class="filter-input w-24" value="0" min="0"></div>
+                        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Filter mode</label>
+                            <select id="infm-mode" class="filter-select"><option value="all">Meets ALL thresholds</option><option value="any">Meets ANY threshold</option></select></div>
+                        <button id="infm-scan" class="text-sm px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Start scan</button>
+                        <span id="infm-status" class="text-sm text-slate-400"></span>
+                    </div>
+                </div>
+                <div class="card p-5">
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-3">Scan history</p>
+                    <div id="infm-list" class="overflow-x-auto"></div>
+                </div>
+            </div>
+        </div>
 
         <div id="users-view" class="view-hidden">
           <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">
