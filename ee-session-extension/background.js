@@ -3,7 +3,6 @@
 // so the "Change warehouse" session never goes stale. Runs on a timer + on cookie change.
 
 const ENDPOINT = 'https://dashboard.theelement.skin:8443/api/webhook/ee-session';
-const EE_URL = 'https://app.easyecom.io';
 const SYNC_MINUTES = 20;
 
 async function getToken() {
@@ -14,13 +13,23 @@ async function setStatus(text) {
   await chrome.storage.local.set({ status: text, statusAt: Date.now() });
 }
 
+// Read all EasyEcom cookies the extension can access. Query by domain (catches app./www./.easyecom.io),
+// falling back to a url query — more reliable than a single url filter.
+async function readEeCookies() {
+  let cookies = await chrome.cookies.getAll({ domain: 'easyecom.io' });
+  if (!cookies.length) cookies = await chrome.cookies.getAll({ url: 'https://app.easyecom.io/' });
+  return cookies || [];
+}
+
 async function pushCookie(reason) {
   const token = await getToken();
-  if (!token) { await setStatus('⚠️ No sync token set — open the popup and paste it.'); return; }
+  if (!token) { await setStatus('⚠️ No sync token set — paste it and click Save token.'); return; }
 
-  const cookies = await chrome.cookies.getAll({ url: EE_URL });
-  if (!cookies.some(c => /laravel_session/i.test(c.name))) {
-    await setStatus('Not logged into EasyEcom in this browser yet — log in once.');
+  const cookies = await readEeCookies();
+  const hasSession = cookies.some(c => /laravel_session/i.test(c.name));
+  if (!hasSession) {
+    const names = cookies.map(c => c.name).slice(0, 8).join(', ') || 'none';
+    await setStatus(`Can't see the session cookie. Found ${cookies.length} easyecom cookie(s): ${names}. Make sure you're logged into app.easyecom.io in THIS Chrome, then Sync now.`);
     return;
   }
   const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
@@ -32,10 +41,11 @@ async function pushCookie(reason) {
       body: JSON.stringify({ cookie: cookieStr }),
     });
     if (res.ok) await setStatus(`✅ Synced (${reason}) at ${new Date().toLocaleTimeString()}`);
-    else if (res.status === 401) await setStatus('❌ Token rejected (401) — check it matches the server.');
-    else await setStatus(`❌ Server responded ${res.status} (${reason}).`);
+    else if (res.status === 401) await setStatus('❌ Token rejected (401) — the extension token must match the server .env value.');
+    else if (res.status === 503) await setStatus('❌ Server has no EE_SESSION_PUSH_TOKEN set (503) — add it to the server .env + restart.');
+    else await setStatus(`❌ Server responded ${res.status} (${reason}) — is the new code deployed?`);
   } catch (e) {
-    await setStatus('❌ Push failed: ' + e.message);
+    await setStatus('❌ Push failed: ' + e.message + ' (is the dashboard reachable?)');
   }
 }
 

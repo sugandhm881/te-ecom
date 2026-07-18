@@ -5,6 +5,7 @@
   "description": "Keeps the Ecom Central dashboard's EasyEcom panel session fresh by syncing the login cookie from your logged-in browser. No passwords stored.",
   "permissions": ["cookies", "alarms", "storage"],
   "host_permissions": [
+    "https://*.easyecom.io/*",
     "https://app.easyecom.io/*",
     "https://dashboard.theelement.skin/*"
   ],
