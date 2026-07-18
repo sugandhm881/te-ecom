@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font: 13px/1.4 system-ui, sans-serif; width: 290px; padding: 14px; color: #1e293b; }
+    h3 { margin: 0 0 4px; font-size: 15px; }
+    p.sub { margin: 0 0 12px; color: #64748b; font-size: 12px; }
+    label { font-weight: 600; font-size: 12px; }
+    input { width: 100%; box-sizing: border-box; padding: 7px; margin: 5px 0 10px; border: 1px solid #cbd5e1; border-radius: 6px; }
+    .row { display: flex; gap: 8px; }
+    button { flex: 1; padding: 7px 10px; border: 0; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    #save { background: #e2e8f0; color: #1e293b; }
+    #now { background: #4338ca; color: #fff; }
+    .status { margin-top: 12px; padding: 8px; background: #f1f5f9; border-radius: 6px; font-size: 12px; color: #475569; word-break: break-word; }
+  </style>
+</head>
+<body>
+  <h3>EasyEcom Session Sync</h3>
+  <p class="sub">Keeps the dashboard's warehouse-change session fresh from your logged-in EasyEcom tab.</p>
+  <label>Sync token</label>
+  <input id="token" type="password" placeholder="paste the EE_SESSION_PUSH_TOKEN">
+  <div class="row">
+    <button id="save">Save token</button>
+    <button id="now">Sync now</button>
+  </div>
+  <div class="status" id="status">…</div>
+  <script src="popup.js"></script>
+</body>
+</html>

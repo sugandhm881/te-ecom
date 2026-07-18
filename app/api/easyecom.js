@@ -780,20 +780,31 @@ async function getPanelCookie() {
     const { data } = await supabase.from('easyecom_panel_session').select('cookie_enc, updated_at, updated_by').eq('id', 1).maybeSingle();
     return data ? { cookie: decrypt(data.cookie_enc), updatedAt: data.updated_at, updatedBy: data.updated_by } : null;
 }
+// Validate + store the panel cookie (encrypted). Shared by the admin paste route and the browser
+// extension auto-sync webhook. Throws 'empty' / 'laravel_session' for the caller to message.
+async function savePanelCookie(cookie, updatedBy) {
+    cookie = String(cookie || '').trim();
+    if (!cookie) throw new Error('empty');
+    // Accept either a full document.cookie string or a copied Cookie header; must contain the session cookie.
+    if (!/laravel_session=/.test(cookie)) throw new Error('laravel_session missing');
+    const { error } = await supabase.from('easyecom_panel_session').upsert({ id: 1, cookie_enc: encrypt(cookie), updated_by: updatedBy || null, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    if (error) throw new Error(error.message);
+    return true;
+}
 router.get('/session', tokenRequired, requireAdmin, async (req, res) => {
     const s = await getPanelCookie();
     res.json({ success: true, hasSession: !!(s && s.cookie), updatedAt: s && s.updatedAt, updatedBy: s && s.updatedBy });
 });
 router.post('/session', tokenRequired, requireAdmin, async (req, res) => {
     try {
-        let cookie = String((req.body || {}).cookie || '').trim();
-        if (!cookie) return res.status(400).json({ success: false, message: 'Paste your EasyEcom session cookie.' });
-        // Accept either a full document.cookie string or a copied Cookie header; must contain the session cookie.
-        if (!/laravel_session=/.test(cookie)) return res.status(400).json({ success: false, message: 'That doesn\'t look like an EasyEcom session — it must include laravel_session=…' });
-        const { error } = await supabase.from('easyecom_panel_session').upsert({ id: 1, cookie_enc: encrypt(cookie), updated_by: req.user && req.user.sub, updated_at: new Date().toISOString() }, { onConflict: 'id' });
-        if (error) throw new Error(error.message);
+        await savePanelCookie((req.body || {}).cookie, req.user && req.user.sub);
         res.json({ success: true, message: 'EasyEcom session saved.' });
-    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+    } catch (e) {
+        const msg = e.message === 'empty' ? 'Paste your EasyEcom session cookie.'
+            : /laravel_session/.test(e.message) ? 'That doesn\'t look like an EasyEcom session — it must include laravel_session=…'
+            : e.message;
+        res.status(400).json({ success: false, message: msg });
+    }
 });
 
 // POST /api/easyecom/change-warehouse  { orderName, targetCid } — via the stored panel session cookie.
@@ -895,3 +906,4 @@ module.exports.rawToDbRow = rawToDbRow;
 module.exports.fetchEasyecomOrderById = fetchEasyecomOrderById;
 module.exports.autoRouteRejectedToShifupro = autoRouteRejectedToShifupro;
 module.exports.pingPanelSession = pingPanelSession;
+module.exports.savePanelCookie = savePanelCookie;

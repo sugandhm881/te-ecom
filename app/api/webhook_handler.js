@@ -198,4 +198,26 @@ router.post('/docpharma-ndr', async (req, res) => {
     } catch (e) { console.error('[Webhook DocPharma-NDR] error:', e.message); }
 });
 
+// ─── EasyEcom panel-session auto-sync (Chrome extension) ─────────────────────
+// A small MV3 browser extension reads the `laravel_session`+`PHPSESSID` cookies from the admin's
+// logged-in EasyEcom tab and POSTs them here every ~20 min (and on change), so the stored panel
+// session stays fresh WITHOUT a manual re-paste — no credentials leave the browser. Server-side
+// auto-login is impossible (EasyEcom uses Google SSO + 2FA), so this browser-side sync is the way.
+// Auth: shared secret EE_SESSION_PUSH_TOKEN (query ?token= or x-ee-token header). Disabled if unset.
+router.post('/ee-session', async (req, res) => {
+    const secret = process.env.EE_SESSION_PUSH_TOKEN;
+    if (!secret) return res.status(503).json({ error: 'EE_SESSION_PUSH_TOKEN not set' });
+    if ((req.query.token || req.headers['x-ee-token']) !== secret) return res.status(401).json({ error: 'unauthorized' });
+    try {
+        const { savePanelCookie } = require('./easyecom');
+        await savePanelCookie((req.body || {}).cookie, 'chrome-extension');
+        console.log(`[EE-sync] panel cookie refreshed from extension (${new Date().toLocaleTimeString('en-IN')})`);
+        res.json({ status: 'saved' });
+    } catch (e) {
+        const msg = e.message === 'empty' ? 'no cookie in body' : e.message;
+        console.warn('[EE-sync] rejected:', msg);
+        res.status(400).json({ error: msg });
+    }
+});
+
 module.exports = router;
