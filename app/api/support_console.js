@@ -145,9 +145,13 @@ router.get('/support/queue', async (req, res) => {
             const all = ids.length ? await chunkedIn('order_buckets', SEL, 'order_id', ids) : [];
             rows = all.filter(r => !UNDELIVERED_BUCKETS.includes(r.bucket))
                 .sort((a, b) => (b.msg91_confirmed === true) - (a.msg91_confirmed === true) || new Date(a.created_at) - new Date(b.created_at));
-        } else { // repeat — COD repeat customers awaiting dispatch with a prior non-delivered order
+        } else { // repeat — COD repeat customers whose order is still BEFORE the courier picks it up, with
+                 // a prior non-delivered order. The whole `order_to_dispatch` bucket is pre-pickup (awaiting
+                 // dispatch + PICKUP_SCHEDULED/in-progress/manifested); once the courier picks up it moves to
+                 // dispatch_plus_2 (IN_TRANSIT). We used to require fulfillment_status IS NULL, which wrongly
+                 // hid the dispatched-but-not-yet-picked-up ones (~70/81) — dropped that so they show too.
             const { data, error } = await supabase.from('order_buckets').select(SEL)
-                .eq('bucket', 'order_to_dispatch').eq('is_repeat_customer', true).is('fulfillment_status', null)
+                .eq('bucket', 'order_to_dispatch').eq('is_repeat_customer', true)
                 .gte('created_at', fromISO).lte('created_at', toISO)
                 .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(1000);
             if (error) throw new Error(error.message);
