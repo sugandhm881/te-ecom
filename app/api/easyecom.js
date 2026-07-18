@@ -907,3 +907,8 @@ module.exports.fetchEasyecomOrderById = fetchEasyecomOrderById;
 module.exports.autoRouteRejectedToShifupro = autoRouteRejectedToShifupro;
 module.exports.pingPanelSession = pingPanelSession;
 module.exports.savePanelCookie = savePanelCookie;
+// Reused by the browser-executor route endpoints (extension runs UpdateVendor from the user's IP).
+module.exports.resolveInvoiceAndWarehouse = resolveInvoiceAndWarehouse;
+module.exports.ourCompanyCid = ourCompanyCid;
+module.exports.markWarehouseRouted = markWarehouseRouted;
+module.exports.SHIFUPRO_CID = SHIFUPRO_CID;

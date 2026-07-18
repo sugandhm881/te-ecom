@@ -220,4 +220,65 @@ router.post('/ee-session', async (req, res) => {
     }
 });
 
+// ─── Browser-executor routing (Firefox extension runs UpdateVendor from the user's IP) ───────
+// EasyEcom's panel is behind AWS WAF that blocks our VPS's datacenter IP, so the VPS can't call
+// UpdateVendor itself. Instead the browser extension (on the admin's residential IP, which the WAF
+// trusts) executes it. The VPS just serves the pending DocPharma-rejected routes and records the
+// results. Auth: the same EE_SESSION_PUSH_TOKEN as /ee-session.
+function _eeAuthed(req) {
+    const secret = process.env.EE_SESSION_PUSH_TOKEN;
+    return !!secret && (req.query.token || req.headers['x-ee-token']) === secret;
+}
+
+// GET pending routes → [{orderName, invoiceId, currentCid, targetCid, cId, eeOrderId}].
+router.get('/ee-routes', async (req, res) => {
+    if (!process.env.EE_SESSION_PUSH_TOKEN) return res.status(503).json({ error: 'EE_SESSION_PUSH_TOKEN not set' });
+    if (!_eeAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
+    try {
+        const ee = require('./easyecom');
+        const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const { data, error } = await supabase.from('dp_rejected_handled_ecom')
+            .select('order_name').is('routed_at', null).gte('updated_at', cutoff).limit(80);
+        if (error) throw new Error(error.message);
+        const cId = await ee.ourCompanyCid();
+        const routes = [];
+        for (const row of (data || [])) {
+            const name = row.order_name;
+            const info = await ee.resolveInvoiceAndWarehouse(name);
+            if (!info || !info.invoiceId) continue;                                   // not synced yet → skip this pass
+            if (String(info.currentCid) === String(ee.SHIFUPRO_CID)) {                // already on Shifupro → close it out
+                await supabase.from('dp_rejected_handled_ecom').update({ routed_at: new Date().toISOString() }).eq('order_name', name);
+                continue;
+            }
+            routes.push({ orderName: name, invoiceId: info.invoiceId, currentCid: info.currentCid, targetCid: ee.SHIFUPRO_CID, cId, eeOrderId: info.eeOrderId });
+        }
+        res.json({ routes });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST a route result from the extension → {orderName, ok, currentCid, message}. Marks routed / retries.
+router.post('/ee-route-result', async (req, res) => {
+    if (!process.env.EE_SESSION_PUSH_TOKEN) return res.status(503).json({ error: 'EE_SESSION_PUSH_TOKEN not set' });
+    if (!_eeAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
+    try {
+        const ee = require('./easyecom');
+        const { orderName, ok, currentCid, message } = req.body || {};
+        if (!orderName) return res.status(400).json({ error: 'orderName required' });
+        supabase.from('api_logs_ecom').insert({ action: 'ee_browser_route', status_code: ok ? 200 : 422,
+            payload: { order: orderName, via: 'extension' }, response: String(message || (ok ? 'routed' : 'failed')).slice(0, 200) }).then(() => {}).catch(() => {});
+        if (ok) {
+            await ee.markWarehouseRouted(orderName, currentCid || null, ee.SHIFUPRO_CID, 'extension');
+            await supabase.from('dp_rejected_handled_ecom').update({ routed_at: new Date().toISOString() }).eq('order_name', orderName);
+            console.log(`[EE-route] ${orderName} routed → Shifupro (via extension)`);
+        } else {
+            // Permanent block (shipment already assigned) → close it so it stops retrying; transient → leave for next pass.
+            if (/shipment.*assigned|already been assigned/i.test(String(message || ''))) {
+                await supabase.from('dp_rejected_handled_ecom').update({ routed_at: new Date().toISOString() }).eq('order_name', orderName);
+            }
+            console.warn(`[EE-route] ${orderName} not routed: ${String(message || '').slice(0, 80)}`);
+        }
+        res.json({ status: 'recorded' });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;

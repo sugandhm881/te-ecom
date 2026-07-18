@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font: 13px/1.4 system-ui, sans-serif; width: 300px; padding: 14px; color: #1e293b; }
+    h3 { margin: 0 0 4px; font-size: 15px; }
+    p.sub { margin: 0 0 12px; color: #64748b; font-size: 12px; }
+    label { font-weight: 600; font-size: 12px; }
+    input { width: 100%; box-sizing: border-box; padding: 7px; margin: 5px 0 10px; border: 1px solid #cbd5e1; border-radius: 6px; }
+    .row { display: flex; gap: 8px; }
+    button { flex: 1; padding: 8px 10px; border: 0; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    #save { background: #e2e8f0; color: #1e293b; }
+    #run { background: #4338ca; color: #fff; }
+    .status { margin-top: 12px; padding: 8px; background: #f1f5f9; border-radius: 6px; font-size: 12px; color: #475569; word-break: break-word; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h3>EasyEcom Warehouse Router</h3>
+  <p class="sub">Routes pending DocPharma-rejected orders → Shifupro, from your browser (so they clear EasyEcom's firewall). Also keeps the session fresh.</p>
+  <label>Sync token</label>
+  <input id="token" type="password" placeholder="paste the EE_SESSION_PUSH_TOKEN">
+  <div class="row">
+    <button id="save">Save token</button>
+    <button id="run">Run pending routes</button>
+  </div>
+  <div class="status" id="status">…</div>
+  <script src="popup.js"></script>
+</body>
+</html>
