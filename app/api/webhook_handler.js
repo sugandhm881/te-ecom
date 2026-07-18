@@ -250,7 +250,22 @@ router.get('/ee-routes', async (req, res) => {
                 await supabase.from('dp_rejected_handled_ecom').update({ routed_at: new Date().toISOString() }).eq('order_name', name);
                 continue;
             }
-            routes.push({ orderName: name, invoiceId: info.invoiceId, currentCid: info.currentCid, targetCid: ee.SHIFUPRO_CID, cId, eeOrderId: info.eeOrderId });
+            routes.push({ orderName: name, invoiceId: info.invoiceId, currentCid: info.currentCid, targetCid: ee.SHIFUPRO_CID, cId, eeOrderId: info.eeOrderId, source: 'dp' });
+        }
+        // Manual "Move order" requests — route_pending marks (any target warehouse).
+        const { data: pend } = await supabase.from('order_marks_ecom').select('order_name, note').eq('mark_type', 'route_pending');
+        for (const m of (pend || [])) {
+            const name = m.order_name;
+            if (routes.some(r => r.orderName === name)) continue;               // already queued via the DP list
+            const targetCid = Number(m.note);
+            if (!targetCid) continue;
+            const info = await ee.resolveInvoiceAndWarehouse(name);
+            if (!info || !info.invoiceId) continue;
+            if (String(info.currentCid) === String(targetCid)) {                // already there → clear the mark
+                await supabase.from('order_marks_ecom').delete().eq('order_name', name).eq('mark_type', 'route_pending');
+                continue;
+            }
+            routes.push({ orderName: name, invoiceId: info.invoiceId, currentCid: info.currentCid, targetCid, cId, eeOrderId: info.eeOrderId, source: 'manual' });
         }
         res.json({ routes });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -262,19 +277,23 @@ router.post('/ee-route-result', async (req, res) => {
     if (!_eeAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
     try {
         const ee = require('./easyecom');
-        const { orderName, ok, currentCid, message } = req.body || {};
+        const { orderName, ok, currentCid, targetCid, message } = req.body || {};
         if (!orderName) return res.status(400).json({ error: 'orderName required' });
+        const dest = targetCid || ee.SHIFUPRO_CID;
         supabase.from('api_logs_ecom').insert({ action: 'ee_browser_route', status_code: ok ? 200 : 422,
-            payload: { order: orderName, via: 'extension' }, response: String(message || (ok ? 'routed' : 'failed')).slice(0, 200) }).then(() => {}).catch(() => {});
-        if (ok) {
-            await ee.markWarehouseRouted(orderName, currentCid || null, ee.SHIFUPRO_CID, 'extension');
+            payload: { order: orderName, to: dest, via: 'extension' }, response: String(message || (ok ? 'routed' : 'failed')).slice(0, 200) }).then(() => {}).catch(() => {});
+        // Clear BOTH queues for this order (it may be in the DP list and/or a manual mark).
+        const clearQueues = async () => {
             await supabase.from('dp_rejected_handled_ecom').update({ routed_at: new Date().toISOString() }).eq('order_name', orderName);
-            console.log(`[EE-route] ${orderName} routed → Shifupro (via extension)`);
+            await supabase.from('order_marks_ecom').delete().eq('order_name', orderName).eq('mark_type', 'route_pending');
+        };
+        if (ok) {
+            await ee.markWarehouseRouted(orderName, currentCid || null, dest, 'extension');
+            await clearQueues();
+            console.log(`[EE-route] ${orderName} routed → ${dest} (via extension)`);
         } else {
             // Permanent block (shipment already assigned) → close it so it stops retrying; transient → leave for next pass.
-            if (/shipment.*assigned|already been assigned/i.test(String(message || ''))) {
-                await supabase.from('dp_rejected_handled_ecom').update({ routed_at: new Date().toISOString() }).eq('order_name', orderName);
-            }
+            if (/shipment.*assigned|already been assigned/i.test(String(message || ''))) await clearQueues();
             console.warn(`[EE-route] ${orderName} not routed: ${String(message || '').slice(0, 80)}`);
         }
         res.json({ status: 'recorded' });

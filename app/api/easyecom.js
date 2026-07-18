@@ -807,22 +807,25 @@ router.post('/session', tokenRequired, requireAdmin, async (req, res) => {
     }
 });
 
-// POST /api/easyecom/change-warehouse  { orderName, targetCid } — via the stored panel session cookie.
+// POST /api/easyecom/change-warehouse  { orderName, targetCid } — QUEUES the route for the browser
+// extension to execute. EasyEcom's panel sits behind AWS WAF that blocks THIS server's datacenter IP,
+// so we can't call UpdateVendor from here — the Firefox extension (on the admin's residential IP the
+// WAF trusts) picks up the queue and runs it. The queue is a `route_pending` mark in order_marks_ecom;
+// GET /api/webhook/ee-routes serves it, POST /api/webhook/ee-route-result clears it.
 router.post('/change-warehouse', tokenRequired, async (req, res) => {
     try {
         const { orderName, targetCid } = req.body || {};
         if (!orderName || !targetCid) return res.status(400).json({ success: false, message: 'orderName and a target warehouse are required.' });
         if (!EE_WAREHOUSES.some(w => String(w.cId) === String(targetCid))) return res.status(400).json({ success: false, message: 'Unknown target warehouse.' });
-        const sess = await getPanelCookie();
-        if (!sess || !sess.cookie) return res.status(400).json({ success: false, message: 'No EasyEcom session saved yet. Click "Update EasyEcom session" and paste your panel cookie first.', needSession: true });
         const info = await resolveInvoiceAndWarehouse(orderName);
         if (!info || !info.invoiceId) return res.status(404).json({ success: false, message: 'Order not found in EasyEcom (no invoice id synced yet).' });
-        const cId = await ourCompanyCid();
-        const out = await callUpdateVendor(sess.cookie, info.invoiceId, targetCid, cId, info.eeOrderId);
-        await supabase.from('api_logs_ecom').insert({ action: 'easyecom_change_warehouse', status_code: out.status, payload: { orderName, invoice_id: info.invoiceId, to: targetCid, c_id: cId }, response: (out.data && Object.keys(out.data).length) ? out.data : out.raw.slice(0, 300) }).then(() => {}).catch(() => {});
-        if (out.expired) return res.status(401).json({ success: false, needSession: true, message: 'Your saved EasyEcom session has expired. Click "Update session" and paste a fresh cookie from the panel.' });
-        if (out.ok) { await markWarehouseRouted(orderName, info.currentCid, targetCid, req.user && req.user.sub); return res.json({ success: true, message: `Order ${orderName} routed to ${eeWarehouseName(targetCid)}.`, to: eeWarehouseName(targetCid), response: out.data }); }
-        return res.status(422).json({ success: false, message: String(out.data.message || '') || `EasyEcom rejected the warehouse change (code ${out.data.code || out.status}).`, response: out.data });
+        if (String(info.currentCid) === String(targetCid)) return res.status(400).json({ success: false, message: `Already on ${eeWarehouseName(targetCid)}.` });
+        await supabase.from('order_marks_ecom').upsert({
+            order_name: String(orderName).replace('#', '').trim(), mark_type: 'route_pending',
+            note: String(targetCid), created_by: req.user && req.user.sub, created_at: new Date().toISOString(),
+        }, { onConflict: 'order_name,mark_type' });
+        res.json({ success: true, queued: true, to: eeWarehouseName(targetCid),
+            message: `Queued → ${eeWarehouseName(targetCid)}. Routes on the next browser-extension run (auto within ~20 min, or click "Run pending routes" in the extension).` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 

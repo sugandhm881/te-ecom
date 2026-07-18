@@ -83,7 +83,7 @@ async function runPendingRoutes(reason) {
     try {
       await fetch(`${RESULT_ENDPOINT}?token=${encodeURIComponent(token)}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderName: r.orderName, ok, currentCid: r.currentCid, message }),
+        body: JSON.stringify({ orderName: r.orderName, ok, currentCid: r.currentCid, targetCid: r.targetCid, message }),
       });
     } catch (_) {}
     if (ok) routed++; else failed++;
