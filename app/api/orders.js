@@ -37,6 +37,7 @@ function normalizeSupabaseOrder(order) {
         address: `${addr.address1 || ''}, ${addr.city || ''}`.replace(/^, /, '') || 'No address',
         paymentMethod: order.financial_status === 'paid' ? 'Prepaid' : 'COD',
         awb,
+        courier: order.courier_name || null,
         isRapidShyp,
         tags: order.tags,
         shipping_address: addr,
@@ -260,6 +261,8 @@ router.get('/get-orders', async (req, res) => {
 
             order.shipmentId = shipmentId;
             order.awbData    = awbData;
+            // Courier name for the dashboard: prefer the Shopify `courier_name`; fall back to the AWB cache.
+            if (!order.courier && awbData && awbData.courier) order.courier = awbData.courier;
 
             // Status from cache (overrides Supabase if more recent workflow state)
             if (order.status === 'New' || order.status === 'Processing') {
@@ -303,7 +306,18 @@ router.get('/get-orders', async (req, res) => {
             const cacheRaw = (awbNumber && trackingCache[String(awbNumber)]) ? String(trackingCache[String(awbNumber)].raw_status || '').toUpperCase() : '';
             const MOVE_RE = /IN.?TRANSIT|OUT.?FOR.?DELIVERY|DELIVERED|\bRTO\b|RETURN|REACHED|UNDELIVERED|PICKUP.?COMPLETED|\bLOST\b/;
             const pickedUp = MOVE_RE.test(rawTs) || MOVE_RE.test(cacheRaw) || order.status === 'Cancelled';
-            order.holdable = !pickedUp;   // frontend uses this to show/hide the ⏸ Hold button
+
+            // EasyEcom REJECTS a hold once the shipment is MANIFESTED (manifest / handover generated),
+            // so the ⏸ Hold button must disappear at that point — not only after physical pickup.
+            // Manifested-or-later = pickup scheduled, our status advanced to Shipped/In-Transit/OFD/
+            // Delivered/RTO, or EasyEcom's own status literally says manifested/shipped. Pre-manifest
+            // (New / Processing / Ready-To-Ship: AWB may be printed but pickup not yet scheduled) stays holdable.
+            const eeStatusU = String(order.easyecomStatus || '').toUpperCase();
+            const manifestedOrLater = pickedUp
+                || ['Shipped', 'In Transit', 'Out For Delivery', 'Delivered', 'RTO'].includes(order.status)
+                || /MANIFEST|SHIPPED/.test(eeStatusU)
+                || !!(awbData && awbData.pickup_scheduled);
+            order.holdable = !manifestedOrLater;   // frontend uses this to show/hide the ⏸ Hold button
 
             // Detect hold from EITHER source: (a) EasyEcom's synced order_status literally says "On Hold"
             // (authoritative — covers orders held directly in the EasyEcom panel), or (b) our local ee_hold

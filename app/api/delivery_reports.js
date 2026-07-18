@@ -7,7 +7,11 @@ const ExcelJS = require('exceljs');
 const { supabase } = require('../supabase');
 const { fetchRsShipment, parseScanDate, parseDpDate } = require('./delivery_journey');
 const { fetchDocpharmaDetails } = require('./helpers');
-const { requireAdmin } = require('../auth');
+const { requirePermission } = require('../auth');
+// Email-send routes below are gated by the 'send-escalation-emails' capability (admins pass via '*';
+// other users only if the admin granted them this permission on the Users page). See server.js _VIEW_PERMS
+// for the additional per-dashboard view gate on the claims routes.
+const requireEmailSender = requirePermission('send-escalation-emails');
 const { getEmailConfig, sendMail } = require('./email_settings');
 const { aiComplete, isConfigured: aiConfigured } = require('./ai');
 
@@ -738,7 +742,7 @@ router.get('/silent-rto-claims', async (req, res) => {
         res.json({ success: true, range: { from: rg.fromLabel, to: rg.toLabel }, summary: silentRtoSummary(rows), rows });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-router.post('/silent-rto-claims/send', requireAdmin, async (req, res) => {
+router.post('/silent-rto-claims/send', requireEmailSender, async (req, res) => {
     try {
         const rg = resolveRange(req.body || {});
         const out = await sendSilentRtoReport({ ...rg, to: (req.body && req.body.to) || undefined });
@@ -753,7 +757,7 @@ router.get('/late-deliveries', async (req, res) => {
         res.json({ success: true, range: { from: rg.fromLabel, to: rg.toLabel }, summary: lateSummary(rows), rows });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-router.post('/late-deliveries/send', requireAdmin, async (req, res) => {
+router.post('/late-deliveries/send', requireEmailSender, async (req, res) => {
     try {
         const rg = resolveRange(req.body || {});
         const out = await sendLateDeliveriesReport({ ...rg, to: (req.body && req.body.to) || undefined });
@@ -768,7 +772,7 @@ router.get('/intransit-late', async (req, res) => {
         res.json({ success: true, range: { from: rg.fromLabel, to: rg.toLabel }, summary: intransitSummary(rows), rows });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-router.post('/intransit-late/send', requireAdmin, async (req, res) => {
+router.post('/intransit-late/send', requireEmailSender, async (req, res) => {
     try {
         const rg = resolveRange(req.body || {});
         const out = await sendIntransitLateReport({ ...rg, to: (req.body && req.body.to) || undefined });
@@ -802,7 +806,7 @@ const NO_CODES_RULE = 'Write in plain business English — NEVER use internal sy
 
 // Compose a critical escalation email from selected shipments; AI-polishes the wording (falls back to a
 // built-in template when AI isn't configured). Returns the editable draft — NOT sent yet.
-router.post('/critical-email/compose', requireAdmin, async (req, res) => {
+router.post('/critical-email/compose', requireEmailSender, async (req, res) => {
     try {
         const awbs = Array.isArray(req.body && req.body.awbs) ? req.body.awbs.filter(Boolean).slice(0, 60) : [];
         if (!awbs.length) return res.status(400).json({ success: false, message: 'No shipments selected — filter the table (e.g. Likely fake attempts) first.' });
@@ -829,7 +833,7 @@ router.post('/critical-email/compose', requireAdmin, async (req, res) => {
 });
 // Re-polish the admin's CURRENT (possibly hand-edited) draft in the chosen tone. Pure rewrite — facts,
 // order numbers, AWBs and counts must survive verbatim. Polishing IS the AI action, so no template fallback.
-router.post('/critical-email/polish', requireAdmin, async (req, res) => {
+router.post('/critical-email/polish', requireEmailSender, async (req, res) => {
     try {
         const { subject, body, tone } = req.body || {};
         if (!body || !String(body).trim()) return res.status(400).json({ success: false, message: 'Nothing to polish — the message is empty.' });
@@ -844,7 +848,7 @@ router.post('/critical-email/polish', requireAdmin, async (req, res) => {
         res.json({ success: true, subject: out.subject || subject, body: out.body || body });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
-router.post('/critical-email/send', requireAdmin, async (req, res) => {
+router.post('/critical-email/send', requireEmailSender, async (req, res) => {
     try {
         const { subject, body, to, tableHtml } = req.body || {};
         if (!subject || !body) return res.status(400).json({ success: false, message: 'Subject and body are required.' });

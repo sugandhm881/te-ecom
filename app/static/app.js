@@ -52,6 +52,8 @@ let codConfirmations = [];
 let currentSearchTerm = '';
 let activeCodFilter = 'All';
 let activeHoldFilter = 'All';   // Orders dashboard: All | On Hold | Not Held
+let activePaymentFilter = 'All'; // Orders dashboard: All | COD | Prepaid  (payment method)
+let activeTypeFilter = 'All';   // Orders dashboard: All | New | Repeat  (customer type)
 
 // --- NEW STATE FOR BULK ACTIONS ---
 let selectedOrders = new Set(); 
@@ -340,6 +342,9 @@ function applyPermissions() {
     }
 }
 function canView(view) { return !currentUser || currentUser.isAdmin || (currentUser.permissions || []).includes(view); }
+// Capability gate: send escalation/critical/claims emails. Admins always; other users only if the admin
+// granted the 'send-escalation-emails' permission on the Users page. The server enforces this too.
+function canSendEmails() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('send-escalation-emails'))); }
 
 async function handleSignup() {
     const email = (document.getElementById('signup-email') || {}).value;
@@ -736,6 +741,24 @@ function renderDashboardFilters() {
             <option value="NotHeld">Not Held</option>
         </select>`;
 
+    // 3c. Payment-method dropdown (COD vs Prepaid)
+    const paymentFilterContainer = document.getElementById('payment-filter-container');
+    if (paymentFilterContainer) paymentFilterContainer.innerHTML = `
+        <select id="payment-filter-select" class="filter-select">
+            <option value="All">All Payments</option>
+            <option value="COD">COD</option>
+            <option value="Prepaid">Prepaid</option>
+        </select>`;
+
+    // 3d. Customer-type dropdown (New vs Repeat)
+    const typeFilterContainer = document.getElementById('type-filter-container');
+    if (typeFilterContainer) typeFilterContainer.innerHTML = `
+        <select id="type-filter-select" class="filter-select">
+            <option value="All">All Customers</option>
+            <option value="New">New</option>
+            <option value="Repeat">Repeat</option>
+        </select>`;
+
     // 4. Attach Listeners
     platformFiltersEl.querySelectorAll('button[data-filter]').forEach(b => {
         b.addEventListener('click', () => { activePlatformFilter = b.dataset.filter; renderAllDashboard(); });
@@ -763,12 +786,52 @@ function renderDashboardFilters() {
         });
     }
 
+    const paymentSelect = document.getElementById('payment-filter-select');
+    if(paymentSelect) {
+        paymentSelect.value = activePaymentFilter;
+        paymentSelect.addEventListener('change', (e) => {
+            activePaymentFilter = e.target.value;
+            renderAllDashboard();
+        });
+    }
+
+    const typeSelect = document.getElementById('type-filter-select');
+    if(typeSelect) {
+        typeSelect.value = activeTypeFilter;
+        typeSelect.addEventListener('change', (e) => {
+            activeTypeFilter = e.target.value;
+            renderAllDashboard();
+        });
+    }
+
+}
+
+// Repeat = Shopify 'repeat' tag OR the same phone/email appears on more than one order (the exact signal
+// the row's New/Repeat badge shows). Sets `_isRepeat` on each order so the badge and the Type filter agree.
+function computeRepeatFlags(orders) {
+    if (!Array.isArray(orders)) return;
+    const ph = o => { const p = o.phone || (o.shipping_address && o.shipping_address.phone) || ''; return String(p).replace(/\D/g, '').slice(-10); };
+    const em = o => (o.email ? o.email.toLowerCase().trim() : '');
+    const pc = new Map(), ec = new Map();
+    for (const o of orders) {
+        const p = ph(o); if (p) pc.set(p, (pc.get(p) || 0) + 1);
+        const eaddr = em(o); if (eaddr) ec.set(eaddr, (ec.get(eaddr) || 0) + 1);
+    }
+    for (const o of orders) {
+        const tags = (o.tags || '').toLowerCase();
+        const p = ph(o), eaddr = em(o);
+        o._isRepeat = tags.includes('repeat') || (!!p && pc.get(p) > 1) || (!!eaddr && ec.get(eaddr) > 1);
+    }
 }
 
 // --- UPDATED RENDER DASHBOARD (With COD Filter Logic) ---
 function renderAllDashboard() {
     const [s, e] = calculateDateRange(activeDatePreset, startDateFilterEl.value, endDateFilterEl.value);
     let o = [...allOrders];
+
+    // Tag every order New/Repeat once (same signal the row badge shows) so the Type filter and the
+    // badge always agree. Runs on the FULL set (not the filtered view) so repeat detection is stable.
+    computeRepeatFlags(allOrders);
 
     // Helper to extract numeric ID for matching
     const extractNum = (str) => {
@@ -828,6 +891,16 @@ function renderAllDashboard() {
     // 4b. Hold-status filter (EasyEcom On Hold)
     if (activeHoldFilter !== 'All') {
         o = o.filter(order => activeHoldFilter === 'OnHold' ? !!order.eeHold : !order.eeHold);
+    }
+
+    // 4c. Payment-method filter (COD vs Prepaid)
+    if (activePaymentFilter !== 'All') {
+        o = o.filter(order => String(order.paymentMethod || '').toLowerCase() === activePaymentFilter.toLowerCase());
+    }
+
+    // 4d. Customer-type filter (New vs Repeat)
+    if (activeTypeFilter !== 'All') {
+        o = o.filter(order => activeTypeFilter === 'Repeat' ? !!order._isRepeat : !order._isRepeat);
     }
 
     // 5. [NEW] COD Status Filter
@@ -1031,8 +1104,9 @@ function renderOrders(o) {
         // 2. DETERMINE STATUS FLAGS
         // =========================================================================
         
-        // IS REPEAT? -> (Shopify says 'repeat') OR (We found > 1 order)
-        const isRepeat = shopifyTags.includes('repeat') || history.length > 1;
+        // IS REPEAT? -> precomputed flag (Shopify 'repeat' tag OR same phone/email on > 1 order), so the
+        // badge here and the New/Repeat filter always agree. Falls back to the local check if not yet set.
+        const isRepeat = (order._isRepeat != null) ? order._isRepeat : (shopifyTags.includes('repeat') || history.length > 1);
 
         // IS DELIVERED CUSTOMER? -> (Shopify says 'delivered') OR (History has 'Delivered' status)
         const isDeliveredCustomer = shopifyTags.includes('delivered') || history.some(h => {
@@ -1109,7 +1183,7 @@ function renderOrders(o) {
             <td class="p-4 text-slate-500 text-sm font-medium">${order.date}</td>
             <td class="p-4 font-semibold text-slate-900 group relative">
                 <span title="${escapeHtml(hoverText)}" class="cursor-help border-b border-dotted border-slate-400">${escapeHtml(order.id)}</span>
-                <div class="text-[10px] text-slate-400 font-normal mt-0.5">${order.awb ? 'AWB: ' + escapeHtml(order.awb) : 'Unfulfilled'}</div>
+                <div class="text-[10px] text-slate-400 font-normal mt-0.5">${order.awb ? 'AWB: ' + escapeHtml(order.awb) + (order.courier ? ' · <span class="text-slate-500 font-medium">' + escapeHtml(order.courier) + '</span>' : '') : 'Unfulfilled'}</div>
             </td>
             <td class="p-4 font-medium text-slate-800">
                 <div class="flex flex-col">
@@ -3080,7 +3154,7 @@ function claimsInit(){
         claimsRender();
       });
     });
-    if(currentUser && currentUser.isAdmin){ ['srto-send', 'late-send', 'itl-send'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = ''; }); }
+    if(canSendEmails()){ ['srto-send', 'late-send', 'itl-send'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = ''; }); }
     // Click a row to expand its full detail (date log + scan log). Delegated per panel body.
     ['srto-tbody', 'late-tbody', 'itl-tbody'].forEach(id => {
       document.getElementById(id)?.addEventListener('click', e => {
@@ -4583,7 +4657,9 @@ const PERM_GROUPS = [
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
   ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
-  ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]]
+  ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
+  // Capabilities (not dashboard views) — granted per-user by the admin. Server enforces each one too.
+  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)']]]
 ];
 const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
 const PERM_TOTAL = PERM_CATALOG.length;
@@ -7355,7 +7431,7 @@ async function dpLoadLikelyFake(){
       ${kpi('Mails sent', s.mailsSent, 'text-indigo-600')}
     </div>
     <p class="text-xs text-slate-400 mb-3">“Delivered — fake ✓” = orders you flagged that were then delivered fine, confirming the earlier failed attempt was fake.</p>
-    ${(currentUser&&currentUser.isAdmin)?`<button id="dp-batch-escalate" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700">✉️ Escalate all ${s.total} marked to RapidShyp</button>`:''}`;
+    ${canSendEmails()?`<button id="dp-batch-escalate" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700">✉️ Escalate all ${s.total} marked to RapidShyp</button>`:''}`;
     document.getElementById('dp-batch-escalate')?.addEventListener('click', ()=>dpComposeCritical((d.rows||[]).map(x=>x.awb).filter(Boolean)));
   }catch(e){ el.innerHTML=`<div class="text-rose-400 text-sm py-4">${ecEsc(e.message)}</div>`; }
 }
@@ -7516,7 +7592,7 @@ function dpRenderDetail(r,td){ const ts=r.ts||{};
         <button class="dp-mark-fake px-3 py-1.5 rounded-lg text-xs font-semibold ${r.marked_fake?'bg-rose-600 text-white hover:bg-rose-700':'bg-white border border-slate-200 text-slate-600 hover:border-rose-300'}" data-order="${ecEsc(r.order||'')}" data-awb="${ecEsc(r.awb||'')}">${r.marked_fake?'🚩 Marked likely-fake — click to unmark':'🚩 Mark as likely-fake'}</button>
         ${r.mail_sent
             ? `<button class="dp-view-thread px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100" data-awb="${ecEsc(r.awb||'')}">📧 ${_dpThreadCache[r.awb]?'Hide email':'View email & replies'}</button>`
-            : ((currentUser&&currentUser.isAdmin)?`<button class="dp-send-critical px-3 py-1.5 rounded-lg text-xs font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300" data-awb="${ecEsc(r.awb||'')}">✉️ Send critical email</button>`:'')}
+            : (canSendEmails()?`<button class="dp-send-critical px-3 py-1.5 rounded-lg text-xs font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300" data-awb="${ecEsc(r.awb||'')}">✉️ Send critical email</button>`:'')}
         ${(r.state==='ndr_pending'&&r.awb)?`<button class="dp-ndr-action px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100" data-awb="${ecEsc(r.awb)}" data-order="${ecEsc(r.order||'')}">🔁 NDR action (reattempt / return)</button>`:''}
         <span class="dp-action-status text-xs"></span>
       </div>`;

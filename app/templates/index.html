@@ -311,6 +311,20 @@
     .date-input:hover { border-color: #c7d2fe; }
     .date-input:focus { border-color: #a5b4fc; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
 
+    /* Orders-dashboard toolbar — compact, so the fuller filter set reads as one tidy, uncluttered row.
+       Scoped to .orders-filter-bar so every other page's filters keep their standard size. Targets both
+       the raw <select.filter-select> and its enhanced .csel-btn twin (see ecEnhanceSelect). */
+    .orders-filter-bar .filter-select,
+    .orders-filter-bar .csel-btn,
+    .orders-filter-bar .date-input { height: 34px; font-size: 0.8rem; }
+    .orders-filter-bar .csel-btn { min-width: 0; padding: 0 .55rem 0 .7rem; gap: .3rem; }
+    .orders-filter-bar .filter-select { padding: 0 1.9rem 0 .7rem; }
+    .orders-filter-bar .date-input { padding: 0 .6rem; }
+    .orders-filter-bar .csel-chev { width: .95em; height: .95em; }
+    /* Denser open list too (not just the button), so the 9 status rows don't read as a tall, loose menu. */
+    .orders-filter-bar .csel-item { font-size: .8rem; padding: .28rem .6rem; }
+    .orders-filter-bar .csel-panel { padding: 3px; }
+
     /* Buttons */
     .btn-pill {
         border-radius: 9999px;
@@ -687,9 +701,11 @@
                     </div>
                 </div>
                 <!-- Filter toolbar -->
-                <div class="flex items-center gap-2 flex-wrap">
+                <div class="orders-filter-bar flex items-center gap-1.5 flex-wrap">
                     <div id="orders-search-slot"></div>
                     <select id="status-filter" class="filter-select"></select>
+                    <div id="payment-filter-container"></div>
+                    <div id="type-filter-container"></div>
                     <div id="cod-filter-container"></div>
                     <div id="hold-filter-container"></div>
                     <select id="order-date-preset-filter" class="filter-select"></select>
