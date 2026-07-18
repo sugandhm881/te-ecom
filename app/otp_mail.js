@@ -69,6 +69,7 @@ async function sweepOtpSent(reason, olderThanMs = TTL_MS) {
         const cfg = await getEmailConfig(); if (!cfg) return;
         const host = process.env.IMAP_HOST || String(cfg.host).replace(/^smtp\./i, 'imap.');
         const client = new ImapFlow({ host, port: 993, secure: true, auth: { user: cfg.user, pass: cfg.pass }, logger: false });
+        client.on('error', e => console.warn('[2FA] IMAP connection error (ignored):', e.message)); // else an unhandled 'error' event (e.g. ECONNRESET) crashes the whole process
         await client.connect();
         try {
             const boxes = await client.list();

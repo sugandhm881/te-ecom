@@ -66,6 +66,7 @@ async function pollEscalationReplies() {
         if (!cfg) { console.warn('[EscMail] email not configured — skip poll'); return { error: 'email not configured' }; }
         const imapHost = process.env.IMAP_HOST || String(cfg.host || '').replace(/^smtp\./i, 'imap.');
         const client = new ImapFlow({ host: imapHost, port: 993, secure: true, logger: false, auth: { user: cfg.user, pass: cfg.pass } });
+        client.on('error', e => console.warn('[EscMail] IMAP connection error (ignored):', e.message)); // else an unhandled 'error' event (e.g. ECONNRESET) crashes the whole process
         await client.connect();
         let checked = 0, saved = 0;
         const lock = await client.getMailboxLock('INBOX');
