@@ -1495,9 +1495,11 @@ async function changeWarehouseModal(orderName) {
         try {
             const s = await (await fetch('/api/easyecom/session/check', { headers: getAuthHeaders() })).json();
             if (!s || !s.success) { sessEl.textContent = '—'; return; }
-            if (!s.hasSession) { sessEl.innerHTML = '<span class="text-amber-600">● not set</span>'; }
-            else if (s.valid) { sessEl.innerHTML = `<span class="text-emerald-600">● healthy</span>${s.updatedAt ? ' · ' + supRelTime(s.updatedAt) : ''}`; }
-            else { sessEl.innerHTML = '<span class="text-rose-600 font-semibold">● expired — paste a fresh cookie</span>'; document.getElementById('eewh-sess-box').classList.remove('hidden'); }
+            // Health = freshness of the cookie the browser sync extension pushes (~every 20 min). The
+            // server can't ping EasyEcom (WAF blocks its IP), so a fresh sync IS a live session.
+            if (!s.hasSession) { sessEl.innerHTML = '<span class="text-amber-600 font-semibold">● not set — paste a cookie</span>'; document.getElementById('eewh-sess-box').classList.remove('hidden'); }
+            else if (s.valid) { sessEl.innerHTML = `<span class="text-emerald-600">● healthy</span>${s.updatedAt ? ' · synced ' + supRelTime(s.updatedAt) : ''}`; }
+            else { sessEl.innerHTML = `<span class="text-amber-600 font-semibold">● stale — auto-sync may be offline${s.updatedAt ? ' · last synced ' + supRelTime(s.updatedAt) : ''}</span>`; document.getElementById('eewh-sess-box').classList.remove('hidden'); }
         } catch (_) { sessEl.textContent = '—'; }
     })();
     document.getElementById('eewh-sess-toggle').addEventListener('click', () => document.getElementById('eewh-sess-box').classList.toggle('hidden'));

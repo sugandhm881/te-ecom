@@ -731,7 +731,14 @@ async function resolveInvoiceAndWarehouse(orderName) {
         .limit(1).maybeSingle();
     if (!data || !data.raw_data) return null;
     const rd = data.raw_data;
-    return { invoiceId: rd.invoice_id || null, currentCid: rd.warehouse_id || rd.warehouseId || null, eeOrderId: data.order_id };
+    // Current fulfilment warehouse = the ASSIGNED warehouse (e.g. DP Bangalore 271096), NOT `warehouse_id`.
+    // `warehouse_id` carries the parent SELLER company (Shifupro 257282) for EVERY order — so reading it
+    // made routing mistake DP-Bangalore orders for "already on Shifupro" and silently mark them routed
+    // WITHOUT moving them (the order stayed on DP Bangalore). `assigned_warehouse_id` is the true owning
+    // location; when the sync snapshot omits it we leave currentCid null and let the real UpdateVendor
+    // call be the source of truth rather than falsely skipping the move.
+    const currentCid = rd.assigned_warehouse_id || rd.assignedWarehouseId || null;
+    return { invoiceId: rd.invoice_id || null, currentCid, eeOrderId: data.order_id };
 }
 
 // Our company c_id (the panel session's company) — used as the UpdateVendor `c_id` param.
@@ -742,7 +749,7 @@ async function ourCompanyCid() { try { return eeDecode(await getEasyecomToken())
 async function markWarehouseRouted(orderName, fromCid, toCid, by) {
     await supabase.from('order_marks_ecom').upsert({
         order_name: String(orderName).replace('#', '').trim(), mark_type: 'warehouse_routed',
-        note: `${eeWarehouseName(fromCid)} → ${eeWarehouseName(toCid)}`, awb: null,
+        note: `${fromCid ? eeWarehouseName(fromCid) : 'DP Bangalore'} → ${eeWarehouseName(toCid)}`, awb: null,
         created_by: by || null, created_at: new Date().toISOString(),
     }, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
 }
@@ -829,27 +836,40 @@ router.post('/change-warehouse', tokenRequired, async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// GET /api/easyecom/session/check — live validity ping (non-destructive: invoice_id=0).
+// How fresh the synced cookie must be to count as a live session. The browser extension re-pushes a
+// logged-in cookie every ~20 min, so ≤45 min old = healthy (allows one missed sync cycle).
+const SESSION_FRESH_MIN = 45;
+const cookieAgeMin = updatedAt => updatedAt ? Math.round((Date.now() - new Date(updatedAt).getTime()) / 60000) : null;
+
+// GET /api/easyecom/session/check — session health, from cookie FRESHNESS (not a live ping).
+// The VPS can't reach EasyEcom's panel — AWS WAF blocks its datacenter IP, so any UpdateVendor probe
+// from here comes back as a WAF challenge / redirect / HTML page that looks "expired" even when the
+// cookie is perfectly fresh (the old false-positive that showed "expired" right after a re-paste).
+// The browser extension re-pushes a logged-in cookie every ~20 min, so a recently-synced cookie IS a
+// live session; a stale one means the extension is offline. Health = freshness of that sync.
 router.get('/session/check', tokenRequired, async (req, res) => {
     try {
         const sess = await getPanelCookie();
         if (!sess || !sess.cookie) return res.json({ success: true, hasSession: false, valid: false });
-        const out = await callUpdateVendor(sess.cookie, 0, 257282, await ourCompanyCid(), 0);
-        // Authenticated (session alive) → we reach business validation ("Invalid Company ID"), NOT an auth wall.
-        res.json({ success: true, hasSession: true, valid: !out.expired, updatedAt: sess.updatedAt });
+        const ageMinutes = cookieAgeMin(sess.updatedAt);
+        const fresh = ageMinutes != null && ageMinutes <= SESSION_FRESH_MIN;
+        res.json({ success: true, hasSession: true, valid: fresh, ageMinutes, updatedAt: sess.updatedAt });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// Keep the panel session warm — a light authenticated ping extends the rolling session so the cookie
-// rarely needs re-pasting. Returns 'alive' | 'expired' | 'none'. Called by a cron.
+// Panel-session health for the keep-alive cron. The VPS can't reach EasyEcom (WAF blocks its IP), so
+// it can neither ping nor keep the session warm — the browser extension keeps it fresh by re-pushing
+// the cookie every ~20 min. So health = cookie freshness. Returns 'alive' (fresh) | 'stale' (cookie
+// aging out — extension likely offline) | 'none' (never set).
 async function pingPanelSession() {
     const sess = await getPanelCookie();
     if (!sess || !sess.cookie) return 'none';
-    try {
-        const out = await callUpdateVendor(sess.cookie, 0, 257282, await ourCompanyCid(), 0);
-        if (out.expired) { console.warn('[EE Session] panel session EXPIRED — admin must re-paste the cookie.'); return 'expired'; }
-        return 'alive';
-    } catch (e) { console.warn('[EE Session] keep-alive ping failed:', e.message); return 'error'; }
+    const ageMinutes = cookieAgeMin(sess.updatedAt);
+    if (ageMinutes == null || ageMinutes > SESSION_FRESH_MIN) {
+        console.warn(`[EE Session] panel cookie STALE (${ageMinutes == null ? 'unknown age' : ageMinutes + ' min old'}) — is the browser sync extension running?`);
+        return 'stale';
+    }
+    return 'alive';
 }
 
 // Auto-route DocPharma-rejected orders to Shifupro (MWH). For each order name: resolve invoice + current

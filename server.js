@@ -266,11 +266,13 @@ cron.schedule('0 11 * * *', async () => {
     await sendEasyecomHoldReport().catch(e => console.error('[Hold Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
-// EasyEcom panel-session keep-alive — a light authenticated ping every 20 min keeps the stored
-// warehouse-routing cookie's rolling session from expiring, so the admin rarely re-pastes it.
-// No-op when no session is saved. Warns (server log) if the session has actually expired.
+// EasyEcom panel-session freshness watch — every 20 min. The VPS can't reach EasyEcom's panel (AWS
+// WAF blocks its datacenter IP), so it can't ping/keep the session warm; the browser sync extension
+// keeps the warehouse-routing cookie fresh by re-pushing it every ~20 min. This just watches that the
+// cookie stays fresh and warns (server log) if it goes stale — i.e. the extension is offline.
+// No-op when no session is saved.
 cron.schedule('*/20 * * * *', async () => {
-    try { const s = await require('./app/api/easyecom').pingPanelSession(); if (s === 'expired') console.warn('[EE Session] keep-alive: session EXPIRED — admin must re-paste the EasyEcom cookie.'); }
+    try { const s = await require('./app/api/easyecom').pingPanelSession(); if (s === 'stale') console.warn('[EE Session] keep-alive: panel cookie STALE — the browser sync extension may be offline (re-paste, or restart it).'); }
     catch (e) { console.error('[EE Session] keep-alive error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 

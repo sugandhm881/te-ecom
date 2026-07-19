@@ -61,7 +61,8 @@ async function runPendingRoutes(reason) {
   if (!routes.length) { await setStatus(`No pending routes (${reason}) · ${new Date().toLocaleTimeString()}`); return; }
 
   await setStatus(`Routing ${routes.length}…`);
-  let routed = 0, failed = 0;
+  let routed = 0;
+  const failedList = [];
   for (const r of routes) {
     let ok = false, message = '';
     try {
@@ -73,6 +74,9 @@ async function runPendingRoutes(reason) {
         body,
       });
       const raw = await resp.text();
+      // EasyEcom's UpdateVendor SUCCESS = the literal "0" (sometimes wrapped in blank lines, hence trim).
+      // Anything else (JSON business error, a WAF page, or an odd bare code like "200") is NOT success —
+      // never guess it routed, or we'd repeat the false-"moved" bug. It stays queued and retries next run.
       ok = resp.status === 200 && raw.trim() === '0';
       if (!ok) {
         if (/Human Verification|awsWaf|gokuProps/i.test(raw)) message = 'WAF challenge (are you logged into EasyEcom in this browser?)';
@@ -86,10 +90,13 @@ async function runPendingRoutes(reason) {
         body: JSON.stringify({ orderName: r.orderName, ok, currentCid: r.currentCid, targetCid: r.targetCid, message }),
       });
     } catch (_) {}
-    if (ok) routed++; else failed++;
+    if (ok) routed++;
+    else failedList.push(`${r.orderName}${message ? ` (${String(message).replace(/\s+/g, ' ').trim().slice(0, 40)})` : ''}`);
     await sleep(1500);   // gentle — one order at a time, never bursts
   }
-  await setStatus(`✅ Routed ${routed}${failed ? `, ${failed} failed` : ''} of ${routes.length} (${reason}) · ${new Date().toLocaleTimeString()}`);
+  const failed = failedList.length;
+  // Name the failed orders + a cleaned message so "1 failed" isn't a mystery to debug.
+  await setStatus(`✅ Routed ${routed}${failed ? ` · ${failed} failed → ${failedList.join('; ')}` : ''} of ${routes.length} (${reason}) · ${new Date().toLocaleTimeString()}`);
 }
 
 // One full cycle = refresh cookie, then run any pending routes.

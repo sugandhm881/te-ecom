@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Ecom Central — EasyEcom Warehouse Router",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Runs EasyEcom warehouse changes from your browser (your IP) so they clear EasyEcom's bot firewall, and keeps the dashboard session fresh. No passwords stored.",
   "permissions": ["cookies", "alarms", "storage"],
   "host_permissions": [
