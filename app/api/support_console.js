@@ -9,6 +9,7 @@ const axios = require('axios');
 const router = express.Router();
 const config = require('../../config');
 const { supabase } = require('../supabase');
+const shopifyHold = require('./shopify_hold');
 
 const UNDELIVERED_BUCKETS = ['undelivered'];   // per the console spec: single member
 const CALL_OUTCOMES = ['no_answer', 'customer_will_accept', 'refused', 'reschedule', 'wrong_number', 'delivered_confirmed', 'other'];
@@ -118,6 +119,56 @@ router.get('/support/summary', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// Repeat-hold candidates — COD repeat customers whose order is still BEFORE the courier picks it up
+// (bucket `order_to_dispatch` = awaiting dispatch + PICKUP_SCHEDULED/in-progress/manifested; once picked
+// up it moves to dispatch_plus_2/IN_TRANSIT and drops out), with ≥1 prior non-delivered order on the
+// same phone. This SAME function powers both the Call Queue "Repeat" tab AND the Shopify auto-hold cron,
+// so the criteria can never diverge. Returns rows with `orders_count` set.
+async function findRepeatCandidates({ fromISO, toISO }) {
+    const SEL = 'order_id, order_name, phone, email, total_price, created_at, fulfillment_status, tracking_status, partner, courier, awb_number, bucket, msg91_confirmed, is_repeat_customer, dispatch_at, edd';
+    const { data, error } = await supabase.from('order_buckets').select(SEL)
+        .eq('bucket', 'order_to_dispatch').eq('is_repeat_customer', true)
+        .gte('created_at', fromISO).lte('created_at', toISO)
+        .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(1000);
+    if (error) throw new Error(error.message);
+    let cand = data || [];
+    // Exclude prepaid (orders.financial_status ∈ paid-ish set) — only COD carries RTO risk worth holding.
+    const finRows = cand.length ? await chunkedIn('orders', 'id, financial_status', 'id', cand.map(c => c.order_id)) : [];
+    const finById = {}; finRows.forEach(o => { finById[String(o.id)] = (o.financial_status || '').toLowerCase(); });
+    cand = cand.filter(c => !PREPAID_STATUSES.includes(finById[String(c.order_id)] || ''));
+    // Customer history by phone: order-count pill + require ≥1 previous non-delivered order.
+    const phones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
+    const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, phone, bucket, created_at', 'phone', phones) : [];
+    const byPhone = {}; hist.forEach(h => { (byPhone[h.phone] = byPhone[h.phone] || []).push(h); });
+    return cand.filter(c => {
+        const list = byPhone[c.phone] || [];
+        c.orders_count = list.length;
+        return list.some(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at) && !['delivered', 'cancelled'].includes(h.bucket));
+    });
+}
+
+// ── POST /support/shopify-hold | /support/shopify-unhold — Repeat-panel hold controls ──
+// Hold an order's fulfillment on Shopify (upstream of EasyEcom) or release it after the customer
+// confirms. orderId = Shopify order id (order_buckets.order_id); orderName = "TE25-…" for the mark.
+router.post('/support/shopify-hold', async (req, res) => {
+    try {
+        const { orderId, orderName, reason } = req.body || {};
+        if (!orderId || !orderName) return res.status(400).json({ success: false, error: 'orderId and orderName are required.' });
+        const out = await shopifyHold.holdOrderManual(orderName, orderId, (req.user && req.user.sub) || 'agent', reason);
+        if (!out.ok) return res.status(502).json({ success: false, error: out.error || 'Hold failed.' });
+        res.json({ success: true, status: 'held' });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+router.post('/support/shopify-unhold', async (req, res) => {
+    try {
+        const { orderId, orderName } = req.body || {};
+        if (!orderId || !orderName) return res.status(400).json({ success: false, error: 'orderId and orderName are required.' });
+        const out = await shopifyHold.releaseOrder(orderName, orderId, (req.user && req.user.sub) || 'agent');
+        if (!out.ok) return res.status(502).json({ success: false, error: out.error || 'Release failed.' });
+        res.json({ success: true, status: 'released' });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 // ── GET /support/queue?tab=repeat|und|changed ────────────────────────────────
 router.get('/support/queue', async (req, res) => {
     try {
@@ -145,34 +196,17 @@ router.get('/support/queue', async (req, res) => {
             const all = ids.length ? await chunkedIn('order_buckets', SEL, 'order_id', ids) : [];
             rows = all.filter(r => !UNDELIVERED_BUCKETS.includes(r.bucket))
                 .sort((a, b) => (b.msg91_confirmed === true) - (a.msg91_confirmed === true) || new Date(a.created_at) - new Date(b.created_at));
-        } else { // repeat — COD repeat customers whose order is still BEFORE the courier picks it up, with
-                 // a prior non-delivered order. The whole `order_to_dispatch` bucket is pre-pickup (awaiting
-                 // dispatch + PICKUP_SCHEDULED/in-progress/manifested); once the courier picks up it moves to
-                 // dispatch_plus_2 (IN_TRANSIT). We used to require fulfillment_status IS NULL, which wrongly
-                 // hid the dispatched-but-not-yet-picked-up ones (~70/81) — dropped that so they show too.
-            const { data, error } = await supabase.from('order_buckets').select(SEL)
-                .eq('bucket', 'order_to_dispatch').eq('is_repeat_customer', true)
-                .gte('created_at', fromISO).lte('created_at', toISO)
-                .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(1000);
-            if (error) throw new Error(error.message);
-            let cand = data || [];
-            // Exclude prepaid (orders.financial_status ∈ paid-ish set).
-            const finRows = cand.length ? await chunkedIn('orders', 'id, financial_status', 'id', cand.map(c => c.order_id)) : [];
-            const finById = {}; finRows.forEach(o => { finById[String(o.id)] = (o.financial_status || '').toLowerCase(); });
-            cand = cand.filter(c => !PREPAID_STATUSES.includes(finById[String(c.order_id)] || ''));
-            // Customer history by phone: order count pill + require ≥1 previous non-delivered order.
-            const phones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
-            const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, phone, bucket, created_at', 'phone', phones) : [];
-            const byPhone = {}; hist.forEach(h => { (byPhone[h.phone] = byPhone[h.phone] || []).push(h); });
-            rows = cand.filter(c => {
-                const list = byPhone[c.phone] || [];
-                c.orders_count = list.length;
-                return list.some(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at) && !['delivered', 'cancelled'].includes(h.bucket));
-            });
+        } else { // repeat — shared with the Shopify auto-hold so the two never diverge (see findRepeatCandidates).
+            rows = await findRepeatCandidates({ fromISO, toISO });
         }
 
         const notes = await notesByOrder(rows.map(r => r.order_id));
         rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; });
+        // Repeat tab: attach Shopify hold state so the panel can show 🔒 + Release / Hold controls.
+        if (tab === 'repeat') {
+            const holds = await shopifyHold.getHoldStates(rows.map(r => r.order_name));
+            rows.forEach(r => { r.shopify_hold = holds[String(r.order_name || '').replace('#', '').trim()] || null; });
+        }
         res.json({ success: true, tab, rows: rows.slice(0, 1500), lock: await lockState() });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -414,3 +448,4 @@ router.post('/support/refresh-tracking', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.findRepeatCandidates = findRepeatCandidates;   // reused by the Shopify auto-hold cron

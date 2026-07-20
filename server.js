@@ -13,7 +13,8 @@ const CORS_ALLOW = (process.env.CORS_ORIGINS || config.DASHBOARD_URL || '')
     .split(',').map(s => s.trim()).filter(Boolean)
     .concat(['http://localhost:5002', 'http://127.0.0.1:5002']);
 app.use(cors({ origin: (origin, cb) => cb(null, !origin || CORS_ALLOW.includes(origin)), credentials: true }));
-app.use(express.json());
+// Capture the raw body (used by the Shopify webhook HMAC check); does not change JSON parsing.
+app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.enable('trust proxy');
 
 // Security headers — clickjacking + MIME-sniffing protection (defense against XSS impact).
@@ -274,6 +275,28 @@ cron.schedule('0 11 * * *', async () => {
 cron.schedule('*/20 * * * *', async () => {
     try { const s = await require('./app/api/easyecom').pingPanelSession(); if (s === 'stale') console.warn('[EE Session] keep-alive: panel cookie STALE — the browser sync extension may be offline (re-paste, or restart it).'); }
     catch (e) { console.error('[EE Session] keep-alive error:', e.message); }
+}, { timezone: 'Asia/Kolkata' });
+
+// Shopify auto-hold BACKSTOP — every 5 min, hold repeat COD orders (same criteria as the Call Queue
+// "Repeat" tab) on Shopify BEFORE EasyEcom imports them, so they can be phone-confirmed before shipping.
+// The orders/create webhook does this instantly; this cron catches anything the webhook missed. Skips
+// orders already held or manually released. OFF unless SHOPIFY_AUTOHOLD_ENABLED=true.
+cron.schedule('*/5 * * * *', async () => {
+    if (String(process.env.SHOPIFY_AUTOHOLD_ENABLED || '').toLowerCase() !== 'true') return;
+    try {
+        const { findRepeatCandidates } = require('./app/api/support_console');
+        const shopifyHold = require('./app/api/shopify_hold');
+        const fromISO = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+        const toISO = new Date().toISOString();
+        const cand = await findRepeatCandidates({ fromISO, toISO });
+        let held = 0, skipped = 0, failed = 0;
+        for (const c of cand.slice(0, 50)) {
+            const r = await shopifyHold.autoHoldOrder(c.order_name, c.order_id);
+            if (r.held) held++; else if (r.skipped) skipped++; else failed++;
+            await new Promise(x => setTimeout(x, 800));   // gentle — one order at a time
+        }
+        if (held || failed) console.log(`[ShopifyHold] auto-hold backstop: held ${held}, skipped ${skipped}, failed ${failed} of ${cand.length}`);
+    } catch (e) { console.error('[ShopifyHold] cron error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
 // Silent-RTO claim mail → RapidShyp — weekly, Monday 9:30 AM IST, previous 7 days ending yesterday.

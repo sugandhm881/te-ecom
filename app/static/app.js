@@ -3509,6 +3509,7 @@ function supQueueTable(){
       <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
       <td class="${TD}">${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}</td>
       <td class="${TD}"><div class="flex items-center gap-2.5">
+        ${supHoldControl(r)}
         <button class="sup-note-btn inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-bold border transition-colors ${r.note_count?'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100':'bg-white text-slate-400 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="${r.note_count?'View / add notes':'Add a note'}">📝${r.note_count?` <span class="min-w-[16px] h-4 px-1 rounded-full bg-amber-200/80 text-amber-800 text-[10px] leading-4 text-center">${r.note_count}</span>`:' <span class="font-medium">+</span>'}</button>
         ${r.latest_note?`<div class="min-w-0 border-l-2 border-amber-300 pl-2">
           <div class="text-xs text-slate-600 italic truncate max-w-[230px]" title="${escapeHtml(r.latest_note)}">“${escapeHtml(r.latest_note)}”</div>
@@ -3516,6 +3517,30 @@ function supQueueTable(){
   }</tbody></table>${list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:''}`;
   c.querySelectorAll('.sup-row').forEach(row=>row.addEventListener('click',()=>supOrderModal(row.dataset.oid)));
   c.querySelectorAll('.sup-note-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supNotesModal(b.dataset.oid,b.dataset.oname); }));
+  c.querySelectorAll('.sup-hold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoHold(b.dataset.oid,b.dataset.oname,b); }));
+  c.querySelectorAll('.sup-unhold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoUnhold(b.dataset.oid,b.dataset.oname,b); }));
+}
+// Shopify hold controls for the Repeat tab: 🔒 held → Release; failed/none → Hold. (Repeat tab only.)
+function supHoldControl(r){
+  if(_supTab!=='repeat') return '';
+  const h=r.shopify_hold;
+  if(h && h.status==='held') return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''} — won't ship / import to EasyEcom until released">🔒 On hold${h.by==='auto'?' (auto)':''}</span> <button class="sup-unhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}">Release</button>`;
+  const failed = h && h.status==='failed';
+  return `${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="Auto-hold failed: ${escapeHtml(h.reason||'')}">⚠️ hold failed</span> `:''}<button class="sup-hold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="Hold this order on Shopify (stops it shipping / importing to EasyEcom)">🔒 Hold</button>`;
+}
+async function supDoHold(oid,oname,btn){
+  btn.disabled=true; const t=btn.innerHTML; btn.textContent='Holding…';
+  try{ await supFetch('/api/support/shopify-hold',{method:'POST',body:JSON.stringify({orderId:oid,orderName:oname})});
+    showNotification(`${oname} held on Shopify`); supLoadQueue(); }
+  catch(e){ showNotification('Hold failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
+}
+async function supDoUnhold(oid,oname,btn){
+  const ok=await supConfirm({title:'Release hold?',message:`${oname} will be released and can ship / import to EasyEcom. Do this only after the customer has confirmed.`,confirmLabel:'Release'});
+  if(!ok) return;
+  btn.disabled=true; const t=btn.innerHTML; btn.textContent='Releasing…';
+  try{ await supFetch('/api/support/shopify-unhold',{method:'POST',body:JSON.stringify({orderId:oid,orderName:oname})});
+    showNotification(`${oname} released`); supLoadQueue(); }
+  catch(e){ showNotification('Release failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
 }
 async function supRefreshTracking(){
   const btn=document.getElementById('sup-refresh'); const orig=btn.textContent;

@@ -5,6 +5,7 @@ const { rawToDbRow } = require('./easyecom');
 const { parseRapidshypJourney, parseDocpharmaJourney, saveJourney, updateJourneyForOrder } = require('./delivery_journey');
 const { syncDocpharmaOrderFromPortal } = require('./docpharma_portal');
 const config = require('../../config');
+const crypto = require('crypto');
 
 router.post('/rapidshyp', async (req, res) => {
     console.log("\n--- [Webhook Received] ---");
@@ -298,6 +299,36 @@ router.post('/ee-route-result', async (req, res) => {
         }
         res.json({ status: 'recorded' });
     } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Shopify orders/create → auto-hold repeat COD orders (upstream of EasyEcom) ──────────────
+// Registered as a Shopify webhook (topic orders/create). HMAC-verified with SHOPIFY_WEBHOOK_SECRET over
+// the RAW body (captured in server.js via express.json verify). Holds instantly so the order never
+// reaches EasyEcom; the */5-min cron is the backstop. 503 until the secret is set. Acks fast (Shopify
+// needs a quick 200), then evaluates + holds asynchronously.
+function _shopifyHmacOk(req) {
+    const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+    if (!secret) return false;
+    const sent = req.get('X-Shopify-Hmac-Sha256') || '';
+    const digest = crypto.createHmac('sha256', secret).update(req.rawBody || Buffer.from('')).digest('base64');
+    try { return sent.length === digest.length && crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(digest)); } catch (_) { return false; }
+}
+router.post('/shopify-order', async (req, res) => {
+    if (!process.env.SHOPIFY_WEBHOOK_SECRET) return res.status(503).json({ error: 'SHOPIFY_WEBHOOK_SECRET not set' });
+    if (!_shopifyHmacOk(req)) return res.status(401).json({ error: 'invalid hmac' });
+    res.json({ ok: true });   // ack immediately
+    setImmediate(async () => {
+        try {
+            const o = req.body || {};
+            const orderName = o.name || String(o.order_number || o.id);
+            const phone = (o.shipping_address && o.shipping_address.phone) || (o.customer && o.customer.phone) || o.phone || null;
+            const shopifyHold = require('./shopify_hold');
+            const qualifies = await shopifyHold.qualifiesForHold({ phone, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id });
+            if (!qualifies) return;
+            const r = await shopifyHold.autoHoldOrder(orderName, o.id);
+            if (r.held) console.log(`[ShopifyHold] webhook held ${orderName} (repeat COD)`);
+        } catch (e) { console.error('[ShopifyHold] webhook error:', e.message); }
+    });
 });
 
 module.exports = router;
