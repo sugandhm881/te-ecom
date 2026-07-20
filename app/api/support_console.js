@@ -126,19 +126,17 @@ router.get('/support/summary', async (req, res) => {
 //      before the courier collects it). These are the actionable orders — the only ones we can hold and
 //      the only ones worth calling before they ship. The customer's own in-transit/not-delivered orders
 //      are NOT listed as rows here; you see them in the order-detail customer-history on click.
-//   3. Value > ₹1500 (total_price).
-//   4. ≥1 of the customer's last 3 PRIOR orders (by phone) is not delivered (RTO/undelivered/in-transit
+//   3. ≥1 of the customer's last 3 PRIOR orders (by phone) is not delivered (RTO/undelivered/in-transit
 //      count; a cancelled order does not) — a recent non-delivery = repeat RTO risk.
+// (No order-value threshold — the AOV is low, so it's repeat-RTO-risk COD orders at any value.)
 async function findRepeatCandidates({ fromISO, toISO }) {
     const SEL = 'order_id, order_name, phone, email, total_price, created_at, fulfillment_status, tracking_status, partner, courier, awb_number, bucket, msg91_confirmed, is_repeat_customer, dispatch_at, edd';
     const { data, error } = await supabase.from('order_buckets').select(SEL)
         .eq('bucket', 'order_to_dispatch')                               // (2) still pre-pickup / holdable
-        .gt('total_price', 1500)                                         // (3) value > ₹1500
         .gte('created_at', fromISO).lte('created_at', toISO)
         .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(2000);
     if (error) throw new Error(error.message);
     let cand = data || [];
-    cand = cand.filter(c => Number(c.total_price) > 1500);   // (3) numeric guard (in case total_price is text in the view)
     // (1) COD only.
     const finRows = cand.length ? await chunkedIn('orders', 'id, financial_status', 'id', cand.map(c => c.order_id)) : [];
     const finById = {}; finRows.forEach(o => { finById[String(o.id)] = (o.financial_status || '').toLowerCase(); });
@@ -213,10 +211,25 @@ router.get('/support/queue', async (req, res) => {
 
         const notes = await notesByOrder(rows.map(r => r.order_id));
         rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; });
-        // Repeat tab: attach Shopify hold state so the panel can show 🔒 + Release / Hold controls.
+        // Repeat tab: attach hold state + EasyEcom-import state so the panel offers the RIGHT control —
+        // Shopify hold only while the order is still upstream of EasyEcom; once imported into EasyEcom the
+        // Shopify hold is pointless, so offer an EasyEcom hold instead.
         if (tab === 'repeat') {
+            const nk = n => String(n || '').replace('#', '').trim();
             const holds = await shopifyHold.getHoldStates(rows.map(r => r.order_name));
-            rows.forEach(r => { r.shopify_hold = holds[String(r.order_name || '').replace('#', '').trim()] || null; });
+            const names = [...new Set(rows.map(r => nk(r.order_name)).filter(Boolean))];
+            const eeRows = names.length ? await chunkedIn('b2c_order_easycom', 'reference_code, order_id, order_status', 'reference_code', names) : [];
+            const eeBy = {}; eeRows.forEach(e => { eeBy[nk(e.reference_code)] = e; });
+            const eeHoldRows = names.length ? await chunkedIn('order_marks_ecom', 'order_name', 'order_name', names, q => q.eq('mark_type', 'ee_hold')) : [];
+            const eeHeld = new Set(eeHoldRows.map(m => nk(m.order_name)));
+            rows.forEach(r => {
+                const k = nk(r.order_name);
+                r.shopify_hold = holds[k] || null;
+                const ee = eeBy[k];
+                r.in_ee = !!ee;                                                   // imported into EasyEcom?
+                r.easyecom_order_id = ee ? String(ee.order_id) : null;
+                r.ee_hold = eeHeld.has(k) || /hold/i.test((ee && ee.order_status) || '');   // already held in EasyEcom?
+            });
         }
         res.json({ success: true, tab, rows: rows.slice(0, 1500), lock: await lockState() });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }

@@ -273,7 +273,7 @@ router.get('/get-orders', async (req, res) => {
             // Status from cache (overrides Supabase if more recent workflow state)
             if (order.status === 'New' || order.status === 'Processing') {
                 if (awbData && awbData.pickup_scheduled) {
-                    order.status = 'Shipped';
+                    order.status = 'Pickup Scheduled';
                 } else if (awbData && awbData.awb) {
                     order.status = 'Ready To Ship';
                 } else if (shipmentId) {
@@ -291,7 +291,7 @@ router.get('/get-orders', async (req, res) => {
                 else if (rawStatus === 'OUT_FOR_DELIVERY')                           order.status = 'Out For Delivery';
                 else if (rawStatus === 'IN_TRANSIT')                                 order.status = 'In Transit';
                 else if (rawStatus === 'SHIPPED')                                    order.status = 'Shipped';
-                else if (['PICKUP_SCHEDULED', 'PICKUP_GENERATED'].includes(rawStatus)) order.status = 'Shipped';
+                else if (['PICKUP_SCHEDULED', 'PICKUP_GENERATED'].includes(rawStatus)) order.status = 'Pickup Scheduled';
             }
 
             // Also use Supabase tracking_status if no cache entry
@@ -320,7 +320,7 @@ router.get('/get-orders', async (req, res) => {
             // (New / Processing / Ready-To-Ship: AWB may be printed but pickup not yet scheduled) stays holdable.
             const eeStatusU = String(order.easyecomStatus || '').toUpperCase();
             const manifestedOrLater = pickedUp
-                || ['Shipped', 'In Transit', 'Out For Delivery', 'Delivered', 'RTO'].includes(order.status)
+                || ['Pickup Scheduled', 'Shipped', 'In Transit', 'Out For Delivery', 'Delivered', 'RTO'].includes(order.status)
                 || /MANIFEST|SHIPPED/.test(eeStatusU)
                 || !!(awbData && awbData.pickup_scheduled);
             order.holdable = !manifestedOrLater;   // frontend uses this to show/hide the ⏸ Hold button

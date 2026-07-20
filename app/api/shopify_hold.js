@@ -137,11 +137,10 @@ async function autoHoldOrder(orderName, shopifyOrderId) {
 
 // Does a NEW order (by phone) qualify for auto-hold? Same criteria as findRepeatCandidates, sourced by a
 // direct phone-history lookup because order_buckets isn't computed for the brand-new order yet:
-//   COD (not prepaid) + value > ₹1500 + ≥1 of the customer's last 3 PRIOR orders not delivered.
+//   COD (not prepaid) + ≥1 of the customer's last 3 PRIOR orders not delivered (no value threshold).
 // (A just-created order is always non-terminal + pre-pickup, so those two checks are implicit.)
-async function qualifiesForHold({ phone, financialStatus, createdAt, shopifyOrderId, totalPrice }) {
+async function qualifiesForHold({ phone, financialStatus, createdAt, shopifyOrderId }) {
     if (PREPAID_STATUSES.includes(String(financialStatus || '').toLowerCase())) return false;   // prepaid → no RTO risk
-    if (Number(totalPrice || 0) <= 1500) return false;                                          // value threshold
     const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
     if (last10.length !== 10) return false;
     const before = new Date(createdAt || Date.now());

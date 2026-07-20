@@ -145,7 +145,8 @@ function getStatusBadge(status) {
         case 'Processing': return 'bg-purple-50 text-purple-700 border border-purple-200';
         // FIXED: Darker Orange for better visibility
         case 'Ready To Ship': return 'bg-orange-100 text-orange-800 border border-orange-200';
-        
+        case 'Pickup Scheduled': return 'bg-amber-100 text-amber-800 border border-amber-200';
+
         case 'Shipped': return 'bg-indigo-50 text-indigo-700 border border-indigo-200';
         case 'In Transit': return 'bg-cyan-50 text-cyan-700 border border-cyan-200';
         case 'Out For Delivery': return 'bg-teal-50 text-teal-700 border border-teal-200';
@@ -860,7 +861,7 @@ function renderAllDashboard() {
         if (activeStatusFilter === 'In Transit') {
             o = o.filter(t => {
                 // Must be one of the moving statuses
-                const isForwardMoving = ['Shipped', 'In Transit', 'Out For Delivery'].includes(t.status);
+                const isForwardMoving = ['Pickup Scheduled', 'Shipped', 'In Transit', 'Out For Delivery'].includes(t.status);
                 
                 // Check if it is actually RTO (by Tag or Status Text)
                 const isRto = t.status.toUpperCase().includes('RTO') || 
@@ -1327,6 +1328,7 @@ function buildOrderDetailHtml(order) {
                         // (AWB assigned but not yet picked). order.holdable is computed server-side from the
                         // real tracking signal (not the ambiguous 'Shipped' status), so it's true until pickup.
                         if (order.holdable === false) return '';
+                        if (order.shopifyHold) return '';   // already held on Shopify → don't also offer an EasyEcom hold
                         return `
                     <div class="flex justify-between items-center pt-2 border-t border-slate-100">
                         <div>
@@ -1366,7 +1368,7 @@ function buildOrderDetailHtml(order) {
         shopifyHoldHtml = `<div class="bg-white p-4 rounded-xl border border-rose-200 shadow-sm mt-2"><div class="flex justify-between items-center">
              <div><p class="text-sm font-bold text-rose-700">🔒 On hold in Shopify</p><p class="text-[10px] text-rose-500 mt-0.5">${sm || "Won't ship / import to EasyEcom"}</p></div>
              <button onclick="shopifyHoldAction('${escapeHtml(String(order.id))}','unhold')" class="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shadow-sm whitespace-nowrap">▶ Unhold Shopify</button></div></div>`;
-      } else if (order.holdable !== false) {
+      } else if (order.holdable !== false && !order.eeHold) {   // hide if already held on EasyEcom
         shopifyHoldHtml = `<div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mt-2"><div class="flex justify-between items-center">
              <div><p class="text-sm font-semibold text-slate-800">Hold on Shopify</p><p class="text-[10px] text-slate-400 mt-0.5">Stops it shipping / importing to EasyEcom</p></div>
              <button onclick="shopifyHoldAction('${escapeHtml(String(order.id))}','hold')" class="px-3 py-1.5 bg-slate-800 text-white text-xs font-semibold rounded-lg hover:bg-slate-700 shadow-sm whitespace-nowrap">🔒 Hold Shopify</button></div></div>`;
@@ -1637,7 +1639,7 @@ function updateBulkActionBar() {
         
         // 3. Label: If Status is Ready/Shipped OR Has AWB
         const canLabel = selectedObjs.filter(o => 
-            ['Ready To Ship', 'Shipped', 'In Transit', 'Out For Delivery'].includes(o.status) || o.awb
+            ['Ready To Ship', 'Pickup Scheduled', 'Shipped', 'In Transit', 'Out For Delivery'].includes(o.status) || o.awb
         );
 
         let buttonsHtml = '';
@@ -2819,7 +2821,7 @@ function updateDashboardKpis(o) {
             if (status === 'New' || status === 'Processing') k.newGroup++;
             else if (status === 'Cancelled' || statusUpper.includes('RTO')) k.failedGroup++;
             else if (status === 'Delivered') k.delivered++;
-            else if (['Ready To Ship', 'Shipped', 'In Transit', 'Out For Delivery'].includes(status)) { if (!statusUpper.includes('RTO')) k.shippedGroup++; }
+            else if (['Ready To Ship', 'Pickup Scheduled', 'Shipped', 'In Transit', 'Out For Delivery'].includes(status)) { if (!statusUpper.includes('RTO')) k.shippedGroup++; }
         });
     }
 
@@ -2891,7 +2893,7 @@ function updateInsightsKpis(o, c) {
         if (s.status === 'New' || s.status === 'Processing') {
             counts.pending++;
         }
-        else if (['Ready To Ship', 'Shipped', 'In Transit', 'Out For Delivery'].includes(s.status)) {
+        else if (['Ready To Ship', 'Pickup Scheduled', 'Shipped', 'In Transit', 'Out For Delivery'].includes(s.status)) {
             counts.moving++;
         }
         else if (s.status === 'Delivered') {
@@ -3494,9 +3496,9 @@ function supQueueInit(){
   supRenderRange('sup-range-queue', supLoadQueue);
   if(!_supQueueWired){ _supQueueWired=true;
     document.querySelectorAll('.sup-tab').forEach(b=>b.addEventListener('click',()=>{ _supTab=b.dataset.tab; supTabPaint(); supLoadQueue(); }));
-    ['sup-f-notes','sup-f-age','sup-f-sort'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
+    ['sup-f-notes','sup-f-age','sup-f-sort','sup-f-hold'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
     document.getElementById('sup-f-notesearch')?.addEventListener('input', debounce(supQueueTable,250));
-    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-sort'].forEach((id,i)=>{ document.getElementById(id).value=['all','any','default'][i]; }); document.getElementById('sup-f-notesearch').value=''; supQueueTable(); });
+    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-sort','sup-f-hold'].forEach((id,i)=>{ document.getElementById(id).value=['all','any','default','all'][i]; }); document.getElementById('sup-f-notesearch').value=''; supQueueTable(); });
     document.getElementById('sup-refresh')?.addEventListener('click', supRefreshTracking);
   }
   supTabPaint(); supLoadQueue();
@@ -3517,13 +3519,15 @@ function supQueueTable(){
   const fQ=(document.getElementById('sup-f-notesearch')?.value||'').trim().toLowerCase();
   const fA=document.getElementById('sup-f-age')?.value||'any';
   const fS=document.getElementById('sup-f-sort')?.value||'default';
-  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fS!=='default')?'':'none';
+  const fH=document.getElementById('sup-f-hold')?.value||'all';
+  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fS!=='default'||fH!=='all')?'':'none';
   let list=_supQueueRows.slice();
   if(fN==='with') list=list.filter(r=>r.note_count>0);
   if(fN==='none') list=list.filter(r=>!r.note_count);
   if(fQ) list=list.filter(r=>(r.latest_note||'').toLowerCase().includes(fQ));
   if(fA!=='any') list=list.filter(r=>{ const dAge=(Date.now()-new Date(r.created_at))/86400000;
     return fA==='lt1'?dAge<1:fA==='1-3'?(dAge>=1&&dAge<3):fA==='3-7'?(dAge>=3&&dAge<7):dAge>=7; });
+  if(fH!=='all'){ const isHeld=r=>(r.shopify_hold&&r.shopify_hold.status==='held')||r.ee_hold; list=list.filter(r=>fH==='held'?isHeld(r):!isHeld(r)); }
   if(fS==='age_old') list.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));
   else if(fS==='age_new') list.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
   else if(fS==='courier') list.sort((a,b)=>String(a.courier||'').localeCompare(String(b.courier||'')));
@@ -3554,16 +3558,22 @@ function supQueueTable(){
   c.querySelectorAll('.sup-note-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supNotesModal(b.dataset.oid,b.dataset.oname); }));
   c.querySelectorAll('.sup-hold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoHold(b.dataset.oid,b.dataset.oname,b); }));
   c.querySelectorAll('.sup-unhold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoUnhold(b.dataset.oid,b.dataset.oname,b); }));
+  c.querySelectorAll('.sup-eehold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoEeHold(b.dataset.oid,b.dataset.oname,b); }));
+  c.querySelectorAll('.sup-eeunhold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoEeUnhold(b.dataset.oid,b.dataset.oname,b); }));
 }
-// Shopify hold controls for the Repeat tab: 🔒 held → Release; holdable + not held → Hold; shipped rows
-// are call-only (no Hold button — you can't hold an order that's already been picked up). Repeat tab only.
+// Hold controls for the Repeat tab. Picks the RIGHT system: held-on-Shopify → Release Shopify;
+// held-on-EasyEcom → Unhold EasyEcom; else if the order is already imported into EasyEcom → Hold
+// EasyEcom (a Shopify hold is pointless once imported); else (still upstream) → Hold Shopify. Past-pickup
+// rows are call-only. Repeat tab only.
 function supHoldControl(r){
   if(_supTab!=='repeat') return '';
-  const h=r.shopify_hold;
-  if(h && h.status==='held') return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''} — won't ship / import to EasyEcom until released">🔒 Shopify hold${h.by==='auto'?' (auto)':''}</span> <button class="sup-unhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}">Release Shopify</button>`;
-  if(r.bucket !== 'order_to_dispatch') return '';   // past pickup → can't hold, call only
+  const h=r.shopify_hold, oid=escapeHtml(r.order_id), oname=escapeHtml(r.order_name||'');
+  if(h && h.status==='held') return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''} — won't ship / import to EasyEcom until released">🔒 Shopify hold${h.by==='auto'?' (auto)':''}</span> <button class="sup-unhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Release Shopify</button>`;
+  if(r.ee_hold) return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="On hold in EasyEcom">⏸ EasyEcom hold</span> <button class="sup-eeunhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Unhold EasyEcom</button>`;
+  if(r.bucket !== 'order_to_dispatch') return '';   // past pickup → call only
+  if(r.in_ee) return `<button class="sup-eehold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-amber-500 text-white hover:bg-amber-600 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Order is already in EasyEcom — pause it there (before manifest)">⏸ Hold EasyEcom</button>`;
   const failed = h && h.status==='failed';
-  return `${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="Shopify hold failed: ${escapeHtml(h.reason||'')}">⚠️ Shopify hold failed</span> `:''}<button class="sup-hold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="Hold this order on Shopify (stops it shipping / importing to EasyEcom)">🔒 Hold Shopify</button>`;
+  return `${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="Shopify hold failed: ${escapeHtml(h.reason||'')}">⚠️ Shopify hold failed</span> `:''}<button class="sup-hold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Not yet in EasyEcom — hold on Shopify (stops it importing / shipping)">🔒 Hold Shopify</button>`;
 }
 async function supDoHold(oid,oname,btn){
   btn.disabled=true; const t=btn.innerHTML; btn.textContent='Holding…';
@@ -3578,6 +3588,23 @@ async function supDoUnhold(oid,oname,btn){
   try{ await supFetch('/api/support/shopify-unhold',{method:'POST',body:JSON.stringify({orderId:oid,orderName:oname})});
     showNotification(`${oname} released`); supLoadQueue(); }
   catch(e){ showNotification('Release failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
+}
+// EasyEcom hold/unhold from the Repeat tab (order already imported into EasyEcom → hold it there).
+async function supDoEeHold(oid,oname,btn){
+  const ok=await supConfirm({title:'Hold on EasyEcom?',message:`${oname} is already in EasyEcom — it will be paused there (works before manifest). Do this to stop it shipping until the customer confirms.`,confirmLabel:'Hold'});
+  if(!ok) return;
+  btn.disabled=true; const t=btn.innerHTML; btn.textContent='Holding…';
+  try{ await supFetch('/api/easyecom/hold-order',{method:'POST',body:JSON.stringify({orderName:oname,reason:'Repeat COD — awaiting customer confirmation'})});
+    showNotification(`${oname} held in EasyEcom`); _eeHoldAt=0; supLoadQueue(); }
+  catch(e){ showNotification('EasyEcom hold failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
+}
+async function supDoEeUnhold(oid,oname,btn){
+  const ok=await supConfirm({title:'Release EasyEcom hold?',message:`${oname} will be released in EasyEcom and can proceed. Do this only after the customer has confirmed.`,confirmLabel:'Release'});
+  if(!ok) return;
+  btn.disabled=true; const t=btn.innerHTML; btn.textContent='Releasing…';
+  try{ await supFetch('/api/easyecom/unhold-order',{method:'POST',body:JSON.stringify({orderName:oname})});
+    showNotification(`${oname} released in EasyEcom`); _eeHoldAt=0; supLoadQueue(); }
+  catch(e){ showNotification('EasyEcom unhold failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
 }
 async function supRefreshTracking(){
   const btn=document.getElementById('sup-refresh'); const orig=btn.textContent;
@@ -4125,7 +4152,7 @@ async function loadInitialData() {
 }
 function initializeAllFilters() {
     // 1. Status Filters
-    const statusOptions = ['All Statuses', 'New', 'Processing', 'Ready To Ship', 'Shipped', 'In Transit', 'Delivered', 'RTO', 'Cancelled'];
+    const statusOptions = ['All Statuses', 'New', 'Processing', 'Ready To Ship', 'Pickup Scheduled', 'Shipped', 'In Transit', 'Delivered', 'RTO', 'Cancelled'];
     statusFilterEl.innerHTML = statusOptions.map(s => `<option value="${s === 'All Statuses' ? 'All' : s}">${s}</option>`).join('');
     statusFilterEl.value = activeStatusFilter;
     statusFilterEl.addEventListener('change', e => { activeStatusFilter = e.target.value; renderAllDashboard(); });
@@ -4748,14 +4775,14 @@ async function eeHoldRefresh(){ if(Date.now()-_eeHoldAt<60000) return _eeHold;
 function eeHoldChip(name){ const h=_eeHold[String(name||'').replace('#','').trim()]; if(!h) return '';
   const t=h.hold_type||'ee';
   const where = t==='shopify' ? 'Held on Shopify (won\'t ship / import to EasyEcom)' : t==='both' ? 'Held on Shopify + EasyEcom' : 'On hold in EasyEcom';
-  const label = t==='shopify' ? '🔒 SHOPIFY HOLD' : t==='both' ? '🔒 HOLD (SHOPIFY+EE)' : '⏸ EE HOLD';
+  const label = t==='shopify' ? '🔒 Shopify hold' : t==='both' ? '🔒 Shopify + EasyEcom hold' : '⏸ EasyEcom hold';
   const cls = t==='ee' ? 'bg-orange-100 text-orange-700' : 'bg-rose-100 text-rose-700';
   const tip=(where+(h.note?': '+h.note:'')+(h.created_by?' — '+h.created_by:'')).replace(/"/g,'&quot;');
   return ` <span class="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-bold ${cls} whitespace-nowrap align-middle" title="${tip}">${label}</span>`; }
 // Orders-dashboard hold chip from the BAKED order.eeHold / order.shopifyHold (keeps the .ord-hold-chip
 // class the live hold/unhold updater targets). Shows either/both hold types so a held order never reads normal.
 function ordHoldChipHtml(order){ const ee=!!(order&&order.eeHold), sh=!!(order&&order.shopifyHold); if(!ee&&!sh) return '';
-  const label = sh&&ee ? '🔒 HOLD (SHOP+EE)' : sh ? '🔒 SHOPIFY HOLD' : '⏸ EE HOLD';
+  const label = sh&&ee ? '🔒 Shopify + EasyEcom hold' : sh ? '🔒 Shopify hold' : '⏸ EasyEcom hold';
   const cls = sh ? 'bg-rose-100 text-rose-700 border-rose-200' : 'bg-amber-100 text-amber-700 border-amber-200';
   return ` <span class="ord-hold-chip px-2 py-0.5 text-[10px] font-bold ${cls} rounded-full border whitespace-nowrap">${label}</span>`; }
 let _usersWired = false;
@@ -8117,6 +8144,7 @@ async function fopsFetch() {
     const d = await res.json();
     if (!d.success) throw new Error(d.error || 'Unknown error');
     fopsOrders = d.orders || [];
+    await eeHoldRefresh();   // load EE + Shopify hold marks so held orders show a HOLD chip here too
     fopsBuildChips(); // refresh chips so any new status in the data becomes filterable
     const filtered = fopsGetFiltered();
     fopsLog(`Done — ${fopsOrders.length} total orders · ${filtered.length} match filters`);
@@ -8291,7 +8319,7 @@ function fopsRenderTable() {
       ? '<span class="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-600">Cancelled</span>'
       : '<span class="text-slate-300 text-[10px]">—</span>';
     return `<tr>
-      <td class="font-semibold text-slate-700">${escapeHtml(o.name)}</td>
+      <td class="font-semibold text-slate-700">${escapeHtml(o.name)}${eeHoldChip(o.name)}</td>
       <td class="text-slate-400 text-[11px]">${dateStr}</td>
       <td title="${escapeHtml((o.customer?.displayName||'')+(phone?' · '+phone:''))}" class="text-slate-600">
         ${o.customer?.displayName?escapeHtml(o.customer.displayName):'<span class="text-slate-300">Guest</span>'}
