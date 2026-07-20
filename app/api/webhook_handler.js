@@ -314,19 +314,20 @@ function _shopifyHmacOk(req) {
     try { return sent.length === digest.length && crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(digest)); } catch (_) { return false; }
 }
 router.post('/shopify-order', async (req, res) => {
-    if (!process.env.SHOPIFY_WEBHOOK_SECRET) return res.status(503).json({ error: 'SHOPIFY_WEBHOOK_SECRET not set' });
-    if (!_shopifyHmacOk(req)) return res.status(401).json({ error: 'invalid hmac' });
+    if (!process.env.SHOPIFY_WEBHOOK_SECRET) { console.warn('[ShopifyHold] webhook hit but SHOPIFY_WEBHOOK_SECRET is not set → 503'); return res.status(503).json({ error: 'SHOPIFY_WEBHOOK_SECRET not set' }); }
+    if (!_shopifyHmacOk(req)) { console.warn('[ShopifyHold] webhook HMAC mismatch → 401 (does SHOPIFY_WEBHOOK_SECRET match the Shopify Webhooks signing secret?)'); return res.status(401).json({ error: 'invalid hmac' }); }
+    const o = req.body || {};
+    const orderName = o.name || String(o.order_number || o.id);
+    console.log(`[ShopifyHold] webhook received: ${orderName} (financial_status=${o.financial_status || '—'})`);
     res.json({ ok: true });   // ack immediately
     setImmediate(async () => {
         try {
-            const o = req.body || {};
-            const orderName = o.name || String(o.order_number || o.id);
             const phone = (o.shipping_address && o.shipping_address.phone) || (o.customer && o.customer.phone) || o.phone || null;
             const shopifyHold = require('./shopify_hold');
             const qualifies = await shopifyHold.qualifiesForHold({ phone, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id });
-            if (!qualifies) return;
+            if (!qualifies) { console.log(`[ShopifyHold] ${orderName}: not a repeat-COD candidate → no hold`); return; }
             const r = await shopifyHold.autoHoldOrder(orderName, o.id);
-            if (r.held) console.log(`[ShopifyHold] webhook held ${orderName} (repeat COD)`);
+            console.log(`[ShopifyHold] ${orderName}: ${r.held ? 'HELD on Shopify ✓' : r.skipped ? 'skipped (' + r.skipped + ')' : 'hold FAILED (' + r.failed + ')'}`);
         } catch (e) { console.error('[ShopifyHold] webhook error:', e.message); }
     });
 });
