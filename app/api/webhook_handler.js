@@ -322,6 +322,12 @@ router.post('/shopify-order', async (req, res) => {
     res.json({ ok: true });   // ack immediately
     setImmediate(async () => {
         try {
+            // Real-time dashboard feed — write the order to `orders` (+ line items + address) so it shows
+            // on Support Orders / Call Queue immediately, without waiting ~30 min for the external sync.
+            const { upsertShopifyOrder } = require('./orders_ingest');
+            const ing = await upsertShopifyOrder(o);
+            if (!ing.ok) console.warn(`[OrderSync] ${orderName}: dashboard upsert failed — ${ing.error}`);
+            // Auto-hold repeat COD orders.
             const phone = (o.shipping_address && o.shipping_address.phone) || (o.customer && o.customer.phone) || o.phone || null;
             const shopifyHold = require('./shopify_hold');
             const qualifies = await shopifyHold.qualifiesForHold({ phone, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price });
