@@ -112,14 +112,32 @@ async function runDataSync() {
     const allOrdersList = Object.values(allRecentOrders);
     helpers.log(`✓ Fetched ${allOrdersList.length} unique orders`);
 
-    // Step 3: Enrich
-    helpers.log(`Step 3: Enriching orders (Concurrency: 10)...`);
+    // Skip re-enriching orders already TERMINAL in the cache (delivered / RTO / cancelled) — they can't
+    // change, so re-calling RapidShyp/DocPharma for them is pure waste (and trips DocPharma's rate limit
+    // on old orders). Their existing enriched_orders_ecom row is left untouched. This is what keeps the
+    // daily full-sweep cheap — only live orders get enriched.
+    const idList = allOrdersList.map(o => String(o.id));
+    const terminalIds = new Set();
+    for (let i = 0; i < idList.length; i += 300) {
+        const { data } = await supabase.from('enriched_orders_ecom')
+            .select('shopify_id, raw_rapidshyp_status, delivered_at, cancelled_at')
+            .in('shopify_id', idList.slice(i, i + 300));
+        (data || []).forEach(r => {
+            const s = String(r.raw_rapidshyp_status || '').toUpperCase();
+            if (r.cancelled_at || r.delivered_at || /DELIVER|\bRTO\b|RETURN/.test(s)) terminalIds.add(String(r.shopify_id));
+        });
+    }
+    const enrichList = allOrdersList.filter(o => !terminalIds.has(String(o.id)));
+    helpers.log(`Skipping ${allOrdersList.length - enrichList.length} already-terminal orders · enriching ${enrichList.length}`);
+
+    // Step 3: Enrich (non-terminal only)
+    helpers.log(`Step 3: Enriching ${enrichList.length} orders (Concurrency: 10)...`);
     let completedCount = 0;
 
-    const enrichPromises = allOrdersList.map(order =>
+    const enrichPromises = enrichList.map(order =>
         limit(() => enrichOrder(order).then(res => {
             completedCount++;
-            if (completedCount % 100 === 0) process.stdout.write(`\rEnriched ${completedCount}/${allOrdersList.length}`);
+            if (completedCount % 100 === 0) process.stdout.write(`\rEnriched ${completedCount}/${enrichList.length}`);
             return res;
         }))
     );
