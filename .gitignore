@@ -11,3 +11,5 @@ service_account.json
 COD_Confirmation.json
 order_shipment_cache.json
 amazon_cache_date.txt
+# data-sync incremental cursor (runtime state, do not commit)
+.sync_state.json

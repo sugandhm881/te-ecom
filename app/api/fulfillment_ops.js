@@ -39,7 +39,7 @@ async function enrichAWBsBackground(awbs) {
                 const rawStatus = ship.current_tracking_status_desc || ship.shipment_status || '';
                 if (rawStatus) {
                     await supabase.from('rapidshyp_tracking_ecom').upsert(
-                        { awb, raw_status: rawStatus, last_checked: new Date().toISOString(), updated_at: new Date().toISOString() },
+                        { awb, raw_status: rawStatus, last_checked: Date.now() / 1000, updated_at: new Date().toISOString() },
                         { onConflict: 'awb' }
                     );
                     console.log(`[RS Sync] ${awb} → ${rawStatus}`);
@@ -148,7 +148,7 @@ router.get('/status/:awb', async (req, res) => {
             rawStatus = shipment.current_tracking_status_desc || shipment.shipment_status || '';
             if (rawStatus) {
                 supabase.from('rapidshyp_tracking_ecom').upsert(
-                    { awb, raw_status: rawStatus, last_checked: new Date().toISOString(), updated_at: new Date().toISOString() },
+                    { awb, raw_status: rawStatus, last_checked: Date.now() / 1000, updated_at: new Date().toISOString() },
                     { onConflict: 'awb' }
                 ).then(() => {}).catch(() => {});
             }
@@ -194,7 +194,7 @@ router.get('/track/:awb', async (req, res) => {
                 if (rawStatus) {
                     rsLiveStatus = rawStatus;
                     supabase.from('rapidshyp_tracking_ecom').upsert(
-                        { awb, raw_status: rawStatus, last_checked: new Date().toISOString(), updated_at: new Date().toISOString() },
+                        { awb, raw_status: rawStatus, last_checked: Date.now() / 1000, updated_at: new Date().toISOString() },
                         { onConflict: 'awb' }
                     ).then(() => {}).catch(() => {});
                 }
@@ -366,7 +366,7 @@ router.get('/track-order/:numericId', async (req, res) => {
         // 3. Save latest AWB + status to DB
         if (latestAWB) {
             await supabase.from('rapidshyp_tracking_ecom').upsert(
-                { awb: latestAWB, raw_status: rsStatus || null, last_checked: new Date().toISOString(), updated_at: new Date().toISOString() },
+                { awb: latestAWB, raw_status: rsStatus || null, last_checked: Date.now() / 1000, updated_at: new Date().toISOString() },
                 { onConflict: 'awb' }
             );
             console.log(`[TrackOrder] ${order.name} → AWB ${latestAWB} → ${rsStatus || '(no status)'}`);
@@ -509,7 +509,7 @@ router.post('/fetch-awb', async (req, res) => {
             tracking_url: result.url || null, courier: result.courier || null, updated_at: new Date().toISOString()
         }, { onConflict: 'order_name' });
         await supabase.from('rapidshyp_tracking_ecom').upsert({
-            awb: result.awb, raw_status: result.status || null, last_checked: new Date().toISOString(), updated_at: new Date().toISOString()
+            awb: result.awb, raw_status: result.status || null, last_checked: Date.now() / 1000, updated_at: new Date().toISOString()
         }, { onConflict: 'awb' });
 
         // 4. Update Shopify — create a fulfillment with the tracking number, then push status

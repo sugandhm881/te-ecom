@@ -160,7 +160,7 @@ async function fetchRsLive(awb, tries = 3) {
                 const rawStatus = shipment.current_tracking_status_desc || shipment.shipment_status || '';
                 if (rawStatus) {
                     await supabase.from('rapidshyp_tracking_ecom').upsert(
-                        { awb, raw_status: rawStatus, last_checked: new Date().toISOString(), updated_at: new Date().toISOString() },
+                        { awb, raw_status: rawStatus, last_checked: Date.now() / 1000, updated_at: new Date().toISOString() },
                         { onConflict: 'awb' });
                     return rawStatus;
                 }
@@ -208,14 +208,15 @@ async function syncRsCacheEasyecom(days = 30, opts = {}) {
         const { data } = await supabase.from('rapidshyp_tracking_ecom').select('awb, raw_status, updated_at').in('awb', awbs.slice(i, i + 200));
         (data || []).forEach(r => { cache[r.awb] = r; });
     }
-    const threeHrAgo = Date.now() - 3 * 3600 * 1000;
+    // Skip AWBs the webhook already refreshed recently — the poll only backstops a gap. Default 12h (was 3h).
+    const staleBeforeMs = Date.now() - (parseInt(process.env.RS_CACHE_TTL_HOURS, 10) || 12) * 3600 * 1000;
     const isTerminal = s => /deliver|rto|return/i.test(s || '');
     const todo = awbs.filter(a => {
         const c = cache[a];
         if (!c || !c.raw_status) return true;        // never tracked
         if (isTerminal(c.raw_status)) return false;  // delivered/RTO won't change — skip even on force
         if (force) return true;                      // force: refresh every non-terminal AWB
-        return !c.updated_at || new Date(c.updated_at).getTime() < threeHrAgo; // stale
+        return !c.updated_at || new Date(c.updated_at).getTime() < staleBeforeMs; // stale
     });
 
     console.log(`[RS-EC Sync]${force ? ' [FORCE]' : ''} ${awbs.length} EasyEcom AWBs · refreshing ${todo.length} (1/sec)…`);

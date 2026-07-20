@@ -205,6 +205,11 @@ async function makeSignedApiRequest(options, maxRetries = 5) {
 }
 
 // --- RAPIDSHYP FUNCTIONS (SUPABASE) ---
+// Circuit breaker: if the tracking-cache upsert is structurally broken (no UNIQUE constraint on `awb`,
+// so `onConflict:'awb'` fails every call), stop writing after the first such error instead of hammering
+// the DB thousands of times — that runaway of failing upserts took Database/Auth/Storage down (P0
+// 2026-07-20). Reset on process restart; the real fix is adding the unique constraint on the table.
+let _rsCacheWriteBroken = false;
 async function getRawRapidshypStatus(awb) {
     const now = Date.now() / 1000;
 
@@ -220,8 +225,11 @@ async function getRawRapidshypStatus(awb) {
             const cachedStatus = (entry.raw_status || '').toUpperCase();
             const lastChecked = entry.last_checked || 0;
 
-            // Return cached if Delivered/RTO or fresh (<1 hour)
-            if (['DELIVERED', 'RTO', 'RTO_DELIVERED'].some(s => cachedStatus.includes(s)) || (now - lastChecked) < 3600) {
+            // Return cached if Delivered/RTO (terminal) or fresh within RS_CACHE_TTL_SECONDS (default 12h,
+            // was 1h). The RapidShyp WEBHOOK keeps this cache live in real time, so re-polling should only
+            // backstop a genuine gap — the hourly re-poll + upsert was the redundant load. This is the fix.
+            const RS_TTL = parseInt(process.env.RS_CACHE_TTL_SECONDS, 10) || 43200;
+            if (['DELIVERED', 'RTO', 'RTO_DELIVERED'].some(s => cachedStatus.includes(s)) || (now - lastChecked) < RS_TTL) {
                 return entry.raw_status;
             }
         }
@@ -240,13 +248,21 @@ async function getRawRapidshypStatus(awb) {
                 const shipment = data.records[0].shipment_details ? data.records[0].shipment_details[0] : {};
                 const rawStatus = shipment.shipment_status || shipment.current_tracking_status_desc || shipment.current_tracking_status || 'Status Not Available';
 
-                // 3. SAVE TO SUPABASE
-                await supabase.from('rapidshyp_tracking_ecom').upsert({
-                    awb,
-                    raw_status: rawStatus,
-                    last_checked: now,
-                    updated_at: new Date().toISOString()
-                }, { onConflict: 'awb' });
+                // 3. SAVE TO SUPABASE (skipped once we know the write is structurally broken — see breaker above)
+                if (!_rsCacheWriteBroken) {
+                    const { error: upErr } = await supabase.from('rapidshyp_tracking_ecom').upsert({
+                        awb,
+                        raw_status: rawStatus,
+                        last_checked: now,
+                        updated_at: new Date().toISOString()
+                    }, { onConflict: 'awb' });
+                    if (upErr) {
+                        if (/unique|exclusion|on conflict|constraint matching/i.test(upErr.message || '')) {
+                            _rsCacheWriteBroken = true;
+                            console.error('[RS cache] rapidshyp_tracking_ecom upsert DISABLED — `awb` needs a UNIQUE constraint: ' + upErr.message);
+                        } else { console.error('[RS cache] upsert error:', upErr.message); }
+                    }
+                }
 
                 return rawStatus;
             }

@@ -1,7 +1,16 @@
 const moment = require('moment-timezone');
 const pLimit = require('p-limit').default || require('p-limit');
+const fs = require('fs');
+const path = require('path');
 const helpers = require('./app/api/helpers');
 const { supabase } = require('./app/supabase');
+
+// Incremental-sync cursor, persisted on disk (survives pm2 restarts). Each pass fetches only orders
+// CHANGED since the last run — so DB/API load scales with activity, not with total order count. A daily
+// bounded FULL sweep re-checks everything as a backstop, so no order/status is ever permanently missed.
+const STATE_FILE = path.join(__dirname, '.sync_state.json');
+function readSyncState() { try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch (_) { return {}; } }
+function writeSyncState(s) { try { fs.writeFileSync(STATE_FILE, JSON.stringify(s)); } catch (e) { helpers.log('[Sync] state write failed: ' + e.message); } }
 
 const limit = pLimit(10);
 
@@ -72,8 +81,20 @@ async function runDataSync() {
     helpers.log("=".repeat(70));
     helpers.log("Starting Data Sync Job (Supabase)");
 
-    const fetchSince = moment().subtract(180, 'days').toISOString();
-    helpers.log(`Fetching Shopify orders since ${fetchSince}`);
+    // INCREMENTAL by default — only orders CHANGED since the last run (a small delta), so the RapidShyp
+    // status-check + upsert (the real load) happens only for orders that actually moved, not the whole
+    // window every pass. Once a day / on first run / after an outage → a bounded FULL sweep as a backstop.
+    const WINDOW_DAYS = parseInt(process.env.SYNC_WINDOW_DAYS, 10) || 45;          // full-sweep look-back
+    const OVERLAP_MIN = parseInt(process.env.SYNC_OVERLAP_MINUTES, 10) || 90;       // overlap so nothing slips between runs
+    const FULL_SWEEP_HOURS = parseInt(process.env.SYNC_FULL_SWEEP_HOURS, 10) || 24;
+    const state = readSyncState();
+    const runStart = new Date().toISOString();
+    const dueFull = !state.lastFullSweepAt || (Date.now() - new Date(state.lastFullSweepAt).getTime()) >= FULL_SWEEP_HOURS * 3600 * 1000;
+    const mode = (!state.lastSyncAt || dueFull) ? 'full' : 'incremental';
+    const fetchSince = mode === 'full'
+        ? moment().subtract(WINDOW_DAYS, 'days').toISOString()
+        : moment(state.lastSyncAt).subtract(OVERLAP_MIN, 'minutes').toISOString();
+    helpers.log(`[Sync] mode=${mode} · orders changed since ${fetchSince}`);
 
     const fields = 'id,name,created_at,total_price,fulfillments,note_attributes,source_name,referring_site,cancelled_at,fulfillment_status,line_items,email,shipping_address,updated_at,tags';
 
@@ -169,12 +190,23 @@ async function runDataSync() {
         helpers.log("No orders to update.");
     }
 
+    // Advance the cursor only after a successful pass — a failed run leaves it, so the next run re-tries
+    // the same window and nothing is skipped. `runStart` (not "now") is the cursor so orders that changed
+    // during this pass are re-caught next time (the overlap adds a further safety margin).
+    writeSyncState({ lastSyncAt: runStart, lastFullSweepAt: mode === 'full' ? runStart : (state.lastFullSweepAt || runStart) });
     helpers.log("Data Sync Job Finished Successfully");
     helpers.log("=".repeat(70));
-
-    process.exit(0);
 }
 
+// Run one pass, then idle before exiting — pm2 restarts us for the next pass. The gap (default 15 min)
+// paces BOTH successful and failed runs, so a persistent error can never become a restart storm.
 if (require.main === module) {
-    runDataSync();
+    const gapMs = (parseInt(process.env.SYNC_GAP_MINUTES, 10) || 15) * 60 * 1000;
+    (async () => {
+        try { await runDataSync(); }
+        catch (e) { helpers.log('[Sync] run failed: ' + (e.message || e)); }
+        helpers.log(`[Sync] idling ${Math.round(gapMs / 60000)} min before pm2 restarts the next pass…`);
+        await new Promise(r => setTimeout(r, gapMs));
+        process.exit(0);
+    })();
 }
