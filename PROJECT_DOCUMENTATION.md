@@ -354,7 +354,7 @@ All schedules run in **Asia/Kolkata** inside the server process (`server.js` unl
 | `47 8-19 * * *` | DocPharma-rejected **detection** (at :47, deduped via handled-list) → Teams report + records to `dp_rejected_handled_ecom` |
 | `56 8-19 * * *` | Warehouse **auto-route** pass (at :56, 9 min after detection) — gently moves not-yet-routed rejections to Shifupro (cookie-based, ~1 order/1.5s, `routed_at` marks done). Kept separate + slow so it never bursts/crashes |
 | `0 11 * * *` | EasyEcom On-Hold report → Teams |
-| `*/5 * * * *` | **Shopify auto-hold backstop** — holds repeat COD orders (same criteria as the Call Queue Repeat tab) on Shopify before EasyEcom imports them. Backstop to the instant `orders/create` webhook. OFF unless `SHOPIFY_AUTOHOLD_ENABLED=true`; skips already-held / manually-released |
+| `*/2 * * * *` | **Shopify auto-hold backstop** — holds repeat COD orders (same criteria as the Call Queue Repeat tab) on Shopify before EasyEcom imports them. Backstop to the instant `orders/create` webhook. OFF unless `SHOPIFY_AUTOHOLD_ENABLED=true`; skips already-held / manually-released |
 | `*/20 * * * *` | EasyEcom panel-session **freshness watch** — warns in the server log if the extension-synced routing cookie goes stale (>45 min = extension offline). The VPS can't ping/keep it warm (WAF); the browser extension does |
 | `30 9 * * 1` | **Silent-RTO weekly claim email → RapidShyp** (previous 7 days, freight + invoice value) |
 | `45 9 * * 1` | **Late-deliveries weekly email** (last 30 days, delivered-only) |

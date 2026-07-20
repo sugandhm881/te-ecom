@@ -277,11 +277,11 @@ cron.schedule('*/20 * * * *', async () => {
     catch (e) { console.error('[EE Session] keep-alive error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
-// Shopify auto-hold BACKSTOP — every 5 min, hold repeat COD orders (same criteria as the Call Queue
+// Shopify auto-hold BACKSTOP — every 2 min, hold repeat COD orders (same criteria as the Call Queue
 // "Repeat" tab) on Shopify BEFORE EasyEcom imports them, so they can be phone-confirmed before shipping.
 // The orders/create webhook does this instantly; this cron catches anything the webhook missed. Skips
 // orders already held or manually released. OFF unless SHOPIFY_AUTOHOLD_ENABLED=true.
-cron.schedule('*/5 * * * *', async () => {
+cron.schedule('*/2 * * * *', async () => {
     if (String(process.env.SHOPIFY_AUTOHOLD_ENABLED || '').toLowerCase() !== 'true') return;
     try {
         const { findRepeatCandidates } = require('./app/api/support_console');
