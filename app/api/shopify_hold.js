@@ -37,7 +37,8 @@ async function holdShopifyOrder(shopifyOrderId, note) {
     const open = list.fos.filter(f => f.status === 'open' && (f.supported_actions || []).includes('hold'));
     if (!open.length) {
         if (list.fos.some(f => f.status === 'on_hold')) return { ok: true, held: [], already: true };
-        return { ok: false, held: [], error: 'no open fulfillment order to hold (already fulfilled/shipped?)' };
+        // Already picked up / fulfilled → can't be held. Not a failure, just not holdable anymore.
+        return { ok: false, notHoldable: true, held: [], error: 'already fulfilled/picked up — can no longer be held' };
     }
     const held = [];
     for (const fo of open) {
@@ -107,6 +108,7 @@ async function logApi(action, status, payload, response) {
 // Manual hold (UI Hold button) — always attempts, clears any prior release tombstone on success.
 async function holdOrderManual(orderName, shopifyOrderId, by, reason) {
     const out = await holdShopifyOrder(shopifyOrderId, reason);
+    if (out.notHoldable) return { ok: false, error: 'Order already fulfilled/picked up — it can no longer be held on Shopify.' };
     await logApi('shopify_hold', out.ok ? 200 : 422, { order: norm(orderName), id: String(shopifyOrderId), by, held: out.held }, out.ok ? (out.already ? 'already-held' : 'held') : out.error);
     if (out.ok) { await recordHold(orderName, by, reason); return { ok: true }; }
     await recordFailed(orderName, out.error);
@@ -121,27 +123,34 @@ async function releaseOrder(orderName, shopifyOrderId, by) {
     return { ok: false, error: out.error };
 }
 
-// Auto-hold (cron/webhook). Skips if already held OR a human already released it.
+// Auto-hold (cron/webhook). Skips if already held OR a human already released it OR it's past pickup.
 async function autoHoldOrder(orderName, shopifyOrderId) {
     const st = (await getHoldStates([orderName]))[norm(orderName)];
     if (st && (st.status === 'held' || st.status === 'released')) return { skipped: st.status };
     const out = await holdShopifyOrder(shopifyOrderId);
+    if (out.notHoldable) return { skipped: 'shipped' };   // already picked up — not a failure, don't mark
     await logApi('shopify_hold', out.ok ? 200 : 422, { order: norm(orderName), id: String(shopifyOrderId), by: 'auto', held: out.held }, out.ok ? (out.already ? 'already-held' : 'held') : out.error);
     if (out.ok) { await recordHold(orderName, 'auto', HOLD_NOTE); return { held: true }; }
     await recordFailed(orderName, out.error);
     return { failed: out.error };
 }
 
-// Does a NEW order (by phone) qualify for auto-hold? COD (not prepaid) + ≥1 prior non-delivered order
-// on the same phone. Used by the orders/create webhook, where order_buckets isn't computed for the new
-// order yet — same criteria as findRepeatCandidates, sourced by a direct phone-history lookup.
-async function qualifiesForHold({ phone, financialStatus, createdAt, shopifyOrderId }) {
+// Does a NEW order (by phone) qualify for auto-hold? Same criteria as findRepeatCandidates, sourced by a
+// direct phone-history lookup because order_buckets isn't computed for the brand-new order yet:
+//   COD (not prepaid) + value > ₹1500 + ≥1 of the customer's last 3 PRIOR orders not delivered.
+// (A just-created order is always non-terminal + pre-pickup, so those two checks are implicit.)
+async function qualifiesForHold({ phone, financialStatus, createdAt, shopifyOrderId, totalPrice }) {
     if (PREPAID_STATUSES.includes(String(financialStatus || '').toLowerCase())) return false;   // prepaid → no RTO risk
+    if (Number(totalPrice || 0) <= 1500) return false;                                          // value threshold
     const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
     if (last10.length !== 10) return false;
     const before = new Date(createdAt || Date.now());
     const { data } = await supabase.from('order_buckets').select('order_id, bucket, created_at').ilike('phone', `%${last10}`).limit(50);
-    return (data || []).some(h => String(h.order_id) !== String(shopifyOrderId) && new Date(h.created_at) < before && !['delivered', 'cancelled'].includes(h.bucket));
+    const last3Prior = (data || [])
+        .filter(h => String(h.order_id) !== String(shopifyOrderId) && new Date(h.created_at) < before)
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+        .slice(0, 3);
+    return last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket));
 }
 
 module.exports = {

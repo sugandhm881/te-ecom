@@ -119,31 +119,42 @@ router.get('/support/summary', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// Repeat-hold candidates — COD repeat customers whose order is still BEFORE the courier picks it up
-// (bucket `order_to_dispatch` = awaiting dispatch + PICKUP_SCHEDULED/in-progress/manifested; once picked
-// up it moves to dispatch_plus_2/IN_TRANSIT and drops out), with ≥1 prior non-delivered order on the
-// same phone. This SAME function powers both the Call Queue "Repeat" tab AND the Shopify auto-hold cron,
-// so the criteria can never diverge. Returns rows with `orders_count` set.
+// Repeat-hold candidates — the shared definition behind both the Call Queue "Repeat" tab AND the Shopify
+// auto-hold, so they can never diverge. An order qualifies when ALL hold:
+//   1. COD (orders.financial_status not paid-ish) — only COD carries RTO risk worth calling/holding.
+//   2. Still pre-pickup — bucket `order_to_dispatch` (awaiting dispatch / pickup scheduled / manifested,
+//      before the courier collects it). These are the actionable orders — the only ones we can hold and
+//      the only ones worth calling before they ship. The customer's own in-transit/not-delivered orders
+//      are NOT listed as rows here; you see them in the order-detail customer-history on click.
+//   3. Value > ₹1500 (total_price).
+//   4. ≥1 of the customer's last 3 PRIOR orders (by phone) is not delivered (RTO/undelivered/in-transit
+//      count; a cancelled order does not) — a recent non-delivery = repeat RTO risk.
 async function findRepeatCandidates({ fromISO, toISO }) {
     const SEL = 'order_id, order_name, phone, email, total_price, created_at, fulfillment_status, tracking_status, partner, courier, awb_number, bucket, msg91_confirmed, is_repeat_customer, dispatch_at, edd';
     const { data, error } = await supabase.from('order_buckets').select(SEL)
-        .eq('bucket', 'order_to_dispatch').eq('is_repeat_customer', true)
+        .eq('bucket', 'order_to_dispatch')                               // (2) still pre-pickup / holdable
+        .gt('total_price', 1500)                                         // (3) value > ₹1500
         .gte('created_at', fromISO).lte('created_at', toISO)
-        .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(1000);
+        .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(2000);
     if (error) throw new Error(error.message);
     let cand = data || [];
-    // Exclude prepaid (orders.financial_status ∈ paid-ish set) — only COD carries RTO risk worth holding.
+    cand = cand.filter(c => Number(c.total_price) > 1500);   // (3) numeric guard (in case total_price is text in the view)
+    // (1) COD only.
     const finRows = cand.length ? await chunkedIn('orders', 'id, financial_status', 'id', cand.map(c => c.order_id)) : [];
     const finById = {}; finRows.forEach(o => { finById[String(o.id)] = (o.financial_status || '').toLowerCase(); });
     cand = cand.filter(c => !PREPAID_STATUSES.includes(finById[String(c.order_id)] || ''));
-    // Customer history by phone: order-count pill + require ≥1 previous non-delivered order.
+    // (4) ≥1 of the customer's last 3 PRIOR orders not delivered.
     const phones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
     const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, phone, bucket, created_at', 'phone', phones) : [];
     const byPhone = {}; hist.forEach(h => { (byPhone[h.phone] = byPhone[h.phone] || []).push(h); });
     return cand.filter(c => {
-        const list = byPhone[c.phone] || [];
-        c.orders_count = list.length;
-        return list.some(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at) && !['delivered', 'cancelled'].includes(h.bucket));
+        const all = byPhone[c.phone] || [];
+        c.orders_count = all.length;
+        const last3Prior = all
+            .filter(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at))
+            .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+            .slice(0, 3);
+        return last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket));
     });
 }
 

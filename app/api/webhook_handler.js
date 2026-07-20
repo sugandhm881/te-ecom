@@ -324,7 +324,7 @@ router.post('/shopify-order', async (req, res) => {
         try {
             const phone = (o.shipping_address && o.shipping_address.phone) || (o.customer && o.customer.phone) || o.phone || null;
             const shopifyHold = require('./shopify_hold');
-            const qualifies = await shopifyHold.qualifiesForHold({ phone, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id });
+            const qualifies = await shopifyHold.qualifiesForHold({ phone, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price });
             if (!qualifies) { console.log(`[ShopifyHold] ${orderName}: not a repeat-COD candidate → no hold`); return; }
             const r = await shopifyHold.autoHoldOrder(orderName, o.id);
             console.log(`[ShopifyHold] ${orderName}: ${r.held ? 'HELD on Shopify ✓' : r.skipped ? 'skipped (' + r.skipped + ')' : 'hold FAILED (' + r.failed + ')'}`);

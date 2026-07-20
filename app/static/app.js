@@ -3520,13 +3520,15 @@ function supQueueTable(){
   c.querySelectorAll('.sup-hold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoHold(b.dataset.oid,b.dataset.oname,b); }));
   c.querySelectorAll('.sup-unhold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoUnhold(b.dataset.oid,b.dataset.oname,b); }));
 }
-// Shopify hold controls for the Repeat tab: 🔒 held → Release; failed/none → Hold. (Repeat tab only.)
+// Shopify hold controls for the Repeat tab: 🔒 held → Release; holdable + not held → Hold; shipped rows
+// are call-only (no Hold button — you can't hold an order that's already been picked up). Repeat tab only.
 function supHoldControl(r){
   if(_supTab!=='repeat') return '';
   const h=r.shopify_hold;
   if(h && h.status==='held') return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''} — won't ship / import to EasyEcom until released">🔒 On hold${h.by==='auto'?' (auto)':''}</span> <button class="sup-unhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}">Release</button>`;
+  if(r.bucket !== 'order_to_dispatch') return '';   // past pickup → can't hold, call only
   const failed = h && h.status==='failed';
-  return `${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="Auto-hold failed: ${escapeHtml(h.reason||'')}">⚠️ hold failed</span> `:''}<button class="sup-hold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="Hold this order on Shopify (stops it shipping / importing to EasyEcom)">🔒 Hold</button>`;
+  return `${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="Hold failed: ${escapeHtml(h.reason||'')}">⚠️ hold failed</span> `:''}<button class="sup-hold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="Hold this order on Shopify (stops it shipping / importing to EasyEcom)">🔒 Hold</button>`;
 }
 async function supDoHold(oid,oname,btn){
   btn.disabled=true; const t=btn.innerHTML; btn.textContent='Holding…';
