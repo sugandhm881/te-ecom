@@ -1310,6 +1310,7 @@ function buildOrderDetailHtml(order) {
                         <span class="text-xs font-bold text-emerald-600">Assigned</span>
                     </div>` : ''}
                     ${hasEasyecomId ? (() => {
+                        if (order.status === 'Cancelled' || order.cancelled_at) return '';   // cancelled → no hold/unhold, the hold is moot
                         const held = order.eeHold || (/hold/i.test(order.easyecomStatus || '') ? {} : null);
                         if (held) {
                             const meta = [held.reason ? `“${escapeHtml(held.reason)}”` : '', held.by ? 'by ' + escapeHtml(held.by) : '', held.at ? new Date(held.at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''].filter(Boolean).join(' · ');
@@ -1362,7 +1363,7 @@ function buildOrderDetailHtml(order) {
     // Shopify fulfillment hold — SEPARATE control from the EasyEcom hold, shown for every order (works
     // upstream of EasyEcom). Held → Unhold Shopify; not held + still pre-pickup → Hold on Shopify.
     let shopifyHoldHtml = '';
-    { const sh = order.shopifyHold;
+    if (order.status !== 'Cancelled' && !order.cancelled_at) { const sh = order.shopifyHold;   // cancelled → no Shopify hold/unhold either
       if (sh) {
         const sm = [sh.reason ? `“${escapeHtml(sh.reason)}”` : '', sh.by ? 'by ' + escapeHtml(sh.by) : ''].filter(Boolean).join(' · ');
         shopifyHoldHtml = `<div class="bg-white p-4 rounded-xl border border-rose-200 shadow-sm mt-2"><div class="flex justify-between items-center">
@@ -3445,6 +3446,70 @@ const SUP_TONE = {
 };
 const supBucketOf = id => SUP_BUCKETS.find(b => b[0] === id) || [id, id || '—', 'muted'];
 function supBadge(id){ const [,label,tone]=supBucketOf(id); return `<span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${SUP_TONE[tone][0]} whitespace-nowrap">${escapeHtml(label)}</span>`; }
+// ── Customer Support live-tracking modal — click an AWB → courier scan log (like Fulfillment Ops). ────
+// Reuses the read-only, cached /api/delivery-performance/shipment/:awb (RapidShyp scans + DocPharma milestones).
+let _supTrackKey=null;
+function supTrackClose(){ const m=document.getElementById('sup-track-modal'); if(m) m.remove(); _supTrackKey=null; }
+// Builds its own modal DOM (no dependency on a static element in index.html — works even if the HTML wasn't
+// reloaded), appended to <body>. z-index is set via INLINE STYLE (95) — a Tailwind `z-[90]` class wouldn't be
+// in the compiled CSS, so it silently did nothing and the popup fell BEHIND the z-[80] order-detail modal.
+async function supTrackOpen(awb, orderName, courier){
+  awb=String(awb||'').trim();
+  supTrackClose();
+  _supTrackKey=awb||('#'+(orderName||'')); const cur=_supTrackKey;
+  const wrap=document.createElement('div');
+  wrap.id='sup-track-modal';
+  wrap.className='fixed inset-0 flex items-end sm:items-center justify-center bg-slate-900/50 backdrop-blur-sm p-0 sm:p-4';
+  wrap.style.zIndex='95';
+  wrap.innerHTML=`<div class="bg-white w-full sm:max-w-lg rounded-t-3xl sm:rounded-2xl shadow-2xl flex flex-col animate-slide-up" style="max-height:88vh">
+    <div class="px-5 pt-4 pb-4 border-b border-slate-100"><div class="flex items-start justify-between gap-3">
+      <div class="flex-1 min-w-0"><span class="text-[10px] font-bold uppercase tracking-widest text-slate-400">Live Tracking</span>
+        <div class="font-mono text-base font-bold text-slate-800 tracking-wider truncate">${escapeHtml(awb||orderName||'—')}</div>
+        <div class="text-xs text-slate-400 mt-0.5">${escapeHtml([orderName,courier].filter(Boolean).join(' · '))}</div></div>
+      <button class="sup-track-x w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 text-lg flex-shrink-0">×</button>
+    </div></div>
+    <div class="sup-track-body overflow-y-auto flex-1 px-5 py-4">${brandLoaderSm('Loading live tracking…')}</div>
+  </div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) supTrackClose(); });
+  wrap.querySelector('.sup-track-x').addEventListener('click',supTrackClose);
+  const body=wrap.querySelector('.sup-track-body');
+  if(!awb){ body.innerHTML='<div class="text-slate-400 text-sm py-8 text-center">No AWB assigned yet — live tracking appears once the courier generates one.</div>'; return; }
+  try{
+    const r=await fetch(`/api/delivery-performance/shipment/${encodeURIComponent(awb)}`,{headers:getAuthHeaders()});
+    const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    if(_supTrackKey===cur) body.innerHTML=supTrackRender(d);
+  }catch(e){ if(_supTrackKey===cur) body.innerHTML=`<div class="text-rose-400 text-sm py-8 text-center">${ecEsc(e.message)}</div>`; }
+}
+function supTrackRender(d){
+  const j=d.journey, ts=(j&&j.ts)||{};
+  const step=(label,iso,color)=>`<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:${iso?color:'#cbd5e1'}"></span><span class="w-28 text-slate-500">${label}</span><span class="tabular-nums ${iso?'text-slate-700 font-medium':'text-slate-300'}">${dpFmtTs(iso)}</span></div>`;
+  const isRto=j&&/rto/i.test(j.outcome||'');
+  const timeline=step('Order placed',ts.order,'#6366f1')+step('Dispatched',ts.dispatched,'#0ea5e9')+step('Out for delivery',ts.ofd,'#f59e0b')+(isRto?step('RTO',ts.rto,'#ef4444'):step('Delivered',ts.delivered,'#16a34a'))+step('Promised EDD',ts.edd,'#8b5cf6');
+  const scanRows=arr=>`<div class="space-y-1 max-h-72 overflow-auto pr-1">${arr.map(s=>`<div class="flex gap-2 text-xs"><span class="w-24 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${ecEsc(s.desc)}${s.code?` <span class="text-slate-400">(${ecEsc(s.code)})</span>`:''}${s.location?` <span class="text-slate-400">· ${ecEsc(s.location)}</span>`:''}</span></div>`).join('')}</div>`;
+  let scanHtml;
+  if(d.dp){ const dp=d.dp;
+    const badge=dp.current_status?`<span class="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200 text-[11px] font-semibold">${ecEsc(dp.current_status)}</span>`:'';
+    const link=dp.tracking_url?`<a href="${ecEsc(dp.tracking_url)}" target="_blank" rel="noopener" class="text-indigo-600 hover:underline text-xs font-medium">Track on DocPharma ↗</a>`:'';
+    scanHtml=`<div class="flex items-center gap-3 mb-2">${badge}${link}</div>${(d.scans&&d.scans.length)?scanRows(d.scans):''}<div class="text-[11px] text-slate-400 mt-2">${ecEsc(dp.note||'')}</div>`;
+  } else if(!d.scans||!d.scans.length) scanHtml='<div class="text-slate-400 text-xs py-3">No scan log available yet for this shipment.</div>';
+  else scanHtml=`${scanRows(d.scans)}${d.live?'<div class="text-[10px] text-emerald-500 mt-1">● fetched live from courier</div>':''}`;
+  const hasJourney=j&&(ts.order||ts.dispatched||ts.ofd||ts.delivered||ts.rto||ts.edd);
+  const courierLine=(j&&j.courier)?`<div class="text-xs text-slate-400 mb-3">${ecEsc(j.courier)}${j.order_name?' · '+ecEsc(j.order_name):''}</div>`:'';
+  return `<div class="space-y-4">${courierLine}${hasJourney?`<div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Journey</div>${timeline}</div>`:''}<div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log</div>${scanHtml}</div></div>`;
+}
+// Clickable AWB (or any label) → support tracking modal. Renders plain text when no AWB.
+function supAwbLink(awb, orderName, courier, label){
+  const a=String(awb||'').trim();
+  if(!a) return escapeHtml(label!=null?String(label):'—');
+  const hasLabel=(label!=null&&String(label).trim()!=='');   // AWB shown in mono; an explicit label (courier) stays normal
+  const txt=hasLabel?String(label):a;
+  // Reads as clean dark data (no blue-hyperlink underline). On hover a subtle grey pill appears + a
+  // "Click to track live" tooltip to signal it's clickable. inline-block + px/-mx keep it aligned with text.
+  return `<a href="#" class="sup-awb-track ${hasLabel?'':'font-mono'} no-underline cursor-pointer inline-block rounded px-1.5 -mx-1.5 py-0.5 text-slate-700 hover:bg-slate-100 transition-colors whitespace-nowrap" data-awb="${escapeHtml(a)}" data-oname="${escapeHtml(orderName||'')}" data-courier="${escapeHtml(courier||'')}" title="Click to track live">${escapeHtml(txt)}</a>`;
+}
+// Capturing listener (fires before a parent row's click) — scoped to Customer Support's .sup-awb-track links.
+document.addEventListener('click', e => { const el = e.target.closest && e.target.closest('.sup-awb-track'); if(el){ e.preventDefault(); e.stopPropagation(); supTrackOpen(el.dataset.awb, el.dataset.oname, el.dataset.courier); } }, true);
 const SUP_OUTCOMES = [['no_answer','No answer'],['customer_will_accept','Customer will accept'],['refused','Refused'],['reschedule','Reschedule'],['wrong_number','Wrong number'],['delivered_confirmed','Delivered confirmed'],['other','Other']];
 const supOutcomeLbl = o => (SUP_OUTCOMES.find(x=>x[0]===o)||[o,String(o||'').replace(/_/g,' ')])[1];
 function supAge(iso){ if(!iso) return '—'; const h=(Date.now()-new Date(iso).getTime())/3600000; if(h<24) return Math.max(1,Math.round(h))+'h'; return Math.round(h/24)+'d'; }
@@ -3491,14 +3556,14 @@ async function supDashInit(){
 }
 
 // ── Call Queue ─────────────────────────────────────────────────────────────
-let _supTab='und', _supQueueRows=[], _supQueueWired=false;
+let _supTab='und', _supQueueRows=[], _supQueueWired=false, _supSort=null;   // _supSort={k,d} set by clicking a column header
 function supQueueInit(){
   supRenderRange('sup-range-queue', supLoadQueue);
   if(!_supQueueWired){ _supQueueWired=true;
     document.querySelectorAll('.sup-tab').forEach(b=>b.addEventListener('click',()=>{ _supTab=b.dataset.tab; supTabPaint(); supLoadQueue(); }));
-    ['sup-f-notes','sup-f-age','sup-f-sort','sup-f-hold'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
+    ['sup-f-notes','sup-f-age','sup-f-hold'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
     document.getElementById('sup-f-notesearch')?.addEventListener('input', debounce(supQueueTable,250));
-    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-sort','sup-f-hold'].forEach((id,i)=>{ document.getElementById(id).value=['all','any','default','all'][i]; }); document.getElementById('sup-f-notesearch').value=''; supQueueTable(); });
+    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-hold'].forEach((id,i)=>{ document.getElementById(id).value=['all','any','all'][i]; }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
     document.getElementById('sup-refresh')?.addEventListener('click', supRefreshTracking);
   }
   supTabPaint(); supLoadQueue();
@@ -3513,14 +3578,30 @@ async function supLoadQueue(){
   try{ const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS()); await eeHoldRefresh(); _supQueueRows=d.rows||[]; supSyncInfo(d.lock); supQueueTable(); }
   catch(e){ if(c) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }
 }
+// Repeat-tab call-reason tags — shows which of the 3 reasons put this order on the call list.
+const SUP_REASON_META={
+  in_flight:['🚚','In-flight','bg-sky-100 text-sky-700','Customer has another order still in transit / not yet delivered'],
+  recent_undelivered:['⚠️','Recent non-delivery','bg-rose-100 text-rose-700','≥1 of the last 3 orders was not delivered (RTO / undelivered)'],
+  high_value:['💰','Above ₹1500','bg-emerald-100 text-emerald-700','Order value is above ₹1500'],
+};
+function supReasonChips(r){
+  if(!r.reasons||!r.reasons.length) return '';
+  return ' '+r.reasons.map(k=>{ const m=SUP_REASON_META[k]; if(!m) return '';
+    return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold ${m[2]} whitespace-nowrap align-middle" title="${m[3]}">${m[0]} ${m[1]}</span>`; }).join(' ');
+}
+// Column comparator for header-click sorting. Time columns (created_at / last_scan_at) compare by epoch
+// with empty values ALWAYS last (regardless of direction); other columns are case-insensitive strings.
+function _supSortCmp(k,d){ const isTime=(k==='created_at'||k==='last_scan_at');
+  return (a,b)=>{ if(isTime){ const x=a[k]?new Date(a[k]).getTime():null, y=b[k]?new Date(b[k]).getTime():null;
+      if(x===null&&y===null) return 0; if(x===null) return 1; if(y===null) return -1; return d*(x-y); }
+    return d*String(a[k]||'').toLowerCase().localeCompare(String(b[k]||'').toLowerCase()); }; }
 function supQueueTable(){
   const c=document.getElementById('sup-queue-table'); if(!c) return;
   const fN=document.getElementById('sup-f-notes')?.value||'all';
   const fQ=(document.getElementById('sup-f-notesearch')?.value||'').trim().toLowerCase();
   const fA=document.getElementById('sup-f-age')?.value||'any';
-  const fS=document.getElementById('sup-f-sort')?.value||'default';
   const fH=document.getElementById('sup-f-hold')?.value||'all';
-  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fS!=='default'||fH!=='all')?'':'none';
+  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fH!=='all'||_supSort)?'':'none';
   let list=_supQueueRows.slice();
   if(fN==='with') list=list.filter(r=>r.note_count>0);
   if(fN==='none') list=list.filter(r=>!r.note_count);
@@ -3528,32 +3609,42 @@ function supQueueTable(){
   if(fA!=='any') list=list.filter(r=>{ const dAge=(Date.now()-new Date(r.created_at))/86400000;
     return fA==='lt1'?dAge<1:fA==='1-3'?(dAge>=1&&dAge<3):fA==='3-7'?(dAge>=3&&dAge<7):dAge>=7; });
   if(fH!=='all'){ const isHeld=r=>(r.shopify_hold&&r.shopify_hold.status==='held')||r.ee_hold; list=list.filter(r=>fH==='held'?isHeld(r):!isHeld(r)); }
-  if(fS==='age_old') list.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));
-  else if(fS==='age_new') list.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
-  else if(fS==='courier') list.sort((a,b)=>String(a.courier||'').localeCompare(String(b.courier||'')));
-  else if(fS==='order') list.sort((a,b)=>String(a.order_name||'').localeCompare(String(b.order_name||'')));
+  if(_supSort&&_supSort.k) list.sort(_supSortCmp(_supSort.k,_supSort.d));   // else keep the server order (confirmed → oldest)
   const cnt=document.getElementById('sup-queue-count'); if(cnt) cnt.textContent=`${list.length} shown`;
   document.querySelector(`.sup-tab[data-tab="${_supTab}"] .sup-tab-count`).textContent=`(${list.length})`;
   if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">Queue is clear 🎉</div>'; return; }
   const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
   const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
-  c.innerHTML=`<table class="w-full"><thead><tr>${['Order','Customer','Bucket','Age','Courier','Actions'].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+  // Click a column header to sort (asc/desc toggle); the caret shows the active column + direction.
+  // The "Last scan" column is only meaningful for Undelivered (in-transit) orders — hidden on Repeat/Status-changed.
+  const showScan=_supTab==='und';
+  const showBucket=_supTab!=='repeat';   // every Repeat row is order_to_dispatch → the Bucket column is noise
+  const COLS=[{h:'Order',k:'order_name',d:1},{h:'Customer',k:null},...(showBucket?[{h:'Bucket',k:'bucket',d:1}]:[]),{h:'Age',k:'created_at',d:1},{h:'Courier',k:'courier',d:1},...(showScan?[{h:'Last scan',k:'last_scan_at',d:-1}]:[]),{h:'Actions',k:null}];
+  const thHtml=COLS.map(col=>{ if(!col.k) return `<th class="${TH}">${col.h}</th>`;
+    const on=_supSort&&_supSort.k===col.k; const car=on?(_supSort.d===1?'▲':'▼'):'<span class="text-slate-300">↕</span>';
+    return `<th class="${TH} cursor-pointer select-none hover:text-indigo-600 ${on?'text-indigo-600':''}" data-sort="${col.k}" data-dir="${col.d}" title="Sort by ${col.h}">${col.h} <span class="text-[9px]">${car}</span></th>`; }).join('');
+  c.innerHTML=`<table class="w-full"><thead><tr>${thHtml}</tr></thead><tbody>${
     list.slice(0,500).map(r=>{ const ph=String(r.phone||'').replace(/\D/g,'').slice(-10);
       return `<tr class="sup-row cursor-pointer hover:bg-slate-50 ${r.msg91_confirmed?'bg-sky-50/50':''}" data-oid="${escapeHtml(r.order_id)}">
-      <td class="${TD} font-mono font-semibold">${escapeHtml(r.order_name||r.order_id)}${eeHoldChip(r.order_name)}</td>
+      <td class="${TD} font-mono font-semibold">${escapeHtml(r.order_name||r.order_id)}${_supTab!=='repeat'?eeHoldChip(r.order_name):''}</td>
       <td class="${TD}">${ph?`<a href="tel:+91${ph}" onclick="event.stopPropagation()" class="text-indigo-600 font-medium hover:underline">${ph}</a>`:'<span class="text-slate-300">no phone</span>'}
         ${r.orders_count?` <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-violet-100 text-violet-700">${r.orders_count} orders</span>`:''}
-        ${r.msg91_confirmed?' <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}</td>
-      <td class="${TD}">${supBadge(r.bucket)}</td>
+        ${r.msg91_confirmed?' <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}${_supTab==='repeat'?supReasonChips(r):''}</td>
+      ${showBucket?`<td class="${TD}">${supBadge(r.bucket)}</td>`:''}
       <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
-      <td class="${TD}">${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}</td>
+      <td class="${TD}"><div>${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}</div>${r.awb_number?`<div class="text-[10px] mt-0.5">${supAwbLink(r.awb_number,r.order_name,r.courier)}</div>`:''}</td>
+      ${showScan?`<td class="${TD} whitespace-nowrap">${r.last_scan_at?`<span class="text-slate-500" title="Latest AWB scan by courier: ${new Date(r.last_scan_at).toLocaleString()}">🛰 ${supRelTime(r.last_scan_at)}</span>`:'<span class="text-slate-300">—</span>'}</td>`:''}
       <td class="${TD}"><div class="flex items-center gap-2.5">
         ${supHoldControl(r)}
-        <button class="sup-note-btn inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-bold border transition-colors ${r.note_count?'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100':'bg-white text-slate-400 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="${r.note_count?'View / add notes':'Add a note'}">📝${r.note_count?` <span class="min-w-[16px] h-4 px-1 rounded-full bg-amber-200/80 text-amber-800 text-[10px] leading-4 text-center">${r.note_count}</span>`:' <span class="font-medium">+</span>'}</button>
         ${r.latest_note?`<div class="min-w-0 border-l-2 border-amber-300 pl-2">
           <div class="text-xs text-slate-600 italic truncate max-w-[230px]" title="${escapeHtml(r.latest_note)}">“${escapeHtml(r.latest_note)}”</div>
-          <div class="text-[10px] text-slate-400 truncate">${escapeHtml(r.latest_note_by||'')}${r.latest_note_by&&r.latest_note_at?' · ':''}${r.latest_note_at?supRelTime(r.latest_note_at):''}</div></div>`:''}</div></td></tr>`; }).join('')
+          <div class="text-[10px] text-slate-400 truncate">${escapeHtml(r.latest_note_by||'')}${r.latest_note_by&&r.latest_note_at?' · ':''}${r.latest_note_at?supRelTime(r.latest_note_at):''}</div></div>`:''}
+        <button class="sup-note-btn ml-auto inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-bold border transition-colors ${r.note_count?'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100':'bg-white text-slate-400 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="${r.note_count?'View / add notes':'Add a note'}">📝${r.note_count?` <span class="min-w-[16px] h-4 px-1 rounded-full bg-amber-200/80 text-amber-800 text-[10px] leading-4 text-center">${r.note_count}</span>`:' <span class="font-medium">+</span>'}</button></div></td></tr>`; }).join('')
   }</tbody></table>${list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:''}`;
+  c.querySelectorAll('th[data-sort]').forEach(th=>th.addEventListener('click',()=>{
+    const k=th.dataset.sort, dd=parseInt(th.dataset.dir,10)||1;
+    if(_supSort&&_supSort.k===k) _supSort.d*=-1; else _supSort={k,d:dd};   // toggle direction on the same column
+    supQueueTable(); }));
   c.querySelectorAll('.sup-row').forEach(row=>row.addEventListener('click',()=>supOrderModal(row.dataset.oid)));
   c.querySelectorAll('.sup-note-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supNotesModal(b.dataset.oid,b.dataset.oname); }));
   c.querySelectorAll('.sup-hold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoHold(b.dataset.oid,b.dataset.oname,b); }));
@@ -3824,7 +3915,7 @@ async function supOrderModal(orderId){
             ${(d.items||[]).map(i=>`<div class="flex items-center justify-between py-1 text-sm"><span class="text-slate-700 truncate mr-2">${escapeHtml(i.title||'')}${i.variant_title?` <span class="text-slate-400">· ${escapeHtml(i.variant_title)}</span>`:''}</span><span class="text-slate-500 whitespace-nowrap">×${i.quantity} · ₹${Number(i.price||0).toLocaleString('en-IN')}</span></div>`).join('')||'<p class="text-sm text-slate-400">—</p>'}
             <div class="flex justify-between border-t border-slate-100 mt-2 pt-2 text-sm font-bold text-slate-800"><span>Total</span><span>₹${Number(o.total_price||0).toLocaleString('en-IN')}</span></div></div>
           <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Delivery timeline</p>
-            <div class="space-y-1.5 max-h-44 overflow-auto">${(d.tracking||[]).map(t=>`<div class="text-xs"><span class="font-semibold text-slate-700">${escapeHtml(t.tracking_status||'—')}</span> <span class="text-slate-400">· ${escapeHtml(t.courier_name||'')} · ${escapeHtml(t.awb_number||'')} · ${t.last_tracked_at?new Date(t.last_tracked_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}${t.edd?` · EDD ${_dmy(t.edd)}`:''}</span></div>`).join('')||'<p class="text-sm text-slate-400">No tracking yet</p>'}</div></div>
+            <div class="space-y-1.5 max-h-44 overflow-auto">${(d.tracking||[]).map(t=>`<div class="text-xs"><span class="font-semibold text-slate-700">${escapeHtml(t.tracking_status||'—')}</span> <span class="text-slate-400">· ${escapeHtml(t.courier_name||'')} · ${t.awb_number?supAwbLink(t.awb_number,o.order_name,t.courier_name):''} · ${t.last_tracked_at?new Date(t.last_tracked_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}${t.edd?` · EDD ${_dmy(t.edd)}`:''}</span></div>`).join('')||'<p class="text-sm text-slate-400">No tracking yet</p>'}</div></div>
         </div>
       </div>
       <div class="grid md:grid-cols-2 gap-6 mt-5">
@@ -3848,7 +3939,7 @@ async function supOrderModal(orderId){
             <td class="py-2 pr-4 border-b border-slate-100 font-mono font-semibold text-indigo-700">${escapeHtml(co.order_name||co.order_id)}${cur?' <span class="text-[10px] text-slate-400 font-sans font-normal">(this order)</span>':''}</td>
             <td class="py-2 pr-4 border-b border-slate-100 text-xs tabular-nums">${_dmy(co.created_at)}</td>
             <td class="py-2 pr-4 border-b border-slate-100">${supBadge(co.bucket)}${eeHoldChip(co.order_name)}</td>
-            <td class="py-2 pr-4 border-b border-slate-100 text-xs text-slate-500">${escapeHtml(co.tracking_status||'—')}</td>
+            <td class="py-2 pr-4 border-b border-slate-100 text-xs text-slate-500">${co.awb_number?supAwbLink(co.awb_number,co.order_name,co.courier):escapeHtml(co.tracking_status||'—')}</td>
             <td class="py-2 pr-4 border-b border-slate-100 text-xs">${escapeHtml(co.courier||'—')}</td>
             <td class="py-2 pr-4 border-b border-slate-100 font-semibold tabular-nums">₹${Number(co.total_price||0).toLocaleString('en-IN')}</td></tr>`; }).join('')}</tbody>
         </table></div>`:'<p class="text-sm text-slate-400">No orders found for this customer.</p>'}
@@ -3912,7 +4003,7 @@ async function supOrdersLoad(){
         <td class="${TD} font-mono font-semibold">${escapeHtml(r.order_name||r.order_id)}${eeHoldChip(r.order_name)}</td>
         <td class="${TD}"><div>${ph||'—'}</div><div class="text-xs text-slate-400 truncate max-w-[160px]">${escapeHtml(r.email||'')}</div></td>
         <td class="${TD}">${supBadge(r.bucket)}</td>
-        <td class="${TD} text-xs"><div>${escapeHtml(r.partner||'—')} · ${escapeHtml(r.courier||'—')}</div><div class="text-slate-400 font-mono">${escapeHtml(r.awb_number||'')}</div></td>
+        <td class="${TD} text-xs"><div>${escapeHtml(r.partner||'—')} · ${escapeHtml(r.courier||'—')}</div><div class="text-slate-400 font-mono">${r.awb_number?supAwbLink(r.awb_number,r.order_name,r.courier):''}</div></td>
         <td class="${TD} text-xs">${escapeHtml(r.tracking_status||'—')}</td>
         <td class="${TD} text-xs tabular-nums">${_dmy(r.created_at)}</td>
         <td class="${TD} font-semibold tabular-nums">₹${Number(r.total_price||0).toLocaleString('en-IN')}</td></tr>`; }).join('')
@@ -4781,7 +4872,8 @@ function eeHoldChip(name){ const h=_eeHold[String(name||'').replace('#','').trim
   return ` <span class="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-bold ${cls} whitespace-nowrap align-middle" title="${tip}">${label}</span>`; }
 // Orders-dashboard hold chip from the BAKED order.eeHold / order.shopifyHold (keeps the .ord-hold-chip
 // class the live hold/unhold updater targets). Shows either/both hold types so a held order never reads normal.
-function ordHoldChipHtml(order){ const ee=!!(order&&order.eeHold), sh=!!(order&&order.shopifyHold); if(!ee&&!sh) return '';
+function ordHoldChipHtml(order){ if(order&&(order.status==='Cancelled'||order.cancelled_at)) return '';   // cancelled → hold is moot, don't show it
+  const ee=!!(order&&order.eeHold), sh=!!(order&&order.shopifyHold); if(!ee&&!sh) return '';
   const label = sh&&ee ? '🔒 Shopify + EasyEcom hold' : sh ? '🔒 Shopify hold' : '⏸ EasyEcom hold';
   const cls = sh ? 'bg-rose-100 text-rose-700 border-rose-200' : 'bg-amber-100 text-amber-700 border-amber-200';
   return ` <span class="ord-hold-chip px-2 py-0.5 text-[10px] font-bold ${cls} rounded-full border whitespace-nowrap">${label}</span>`; }

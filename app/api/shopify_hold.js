@@ -135,21 +135,28 @@ async function autoHoldOrder(orderName, shopifyOrderId) {
     return { failed: out.error };
 }
 
-// Does a NEW order (by phone) qualify for auto-hold? Same criteria as findRepeatCandidates, sourced by a
-// direct phone-history lookup because order_buckets isn't computed for the brand-new order yet:
-//   COD (not prepaid) + ≥1 of the customer's last 3 PRIOR orders not delivered (no value threshold).
-// (A just-created order is always non-terminal + pre-pickup, so those two checks are implicit.)
-async function qualifiesForHold({ phone, financialStatus, createdAt, shopifyOrderId }) {
+// Does a NEW order qualify for auto-hold? Mirrors the Call Queue Repeat reasons — COD (not prepaid) AND any
+// of: HIGH-VALUE (> ₹1500) / a RECENT NON-DELIVERY (≥1 of the last 3 prior orders not delivered) / IN-FLIGHT
+// (the customer has another live order AND no delivered order in the last 3). Sourced by a direct phone-history
+// lookup because order_buckets isn't computed for the brand-new order yet. (A just-created order is always
+// non-terminal + pre-pickup, so the callable/holdable checks are implicit.)
+async function qualifiesForHold({ phone, financialStatus, createdAt, shopifyOrderId, totalPrice }) {
     if (PREPAID_STATUSES.includes(String(financialStatus || '').toLowerCase())) return false;   // prepaid → no RTO risk
+    if (Number(totalPrice || 0) >= 1500) return true;                                           // reason: high value (₹1500 and above)
     const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
     if (last10.length !== 10) return false;
     const before = new Date(createdAt || Date.now());
     const { data } = await supabase.from('order_buckets').select('order_id, bucket, created_at').ilike('phone', `%${last10}`).limit(50);
-    const last3Prior = (data || [])
-        .filter(h => String(h.order_id) !== String(shopifyOrderId) && new Date(h.created_at) < before)
-        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-        .slice(0, 3);
-    return last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket));
+    const others = (data || []).filter(h => String(h.order_id) !== String(shopifyOrderId));
+    const last3Prior = others.filter(h => new Date(h.created_at) < before).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
+    // RTO counts as not-delivered (triggers hold). EXCEPTION (don't hold): 1–2 of the last 3 delivered AND the
+    // latest or 2nd-latest is an RTO (one-off RTO for an otherwise-delivering customer). last3Prior[0] = latest.
+    const dCount    = last3Prior.filter(h => h.bucket === 'delivered').length;
+    const recentRTO = (last3Prior[0] && last3Prior[0].bucket === 'rto') || (last3Prior[1] && last3Prior[1].bucket === 'rto');
+    const reliable  = (dCount === 1 || dCount === 2) && recentRTO;
+    const recentUndelivered = !reliable && last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket));   // reason: recent non-delivery (RTO included)
+    const inFlight = !reliable && others.some(h => !['delivered', 'rto', 'cancelled'].includes(h.bucket));         // reason: in-flight (unproven)
+    return recentUndelivered || inFlight;
 }
 
 module.exports = {

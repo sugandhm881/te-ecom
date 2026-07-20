@@ -90,6 +90,28 @@ async function notesByOrder(orderIds) {
     }
     return map;
 }
+// Latest courier scan time per order — the most recent tracking movement (max of status_updated_at →
+// last_tracked_at → updated_at across the order's tracking rows). Powers the Call Queue "Latest scan"
+// sort so agents can work by freshest courier activity. order_tracking has ≤1 row per (order, source);
+// we keep the newest across sources.
+async function scanTimesByOrder(orderIds) {
+    if (!orderIds.length) return {};
+    const rows = await chunkedIn('order_tracking', 'order_id, status_updated_at, last_tracked_at, updated_at', 'order_id', orderIds);
+    const best = r => r.status_updated_at || r.last_tracked_at || r.updated_at || null;
+    const map = {};
+    rows.forEach(r => { const t = best(r); if (!t) return; if (!map[r.order_id] || new Date(t) > new Date(map[r.order_id])) map[r.order_id] = t; });
+    return map;
+}
+// Orders CANCELLED in EasyEcom (b2c_order_easycom.order_status "Cancelled"). EasyEcom can cancel an order
+// while Shopify's `cancelled_at` + the `order_buckets` bucket still show it active (Shopify sync lags), so
+// for EasyEcom-fulfilled orders this is the authoritative "cancelled" signal. (Unlike holds, the cancel text
+// IS reliable — a cancelled order reads "Cancelled".) Returns a Set of normalized order names.
+async function eeCancelledSet(names) {
+    const uniq = [...new Set((names || []).map(n => String(n || '').replace('#', '').trim()).filter(Boolean))];
+    if (!uniq.length) return new Set();
+    const rows = await chunkedIn('b2c_order_easycom', 'reference_code', 'reference_code', uniq, q => q.ilike('order_status', '%cancel%'));
+    return new Set(rows.map(r => String(r.reference_code || '').replace('#', '').trim()));
+}
 async function lockState() {
     const { data } = await supabase.from('tracking_run_lock').select('*').eq('id', 1).maybeSingle();
     return data || null;
@@ -119,17 +141,19 @@ router.get('/support/summary', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// Repeat-hold candidates — the shared definition behind both the Call Queue "Repeat" tab AND the Shopify
-// auto-hold, so they can never diverge. An order qualifies when ALL hold:
-//   1. COD (orders.financial_status not paid-ish) — only COD carries RTO risk worth calling/holding.
-//   2. Still pre-pickup — bucket `order_to_dispatch` (awaiting dispatch / pickup scheduled / manifested,
-//      before the courier collects it). These are the actionable orders — the only ones we can hold and
-//      the only ones worth calling before they ship. The customer's own in-transit/not-delivered orders
-//      are NOT listed as rows here; you see them in the order-detail customer-history on click.
-//   3. ≥1 of the customer's last 3 PRIOR orders (by phone) is not delivered (RTO/undelivered/in-transit
-//      count; a cancelled order does not) — a recent non-delivery = repeat RTO risk.
-// (No order-value threshold — the AOV is low, so it's repeat-RTO-risk COD orders at any value.)
-async function findRepeatCandidates({ fromISO, toISO }) {
+// Repeat-call candidates. BASE (always): (a) COD (financial_status not paid-ish) — only COD carries the RTO
+// risk worth calling; (b) still callable — bucket `order_to_dispatch`, before the courier collects it.
+// Each candidate is TAGGED with which of THREE call-reasons it matches (`c.reasons`):
+//   • `in_flight`          — the customer has ANOTHER order that hasn't reached a terminal status
+//                            (delivered/RTO/cancelled) → a live/pending delivery.
+//   • `recent_undelivered` — ≥1 of the customer's last 3 PRIOR orders (by phone) was not delivered
+//                            (RTO/undelivered/in-transit; cancelled doesn't count) → recent non-delivery.
+//   • `high_value`         — this order is above ₹1500.
+// `anyReason` (Call Queue dashboard) returns the whole COD/pre-pickup base tagged, and the /support/queue
+// repeat block decides what to show (drops MOVED orders, keeps reason-tagged + held/noted). Default
+// (Shopify auto-hold cron) keeps the STRICTER original rule — only `recent_undelivered` — so it doesn't
+// start auto-holding every high-value / in-flight order.
+async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false, anyReason = false }) {
     const SEL = 'order_id, order_name, phone, email, total_price, created_at, fulfillment_status, tracking_status, partner, courier, awb_number, bucket, msg91_confirmed, is_repeat_customer, dispatch_at, edd';
     const { data, error } = await supabase.from('order_buckets').select(SEL)
         .eq('bucket', 'order_to_dispatch')                               // (2) still pre-pickup / holdable
@@ -137,22 +161,72 @@ async function findRepeatCandidates({ fromISO, toISO }) {
         .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(2000);
     if (error) throw new Error(error.message);
     let cand = data || [];
+    // "Dispatched" = already fulfilled / picked up / in transit. The `order_to_dispatch` bucket is keyed off
+    // a Shopify-fulfillment state that lags, so a fulfilled order (AWB assigned, courier "out for pickup" /
+    // "pickup scheduled", or DocPharma "in-progress") wrongly stays in the bucket even though it has already
+    // been dispatched and can no longer be held (Shopify won't hold a fulfilled order; EasyEcom won't after
+    // manifest). Primary signal = `fulfillment_status` (fulfilled/partial); tracking-status regex is a safety
+    // net for the rare unfulfilled-but-moving row.
+    // "MOVED" = the courier has physically taken the parcel — picked up / in transit / out-for-delivery /
+    // sorting / delivered / RTO. Read from the courier `tracking_status` (fresher & more truthful than the
+    // Shopify-fulfillment bucket). A moved order is GONE: it can never be held/called before dispatch again,
+    // so it must drop from the Repeat panel EVEN IF it carries a hold mark or agent notes.
+    // "DISPATCHED" = moved OR merely fulfilled (AWB assigned but maybe not yet picked up — e.g. pickup
+    // scheduled / out-for-pickup, which is still holdable). The cron drops all dispatched; the queue keeps a
+    // dispatched-but-not-moved order if it's being worked (held/noted) and hides moved ones outright.
+    const MOVED_RE = /IN.?TRANSIT|IN.?PROGRESS|OUT.?FOR.?DELIVERY|\bOFD\b|DELIVERED|\bRTO\b|RETURN|REACHED|UNDELIVERED|PICKUP.?COMPLETED|PICKED.?UP|SORTING|DISPATCHED|\bLOST\b|EXCEPTION/i;
+    const DISPATCHED_FULFIL = new Set(['fulfilled', 'partial']);
+    const hasMoved = c => MOVED_RE.test(String(c.tracking_status || ''));
+    const isDispatched = c => DISPATCHED_FULFIL.has(String(c.fulfillment_status || '').toLowerCase()) || hasMoved(c);
+    if (skipDispatchFilter) cand.forEach(c => { c._dispatched = isDispatched(c); c._moved = hasMoved(c); });
+    else cand = cand.filter(c => !isDispatched(c));
+    // Drop candidates CANCELLED in EasyEcom — Shopify's cancelled_at / the bucket may still say active (sync
+    // lag), but a cancelled order can't be held or called, so it's never a repeat candidate.
+    const candCancelled = await eeCancelledSet(cand.map(c => c.order_name));
+    cand = cand.filter(c => !candCancelled.has(String(c.order_name || '').replace('#', '').trim()));
     // (1) COD only.
     const finRows = cand.length ? await chunkedIn('orders', 'id, financial_status', 'id', cand.map(c => c.order_id)) : [];
     const finById = {}; finRows.forEach(o => { finById[String(o.id)] = (o.financial_status || '').toLowerCase(); });
     cand = cand.filter(c => !PREPAID_STATUSES.includes(finById[String(c.order_id)] || ''));
     // (4) ≥1 of the customer's last 3 PRIOR orders not delivered.
     const phones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
-    const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, phone, bucket, created_at', 'phone', phones) : [];
+    const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, order_name, phone, bucket, created_at', 'phone', phones) : [];
+    // EasyEcom-cancelled prior orders read as active in order_buckets (Shopify lag) — treat them as cancelled
+    // so a customer whose only "non-delivered" prior order was actually cancelled isn't flagged repeat-risk.
+    const histCancelled = await eeCancelledSet(hist.map(h => h.order_name));
+    const nkn = n => String(n || '').replace('#', '').trim();
     const byPhone = {}; hist.forEach(h => { (byPhone[h.phone] = byPhone[h.phone] || []).push(h); });
+    const TERMINAL = new Set(['delivered', 'rto', 'cancelled']);                 // final states → not "in-flight"
+    const isCancelled = h => h.bucket === 'cancelled' || histCancelled.has(nkn(h.order_name));   // Shopify OR EasyEcom cancel
     return cand.filter(c => {
         const all = byPhone[c.phone] || [];
         c.orders_count = all.length;
+        // Reason `recent_undelivered` — ≥1 of the customer's last 3 PRIOR orders not delivered.
         const last3Prior = all
             .filter(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at))
             .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
             .slice(0, 3);
-        return last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket));
+        // Reliability from the last 3 orders (last3Prior[0] = most recent). RTO counts as "not delivered" (a
+        // real failure) → it triggers a hold. EXCEPTION (don't hold on the history reasons): the customer HAS
+        // 1–2 delivered in the last 3 AND their latest or 2nd-latest order is an RTO — treated as a one-off RTO
+        // for an otherwise-delivering customer. (All-3-delivered has no "not delivered" order, so never holds.)
+        const dCount    = last3Prior.filter(h => h.bucket === 'delivered').length;
+        const recentRTO = (last3Prior[0] && last3Prior[0].bucket === 'rto') || (last3Prior[1] && last3Prior[1].bucket === 'rto');
+        const reliable  = (dCount === 1 || dCount === 2) && recentRTO;
+        // Reason `recent_undelivered` — ≥1 of the last 3 not delivered (RTO included), unless reliable.
+        const rRecent   = !reliable && last3Prior.some(h => h.bucket !== 'delivered' && !isCancelled(h));
+        // Reason `in_flight` — the customer has ANOTHER order still non-terminal (a live/pending delivery), unless reliable.
+        const rInflight = !reliable && all.some(h => h.order_id !== c.order_id && !TERMINAL.has(h.bucket) && !isCancelled(h));
+        // Reason `high_value` — this order is ₹1500 and above.
+        const rValue    = Number(c.total_price || 0) >= 1500;
+        const reasons = [];
+        if (rInflight) reasons.push('in_flight');
+        if (rRecent)   reasons.push('recent_undelivered');
+        if (rValue)    reasons.push('high_value');
+        c.reasons = reasons;
+        // Dashboard (anyReason): return the whole tagged base — /support/queue filters it. Auto-hold cron:
+        // qualify by ANY of the 3 reasons (so high-value / in-flight orders auto-hold too, matching the panel).
+        return anyReason ? true : reasons.length > 0;
     });
 }
 
@@ -205,12 +279,16 @@ router.get('/support/queue', async (req, res) => {
             const all = ids.length ? await chunkedIn('order_buckets', SEL, 'order_id', ids) : [];
             rows = all.filter(r => !UNDELIVERED_BUCKETS.includes(r.bucket))
                 .sort((a, b) => (b.msg91_confirmed === true) - (a.msg91_confirmed === true) || new Date(a.created_at) - new Date(b.created_at));
-        } else { // repeat — shared with the Shopify auto-hold so the two never diverge (see findRepeatCandidates).
-            rows = await findRepeatCandidates({ fromISO, toISO });
+        } else { // repeat — reason-tagged COD/pre-pickup base (see findRepeatCandidates); shown/filtered below.
+            rows = await findRepeatCandidates({ fromISO, toISO, skipDispatchFilter: true, anyReason: true });
+            rows = rows.filter(r => !r._moved);   // orders the courier already took are gone — drop before enriching
         }
 
-        const notes = await notesByOrder(rows.map(r => r.order_id));
-        rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; });
+        const [notes, scans] = await Promise.all([
+            notesByOrder(rows.map(r => r.order_id)),
+            scanTimesByOrder(rows.map(r => r.order_id)),
+        ]);
+        rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; r.last_scan_at = scans[r.order_id] || null; });
         // Repeat tab: attach hold state + EasyEcom-import state so the panel offers the RIGHT control —
         // Shopify hold only while the order is still upstream of EasyEcom; once imported into EasyEcom the
         // Shopify hold is pointless, so offer an EasyEcom hold instead.
@@ -222,14 +300,27 @@ router.get('/support/queue', async (req, res) => {
             const eeBy = {}; eeRows.forEach(e => { eeBy[nk(e.reference_code)] = e; });
             const eeHoldRows = names.length ? await chunkedIn('order_marks_ecom', 'order_name', 'order_name', names, q => q.eq('mark_type', 'ee_hold')) : [];
             const eeHeld = new Set(eeHoldRows.map(m => nk(m.order_name)));
+            // EasyEcom's text `order_status` often stays "Open"/"Shipped" while the item is actually On Hold, so
+            // the authoritative held signal is `raw_data.order_status_id = 44` — without this, panel-held orders
+            // showed a "Hold" button instead of "Unhold" and were dropped as untouched-dispatched.
+            const eeHoldIdRows = names.length ? await chunkedIn('b2c_order_easycom', 'reference_code', 'reference_code', names, q => q.filter('raw_data->>order_status_id', 'eq', '44')) : [];
+            const eeHeldById = new Set(eeHoldIdRows.map(r => nk(r.reference_code)));
             rows.forEach(r => {
                 const k = nk(r.order_name);
                 r.shopify_hold = holds[k] || null;
                 const ee = eeBy[k];
                 r.in_ee = !!ee;                                                   // imported into EasyEcom?
                 r.easyecom_order_id = ee ? String(ee.order_id) : null;
-                r.ee_hold = eeHeld.has(k) || /hold/i.test((ee && ee.order_status) || '');   // already held in EasyEcom?
+                r.ee_hold = eeHeld.has(k) || eeHeldById.has(k) || /hold/i.test((ee && ee.order_status) || '');   // already held in EasyEcom?
             });
+            // Show a candidate if it matches ≥1 call-reason (in_flight / recent_undelivered / high_value) OR the
+            // team is already working it (held on EasyEcom/Shopify — incl. a failed hold — or has agent notes).
+            // MOVED orders were already dropped above. Untouched, no-reason orders (e.g. a first-time low-value
+            // COD customer) fall away.
+            rows = rows.filter(r => (r.reasons && r.reasons.length > 0)
+                || r.ee_hold
+                || (r.shopify_hold && (r.shopify_hold.status === 'held' || r.shopify_hold.status === 'failed'))
+                || r.note_count > 0);
         }
         res.json({ success: true, tab, rows: rows.slice(0, 1500), lock: await lockState() });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
@@ -271,7 +362,7 @@ router.get('/support/order/:orderId', async (req, res) => {
         // stored phone format varies per order (+91…, bare 10-digit, spaced). Exact-match misses them.
         const last10 = String(b.phone || '').replace(/\D/g, '').slice(-10);
         const custEmail = String(b.email || '').trim();
-        const CUST_SEL = 'order_id, order_name, bucket, created_at, total_price, tracking_status, courier, phone, email';
+        const CUST_SEL = 'order_id, order_name, bucket, created_at, total_price, tracking_status, courier, awb_number, phone, email';
         const [items, addr, tracking, calls, notes, contactsAll, custByPhone, custByEmail] = await Promise.all([
             supabase.from('order_line_items').select('title, variant_title, sku, quantity, price').eq('order_id', oid),
             supabase.from('order_shipping_addresses').select('*').eq('order_id', oid).maybeSingle(),
@@ -286,6 +377,13 @@ router.get('/support/order/:orderId', async (req, res) => {
         const custMap = new Map();
         [...(custByPhone.data || []), ...(custByEmail.data || [])].forEach(o => { if (!custMap.has(o.order_id)) custMap.set(o.order_id, o); });
         const custOrders = { data: [...custMap.values()].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 25) };
+        // Reflect EasyEcom cancellations Shopify hasn't synced yet — an order cancelled in EasyEcom still reads
+        // as active (bucket order_to_dispatch) in order_buckets, which misleads the customer-history table. Show
+        // it as cancelled so the agent isn't misguided into calling/holding a dead order.
+        const eeCanc = await eeCancelledSet([...custOrders.data.map(o => o.order_name), b.order_name]);
+        const nkn = n => String(n || '').replace('#', '').trim();
+        if (eeCanc.has(nkn(b.order_name))) b.bucket = 'cancelled';
+        custOrders.data.forEach(o => { if (eeCanc.has(nkn(o.order_name))) o.bucket = 'cancelled'; });
         // MSG91 thread by phone (last 20).
         let msg91 = [];
         if (b.phone) {

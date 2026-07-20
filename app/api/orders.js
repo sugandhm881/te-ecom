@@ -370,21 +370,43 @@ router.get('/ee-hold-marks', async (req, res) => {
     // hold_type ('ee' | 'shopify' | 'both'), so the HOLD chip shows on EVERY dashboard for any hold —
     // no dashboard ever shows a held order as if it's actionable.
     const sinceHold = moment().subtract(60, 'days').toISOString();
-    const [markRes, shopRes, eeRes] = await Promise.all([
+    const [markRes, shopRes, eeRes, eeIdRes] = await Promise.all([
         supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold'),
         supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'shopify_hold'),
         supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status').ilike('order_status', '%hold%').gte('order_date', sinceHold).limit(2000),
+        // EasyEcom's text `order_status` is UNRELIABLE for holds — when an order is held from the panel it
+        // often stays "Open"/"Shipped" while only the item is flagged, so the ilike above catches ~4 of ~65
+        // real holds. The authoritative signal is `raw_data.order_status_id = 44` (On Hold) — filter on it
+        // directly so panel-held orders actually surface. (Stale-cancelled id=44 rows are dropped below.)
+        supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status').filter('raw_data->>order_status_id', 'eq', '44').gte('order_date', sinceHold).limit(2000),
     ]);
     if (markRes.error) return res.status(500).json({ success: false, error: markRes.error.message });
     const nk = n => String(n || '').replace('#', '').trim();
     const map = {};
-    // EasyEcom holds (local mark + synced "On Hold") → type 'ee'.
+    // EasyEcom holds (local mark + synced "On Hold" text + order_status_id=44) → type 'ee'. Skip cancelled rows.
     (markRes.data || []).forEach(m => { const k = nk(m.order_name); if (k) map[k] = { order_name: k, hold_type: 'ee', note: m.note, created_by: m.created_by, created_at: m.created_at }; });
-    (eeRes.data || []).forEach(r => { const k = nk(r.reference_code || r.store_order_id); if (k && !map[k]) map[k] = { order_name: k, hold_type: 'ee', note: 'Held in EasyEcom', created_by: null, created_at: null }; });
+    [...(eeRes.data || []), ...(eeIdRes.data || [])]
+        .filter(r => !/cancel/i.test(r.order_status || ''))
+        .forEach(r => { const k = nk(r.reference_code || r.store_order_id); if (k && !map[k]) map[k] = { order_name: k, hold_type: 'ee', note: 'Held in EasyEcom', created_by: null, created_at: null }; });
     // Shopify holds → type 'shopify' (or 'both' if also held in EasyEcom).
     (shopRes.data || []).forEach(m => { const k = nk(m.order_name); if (!k) return;
         if (map[k]) map[k].hold_type = 'both';
         else map[k] = { order_name: k, hold_type: 'shopify', note: m.note, created_by: m.created_by, created_at: m.created_at }; });
+    // Drop holds for orders that have since been CANCELLED — a cancelled order can't ship, so its hold is
+    // moot and a HOLD chip on it only misguides. Cancellation truth = `orders.cancelled_at` (the SAME source
+    // the Orders dashboard uses for its "Cancelled" badge; `enriched_orders_ecom.cancelled_at` lags because
+    // the data-sync skips terminal orders). This makes the chip disappear on EVERY dashboard reading /ee-hold-marks.
+    const heldNames = Object.keys(map);
+    if (heldNames.length) {
+        const variants = heldNames.flatMap(k => ['#' + k, k]);
+        const cancelled = new Set();
+        for (let i = 0; i < variants.length; i += 300) {
+            const { data } = await supabase.from('orders')
+                .select('name, cancelled_at').in('name', variants.slice(i, i + 300)).not('cancelled_at', 'is', null);
+            (data || []).forEach(r => cancelled.add(nk(r.name)));
+        }
+        cancelled.forEach(k => { delete map[k]; });
+    }
     res.json({ success: true, marks: Object.values(map) });
 });
 

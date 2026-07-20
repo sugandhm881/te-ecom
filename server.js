@@ -96,9 +96,10 @@ const _VIEW_PERMS = [
     [/^\/fba\//i, 'amazon-fba'],
     [/^\/ops-control/i, 'ops-control'],
     [/^\/ndr-action/i, ['ops-control', 'delivery-perf']],   // NDR reattempt/return — both ops surfaces use it
-    // Shared shipment-detail lookup — used by BOTH the Delivery Performance table and the Silent-RTO & SLA
-    // expandable rows, so allow either permission. Must precede the general /delivery-performance rule.
-    [/^\/delivery-performance\/shipment/i, ['delivery-perf', 'claims-sla']],
+    // Shared shipment-detail lookup — read-only courier tracking used by the Delivery Performance table, the
+    // Silent-RTO & SLA rows, AND the Customer Support "click AWB → live tracking" modal, so allow those views'
+    // permissions. Must precede the general /delivery-performance rule.
+    [/^\/delivery-performance\/shipment/i, ['delivery-perf', 'claims-sla', 'support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts']],
     [/^\/delivery-performance/i, 'delivery-perf'],
     [/^\/order-marks/i, 'delivery-perf'],
     [/^\/likely-fake-insight/i, 'delivery-perf'],

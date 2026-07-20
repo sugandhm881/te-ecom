@@ -269,11 +269,31 @@ async function runAutoReviewCheck(failedOnly = false) {
 // ─────────────────────────────────────────────────────
 
 async function runBulkSend(orders) {
-    console.log(`[AutoReview] Bulk send starting — ${orders.length} orders`);
+    // Idempotency guard — re-check each order's CURRENT status right before sending, so an order that was
+    // already solicited ('sent') or permanently rejected (4xx / ineligible) since the report was built is
+    // never hit at Amazon again. The eligibility check already excludes these at report time; this closes
+    // the timing gap (stale 24h-old snapshot, a double "yes", or cron+manual retry overlapping).
+    let toSend = orders;
+    try {
+        const ids = [...new Set(orders.map(o => o.amazon_order_id))];
+        const done = new Set();
+        for (let i = 0; i < ids.length; i += 300) {
+            const { data } = await supabase.from('amazon_review_requests')
+                .select('order_id, solicitation_status, response_code').in('order_id', ids.slice(i, i + 300));
+            (data || []).forEach(r => {
+                if (r.solicitation_status === 'sent' || r.solicitation_status === 'ineligible' ||
+                    (r.solicitation_status === 'failed' && isPermanentCode(r.response_code))) done.add(r.order_id);
+            });
+        }
+        const skipped = orders.filter(o => done.has(o.amazon_order_id)).length;
+        if (skipped) { toSend = orders.filter(o => !done.has(o.amazon_order_id)); console.log(`[AutoReview] Send-time re-check: skipping ${skipped} already-done order(s) → no duplicate Amazon call`); }
+    } catch (e) { console.error('[AutoReview] send-time re-check failed — proceeding with full list:', e.message); }
+
+    console.log(`[AutoReview] Bulk send starting — ${toSend.length} orders`);
     let sent = 0, failed = 0;
     const failures = [];
 
-    for (const order of orders) {
+    for (const order of toSend) {
         try {
             await makeSignedApiRequest({
                 method: 'POST',
