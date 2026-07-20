@@ -890,7 +890,7 @@ function renderAllDashboard() {
 
     // 4b. Hold-status filter (EasyEcom On Hold)
     if (activeHoldFilter !== 'All') {
-        o = o.filter(order => activeHoldFilter === 'OnHold' ? !!order.eeHold : !order.eeHold);
+        o = o.filter(order => { const held = !!(order.eeHold || order.shopifyHold); return activeHoldFilter === 'OnHold' ? held : !held; });
     }
 
     // 4c. Payment-method filter (COD vs Prepaid)
@@ -1210,7 +1210,7 @@ function renderOrders(o) {
                 ${codBadge}
             </td>
             <td class="p-4 font-medium text-slate-900">${formatCurrency(order.total)}</td>
-            <td class="p-4 ord-status-cell"><span class="px-3 py-1 text-xs font-semibold rounded-full whitespace-nowrap ${getStatusBadge(order.status)}">${order.status}</span>${order.eeHold ? ' <span class="ord-hold-chip px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-700 rounded-full border border-amber-200 whitespace-nowrap">⏸ HOLD</span>' : ''}</td>
+            <td class="p-4 ord-status-cell"><span class="px-3 py-1 text-xs font-semibold rounded-full whitespace-nowrap ${getStatusBadge(order.status)}">${order.status}</span>${ordHoldChipHtml(order)}</td>
             <td class="p-4 text-right">
                  <button class="text-slate-400 hover:text-indigo-600 focus:outline-none" onclick="toggleDetails('${order.id}')">
                     <svg class="w-5 h-5 transform transition-transform duration-200" id="arrow-${order.id}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
@@ -1448,7 +1448,7 @@ function refreshOrderDetailRow(orderId) {
     // Patch the main row's status cell chip too.
     const row = document.querySelector(`tr[data-order-id="${(window.CSS && CSS.escape) ? CSS.escape(String(orderId)) : String(orderId)}"]`);
     const cell = row && row.querySelector('.ord-status-cell');
-    if (cell) { const chip = cell.querySelector('.ord-hold-chip'); if (order && order.eeHold) { if (!chip) cell.insertAdjacentHTML('beforeend', ' <span class="ord-hold-chip px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-700 rounded-full border border-amber-200 whitespace-nowrap">⏸ HOLD</span>'); } else if (chip) chip.remove(); }
+    if (cell) { const chip = cell.querySelector('.ord-hold-chip'); if (chip) chip.remove(); const html = ordHoldChipHtml(order); if (html) cell.insertAdjacentHTML('beforeend', html); }
 }
 
 // ── Change an order's fulfilment warehouse in EasyEcom — own modal (routes a rejected order out) ──
@@ -3785,7 +3785,7 @@ async function supOrderModal(orderId){
             return `<tr class="supd-cust-row ${cur?'bg-indigo-50/60':'hover:bg-slate-50 cursor-pointer'}" data-oid="${escapeHtml(co.order_id)}">
             <td class="py-2 pr-4 border-b border-slate-100 font-mono font-semibold text-indigo-700">${escapeHtml(co.order_name||co.order_id)}${cur?' <span class="text-[10px] text-slate-400 font-sans font-normal">(this order)</span>':''}</td>
             <td class="py-2 pr-4 border-b border-slate-100 text-xs tabular-nums">${_dmy(co.created_at)}</td>
-            <td class="py-2 pr-4 border-b border-slate-100">${supBadge(co.bucket)}</td>
+            <td class="py-2 pr-4 border-b border-slate-100">${supBadge(co.bucket)}${eeHoldChip(co.order_name)}</td>
             <td class="py-2 pr-4 border-b border-slate-100 text-xs text-slate-500">${escapeHtml(co.tracking_status||'—')}</td>
             <td class="py-2 pr-4 border-b border-slate-100 text-xs">${escapeHtml(co.courier||'—')}</td>
             <td class="py-2 pr-4 border-b border-slate-100 font-semibold tabular-nums">₹${Number(co.total_price||0).toLocaleString('en-IN')}</td></tr>`; }).join('')}</tbody>
@@ -4711,8 +4711,18 @@ async function eeHoldRefresh(){ if(Date.now()-_eeHoldAt<60000) return _eeHold;
   }catch(_){}
   return _eeHold; }
 function eeHoldChip(name){ const h=_eeHold[String(name||'').replace('#','').trim()]; if(!h) return '';
-  const tip=('On hold in EasyEcom'+(h.note?': '+h.note:'')+(h.created_by?' — '+h.created_by:'')).replace(/"/g,'&quot;');
-  return ` <span class="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-orange-100 text-orange-700 whitespace-nowrap align-middle" title="${tip}">⏸ HOLD</span>`; }
+  const t=h.hold_type||'ee';
+  const where = t==='shopify' ? 'Held on Shopify (won\'t ship / import to EasyEcom)' : t==='both' ? 'Held on Shopify + EasyEcom' : 'On hold in EasyEcom';
+  const label = t==='shopify' ? '🔒 SHOPIFY HOLD' : t==='both' ? '🔒 HOLD (SHOPIFY+EE)' : '⏸ EE HOLD';
+  const cls = t==='ee' ? 'bg-orange-100 text-orange-700' : 'bg-rose-100 text-rose-700';
+  const tip=(where+(h.note?': '+h.note:'')+(h.created_by?' — '+h.created_by:'')).replace(/"/g,'&quot;');
+  return ` <span class="inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-bold ${cls} whitespace-nowrap align-middle" title="${tip}">${label}</span>`; }
+// Orders-dashboard hold chip from the BAKED order.eeHold / order.shopifyHold (keeps the .ord-hold-chip
+// class the live hold/unhold updater targets). Shows either/both hold types so a held order never reads normal.
+function ordHoldChipHtml(order){ const ee=!!(order&&order.eeHold), sh=!!(order&&order.shopifyHold); if(!ee&&!sh) return '';
+  const label = sh&&ee ? '🔒 HOLD (SHOP+EE)' : sh ? '🔒 SHOPIFY HOLD' : '⏸ EE HOLD';
+  const cls = sh ? 'bg-rose-100 text-rose-700 border-rose-200' : 'bg-amber-100 text-amber-700 border-amber-200';
+  return ` <span class="ord-hold-chip px-2 py-0.5 text-[10px] font-bold ${cls} rounded-full border whitespace-nowrap">${label}</span>`; }
 let _usersWired = false;
 function usersInit(){
   if(!_usersWired){

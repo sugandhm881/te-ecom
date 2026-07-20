@@ -250,6 +250,11 @@ router.get('/get-orders', async (req, res) => {
             holdByName[m.order_name] = { reason: m.note || '', by: m.created_by || null, at: m.created_at || null };
         });
         const staleMarks = [];
+        // Shopify fulfillment holds (upstream of EasyEcom) — baked in too so the Orders dashboard shows a
+        // hold chip / filters them, same as EE holds. Never shows a Shopify-held order as if it's normal.
+        const shopHoldByName = {};
+        const { data: shopHoldRows } = await supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'shopify_hold');
+        (shopHoldRows || []).forEach(m => { shopHoldByName[m.order_name] = { reason: m.note || '', by: m.created_by || null, at: m.created_at || null }; });
 
         // ── 4. ENRICH WITH SUPABASE WORKFLOW CACHE ──────────
         allOrders = allOrders.map(order => {
@@ -332,6 +337,7 @@ router.get('/get-orders', async (req, res) => {
                 if (pickedUp) staleMarks.push(_hk);   // held via our button but now picked up → drop stale mark
                 else order.eeHold = _mark;            // still holdable → show as ON HOLD
             }
+            if (shopHoldByName[_hk]) order.shopifyHold = shopHoldByName[_hk];   // Shopify fulfillment hold
 
             return order;
         });
@@ -359,17 +365,25 @@ router.get('/get-orders', async (req, res) => {
 //  fresh even where responses are cached.) Any authenticated user may read it.
 router.get('/ee-hold-marks', async (req, res) => {
     // Held = our local ee_hold mark OR EasyEcom's synced order_status "On Hold" (held directly in the
-    // panel). Merge both so the ⏸ HOLD chip shows on every dashboard for either kind of hold.
+    // panel) OR a Shopify fulfillment hold (shopify_hold mark). Merge all three, each tagged with
+    // hold_type ('ee' | 'shopify' | 'both'), so the HOLD chip shows on EVERY dashboard for any hold —
+    // no dashboard ever shows a held order as if it's actionable.
     const sinceHold = moment().subtract(60, 'days').toISOString();
-    const [markRes, eeRes] = await Promise.all([
+    const [markRes, shopRes, eeRes] = await Promise.all([
         supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold'),
+        supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'shopify_hold'),
         supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status').ilike('order_status', '%hold%').gte('order_date', sinceHold).limit(2000),
     ]);
     if (markRes.error) return res.status(500).json({ success: false, error: markRes.error.message });
     const nk = n => String(n || '').replace('#', '').trim();
     const map = {};
-    (markRes.data || []).forEach(m => { const k = nk(m.order_name); if (k) map[k] = { order_name: k, note: m.note, created_by: m.created_by, created_at: m.created_at }; });
-    (eeRes.data || []).forEach(r => { const k = nk(r.reference_code || r.store_order_id); if (k && !map[k]) map[k] = { order_name: k, note: 'Held in EasyEcom', created_by: null, created_at: null }; });
+    // EasyEcom holds (local mark + synced "On Hold") → type 'ee'.
+    (markRes.data || []).forEach(m => { const k = nk(m.order_name); if (k) map[k] = { order_name: k, hold_type: 'ee', note: m.note, created_by: m.created_by, created_at: m.created_at }; });
+    (eeRes.data || []).forEach(r => { const k = nk(r.reference_code || r.store_order_id); if (k && !map[k]) map[k] = { order_name: k, hold_type: 'ee', note: 'Held in EasyEcom', created_by: null, created_at: null }; });
+    // Shopify holds → type 'shopify' (or 'both' if also held in EasyEcom).
+    (shopRes.data || []).forEach(m => { const k = nk(m.order_name); if (!k) return;
+        if (map[k]) map[k].hold_type = 'both';
+        else map[k] = { order_name: k, hold_type: 'shopify', note: m.note, created_by: m.created_by, created_at: m.created_at }; });
     res.json({ success: true, marks: Object.values(map) });
 });
 
