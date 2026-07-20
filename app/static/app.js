@@ -1316,10 +1316,10 @@ function buildOrderDetailHtml(order) {
                     <div class="pt-2 border-t border-slate-100">
                         <div class="flex justify-between items-center p-2.5 rounded-lg bg-amber-50 border border-amber-200">
                             <div>
-                                <p class="text-sm font-bold text-amber-700">⏸ Order is ON HOLD</p>
+                                <p class="text-sm font-bold text-amber-700">⏸ On hold in EasyEcom</p>
                                 <p class="text-[10px] text-amber-600 mt-0.5">${meta || 'Held in EasyEcom'}</p>
                             </div>
-                            <button onclick="holdOrderModal('${escapeHtml(String(order.id))}', 'unhold')" class="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shadow-sm whitespace-nowrap">▶ Unhold</button>
+                            <button onclick="holdOrderModal('${escapeHtml(String(order.id))}', 'unhold')" class="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shadow-sm whitespace-nowrap">▶ Unhold EasyEcom</button>
                         </div>
                     </div>`;
                         }
@@ -1330,10 +1330,10 @@ function buildOrderDetailHtml(order) {
                         return `
                     <div class="flex justify-between items-center pt-2 border-t border-slate-100">
                         <div>
-                            <p class="text-sm font-semibold text-slate-800">Hold Order</p>
+                            <p class="text-sm font-semibold text-slate-800">Hold on EasyEcom</p>
                             <p class="text-[10px] text-slate-400 mt-0.5">Pause processing in EasyEcom (before manifest only)</p>
                         </div>
-                        <button onclick="holdOrderModal('${escapeHtml(String(order.id))}', 'hold')" class="px-3 py-1.5 bg-amber-500 text-white text-xs font-semibold rounded-lg hover:bg-amber-600 shadow-sm">⏸ Hold</button>
+                        <button onclick="holdOrderModal('${escapeHtml(String(order.id))}', 'hold')" class="px-3 py-1.5 bg-amber-500 text-white text-xs font-semibold rounded-lg hover:bg-amber-600 shadow-sm whitespace-nowrap">⏸ Hold EasyEcom</button>
                     </div>`;
                     })() : ''}
                 </div>
@@ -1357,6 +1357,21 @@ function buildOrderDetailHtml(order) {
                  <button onclick="changeWarehouseModal('${escapeHtml(String(order.id))}')" class="px-3 py-1.5 bg-indigo-600 text-white text-xs font-semibold rounded-lg hover:bg-indigo-700 shadow-sm whitespace-nowrap">🏬 Move</button></div></div>`;
     }
 
+    // Shopify fulfillment hold — SEPARATE control from the EasyEcom hold, shown for every order (works
+    // upstream of EasyEcom). Held → Unhold Shopify; not held + still pre-pickup → Hold on Shopify.
+    let shopifyHoldHtml = '';
+    { const sh = order.shopifyHold;
+      if (sh) {
+        const sm = [sh.reason ? `“${escapeHtml(sh.reason)}”` : '', sh.by ? 'by ' + escapeHtml(sh.by) : ''].filter(Boolean).join(' · ');
+        shopifyHoldHtml = `<div class="bg-white p-4 rounded-xl border border-rose-200 shadow-sm mt-2"><div class="flex justify-between items-center">
+             <div><p class="text-sm font-bold text-rose-700">🔒 On hold in Shopify</p><p class="text-[10px] text-rose-500 mt-0.5">${sm || "Won't ship / import to EasyEcom"}</p></div>
+             <button onclick="shopifyHoldAction('${escapeHtml(String(order.id))}','unhold')" class="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shadow-sm whitespace-nowrap">▶ Unhold Shopify</button></div></div>`;
+      } else if (order.holdable !== false) {
+        shopifyHoldHtml = `<div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mt-2"><div class="flex justify-between items-center">
+             <div><p class="text-sm font-semibold text-slate-800">Hold on Shopify</p><p class="text-[10px] text-slate-400 mt-0.5">Stops it shipping / importing to EasyEcom</p></div>
+             <button onclick="shopifyHoldAction('${escapeHtml(String(order.id))}','hold')" class="px-3 py-1.5 bg-slate-800 text-white text-xs font-semibold rounded-lg hover:bg-slate-700 shadow-sm whitespace-nowrap">🔒 Hold Shopify</button></div></div>`;
+      } }
+
     return `
         <div class="ord-detail-fade p-6 grid grid-cols-1 md:grid-cols-2 gap-8 border-t border-slate-100">
             <div class="space-y-4">
@@ -1373,8 +1388,28 @@ function buildOrderDetailHtml(order) {
                     <div class="max-h-40 overflow-y-auto pr-2 custom-scrollbar">${itemsHtml}</div>
                 </div>
             </div>
-            <div>${workflowHtml}${standaloneWhHtml}</div>
+            <div>${workflowHtml}${standaloneWhHtml}${shopifyHoldHtml}</div>
         </div>`;
+}
+
+// ── Hold / Release an order on SHOPIFY — separate control from the EasyEcom hold. Confirm + shared endpoint.
+async function shopifyHoldAction(orderName, mode) {
+    const isHold = mode === 'hold';
+    const ok = await supConfirm({
+        title: isHold ? 'Hold on Shopify?' : 'Release Shopify hold?',
+        message: isHold ? `${orderName} will be held on Shopify — it won't ship or import to EasyEcom until released.`
+                        : `${orderName} will be released and can ship / import to EasyEcom. Do this only after confirming with the customer.`,
+        confirmLabel: isHold ? 'Hold' : 'Release' });
+    if (!ok) return;
+    try {
+        const r = await fetch(isHold ? '/api/shopify-hold' : '/api/shopify-unhold', { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ orderName }) });
+        const d = await r.json(); if (!r.ok || !d.success) throw new Error(d.message || 'Failed');
+        showNotification(isHold ? `${orderName} held on Shopify` : `${orderName} released from Shopify hold`);
+        const order = _ordersById.get(String(orderName));
+        if (order) order.shopifyHold = isHold ? { reason: 'Repeat COD — awaiting customer confirmation', by: (currentUser && currentUser.email) || null } : null;
+        _eeHoldAt = 0;   // bust the hold-chip cache so chips refresh everywhere
+        if (typeof silentRefreshOrders === 'function') silentRefreshOrders();
+    } catch (e) { showNotification(e.message, true); }
 }
 
 // ── Hold / Unhold an order in EasyEcom — custom in-app modal (no browser prompt) ──
@@ -3525,10 +3560,10 @@ function supQueueTable(){
 function supHoldControl(r){
   if(_supTab!=='repeat') return '';
   const h=r.shopify_hold;
-  if(h && h.status==='held') return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''} — won't ship / import to EasyEcom until released">🔒 On hold${h.by==='auto'?' (auto)':''}</span> <button class="sup-unhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}">Release</button>`;
+  if(h && h.status==='held') return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''} — won't ship / import to EasyEcom until released">🔒 Shopify hold${h.by==='auto'?' (auto)':''}</span> <button class="sup-unhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}">Release Shopify</button>`;
   if(r.bucket !== 'order_to_dispatch') return '';   // past pickup → can't hold, call only
   const failed = h && h.status==='failed';
-  return `${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="Hold failed: ${escapeHtml(h.reason||'')}">⚠️ hold failed</span> `:''}<button class="sup-hold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="Hold this order on Shopify (stops it shipping / importing to EasyEcom)">🔒 Hold</button>`;
+  return `${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="Shopify hold failed: ${escapeHtml(h.reason||'')}">⚠️ Shopify hold failed</span> `:''}<button class="sup-hold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="Hold this order on Shopify (stops it shipping / importing to EasyEcom)">🔒 Hold Shopify</button>`;
 }
 async function supDoHold(oid,oname,btn){
   btn.disabled=true; const t=btn.innerHTML; btn.textContent='Holding…';

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const moment = require('moment-timezone');
 const { supabase } = require('../supabase');
+const shopifyHold = require('./shopify_hold');
 
 // ─────────────────────────────────────────────────────
 // NORMALIZE: Supabase Shopify order → dashboard format
@@ -385,6 +386,39 @@ router.get('/ee-hold-marks', async (req, res) => {
         if (map[k]) map[k].hold_type = 'both';
         else map[k] = { order_name: k, hold_type: 'shopify', note: m.note, created_by: m.created_by, created_at: m.created_at }; });
     res.json({ success: true, marks: Object.values(map) });
+});
+
+// ── Shopify fulfillment hold / release — SHARED (available from any dashboard, like the EasyEcom hold).
+// Separate from the EasyEcom hold so each system is controlled independently. Takes the order NAME
+// ("TE25-…"); resolves the Shopify numeric order id from the `orders` table (or accepts orderId directly).
+async function resolveShopifyOrderId(orderName, orderId) {
+    if (orderId && /^\d+$/.test(String(orderId))) return String(orderId);
+    const clean = String(orderName || '').replace('#', '').trim();
+    if (!clean) return null;
+    const { data } = await supabase.from('orders').select('id, name').ilike('name', '%' + clean).limit(1).maybeSingle();
+    return data ? String(data.id) : null;
+}
+router.post('/shopify-hold', async (req, res) => {
+    try {
+        const { orderName, orderId, reason } = req.body || {};
+        if (!orderName) return res.status(400).json({ success: false, message: 'orderName is required.' });
+        const sid = await resolveShopifyOrderId(orderName, orderId);
+        if (!sid) return res.status(404).json({ success: false, message: `Shopify order not found for ${orderName}.` });
+        const out = await shopifyHold.holdOrderManual(orderName, sid, req.user && req.user.sub, reason);
+        if (!out.ok) return res.status(502).json({ success: false, message: out.error || 'Hold failed.' });
+        res.json({ success: true, status: 'held' });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+router.post('/shopify-unhold', async (req, res) => {
+    try {
+        const { orderName, orderId } = req.body || {};
+        if (!orderName) return res.status(400).json({ success: false, message: 'orderName is required.' });
+        const sid = await resolveShopifyOrderId(orderName, orderId);
+        if (!sid) return res.status(404).json({ success: false, message: `Shopify order not found for ${orderName}.` });
+        const out = await shopifyHold.releaseOrder(orderName, sid, req.user && req.user.sub);
+        if (!out.ok) return res.status(502).json({ success: false, message: out.error || 'Release failed.' });
+        res.json({ success: true, status: 'released' });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 module.exports = router;
