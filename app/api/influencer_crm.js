@@ -35,7 +35,9 @@ async function logActivity(influencerId, type, description) {
 const num = v => (v === '' || v === null || v === undefined) ? null : Number(v);
 const cleanHandle = h => String(h || '').replace(/^@/, '').trim().toLowerCase();
 
-const STATUSES = ['not_contacted', 'reached_out', 'in_discussion', 'partnered', 'rejected'];
+// Full outreach lifecycle — mirrors the statuses the original standalone Influencer CRM writes (the shared
+// DB already contains declined / not_replying / hold rows), so the portal can display AND set them all.
+const STATUSES = ['not_contacted', 'reached_out', 'in_discussion', 'partnered', 'not_replying', 'declined', 'rejected', 'hold'];
 
 // ── Dashboard summary ────────────────────────────────────────────────────────
 router.get('/inf/summary', async (req, res) => {
@@ -362,20 +364,36 @@ router.get('/inf/lists/:id', async (req, res) => {
         if (ids.length) {
             const [infs, vids] = await Promise.all([
                 supabase.from('influencers').select('id, instagram_handle, name, follower_count, niche, outreach_status, profile_image_url').in('id', ids),
-                supabase.from('influencer_videos').select('influencer_id, views, live_date, quoted_price, final_price, gst_applicable, payment_status').in('influencer_id', ids),
+                supabase.from('influencer_videos').select('influencer_id, views, likes, comments, shares, live_date, quoted_price, final_price, gst_applicable, payment_status, product_sent, email_sent, is_ad_run').in('influencer_id', ids),
             ]);
             const vidsBy = {};
             (vids.data || []).forEach(v => { (vidsBy[v.influencer_id] = vidsBy[v.influencer_id] || []).push(v); });
             members = (infs.data || []).map(i => {
                 const all = vidsBy[i.id] || [];
                 const inRange = range ? all.filter(v => v.live_date && v.live_date >= range.from && v.live_date <= range.to) : all;
-                const views = inRange.reduce((s, v) => s + (v.views || 0), 0);
+                const sum = (arr, k) => arr.reduce((s, v) => s + (Number(v[k]) || 0), 0);
+                const views = sum(inRange, 'views');
                 const quoted = all.reduce((s, v) => s + (Number(v.quoted_price) || 0), 0);
                 const finalP = all.reduce((s, v) => s + (Number(v.final_price) || Number(v.quoted_price) || 0), 0);
                 const gst = all.reduce((s, v) => s + (v.gst_applicable ? 0.18 * (Number(v.final_price) || Number(v.quoted_price) || 0) : 0), 0);
                 const spend = finalP + gst;
+                // Per-influencer workflow aggregates for the member table (image-one layout): payment = paid if
+                // every deliverable is paid, partial if some, else the raw status; booleans = "any deliverable".
+                const paidN = all.filter(v => String(v.payment_status || '').toLowerCase() === 'paid').length;
+                const payment = !all.length ? null
+                    : paidN === all.length ? 'paid'
+                    : paidN > 0 ? 'partial'
+                    : (all.find(v => v.payment_status) ? String(all[0].payment_status).toLowerCase() : 'unpaid');
                 totals.quoted += quoted; totals.final += finalP; totals.gst += gst; totals.spend += spend; totals.views += views;
-                return { ...i, videos: all.length, views_in_range: views, quoted, final: finalP, gst: Math.round(gst), spend: Math.round(spend), cpm: views > 0 ? Math.round((spend / views) * 1000) : null };
+                return {
+                    ...i, videos: all.length, views_in_range: views, quoted, final: finalP,
+                    gst: Math.round(gst), spend: Math.round(spend), cpm: views > 0 ? Math.round((spend / views) * 1000) : null,
+                    likes: sum(inRange, 'likes'), comments: sum(inRange, 'comments'), shares: sum(inRange, 'shares'),
+                    final_price: finalP, payment,
+                    product_sent: all.some(v => v.product_sent === true),
+                    email_sent: all.some(v => v.email_sent === true),
+                    ad_run: all.some(v => v.is_ad_run === true),
+                };
             }).sort((a, b) => (b.views_in_range - a.views_in_range));
         }
         totals.gst = Math.round(totals.gst); totals.spend = Math.round(totals.spend);

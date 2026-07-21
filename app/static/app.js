@@ -3652,19 +3652,31 @@ function supQueueTable(){
   c.querySelectorAll('.sup-eehold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoEeHold(b.dataset.oid,b.dataset.oname,b); }));
   c.querySelectorAll('.sup-eeunhold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoEeUnhold(b.dataset.oid,b.dataset.oname,b); }));
 }
+// "🔓 Unheld by <user> · <ago>" history chip — shown when a hold was placed then RELEASED by a human,
+// so an agent can see who released it (and when) instead of assuming it was never held. `by` is the
+// releaser's email (or 'auto'); prettify the email local-part into a name to match the note byline.
+function supPrettyUser(u){ if(!u) return ''; if(u==='auto') return 'auto'; const l=String(u).split('@')[0]; return l.replace(/[._]+/g,' ').replace(/\b\w/g,c=>c.toUpperCase()); }
+function supReleasedChip(h){
+  if(!(h && h.status==='released')) return '';
+  const who=supPrettyUser(h.by)||'someone', when=h.at?supRelTime(h.at):'';
+  const full=h.at?new Date(h.at).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'';
+  return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-500 border border-slate-200 whitespace-nowrap" title="Hold released by ${escapeHtml(h.by||'')}${full?' · '+full:''}">🔓 Unheld by ${escapeHtml(who)}${when?' · '+when:''}</span>`;
+}
 // Hold controls for the Repeat tab. Picks the RIGHT system: held-on-Shopify → Release Shopify;
 // held-on-EasyEcom → Unhold EasyEcom; else if the order is already imported into EasyEcom → Hold
-// EasyEcom (a Shopify hold is pointless once imported); else (still upstream) → Hold Shopify. Past-pickup
+// EasyEcom (a Shopify hold is pointless once imported); else (still upstream) → Hold Shopify. A hold that
+// was placed then human-RELEASED also shows the "🔓 Unheld by <user> · <ago>" history chip. Past-pickup
 // rows are call-only. Repeat tab only.
 function supHoldControl(r){
   if(_supTab!=='repeat') return '';
   const h=r.shopify_hold, oid=escapeHtml(r.order_id), oname=escapeHtml(r.order_name||'');
   if(h && h.status==='held') return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''} — won't ship / import to EasyEcom until released">🔒 Shopify hold${h.by==='auto'?' (auto)':''}</span> <button class="sup-unhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Release Shopify</button>`;
   if(r.ee_hold) return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="On hold in EasyEcom">⏸ EasyEcom hold</span> <button class="sup-eeunhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Unhold EasyEcom</button>`;
-  if(r.bucket !== 'order_to_dispatch') return '';   // past pickup → call only
-  if(r.in_ee) return `<button class="sup-eehold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-amber-500 text-white hover:bg-amber-600 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Order is already in EasyEcom — pause it there (before manifest)">⏸ Hold EasyEcom</button>`;
+  const rel=supReleasedChip(h);                      // history: was held, then released by a human (or auto)
+  if(r.bucket !== 'order_to_dispatch') return rel;   // past pickup → call only (still surface the release history)
+  if(r.in_ee) return `${rel?rel+' ':''}<button class="sup-eehold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-amber-500 text-white hover:bg-amber-600 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Order is already in EasyEcom — pause it there (before manifest)">⏸ Hold EasyEcom</button>`;
   const failed = h && h.status==='failed';
-  return `${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="Shopify hold failed: ${escapeHtml(h.reason||'')}">⚠️ Shopify hold failed</span> `:''}<button class="sup-hold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Not yet in EasyEcom — hold on Shopify (stops it importing / shipping)">🔒 Hold Shopify</button>`;
+  return `${rel?rel+' ':''}${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="Shopify hold failed: ${escapeHtml(h.reason||'')}">⚠️ Shopify hold failed</span> `:''}<button class="sup-hold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Not yet in EasyEcom — hold on Shopify (stops it importing / shipping)">🔒 Hold Shopify</button>`;
 }
 async function supDoHold(oid,oname,btn){
   btn.disabled=true; const t=btn.innerHTML; btn.textContent='Holding…';
@@ -8851,8 +8863,23 @@ function srvRenderResult(data) {
 // ═══════════════ INFLUENCER MARKETING CRM (port of the standalone Influencer CRM) ═══════════════
 // Views: inf-dashboard · inf-discover · inf-influencers · inf-lists · inf-calendar · inf-mentions
 async function infFetch(url, opts){ const r=await fetch(url,{...(opts||{}),headers:{'Content-Type':'application/json',...getAuthHeaders(),...((opts||{}).headers||{})}}); const d=await r.json().catch(()=>({})); if(!r.ok||d.success===false) throw new Error(d.error||d.message||('HTTP '+r.status)); return d; }
-const INF_STATUS={not_contacted:['Not contacted','bg-slate-100 text-slate-600'],reached_out:['Reached out','bg-sky-50 text-sky-700'],in_discussion:['In discussion','bg-amber-50 text-amber-700'],partnered:['Partnered','bg-emerald-50 text-emerald-700'],rejected:['Rejected','bg-rose-50 text-rose-600']};
+const INF_STATUS={not_contacted:['Not Contacted','bg-slate-100 text-slate-600'],reached_out:['Reached Out','bg-sky-50 text-sky-700'],in_discussion:['In Conversation','bg-violet-50 text-violet-700'],partnered:['Partnered','bg-emerald-50 text-emerald-700'],not_replying:['Not Replying','bg-amber-100 text-amber-700'],declined:['Declined','bg-rose-50 text-rose-600'],rejected:['Rejected','bg-red-100 text-red-700'],hold:['Hold','bg-yellow-100 text-yellow-800']};
 function infBadge(s){ const [l,c]=INF_STATUS[s]||[s||'—','bg-slate-100 text-slate-500']; return `<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap ${c}">${escapeHtml(l)}</span>`; }
+// Conditional colour formatting for a status <select> AFTER it's been upgraded by ecEnhanceSelect: tints the
+// generated .csel-btn (closed dropdown) by status so the row stays colour-coded like the reference, while the
+// open .csel-panel keeps its own clean white styling. [bg, text] per status — inline styles so they win over .csel-btn.
+const INFL_STATUS_STYLE={
+  not_contacted:['#f1f5f9','#475569'], reached_out:['#e0f2fe','#0369a1'], in_discussion:['#ede9fe','#6d28d9'],
+  partnered:['#d1fae5','#047857'], not_replying:['#fef3c7','#b45309'], declined:['#ffe4e6','#e11d48'],
+  rejected:['#fee2e2','#b91c1c'], hold:['#fef9c3','#a16207'],
+};
+function inflColorStatusBtn(sel){
+  if(!sel) return; const wrap=sel.closest('.csel'); if(!wrap) return;
+  const btn=wrap.querySelector('.csel-btn'); if(!btn) return;
+  const st=INFL_STATUS_STYLE[sel.value];
+  if(st){ btn.style.background=st[0]; btn.style.color=st[1]; btn.style.borderColor='transparent'; btn.style.fontWeight='600'; }
+  else { btn.style.background=''; btn.style.color=''; btn.style.borderColor=''; btn.style.fontWeight=''; }
+}
 function infN(n){ if(n==null||n==='') return '—'; n=Number(n); if(!isFinite(n)) return '—'; if(n>=1e6) return (n/1e6).toFixed(1).replace(/\.0$/,'')+'Mn'; if(n>=1e3) return (n/1e3).toFixed(1).replace(/\.0$/,'')+'K'; return n.toLocaleString('en-IN'); }
 function infMoney(n){ return '₹'+Math.round(Number(n||0)).toLocaleString('en-IN'); }
 function infAvatar(inf,cls){ const av=_avatar(inf.instagram_handle||inf.name||'?');
@@ -9165,9 +9192,12 @@ function infDetailRender(wrap){
     </div>`;
   // wiring
   wrap.querySelectorAll('.infd-tab').forEach(b=>b.addEventListener('click',()=>{ _infDetTab=b.dataset.tab; infDetailRender(wrap); }));
-  wrap.querySelector('#infd-status').addEventListener('change',async e=>{
+  const _infdStatus=wrap.querySelector('#infd-status');
+  _infdStatus.addEventListener('change',async e=>{
+    inflColorStatusBtn(_infdStatus);
     try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({outreach_status:e.target.value})}); showNotification('Status updated'); _infRows=null; if(currentView==='inf-influencers') infLoadRows(); }
     catch(err){ showNotification(err.message,true); } });
+  try{ ecEnhanceSelect(_infdStatus); inflColorStatusBtn(_infdStatus); }catch(_){}   // standard .csel dropdown + colour-coded, matching the list page
   wrap.querySelector('#infd-dm').addEventListener('click',async()=>{
     window.open('https://ig.me/m/'+encodeURIComponent(inf.instagram_handle||''),'_blank');
     if(inf.outreach_status==='not_contacted'){ try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({outreach_status:'reached_out'})}); _infRows=null; infDetailReload(wrap); }catch(_){}}
@@ -9444,51 +9474,152 @@ async function infListsLoad(){
     g.querySelectorAll('[data-list]').forEach(b=>b.addEventListener('click',()=>infListDetail(b.dataset.list)));
   }catch(e){ g.innerHTML=`<p class="col-span-full text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
 }
+// ── List detail — member workflow table (Handle · Name · Final Price · Payment · Product/Email Sent ·
+// Ad Run Live · Status · Views/Likes/Comments/Shares) with status-chip filters, search & sortable headers.
+let _inflId=null,_inflList=null,_inflMembers=[],_inflTotals=null,_inflRange=null,_inflFilter='all',_inflSearch='',_inflSort={k:'views',d:-1},_inflSel=new Set();
+const INFL_COLS=[
+  {k:'handle',h:'Handle',a:'l'},{k:'name',h:'Name',a:'l'},{k:'final',h:'Final Price',a:'r'},{k:'payment',h:'Payment',a:'l'},
+  {k:'product_sent',h:'Product Sent',a:'c'},{k:'email_sent',h:'Email Sent',a:'c'},{k:'ad_run',h:'Ad Run Live',a:'c'},{k:'status',h:'Status',a:'l'},
+  {k:'views',h:'👁 Views',a:'r'},{k:'likes',h:'♡ Likes',a:'r'},{k:'comments',h:'💬 Comments',a:'r'},{k:'shares',h:'↗ Shares',a:'r'},
+];
+const INFL_SV={handle:m=>(m.instagram_handle||'').toLowerCase(),name:m=>(m.name||'').toLowerCase(),final:m=>m.final||0,payment:m=>m.payment||'',
+  product_sent:m=>m.product_sent?1:0,email_sent:m=>m.email_sent?1:0,ad_run:m=>m.ad_run?1:0,status:m=>(INF_STATUS[m.outreach_status]?INF_STATUS[m.outreach_status][0]:m.outreach_status||''),
+  views:m=>m.views_in_range||0,likes:m=>m.likes||0,comments:m=>m.comments||0,shares:m=>m.shares||0};
+function inflPayBadge(p){ if(!p) return '<span class="text-slate-300">—</span>';
+  const map={paid:['Paid','bg-emerald-50 text-emerald-700'],partial:['Partial','bg-amber-50 text-amber-700'],unpaid:['Unpaid','bg-slate-100 text-slate-500'],pending:['Pending','bg-slate-100 text-slate-500']};
+  const [l,c]=map[p]||[p,'bg-slate-100 text-slate-500']; return `<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${c}">${escapeHtml(l)}</span>`; }
+const inflBool=b=>b?'<span class="text-emerald-600 font-bold">✓</span>':'<span class="text-slate-300">—</span>';
+const inflNum=n=>n?infN(n):'<span class="text-slate-300">—</span>';
+// Inline status editor — a project-standard ENHANCED dropdown (ecEnhanceSelect turns any .filter-select
+// into the .csel component used by "+ Add influencer") rendered directly in the row, so status updates in
+// one click with the same dropdown UI/UX as the rest of the app. Change → PATCH /inf/influencer/:id.
+function inflStatusCell(m){
+  return `<select class="filter-select infl-status-sel text-xs w-28" data-id="${m.id}">${Object.entries(INF_STATUS).map(([k,[l]])=>`<option value="${k}" ${k===(m.outreach_status||'')?'selected':''}>${l}</option>`).join('')}</select>`;
+}
+
 async function infListDetail(id){
+  _inflId=id; _inflSel=new Set(); _inflFilter='all'; _inflSearch=''; _inflSort={k:'views',d:-1};
   const grid=document.getElementById('infl-grid'), det=document.getElementById('infl-detail');
   grid.classList.add('hidden'); det.classList.remove('hidden'); det.innerHTML=brandLoader('Loading campaign…');
   try{ const d=await infFetch('/api/inf/lists/'+id);
-    const t=d.totals;
+    _inflList=d.list; _inflMembers=d.members||[]; _inflTotals=d.totals||{}; _inflRange=d.range||null;
+    const t=_inflTotals;
     const tile=(l,v)=>`<div class="card p-4"><p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${l}</p><p class="text-lg font-bold text-slate-800 mt-0.5">${v}</p></div>`;
     det.innerHTML=`
       <div class="flex flex-wrap items-center gap-3 mb-5">
         <button id="infl-back" class="filter-btn">← All lists</button>
         <div><h2 class="text-lg font-bold text-slate-800">${escapeHtml(d.list.name)}</h2>
-          <p class="text-xs text-slate-400">${escapeHtml(d.list.description||'')} ${d.range?`· rollups for <b>${escapeHtml(d.range.label)}</b> (${_dmy(d.range.from)} – ${_dmy(d.range.to)})`:'· all-time rollups (no date in list name)'}</p></div>
-        <div class="ml-auto flex gap-2">
-          <select id="infl-addmem" class="filter-select w-56"><option value="">+ Add influencer…</option></select>
-          <button id="infl-del" class="text-rose-500 hover:bg-rose-50 rounded-lg px-3 text-sm">Delete list</button></div>
+          <p class="text-xs text-slate-400">${escapeHtml(d.list.description||'')} · ${_inflRange?`rollups for <b>${escapeHtml(_inflRange.label)}</b> (${_dmy(_inflRange.from)} – ${_dmy(_inflRange.to)})`:'all-time rollups (no date in list name)'}</p></div>
+        <div class="ml-auto flex items-center gap-2">
+          <select id="infl-addmem" class="filter-select w-52"><option value="">+ Add influencer…</option></select>
+          <button id="infl-del" class="px-3 py-2 text-sm rounded-lg bg-rose-500 text-white font-semibold hover:bg-rose-600 whitespace-nowrap">🗑 Delete list</button></div>
       </div>
       <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-5">
-        ${tile('Views (range)',infN(t.views))}${tile('Total quoted',infMoney(t.quoted))}${tile('Total final',infMoney(t.final))}${tile('GST',infMoney(t.gst))}${tile('Total spend',infMoney(t.spend))}${tile('Blended CPM',t.cpm!=null?infMoney(t.cpm):'—')}
+        ${tile('Views (range)',infN(t.views||0))}${tile('Total quoted',infMoney(t.quoted||0))}${tile('Total final',infMoney(t.final||0))}${tile('GST',infMoney(t.gst||0))}${tile('Total spend',infMoney(t.spend||0))}${tile('Blended CPM',t.cpm!=null?infMoney(t.cpm):'—')}
       </div>
-      <div class="card overflow-x-auto"><table class="w-full">
-        <thead><tr>${['Influencer','Followers','Videos','Views in range','Quoted','Spend (incl GST)','CPM',''].map(h=>`<th class="px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap">${h}</th>`).join('')}</tr></thead>
-        <tbody>${d.members.map(m=>`<tr class="hover:bg-slate-50">
-          <td class="px-3 py-2.5 border-b border-slate-100"><a href="#" class="flex items-center gap-2 infl-open" data-id="${m.id}">${infAvatar(m)}<span><span class="font-semibold text-slate-800 text-sm">${escapeHtml(m.name||'—')}</span><br><span class="text-xs text-indigo-500">@${escapeHtml(m.instagram_handle)}</span></span></a></td>
-          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${infN(m.follower_count)}</td>
-          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${m.videos}</td>
-          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums font-semibold">${infN(m.views_in_range)}</td>
-          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${infMoney(m.quoted)}</td>
-          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${infMoney(m.spend)}</td>
-          <td class="px-3 py-2.5 border-b border-slate-100 text-sm tabular-nums">${m.cpm!=null?infMoney(m.cpm):'—'}</td>
-          <td class="px-3 py-2.5 border-b border-slate-100"><button class="infl-rm text-slate-400 hover:text-rose-500 text-sm" title="Remove from list" data-id="${m.id}">✕</button></td></tr>`).join('')||'<tr><td colspan="8" class="px-4 py-8 text-center text-sm text-slate-400">No members yet.</td></tr>'}</tbody></table></div>`;
+      <div class="card p-4">
+        <div class="flex flex-wrap items-center gap-3 mb-3">
+          <h3 class="text-sm font-bold text-slate-700 whitespace-nowrap">Members (<span id="infl-count">${_inflMembers.length}</span>)</h3>
+          <div class="flex-1 min-w-[200px] max-w-sm"><input id="infl-search" placeholder="Search by handle, name, niche…" class="w-full text-sm px-3 py-1.5 rounded-lg border border-slate-200 focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100 outline-none"></div>
+          <div id="infl-chips" class="flex flex-wrap gap-1.5 ml-auto"></div>
+        </div>
+        <div id="infl-bulk" class="hidden items-center gap-2 mb-3 px-3 py-2 rounded-lg bg-indigo-50 border border-indigo-100 text-sm"></div>
+        <div id="infl-table" class="overflow-x-auto"></div>
+      </div>`;
     document.getElementById('infl-back').addEventListener('click',()=>{ det.classList.add('hidden'); grid.classList.remove('hidden'); infListsLoad(); });
     document.getElementById('infl-del').addEventListener('click',async()=>{
       if(!(await supConfirm({title:'Delete this list?',message:`"${d.list.name}" will be removed (influencers themselves are kept).`,confirmLabel:'Delete',danger:true}))) return;
       try{ await infFetch('/api/inf/lists/'+id,{method:'DELETE'}); _infListsCache=null; det.classList.add('hidden'); grid.classList.remove('hidden'); infListsLoad(); showNotification('List deleted'); }catch(e){ showNotification(e.message,true); } });
-    det.querySelectorAll('.infl-open').forEach(a=>a.addEventListener('click',e=>{ e.preventDefault(); infDetailModal(a.dataset.id); }));
-    det.querySelectorAll('.infl-rm').forEach(b=>b.addEventListener('click',async()=>{
-      try{ await infFetch(`/api/inf/lists/${id}/members/${b.dataset.id}`,{method:'DELETE'}); infListDetail(id); }catch(e){ showNotification(e.message,true); } }));
-    // add-member dropdown (all influencers not already members)
+    const search=document.getElementById('infl-search');
+    search.addEventListener('input',()=>{ _inflSearch=search.value.trim().toLowerCase(); inflRenderTable(); });
     try{ if(!_infRows){ _infRows=(await infFetch('/api/inf/influencers')).influencers||[]; }
-      const have=new Set(d.members.map(m=>m.id));
+      const have=new Set(_inflMembers.map(m=>m.id));
       const sel=document.getElementById('infl-addmem');
       sel.innerHTML='<option value="">+ Add influencer…</option>'+_infRows.filter(r=>!have.has(r.id)).map(r=>`<option value="${r.id}">@${escapeHtml(r.instagram_handle)} — ${escapeHtml(r.name||'')}</option>`).join('');
       sel.addEventListener('change',async e=>{ if(!e.target.value) return;
         try{ await infFetch('/api/inf/lists/'+id+'/members',{method:'POST',body:JSON.stringify({influencerId:Number(e.target.value)})}); infListDetail(id); }catch(err){ showNotification(err.message,true); } });
     }catch(_){}
+    inflRenderChips(); inflRenderTable();
   }catch(e){ det.innerHTML=`<p class="text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
+}
+function inflRenderChips(){
+  const box=document.getElementById('infl-chips'); if(!box) return;
+  const present=Object.keys(INF_STATUS).filter(k=>_inflMembers.some(m=>m.outreach_status===k));
+  const chips=[['all','All']].concat(present.map(k=>[k,INF_STATUS[k][0]]));
+  box.innerHTML=chips.map(([k,l])=>`<button class="infl-chip px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors ${_inflFilter===k?'bg-indigo-600 text-white border-indigo-600':'bg-white text-slate-500 border-slate-200 hover:border-indigo-300'}" data-f="${k}">${escapeHtml(l)}</button>`).join('');
+  box.querySelectorAll('.infl-chip').forEach(b=>b.addEventListener('click',()=>{ _inflFilter=b.dataset.f; inflRenderChips(); inflRenderTable(); }));
+}
+function inflFilteredSorted(){
+  let rows=_inflMembers.slice();
+  if(_inflFilter!=='all') rows=rows.filter(m=>m.outreach_status===_inflFilter);
+  if(_inflSearch){ const q=_inflSearch; rows=rows.filter(m=>((m.instagram_handle||'')+' '+(m.name||'')+' '+(m.niche||'')).toLowerCase().includes(q)); }
+  const sv=INFL_SV[_inflSort.k]||(()=>0), d=_inflSort.d;
+  rows.sort((a,b)=>{ const x=sv(a),y=sv(b); if(typeof x==='string'||typeof y==='string') return d*String(x).localeCompare(String(y)); return d*((x||0)-(y||0)); });
+  return rows;
+}
+function inflRenderTable(){
+  const box=document.getElementById('infl-table'); if(!box) return;
+  const rows=inflFilteredSorted();
+  const cnt=document.getElementById('infl-count'); if(cnt) cnt.textContent=rows.length;
+  const al={l:'text-left',r:'text-right',c:'text-center'}, car=k=>_inflSort.k===k?(_inflSort.d<0?'▾':'▴'):'<span class="text-slate-300">↕</span>';
+  // Compact sizing so all 14 columns fit one page without horizontal scroll.
+  const TH='px-2 py-2 text-[10px] font-semibold text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50/60 whitespace-nowrap', TD='px-2 py-1.5 border-b border-slate-100 text-xs';
+  const th=`<th class="px-1.5 py-2 border-b border-slate-200 bg-slate-50/60 text-center"><input type="checkbox" id="infl-all"></th>`
+    +INFL_COLS.map(c=>`<th class="${TH} ${al[c.a]} cursor-pointer select-none hover:text-indigo-600 ${_inflSort.k===c.k?'!text-indigo-600':''}" data-sort="${c.k}">${c.h} ${car(c.k)}</th>`).join('')
+    +`<th class="px-2 py-2 border-b border-slate-200 bg-slate-50/60"></th>`;
+  const body=rows.map(m=>`<tr class="hover:bg-slate-50">
+    <td class="px-1.5 py-1.5 border-b border-slate-100 text-center"><input type="checkbox" class="infl-cb" data-id="${m.id}" ${_inflSel.has(m.id)?'checked':''}></td>
+    <td class="${TD} whitespace-nowrap"><a href="#" class="infl-open text-indigo-600 font-medium hover:underline" data-id="${m.id}">@${escapeHtml(m.instagram_handle)}</a></td>
+    <td class="${TD} text-slate-700">${escapeHtml(m.name||'—')}</td>
+    <td class="${TD} text-right tabular-nums">${m.final?infMoney(m.final):'<span class="text-slate-300">—</span>'}</td>
+    <td class="${TD}">${inflPayBadge(m.payment)}</td>
+    <td class="${TD} text-center">${inflBool(m.product_sent)}</td>
+    <td class="${TD} text-center">${inflBool(m.email_sent)}</td>
+    <td class="${TD} text-center">${m.ad_run?'<span class="text-emerald-600 font-bold whitespace-nowrap">✓ Live</span>':'<span class="text-slate-300">—</span>'}</td>
+    <td class="${TD}">${inflStatusCell(m)}</td>
+    <td class="${TD} text-right tabular-nums">${inflNum(m.views_in_range)}</td>
+    <td class="${TD} text-right tabular-nums">${inflNum(m.likes)}</td>
+    <td class="${TD} text-right tabular-nums">${inflNum(m.comments)}</td>
+    <td class="${TD} text-right tabular-nums">${inflNum(m.shares)}</td>
+    <td class="px-1.5 py-1.5 border-b border-slate-100 text-center"><button class="infl-rm text-slate-300 hover:text-rose-500" title="Remove from list" data-id="${m.id}">✕</button></td></tr>`).join('')
+    ||`<tr><td colspan="${INFL_COLS.length+2}" class="px-4 py-10 text-center text-sm text-slate-400">${_inflMembers.length?'No members match this filter.':'No members yet.'}</td></tr>`;
+  box.innerHTML=`<table class="w-full"><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
+  box.querySelectorAll('.infl-status-sel').forEach(s=>{ try{ ecEnhanceSelect(s); inflColorStatusBtn(s);
+    const b=s.closest('.csel')?s.closest('.csel').querySelector('.csel-btn'):null; if(b){ b.style.minWidth='0'; b.style.height='26px'; b.style.fontSize='11px'; b.style.padding='0 .4rem'; } }catch(_){} });   // upgrade + colour-code + compact the status dropdowns (.csel)
+  box.querySelectorAll('th[data-sort]').forEach(th=>th.addEventListener('click',()=>{ const k=th.dataset.sort;
+    if(_inflSort.k===k) _inflSort.d*=-1; else _inflSort={k,d:['handle','name','status','payment'].includes(k)?1:-1};
+    inflRenderTable(); }));
+  box.querySelectorAll('.infl-open').forEach(a=>a.addEventListener('click',e=>{ e.preventDefault(); infDetailModal(a.dataset.id); }));
+  box.querySelectorAll('.infl-status-sel').forEach(sel=>sel.addEventListener('change',async ()=>{ const id=sel.dataset.id, v=sel.value;
+    try{ await infFetch('/api/inf/influencer/'+id,{method:'POST',body:JSON.stringify({outreach_status:v})});
+      const m=_inflMembers.find(x=>String(x.id)===String(id)); if(m) m.outreach_status=v;
+      inflColorStatusBtn(sel); inflRenderChips(); if(_inflFilter!=='all') inflRenderTable();   // recolour; active status filter → row may leave the view
+      showNotification('Status updated'); }
+    catch(err){ showNotification(err.message,true); } }));
+  box.querySelectorAll('.infl-rm').forEach(b=>b.addEventListener('click',async()=>{
+    try{ await infFetch(`/api/inf/lists/${_inflId}/members/${b.dataset.id}`,{method:'DELETE'}); _inflMembers=_inflMembers.filter(m=>String(m.id)!==String(b.dataset.id)); _inflSel.delete(Number(b.dataset.id)); inflRenderChips(); inflRenderTable(); showNotification('Removed from list'); }catch(e){ showNotification(e.message,true); } }));
+  box.querySelectorAll('.infl-cb').forEach(cb=>cb.addEventListener('change',()=>{ const idn=Number(cb.dataset.id); if(cb.checked) _inflSel.add(idn); else _inflSel.delete(idn); inflRenderBulk(); }));
+  const all=document.getElementById('infl-all'); if(all){ all.checked=rows.length>0&&rows.every(m=>_inflSel.has(m.id));
+    all.addEventListener('change',()=>{ rows.forEach(m=>{ if(all.checked) _inflSel.add(m.id); else _inflSel.delete(m.id); }); inflRenderTable(); }); }
+  inflRenderBulk();
+}
+function inflRenderBulk(){
+  const bar=document.getElementById('infl-bulk'); if(!bar) return;
+  if(!_inflSel.size){ bar.classList.add('hidden'); bar.classList.remove('flex'); bar.innerHTML=''; return; }
+  bar.classList.remove('hidden'); bar.classList.add('flex');
+  bar.innerHTML=`<span class="font-semibold text-indigo-700">${_inflSel.size} selected</span>
+    <select id="infl-bulk-status" class="filter-select"><option value="">Set status…</option>${Object.entries(INF_STATUS).map(([k,[l]])=>`<option value="${k}">${l}</option>`).join('')}</select>
+    <button id="infl-bulk-rm" class="px-3 py-1 rounded-lg bg-rose-500 text-white text-xs font-semibold hover:bg-rose-600">Remove from list</button>
+    <button id="infl-bulk-clear" class="text-slate-400 hover:text-slate-600 text-xs ml-1">Clear</button>`;
+  document.getElementById('infl-bulk-clear').addEventListener('click',()=>{ _inflSel=new Set(); inflRenderTable(); });
+  document.getElementById('infl-bulk-status').addEventListener('change',async e=>{ const v=e.target.value; if(!v) return;
+    try{ await infFetch('/api/inf/influencers/bulk',{method:'POST',body:JSON.stringify({ids:[..._inflSel],action:'status',status:v})});
+      _inflMembers.forEach(m=>{ if(_inflSel.has(m.id)) m.outreach_status=v; }); inflRenderChips(); inflRenderTable(); showNotification(`Status set for ${_inflSel.size}`); }catch(err){ showNotification(err.message,true); e.target.value=''; } });
+  document.getElementById('infl-bulk-rm').addEventListener('click',async()=>{
+    const ids=[..._inflSel]; if(!ids.length) return;
+    if(!(await supConfirm({title:'Remove from list?',message:`Remove ${ids.length} influencer(s) from "${_inflList.name}"? (They stay in the CRM.)`,confirmLabel:'Remove',danger:true}))) return;
+    try{ for(const mid of ids){ await infFetch(`/api/inf/lists/${_inflId}/members/${mid}`,{method:'DELETE'}); }
+      _inflMembers=_inflMembers.filter(m=>!_inflSel.has(m.id)); _inflSel=new Set(); inflRenderChips(); inflRenderTable(); showNotification(`Removed ${ids.length} from list`); }catch(e){ showNotification(e.message,true); } });
 }
 
 // ── Video calendar ───────────────────────────────────────────────────────────
