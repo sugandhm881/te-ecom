@@ -50,10 +50,34 @@ async function generatePdfBuffer(since, until, label) {
 }
 
 async function sendEmailWithAttachments(attachments, since, until) {
-    // Use the shared portal-aware sender (DB settings over .env, decrypted password).
-    const { sendMail } = require('./app/api/email_settings');
+    // Ad-set report uses its OWN env-based SMTP + fixed RECIPIENT_EMAIL — INTENTIONALLY NOT the portal
+    // Settings → Email recipient (`app_email_settings.to_emails`). That saved address is only for the
+    // critical delivery reports (silent-RTO / late deliveries); the ad-set report must keep going to its
+    // original recipient regardless of what's saved in Settings. Do NOT switch this to the shared sendMail.
+    const emailUser = config.EMAIL_USER || process.env.EMAIL_USER;
+    const emailPass = config.EMAIL_PASSWORD || process.env.EMAIL_PASSWORD;
+    const emailHost = config.EMAIL_HOST || process.env.EMAIL_HOST;
+    const emailPort = parseInt(config.EMAIL_PORT || process.env.EMAIL_PORT || 587);
+    const recipient = config.RECIPIENT_EMAIL || process.env.RECIPIENT_EMAIL;
+
+    if (!emailUser || !emailPass || !emailHost || !recipient) {
+        log("[EMAIL ERROR] Missing environment variables (EMAIL_USER, EMAIL_PASSWORD, EMAIL_HOST, RECIPIENT_EMAIL)");
+        return;
+    }
+
     try {
-        const r = await sendMail({
+        log(`Connecting to SMTP server: ${emailHost}:${emailPort}`);
+
+        const transporter = nodemailer.createTransport({
+            host: emailHost,
+            port: emailPort,
+            secure: emailPort === 465,
+            auth: { user: emailUser, pass: emailPass },
+        });
+
+        const info = await transporter.sendMail({
+            from: emailUser,
+            to: recipient,
             subject: `Ad Set Performance Report: ${since} to ${until}`,
             text: `Attached are the ad set performance reports:\n\n` +
                   `1️⃣ Month-to-Date (${since} to ${until})\n` +
@@ -61,7 +85,7 @@ async function sendEmailWithAttachments(attachments, since, until) {
                   `Regards,\nEcom Central`,
             attachments,
         });
-        log(`✅ Email sent successfully to ${r.to.join(', ')} (MsgID: ${r.messageId})`);
+        log(`✅ Email sent successfully to ${recipient} (MsgID: ${info.messageId})`);
     } catch (e) {
         log(`[EMAIL ERROR] ${e.message}`);
     }
