@@ -40,14 +40,19 @@ module.exports = {
     SHOPIFY_SHOP_URL: process.env.SHOPIFY_SHOP_URL,
 
     // --- Amazon ---
-    AWS_ACCESS_KEY: process.env.AWS_ACCESS_KEY,
-    AWS_SECRET_KEY: process.env.AWS_SECRET_KEY,
-    AWS_REGION: process.env.AWS_REGION,
-    LWA_CLIENT_ID: process.env.LWA_CLIENT_ID,
-    LWA_CLIENT_SECRET: process.env.LWA_CLIENT_SECRET,
-    REFRESH_TOKEN: process.env.REFRESH_TOKEN,
-    MARKETPLACE_ID: process.env.MARKETPLACE_ID,
-    BASE_URL: process.env.BASE_URL || 'https://sellingpartnerapi-eu.amazon.com',
+    // Prefer the .env FILE values (same reason as PORT/JWT_SECRET above): dotenv never overrides an
+    // already-set process.env var, so a stale Amazon cred cached in pm2's saved environment (e.g. an old
+    // REFRESH_TOKEN / LWA_CLIENT_SECRET from a previous deploy) would otherwise shadow the freshly-updated
+    // .env file — which made SP-API return "The LWA secret token you provided has expired." even though the
+    // .env on disk was correct. Reading _envFile first pins these to the file, immune to pm2 env caching.
+    AWS_ACCESS_KEY: _envFile.AWS_ACCESS_KEY || process.env.AWS_ACCESS_KEY,
+    AWS_SECRET_KEY: _envFile.AWS_SECRET_KEY || process.env.AWS_SECRET_KEY,
+    AWS_REGION: _envFile.AWS_REGION || process.env.AWS_REGION,
+    LWA_CLIENT_ID: _envFile.LWA_CLIENT_ID || process.env.LWA_CLIENT_ID,
+    LWA_CLIENT_SECRET: _envFile.LWA_CLIENT_SECRET || process.env.LWA_CLIENT_SECRET,
+    REFRESH_TOKEN: _envFile.REFRESH_TOKEN || process.env.REFRESH_TOKEN,
+    MARKETPLACE_ID: _envFile.MARKETPLACE_ID || process.env.MARKETPLACE_ID,
+    BASE_URL: _envFile.BASE_URL || process.env.BASE_URL || 'https://sellingpartnerapi-eu.amazon.com',
     
     // --- Facebook Ads ---
     FACEBOOK_AD_ACCOUNT_ID: process.env.FACEBOOK_AD_ACCOUNT_ID,
