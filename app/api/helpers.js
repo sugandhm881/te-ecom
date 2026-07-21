@@ -197,8 +197,16 @@ async function makeSignedApiRequest(options, maxRetries = 5) {
                 await sleep(delay);
                 continue;
             }
-            console.error(`Amazon SP-API request failed attempt ${attempt + 1}: ${e.message}`);
-            if (attempt >= maxRetries - 1) throw e;
+            // Surface the ACTUAL SP-API error body — the bare "Request failed with status code 403" hides WHY
+            // (Unauthorized / InvalidSignature / RequestTimeTooSkewed / access-denied). Auth 4xx (401/403) won't
+            // self-resolve, so throw immediately instead of burning 5 retries.
+            const status = e.response && e.response.status;
+            const body = e.response && e.response.data
+                ? (typeof e.response.data === 'string' ? e.response.data : JSON.stringify(e.response.data)) : '';
+            console.error(`Amazon SP-API ${options.method} ${options.path} failed (attempt ${attempt + 1}): ${status || ''} ${e.message} :: ${body}`);
+            if (status === 401 || status === 403 || attempt >= maxRetries - 1) {
+                throw new Error(`SP-API ${status || ''} on ${options.path}: ${body || e.message}`);
+            }
             await sleep((Math.pow(2, attempt) + Math.random()) * 1000);
         }
     }

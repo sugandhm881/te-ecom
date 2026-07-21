@@ -72,21 +72,27 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
     const startDate = moment(since).startOf('day').toISOString();
     const endDate = moment(until).endOf('day').toISOString();
 
-    // 1. BUILD SUPABASE QUERY
-    let query = supabase.from('enriched_orders_ecom').select('*');
-
-    if (dateFilterType === 'shipped_date') {
-        query = query.gte('shipped_at', startDate).lte('shipped_at', endDate);
-    } else if (dateFilterType === 'delivered_date') {
-        query = query.gte('delivered_at', startDate).lte('delivered_at', endDate);
-    } else {
-        query = query.gte('created_at', startDate).lte('created_at', endDate);
-    }
-
-    // 2. FETCH FROM SUPABASE
-    const { data: shopifyOrdersInRange, error } = await query;
-    if (error) {
-        console.error('[Supabase] enriched_orders_ecom fetch error:', error.message);
+    // 1 + 2. FETCH ALL ORDERS IN RANGE (PAGINATED). PostgREST caps a single select at 1000 rows, which was
+    // silently truncating the whole page — e.g. June had 5,166 orders but only 1,000 were counted, so order
+    // counts + delivered revenue were ~5x under and ROAS (full spend / capped revenue) looked artificially low.
+    // Loop .range() until a short page returns to get the true totals. (order() gives stable, gap-free paging.)
+    const dateCol = dateFilterType === 'shipped_date' ? 'shipped_at'
+                  : dateFilterType === 'delivered_date' ? 'delivered_at' : 'created_at';
+    // Only the columns getOrderSourceTerm/normalizeStatus/revenue actually read — deliberately SKIP the large
+    // `order_data` (full Shopify order) + line_items/shipping_address JSON so fetching ~5k rows stays light.
+    // Order by the unique `shopify_id` for stable, gap-free .range() paging (tied timestamps can't drop rows).
+    const COLS = 'shopify_id, total_price, raw_rapidshyp_status, docpharma_data, note_attributes, source_name, referring_site, cancelled_at, rapidshyp_webhook_status, fulfillment_status, fulfillments';
+    const PAGE = 1000;
+    const shopifyOrdersInRange = [];
+    for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase.from('enriched_orders_ecom').select(COLS)
+            .gte(dateCol, startDate).lte(dateCol, endDate)
+            .order('shopify_id', { ascending: true })
+            .range(from, from + PAGE - 1);
+        if (error) { console.error('[Supabase] enriched_orders_ecom fetch error:', error.message); break; }
+        if (!data || !data.length) break;
+        shopifyOrdersInRange.push(...data);
+        if (data.length < PAGE) break;
     }
 
     const orders = (shopifyOrdersInRange || []).map(row => ({

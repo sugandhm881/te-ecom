@@ -14,7 +14,9 @@ const CORS_ALLOW = (process.env.CORS_ORIGINS || config.DASHBOARD_URL || '')
     .concat(['http://localhost:5002', 'http://127.0.0.1:5002']);
 app.use(cors({ origin: (origin, cb) => cb(null, !origin || CORS_ALLOW.includes(origin)), credentials: true }));
 // Capture the raw body (used by the Shopify webhook HMAC check); does not change JSON parsing.
-app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
+// limit 5mb (default 100kb was too tight): the Ad-Set PDF/Excel download POSTs the full computed report JSON
+// (~100kb+ once all orders are counted, grows with the date range) — a 100kb cap threw PayloadTooLargeError.
+app.use(express.json({ limit: '5mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.enable('trust proxy');
 
 // Security headers — clickjacking + MIME-sniffing protection (defense against XSS impact).
