@@ -9367,18 +9367,27 @@ function infDiscoverRenderResult(r){
       <span id="infdis-added" class="text-sm text-emerald-600 font-semibold hidden">Added ✓</span>
     </div></div>`;
   document.getElementById('infdis-addcrm').addEventListener('click',async()=>{
-    try{ const resp=await infFetch('/api/inf/influencers',{method:'POST',body:JSON.stringify({
+    const btn=document.getElementById('infdis-addcrm'); btn.disabled=true;
+    try{
+      // Raw fetch (not infFetch) so we can read the 409 "already in CRM" body — it carries the existing id.
+      const rr=await fetch('/api/inf/influencers',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({
         instagram_handle:r.handle,name:r.name,niche:r.niche,location:r.location,
         follower_count:r.follower_count||r.estimated_followers,engagement_rate:r.avg_engagement_rate,
         engagement_quality:r.engagement_quality,bio:r.bio,profile_image_url:r.profile_pic_url,source:'discover'})});
-      document.getElementById('infdis-addcrm').classList.add('hidden');
-      document.getElementById('infdis-added').classList.remove('hidden');
+      const dd=await rr.json().catch(()=>({}));
+      const already=rr.status===409;                       // handle is already saved — not an error
+      if(!rr.ok && !already) throw new Error(dd.error||dd.message||('HTTP '+rr.status));
+      const infId=dd.id;                                   // present on both a fresh insert and the 409 body
+      btn.classList.add('hidden');
+      const added=document.getElementById('infdis-added');
+      added.textContent=already?'Already in CRM ✓':'Added ✓'; added.classList.remove('hidden');
       const sel=document.getElementById('infdis-addlist'); sel.classList.remove('hidden');
       _infListsCache=null; await infLoadListsInto('infdis-addlist','Add to list…');
-      sel.addEventListener('change',async e=>{ if(!e.target.value) return;
-        try{ await infFetch('/api/inf/lists/'+e.target.value+'/members',{method:'POST',body:JSON.stringify({influencerId:resp.id})}); showNotification('Added to list'); }catch(err){ showNotification(err.message,true); } e.target.value=''; });
-      _infRows=null; showNotification('@'+r.handle+' added to CRM');
-    }catch(e){ showNotification(e.message,true); } });
+      sel.onchange=async e=>{ if(!e.target.value) return;
+        try{ await infFetch('/api/inf/lists/'+e.target.value+'/members',{method:'POST',body:JSON.stringify({influencerId:infId})}); showNotification('Added to list'); }catch(err){ showNotification(err.message,true); } e.target.value=''; };
+      _infRows=null;
+      showNotification(already?('@'+r.handle+' is already in the CRM'):('@'+r.handle+' added to CRM'));
+    }catch(e){ showNotification(e.message,true); btn.disabled=false; } });
 }
 async function infDiscoverHistory(){
   const h=document.getElementById('infdis-history'); if(h) h.innerHTML=brandLoaderSm();
