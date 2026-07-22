@@ -80,7 +80,15 @@ async function setMark(orderName, type, note, by) {
     }, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
 }
 async function recordHold(orderName, by, reason) { await clearHoldMarks(orderName, ['shopify_hold_released', 'shopify_hold_failed']); await setMark(orderName, 'shopify_hold', reason || HOLD_NOTE, by); }
-async function recordReleased(orderName, by) { await clearHoldMarks(orderName, ['shopify_hold', 'shopify_hold_failed']); await setMark(orderName, 'shopify_hold_released', 'released', by); }
+async function recordReleased(orderName, by) {
+    // Preserve WHY it was held (the hold mark's reason note) so the Repeat panel can still show the category
+    // after release — the live-recomputed reason may have since vanished (e.g. a prior undelivered order
+    // finalised to RTO and hit the reliability exception).
+    const prev = (await getHoldStates([orderName]))[norm(orderName)];
+    const heldReason = (prev && prev.status === 'held' && prev.reason && prev.reason !== HOLD_NOTE) ? prev.reason : null;
+    await clearHoldMarks(orderName, ['shopify_hold', 'shopify_hold_failed']);
+    await setMark(orderName, 'shopify_hold_released', heldReason ? ('held for: ' + heldReason) : 'released', by);
+}
 async function recordFailed(orderName, error) { await clearHoldMarks(orderName, ['shopify_hold']); await setMark(orderName, 'shopify_hold_failed', error, 'auto'); }
 
 // Hold-state map for a set of order names → { [orderName]: { status:'held'|'released'|'failed', reason, by, at } }.
@@ -124,13 +132,14 @@ async function releaseOrder(orderName, shopifyOrderId, by) {
 }
 
 // Auto-hold (cron/webhook). Skips if already held OR a human already released it OR it's past pickup.
-async function autoHoldOrder(orderName, shopifyOrderId) {
+// `reasonNote` (from reasonNoteFrom) records WHY it qualified, so the panel can show the category later.
+async function autoHoldOrder(orderName, shopifyOrderId, reasonNote) {
     const st = (await getHoldStates([orderName]))[norm(orderName)];
     if (st && (st.status === 'held' || st.status === 'released')) return { skipped: st.status };
-    const out = await holdShopifyOrder(shopifyOrderId);
+    const out = await holdShopifyOrder(shopifyOrderId, reasonNote);
     if (out.notHoldable) return { skipped: 'shipped' };   // already picked up — not a failure, don't mark
-    await logApi('shopify_hold', out.ok ? 200 : 422, { order: norm(orderName), id: String(shopifyOrderId), by: 'auto', held: out.held }, out.ok ? (out.already ? 'already-held' : 'held') : out.error);
-    if (out.ok) { await recordHold(orderName, 'auto', HOLD_NOTE); return { held: true }; }
+    await logApi('shopify_hold', out.ok ? 200 : 422, { order: norm(orderName), id: String(shopifyOrderId), by: 'auto', held: out.held, reason: reasonNote || null }, out.ok ? (out.already ? 'already-held' : 'held') : out.error);
+    if (out.ok) { await recordHold(orderName, 'auto', reasonNote || HOLD_NOTE); return { held: true }; }
     await recordFailed(orderName, out.error);
     return { failed: out.error };
 }
@@ -140,26 +149,34 @@ async function autoHoldOrder(orderName, shopifyOrderId) {
 // (the customer has another live order AND no delivered order in the last 3). Sourced by a direct phone-history
 // lookup because order_buckets isn't computed for the brand-new order yet. (A just-created order is always
 // non-terminal + pre-pickup, so the callable/holdable checks are implicit.)
-async function qualifiesForHold({ phone, financialStatus, createdAt, shopifyOrderId, totalPrice }) {
-    if (PREPAID_STATUSES.includes(String(financialStatus || '').toLowerCase())) return false;   // prepaid → no RTO risk
-    if (Number(totalPrice || 0) >= 1500) return true;                                           // reason: high value (₹1500 and above)
+// Which of the 3 call-reasons a NEW order matches (empty array = doesn't qualify for hold). Mirrors the Call
+// Queue Repeat logic. Returned (not just a boolean) so the auto-holder can RECORD *why* it held — the panel then
+// shows the category even later, when the live-recomputed reason has changed (e.g. a prior order that was
+// 'undelivered' at hold time finalised to RTO and now hits the reliability exception, leaving no live reason).
+const REASON_LABEL = { high_value: 'high value (≥₹1500)', recent_undelivered: 'no delivery in last 3', in_flight: 'another live order' };
+function reasonNoteFrom(reasons) { return (reasons || []).map(r => REASON_LABEL[r] || r).join(', ') || HOLD_NOTE; }
+async function holdReasons({ phone, financialStatus, createdAt, shopifyOrderId, totalPrice }) {
+    if (PREPAID_STATUSES.includes(String(financialStatus || '').toLowerCase())) return [];   // prepaid → no RTO risk
+    const reasons = [];
+    if (Number(totalPrice || 0) >= 1500) reasons.push('high_value');                          // reason: high value (₹1500 and above)
     const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
-    if (last10.length !== 10) return false;
-    const before = new Date(createdAt || Date.now());
-    const { data } = await supabase.from('order_buckets').select('order_id, bucket, created_at').ilike('phone', `%${last10}`).limit(50);
-    const others = (data || []).filter(h => String(h.order_id) !== String(shopifyOrderId));
-    const last3Prior = others.filter(h => new Date(h.created_at) < before).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
-    // RTO counts as not-delivered (triggers hold). EXCEPTION (don't hold): 1–2 of the last 3 delivered AND the
-    // latest or 2nd-latest is an RTO (one-off RTO for an otherwise-delivering customer). last3Prior[0] = latest.
-    const dCount    = last3Prior.filter(h => h.bucket === 'delivered').length;
-    const recentRTO = (last3Prior[0] && last3Prior[0].bucket === 'rto') || (last3Prior[1] && last3Prior[1].bucket === 'rto');
-    const reliable  = (dCount === 1 || dCount === 2) && recentRTO;
-    const recentUndelivered = !reliable && last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket));   // reason: recent non-delivery (RTO included)
-    const inFlight = !reliable && others.some(h => !['delivered', 'rto', 'cancelled'].includes(h.bucket));         // reason: in-flight (unproven)
-    return recentUndelivered || inFlight;
+    if (last10.length === 10) {
+        const before = new Date(createdAt || Date.now());
+        const { data } = await supabase.from('order_buckets').select('order_id, bucket, created_at').ilike('phone', `%${last10}`).limit(50);
+        const others = (data || []).filter(h => String(h.order_id) !== String(shopifyOrderId));
+        const last3Prior = others.filter(h => new Date(h.created_at) < before).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
+        // RULE: if ANY ONE of the last 3 prior orders was DELIVERED, the customer is trusted → do NOT auto-hold
+        // on the history reasons (recent non-delivery / in-flight). Only hold when NONE of the last 3 delivered.
+        const dCount    = last3Prior.filter(h => h.bucket === 'delivered').length;
+        const reliable  = dCount >= 1;
+        if (!reliable && last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket))) reasons.push('recent_undelivered');   // reason #2 — skipped when any of last 3 delivered
+        if (others.some(h => new Date(h.created_at) < before && !['delivered', 'rto', 'cancelled'].includes(h.bucket))) reasons.push('in_flight');   // reason #1 — an OLDER live order still open → THIS order is the repeat. Holds regardless of delivery history, but never the first of a concurrent batch.
+    }
+    return reasons;
 }
+async function qualifiesForHold(opts) { return (await holdReasons(opts)).length > 0; }   // back-compat boolean wrapper
 
 module.exports = {
     listFulfillmentOrders, holdShopifyOrder, releaseShopifyOrder,
-    getHoldStates, holdOrderManual, releaseOrder, autoHoldOrder, qualifiesForHold, HOLD_NOTE,
+    getHoldStates, holdOrderManual, releaseOrder, autoHoldOrder, qualifiesForHold, holdReasons, reasonNoteFrom, HOLD_NOTE,
 };

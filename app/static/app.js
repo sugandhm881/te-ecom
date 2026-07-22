@@ -3623,12 +3623,15 @@ function supQueueTable(){
   const thHtml=COLS.map(col=>{ if(!col.k) return `<th class="${TH}">${col.h}</th>`;
     const on=_supSort&&_supSort.k===col.k; const car=on?(_supSort.d===1?'▲':'▼'):'<span class="text-slate-300">↕</span>';
     return `<th class="${TH} cursor-pointer select-none hover:text-indigo-600 ${on?'text-indigo-600':''}" data-sort="${col.k}" data-dir="${col.d}" title="Sort by ${col.h}">${col.h} <span class="text-[9px]">${car}</span></th>`; }).join('');
+  // Flag customers who have MORE THAN ONE order sitting in this queue right now (concurrent / duplicate orders).
+  const _phoneCount={}; list.forEach(x=>{ const p=String(x.phone||'').replace(/\D/g,'').slice(-10); if(p) _phoneCount[p]=(_phoneCount[p]||0)+1; });
   c.innerHTML=`<table class="w-full"><thead><tr>${thHtml}</tr></thead><tbody>${
-    list.slice(0,500).map(r=>{ const ph=String(r.phone||'').replace(/\D/g,'').slice(-10);
+    list.slice(0,500).map(r=>{ const ph=String(r.phone||'').replace(/\D/g,'').slice(-10); const dupN=ph?(_phoneCount[ph]||0):0;
       return `<tr class="sup-row cursor-pointer hover:bg-slate-50 ${r.msg91_confirmed?'bg-sky-50/50':''}" data-oid="${escapeHtml(r.order_id)}">
-      <td class="${TD} font-mono font-semibold">${escapeHtml(r.order_name||r.order_id)}${_supTab!=='repeat'?eeHoldChip(r.order_name):''}</td>
+      <td class="${TD} font-mono font-semibold"${dupN>1?' style="border-left:4px solid #d946ef"':''}>${escapeHtml(r.order_name||r.order_id)}${_supTab!=='repeat'?eeHoldChip(r.order_name):''}</td>
       <td class="${TD}">${ph?`<a href="tel:+91${ph}" onclick="event.stopPropagation()" class="text-indigo-600 font-medium hover:underline">${ph}</a>`:'<span class="text-slate-300">no phone</span>'}
         ${r.orders_count?` <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-violet-100 text-violet-700">${r.orders_count} orders</span>`:''}
+        ${dupN>1?` <span class="inline-block px-1.5 py-0.5 rounded-full text-[10px] font-bold" style="background:#fae8ff;color:#a21caf;border:1px solid #f0abfc" title="This customer has ${dupN} orders in the queue right now — likely duplicate / concurrent orders">🔁 ${dupN}× same customer</span>`:''}
         ${r.msg91_confirmed?' <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}${_supTab==='repeat'?supReasonChips(r):''}</td>
       ${showBucket?`<td class="${TD}">${supBadge(r.bucket)}</td>`:''}
       <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
@@ -3660,7 +3663,8 @@ function supReleasedChip(h){
   if(!(h && h.status==='released')) return '';
   const who=supPrettyUser(h.by)||'someone', when=h.at?supRelTime(h.at):'';
   const full=h.at?new Date(h.at).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'';
-  return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-500 border border-slate-200 whitespace-nowrap" title="Hold released by ${escapeHtml(h.by||'')}${full?' · '+full:''}">🔓 Unheld by ${escapeHtml(who)}${when?' · '+when:''}</span>`;
+  const m=String(h.reason||'').match(/^held for:\s*(.+)$/i), why=m?m[1]:'';   // category captured at hold time (recordReleased)
+  return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-500 border border-slate-200 whitespace-nowrap" title="Hold released by ${escapeHtml(h.by||'')}${full?' · '+full:''}${why?' · was held for: '+escapeHtml(why):''}">🔓 Unheld by ${escapeHtml(who)}${when?' · '+when:''}${why?' · was: '+escapeHtml(why):''}</span>`;
 }
 // Hold controls for the Repeat tab. Picks the RIGHT system: held-on-Shopify → Release Shopify;
 // held-on-EasyEcom → Unhold EasyEcom; else if the order is already imported into EasyEcom → Hold
@@ -3670,7 +3674,8 @@ function supReleasedChip(h){
 function supHoldControl(r){
   if(_supTab!=='repeat') return '';
   const h=r.shopify_hold, oid=escapeHtml(r.order_id), oname=escapeHtml(r.order_name||'');
-  if(h && h.status==='held') return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''} — won't ship / import to EasyEcom until released">🔒 Shopify hold${h.by==='auto'?' (auto)':''}</span> <button class="sup-unhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Release Shopify</button>`;
+  if(h && h.status==='held'){ const why=(h.reason && h.reason!=='Repeat COD — awaiting customer confirmation')?h.reason:'';   // category captured at hold time
+    return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''}${why?' — '+escapeHtml(why):''} — won't ship / import to EasyEcom until released">🔒 Shopify hold${h.by==='auto'?' (auto)':''}${why?' · '+escapeHtml(why):''}</span> <button class="sup-unhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Release Shopify</button>`; }
   if(r.ee_hold) return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="On hold in EasyEcom">⏸ EasyEcom hold</span> <button class="sup-eeunhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Unhold EasyEcom</button>`;
   const rel=supReleasedChip(h);                      // history: was held, then released by a human (or auto)
   if(r.bucket !== 'order_to_dispatch') return rel;   // past pickup → call only (still surface the release history)
@@ -3903,6 +3908,17 @@ async function supOrderModal(orderId){
     const o=d.order, a=d.address||{}, ph=String(o.phone||'').replace(/\D/g,'').slice(-10);
     const days=Math.round((Date.now()-new Date(o.created_at))/86400000);
     const esc=d.escalation;
+    // Hold / unhold log — a timeline: order placed → each auto/manual hold (+reason) → each release (by whom).
+    const _hlFmt=t=>t?new Date(t).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'';
+    const holdLogHtml=`<div class="card p-4 mt-5"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Hold &amp; unhold log</p>
+      <div class="space-y-1.5">
+        <div class="flex items-start gap-2 text-xs"><span>📦</span><div><span class="font-semibold text-slate-700">Order placed</span> <span class="text-slate-400">· ${_hlFmt(o.created_at)}</span></div></div>
+        ${(d.holdLog||[]).map(ev=>{
+          if(ev.action==='shopify_release') return `<div class="flex items-start gap-2 text-xs"><span>🔓</span><div><span class="font-semibold text-emerald-700">Released${ev.by==='auto'?'':' by '+escapeHtml(supPrettyUser(ev.by))}</span> <span class="text-slate-400">· ${_hlFmt(ev.at)}</span></div></div>`;
+          const who=ev.by==='auto'?'Auto-held on Shopify':('Held by '+supPrettyUser(ev.by));
+          return `<div class="flex items-start gap-2 text-xs"><span>${ev.ok?'🔒':'⚠️'}</span><div><span class="font-semibold text-rose-700">${escapeHtml(who)}</span>${ev.reason?` <span class="px-1.5 py-0.5 rounded bg-rose-50 text-rose-600 font-semibold">${escapeHtml(ev.reason)}</span>`:''} <span class="text-slate-400">· ${_hlFmt(ev.at)}${ev.ok?'':' · '+escapeHtml(ev.result||'failed')}</span></div></div>`;
+        }).join('')||'<p class="text-xs text-slate-400 pl-6">No hold/unhold activity — never held.</p>'}
+      </div></div>`;
     wrap.firstElementChild.innerHTML=`
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div><div class="flex items-center gap-2 flex-wrap"><span class="font-mono text-lg font-bold text-slate-800">${escapeHtml(o.order_name||o.order_id)}</span>${supBadge(o.bucket)}
@@ -3941,6 +3957,7 @@ async function supOrderModal(orderId){
             <span class="text-slate-400">${escapeHtml(m.template_name||'')} · ${m.sent_at?new Date(m.sent_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span>
             ${tx?`<p class="text-slate-600 mt-0.5">${escapeHtml(tx.slice(0,160))}</p>`:''}</div>`; }).join('')||'<p class="text-sm text-slate-400">No messages</p>'}</div></div>
       </div>
+      ${holdLogHtml}
       <div class="card p-4 mt-5">
         <div class="flex items-center justify-between mb-2"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide">All orders from this customer</p>
           <span class="text-xs text-slate-400">${(d.customer_orders||[]).length} order${(d.customer_orders||[]).length===1?'':'s'}</span></div>

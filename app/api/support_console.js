@@ -206,17 +206,17 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
             .filter(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at))
             .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
             .slice(0, 3);
-        // Reliability from the last 3 orders (last3Prior[0] = most recent). RTO counts as "not delivered" (a
-        // real failure) → it triggers a hold. EXCEPTION (don't hold on the history reasons): the customer HAS
-        // 1–2 delivered in the last 3 AND their latest or 2nd-latest order is an RTO — treated as a one-off RTO
-        // for an otherwise-delivering customer. (All-3-delivered has no "not delivered" order, so never holds.)
+        // RULE: if ANY ONE of the last 3 prior orders was DELIVERED, the customer is trusted → don't flag/hold on
+        // the history reasons (recent non-delivery / in-flight). Only when NONE of the last 3 delivered. RTO/
+        // undelivered/in-transit all count as "not delivered". (high_value below is independent of this.)
         const dCount    = last3Prior.filter(h => h.bucket === 'delivered').length;
-        const recentRTO = (last3Prior[0] && last3Prior[0].bucket === 'rto') || (last3Prior[1] && last3Prior[1].bucket === 'rto');
-        const reliable  = (dCount === 1 || dCount === 2) && recentRTO;
+        const reliable  = dCount >= 1;
         // Reason `recent_undelivered` — ≥1 of the last 3 not delivered (RTO included), unless reliable.
         const rRecent   = !reliable && last3Prior.some(h => h.bucket !== 'delivered' && !isCancelled(h));
-        // Reason `in_flight` — the customer has ANOTHER order still non-terminal (a live/pending delivery), unless reliable.
-        const rInflight = !reliable && all.some(h => h.order_id !== c.order_id && !TERMINAL.has(h.bucket) && !isCancelled(h));
+        // Reason `in_flight` (spec reason #1) — the customer has ANOTHER non-terminal (live/pending) order. Independent
+        // of the delivery-reliability skip (that carve-out is for recent-non-delivery only), so a concurrent live order
+        // holds the latest even for a customer who has a past delivery.
+        const rInflight = all.some(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at) && !TERMINAL.has(h.bucket) && !isCancelled(h));
         // Reason `high_value` — this order is ₹1500 and above.
         const rValue    = Number(c.total_price || 0) >= 1500;
         const reasons = [];
@@ -384,6 +384,17 @@ router.get('/support/order/:orderId', async (req, res) => {
         const nkn = n => String(n || '').replace('#', '').trim();
         if (eeCanc.has(nkn(b.order_name))) b.bucket = 'cancelled';
         custOrders.data.forEach(o => { if (eeCanc.has(nkn(o.order_name))) o.bucket = 'cancelled'; });
+        // Hold / unhold log — every auto/manual Shopify hold + release for THIS order (from api_logs_ecom),
+        // oldest first, so the modal can render a full timeline (who, when, auto vs manual, reason).
+        const onmNorm = nkn(b.order_name);
+        const { data: holdRows } = await supabase.from('api_logs_ecom')
+            .select('action, status_code, payload, response, created_at')
+            .in('action', ['shopify_hold', 'shopify_release'])
+            .order('created_at', { ascending: false }).limit(500);
+        const holdLog = (holdRows || [])
+            .filter(l => String(JSON.stringify(l.payload || '')).includes(onmNorm))
+            .map(l => { const p = l.payload || {}; return { action: l.action, by: p.by || 'auto', reason: p.reason || null, ok: (l.status_code || 0) < 400, result: l.response || null, at: l.created_at }; })
+            .sort((x, y) => new Date(x.at) - new Date(y.at));
         // MSG91 thread by phone (last 20).
         let msg91 = [];
         if (b.phone) {
@@ -410,7 +421,7 @@ router.get('/support/order/:orderId', async (req, res) => {
             calls: (calls.data || []).map(c => ({ ...c, agent_name: nameById[c.agent_id] || null })),
             notes: (notes.data || []).map(n => ({ ...n, agent_name: nameById[n.agent_id] || null, mine: n.agent_id === myId })),
             escalation, customer_orders: custOrders.data || [],   // includes the current order (marked client-side)
-            isAdmin: isAdmin(req) });
+            holdLog, isAdmin: isAdmin(req) });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 

@@ -294,7 +294,7 @@ cron.schedule('*/2 * * * *', async () => {
         const cand = await findRepeatCandidates({ fromISO, toISO });
         let held = 0, skipped = 0, failed = 0;
         for (const c of cand.slice(0, 50)) {
-            const r = await shopifyHold.autoHoldOrder(c.order_name, c.order_id);
+            const r = await shopifyHold.autoHoldOrder(c.order_name, c.order_id, shopifyHold.reasonNoteFrom(c.reasons));
             if (r.held) held++; else if (r.skipped) skipped++; else failed++;
             await new Promise(x => setTimeout(x, 800));   // gentle — one order at a time
         }
