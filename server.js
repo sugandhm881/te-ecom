@@ -113,7 +113,10 @@ const _VIEW_PERMS = [
     [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts']],
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
-    // Inventory Analytics.
+    // Inventory Analytics. Stock Count (WH-only) + its deep Count Analysis (manager-only) are separate perms —
+    // the more specific analysis rule must precede the count rule, which must precede the general rule.
+    [/^\/inventory\/count\/analysis/i, ['inventory-count-analysis', 'inventory']],
+    [/^\/inventory\/count/i, ['inventory-count', 'inventory']],
     [/^\/inventory\//i, 'inventory'],
 ];
 app.use('/api', (req, res, next) => {

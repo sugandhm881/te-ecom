@@ -691,6 +691,16 @@ function navigate(view) {
             activeViewElement = document.getElementById('inventory-view');
             if (typeof initInventory === 'function') initInventory();
             break;
+        case 'inventory-count':
+            activeLinkElement = document.getElementById('nav-inventory-count');
+            activeViewElement = document.getElementById('inventory-count-view');
+            if (typeof initInventoryCount === 'function') initInventoryCount();
+            break;
+        case 'inventory-count-analysis':
+            activeLinkElement = document.getElementById('nav-inventory-count-analysis');
+            activeViewElement = document.getElementById('inventory-count-analysis-view');
+            if (typeof initCountAnalysis === 'function') initCountAnalysis();
+            break;
         case 'users':
             activeLinkElement = document.getElementById('nav-users');
             activeViewElement = document.getElementById('users-view');
@@ -4152,7 +4162,7 @@ const NAV_HREF = {
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon',
-    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-users': 'users',
+    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-users': 'users',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
@@ -4864,6 +4874,8 @@ document.getElementById('nav-claims-sla')?.addEventListener('click', (e) => { e.
     document.getElementById('nav-' + v)?.addEventListener('click', (e) => { e.preventDefault(); navigate(v); }));
 document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
 document.getElementById('nav-amazon-fba')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-fba'); });
+document.getElementById('nav-inventory-count')?.addEventListener('click', (e) => { e.preventDefault(); navigate('inventory-count'); });
+document.getElementById('nav-inventory-count-analysis')?.addEventListener('click', (e) => { e.preventDefault(); navigate('inventory-count-analysis'); });
 document.getElementById('nav-users')?.addEventListener('click', (e) => { e.preventDefault(); navigate('users'); });
 
 // ═══════════════ USERS & PERMISSIONS (admin) ═══════════════
@@ -4873,6 +4885,7 @@ const PERM_GROUPS = [
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
   ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
+  ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
   // Capabilities (not dashboard views) — granted per-user by the admin. Server enforces each one too.
   ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)']]]
@@ -9028,6 +9041,274 @@ function invRefresh(){
   document.getElementById('inv-table').querySelectorAll('tr[data-key]').forEach(tr=>tr.addEventListener('click',()=>{ const i=_invRowByKey.get(tr.dataset.key); if(i) infModal('inv-detail-modal',invDetailModalHtml(i),'max-w-lg'); }));
 }
 // ═══════════════ End Inventory Analytics ═══════════════
+
+// ═══════════════ STOCK COUNT — physical inventory reconciliation vs EasyEcom (WH team) ═══════════════
+// Blind, one-SKU-at-a-time count at Shifupro. On submit the backend captures EasyEcom's LIVE qty at that
+// instant and logs system/physical/diff to inventory_counts_ecom. Gated by the `inventory-count` perm.
+let _icSkus=[], _icSel='', _icActive=-1;
+async function initInventoryCount(){
+  const body=document.getElementById('inv-count-body'); if(!body) return;
+  body.innerHTML=brandLoader('Loading…');
+  try{
+    const r=await fetch('/api/inventory/count/skus',{headers:{'Content-Type':'application/json',...getAuthHeaders()}});
+    const d=await r.json(); if(!r.ok||d.success===false) throw new Error(d.error||('HTTP '+r.status));
+    _icSkus=d.skus||[]; _icSel='';
+    // Reconciliation KPIs + log reveal system/diff, so show them ONLY to managers/admins (the analysis perm).
+    // A pure counter (inventory-count only) gets a fully blind entry form — no system numbers anywhere.
+    const showRecon = !!(typeof canView==='function' && canView('inventory-count-analysis'));
+    body.innerHTML=`
+      <div class="${showRecon?'grid lg:grid-cols-5 gap-5 items-start':''}">
+        <div class="${showRecon?'lg:col-span-2':'max-w-xl'} card p-5">
+          <p class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-3">Log a physical count</p>
+          <label class="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">SKU</label>
+          <div class="relative mt-1" id="ic-combo">
+            <input id="ic-sku-input" autocomplete="off" placeholder="Search SKU or product…" class="filter-input w-full">
+            <div id="ic-sku-panel" class="hidden absolute z-30 mt-1 w-full max-h-72 overflow-y-auto bg-white rounded-xl ring-1 ring-slate-200 shadow-xl py-1"></div>
+          </div>
+          <p id="ic-skuname" class="text-xs text-slate-400 mt-1 min-h-[1rem]"></p>
+          <label class="block text-[11px] font-semibold text-slate-500 uppercase tracking-wide mt-4">Physical count</label>
+          <input id="ic-qty" type="text" inputmode="numeric" placeholder="0 units on shelf" class="filter-input w-full text-2xl font-bold tabular-nums py-3 text-slate-800 mt-1">
+          <button id="ic-submit" class="w-full mt-4 py-3 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700 active:bg-indigo-800 transition disabled:opacity-50">Submit</button>
+          <div id="ic-result" class="mt-3"></div>
+        </div>
+        ${showRecon?`<div class="lg:col-span-3 grid grid-cols-2 gap-3" id="ic-kpis"></div>`:''}
+      </div>
+      ${showRecon?`<div class="card p-3"><div class="flex flex-wrap items-center gap-2">
+        <input id="ic-search" placeholder="Filter log by SKU…" class="filter-input w-56">
+        <label class="flex items-center gap-1.5 text-sm text-slate-600 select-none cursor-pointer"><input id="ic-mismatch" type="checkbox" class="rounded"> Mismatches only</label>
+        <span id="ic-count" class="text-xs text-slate-400 ml-auto"></span>
+      </div></div>
+      <div class="card p-4"><div id="ic-log" class="overflow-x-auto"></div></div>`:''}`;
+    // ── Custom searchable SKU combobox (replaces the native datalist for a themed, keyboard-friendly picker) ──
+    const inp=document.getElementById('ic-sku-input'), panel=document.getElementById('ic-sku-panel');
+    const setSel=sku=>{ _icSel=sku; const m=_icSkus.find(s=>s.sku===sku); document.getElementById('ic-skuname').textContent=m?(m.name||''):''; };
+    const renderOpts=()=>{ const q=inp.value.trim().toLowerCase(); _icActive=-1;
+      const list=_icSkus.filter(s=>!q||(s.sku+' '+(s.name||'')).toLowerCase().includes(q));
+      panel.innerHTML=list.length?list.map(s=>`<button type="button" data-sku="${escapeHtml(s.sku)}" class="ic-opt w-full text-left px-3 py-2 hover:bg-indigo-50"><span class="font-mono font-semibold text-slate-700 text-sm">${escapeHtml(s.sku)}</span><span class="block text-xs text-slate-400 truncate">${escapeHtml(s.name||'')}</span></button>`).join(''):`<p class="px-3 py-3 text-sm text-slate-400">No match</p>`;
+    };
+    const openP=()=>{ renderOpts(); panel.classList.remove('hidden'); };
+    const closeP=()=>{ panel.classList.add('hidden'); _icActive=-1; };
+    const pick=sku=>{ inp.value=sku; setSel(sku); closeP(); document.getElementById('ic-qty').focus(); };
+    inp.addEventListener('focus',openP);
+    inp.addEventListener('input',()=>{ setSel(_icSkus.some(s=>s.sku===inp.value.trim())?inp.value.trim():''); openP(); });
+    panel.addEventListener('mousedown',e=>{ const b=e.target.closest('.ic-opt'); if(b){ e.preventDefault(); pick(b.dataset.sku); } });
+    inp.addEventListener('keydown',e=>{ const opts=[...panel.querySelectorAll('.ic-opt')];
+      if(e.key==='ArrowDown'){ e.preventDefault(); if(panel.classList.contains('hidden'))openP(); _icActive=Math.min(_icActive+1,opts.length-1); }
+      else if(e.key==='ArrowUp'){ e.preventDefault(); _icActive=Math.max(_icActive-1,0); }
+      else if(e.key==='Enter'&&_icActive>=0&&opts[_icActive]){ e.preventDefault(); pick(opts[_icActive].dataset.sku); return; }
+      else if(e.key==='Escape'){ closeP(); return; }
+      opts.forEach((o,i)=>o.classList.toggle('bg-indigo-50',i===_icActive));
+      if(_icActive>=0&&opts[_icActive]) opts[_icActive].scrollIntoView({block:'nearest'});
+    });
+    document.addEventListener('mousedown',e=>{ if(!document.getElementById('ic-combo')?.contains(e.target)) closeP(); });
+    document.getElementById('ic-submit').addEventListener('click',icSubmit);
+    document.getElementById('ic-qty').addEventListener('keydown',e=>{ if(e.key==='Enter') icSubmit(); });
+    document.getElementById('ic-search')?.addEventListener('input',()=>{ clearTimeout(window._icT); window._icT=setTimeout(icLoadLog,300); });
+    document.getElementById('ic-mismatch')?.addEventListener('change',icLoadLog);
+    inp.focus();
+    if(showRecon) icLoadLog();
+  }catch(e){ body.innerHTML=`<div class="card p-6 text-sm text-rose-600">${escapeHtml(e.message)}</div>`; }
+}
+async function icSubmit(){
+  const inp=document.getElementById('ic-sku-input'), qtyEl=document.getElementById('ic-qty'), btn=document.getElementById('ic-submit'), res=document.getElementById('ic-result');
+  let sku=_icSel; if(!sku && _icSkus.some(s=>s.sku===(inp.value||'').trim())) sku=(inp.value||'').trim();
+  const qty=qtyEl.value;
+  if(!sku){ res.innerHTML=`<p class="text-sm text-rose-600">Pick a SKU from the list.</p>`; inp.focus(); return; }
+  if(qty===''||!isFinite(Number(qty))||Number(qty)<0){ res.innerHTML=`<p class="text-sm text-rose-600">Enter a valid physical count.</p>`; qtyEl.focus(); return; }
+  btn.disabled=true; const orig=btn.textContent; btn.textContent='Submitting…';
+  try{
+    const r=await fetch('/api/inventory/count',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({sku,physical_qty:Number(qty)})});
+    const d=await r.json(); if(!r.ok||d.success===false) throw new Error(d.error||('HTTP '+r.status));
+    const e=d.entry;
+    // Blind count — do NOT reveal system qty / difference / match-status to the counter. Just confirm the save.
+    res.innerHTML=`<div class="rounded-xl p-3.5 bg-emerald-50 ring-1 ring-emerald-200 text-sm text-emerald-800 flex items-center gap-2">
+        <svg class="w-5 h-5 shrink-0 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+        <span>Count logged for <b class="font-mono">${escapeHtml(e.sku)}</b> — <b>${invNum(e.physical_qty)}</b> units. Ready for the next SKU.</span></div>`;
+    qtyEl.value=''; inp.value=''; _icSel=''; document.getElementById('ic-skuname').textContent=''; inp.focus();
+    icLoadLog();
+  }catch(err){ res.innerHTML=`<div class="rounded-xl p-3.5 bg-rose-50 ring-1 ring-rose-200 text-sm text-rose-700">${escapeHtml(err.message)}</div>`; }
+  finally{ btn.disabled=false; btn.textContent=orig; }
+}
+async function icLoadLog(){
+  const log=document.getElementById('ic-log'); if(!log) return;
+  const sku=(document.getElementById('ic-search')?.value||'').trim();
+  const mm=document.getElementById('ic-mismatch')?.checked?'1':'';
+  try{
+    const r=await fetch(`/api/inventory/count/log?sku=${encodeURIComponent(sku)}&mismatch=${mm}`,{headers:{'Content-Type':'application/json',...getAuthHeaders()}});
+    const d=await r.json(); if(!r.ok||d.success===false) throw new Error(d.error||('HTTP '+r.status));
+    const s=d.summary||{};
+    const kpi=(l,v,sub,cls)=>`<div class="card p-4"><p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${l}</p><p class="text-2xl font-bold mt-1 tabular-nums ${cls||'text-slate-800'}">${v}</p>${sub?`<p class="text-xs text-slate-400 mt-0.5">${sub}</p>`:''}</div>`;
+    document.getElementById('ic-kpis').innerHTML=
+      kpi('Counts logged',invNum(s.total||0))+
+      kpi('Mismatches',invNum(s.mismatches||0),'system ≠ physical',(s.mismatches>0?'text-rose-600':'text-emerald-600'))+
+      kpi('Net unit variance',(s.netUnits>0?'+':'')+invNum(s.netUnits||0),'physical − system',(s.netUnits!==0?'text-amber-600':'text-slate-800'))+
+      kpi('₹ variance',infMoney(s.valueVar||0),'at EasyEcom cost',(s.valueVar!==0?'text-amber-600':'text-slate-800'));
+    const rows=d.rows||[];
+    document.getElementById('ic-count').textContent=rows.length+' entries';
+    const TH='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+    const TD='px-3 py-2 border-b border-slate-100 text-sm';
+    const fmtDt=t=>t?new Date(t).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'';
+    const tb=rows.map(r=>{ const diff=Number(r.difference), match=diff===0;
+      return `<tr class="hover:bg-slate-50 ${match?'':'bg-rose-50/40'}">
+        <td class="${TD} whitespace-nowrap text-slate-500">${fmtDt(r.counted_at)}</td>
+        <td class="${TD} text-slate-500 whitespace-nowrap">${escapeHtml((r.counted_by||'').split('@')[0])}</td>
+        <td class="${TD} font-mono font-semibold text-slate-700 whitespace-nowrap">${escapeHtml(r.sku)}</td>
+        <td class="${TD} text-slate-600 max-w-[220px] truncate" title="${escapeHtml(r.product_name||'')}">${escapeHtml(r.product_name||'')}</td>
+        <td class="${TD} text-right tabular-nums">${invNum(r.system_qty)}</td>
+        <td class="${TD} text-right tabular-nums">${invNum(r.physical_qty)}</td>
+        <td class="${TD} text-right tabular-nums font-bold ${match?'text-emerald-600':(diff>0?'text-amber-600':'text-rose-600')}">${diff>0?'+':''}${invNum(diff)}</td>
+        <td class="${TD}">${match?'<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700">Match</span>':'<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-100 text-rose-700">Mismatch</span>'}</td></tr>`;
+    }).join('')||`<tr><td colspan="8" class="px-4 py-10 text-center text-sm text-slate-400">No counts logged yet.</td></tr>`;
+    log.innerHTML=`<table class="w-full"><thead><tr>
+      <th class="${TH}">When</th><th class="${TH}">By</th><th class="${TH}">SKU</th><th class="${TH}">Product</th>
+      <th class="${TH} text-right">System</th><th class="${TH} text-right">Physical</th><th class="${TH} text-right">Diff</th><th class="${TH}">Status</th>
+      </tr></thead><tbody>${tb}</tbody></table>`;
+  }catch(e){ log.innerHTML=`<p class="text-sm text-rose-500 p-4">${escapeHtml(e.message)}</p>`; }
+}
+// ═══════════════ End Stock Count ═══════════════
+
+// ═══════════════ COUNT ANALYSIS — deep system-vs-physical reconciliation analytics (manager-level) ═══════════════
+let _icaWired=false, _icaData=null, _icaChartTop=null, _icaChartTrend=null, _icaSort={k:'trueValueVar',d:-1};
+async function initCountAnalysis(){
+  const body=document.getElementById('ica-body'); if(!body) return;
+  if(!_icaWired){ _icaWired=true;
+    document.getElementById('ica-refresh')?.addEventListener('click',initCountAnalysis);
+    document.getElementById('ica-from')?.addEventListener('change',initCountAnalysis);
+    document.getElementById('ica-to')?.addEventListener('change',initCountAnalysis);
+  }
+  body.innerHTML=brandLoader('Crunching reconciliation data…');
+  try{
+    const from=document.getElementById('ica-from')?.value||'', to=document.getElementById('ica-to')?.value||'';
+    const r=await fetch(`/api/inventory/count/analysis?from=${from}&to=${to}`,{headers:{'Content-Type':'application/json',...getAuthHeaders()}});
+    const d=await r.json(); if(!r.ok||d.success===false) throw new Error(d.error||('HTTP '+r.status));
+    _icaData=d; const s=d.summary;
+    if(!s.counted){ body.innerHTML=`<div class="card p-10 text-center text-slate-400">No counts logged in this range — count some SKUs in <b>Stock Count</b> and the analysis builds here.</div>`; return; }
+    body.innerHTML=`
+      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+        ${icaKpi('Coverage',`${s.counted}/${s.trackedTotal}`,`${s.coverage}% of SKUs counted`)}
+        ${icaKpi('True accuracy',`${s.trueAccuracy}%`,`${s.trueMatched} clean · ${s.trueMismatched} off · net of reserved`,(s.trueAccuracy>=99?'text-emerald-600':s.trueAccuracy>=95?'text-amber-600':'text-rose-600'))}
+        ${icaKpi('Off-Available stock',`${invNum((s.reservedTrackedUnits||0)+(s.blockedUnits||0)+(s.awaitingUnits||0))} u`,`resv ${invNum(s.reservedTrackedUnits||0)} · blkd ${invNum(s.blockedUnits||0)} · await ${invNum(s.awaitingUnits||0)}`)}
+        ${icaKpi('True ₹ variance',infMoney(s.trueNetValue),'real shrink/excess, net of reserved',(s.trueNetValue<0?'text-rose-600':s.trueNetValue>0?'text-amber-600':'text-emerald-600'))}
+        ${icaKpi('True shrinkage',infMoney(s.shortageValue),`${s.shortageSkus} SKUs short`,'text-rose-600')}
+        ${icaKpi('True excess',infMoney(s.excessValue),`${s.excessSkus} SKUs over`,'text-amber-600')}
+      </div>
+      <div class="rounded-xl bg-slate-50 ring-1 ring-slate-200 px-4 py-2.5 text-xs text-slate-500 leading-relaxed">
+        <b class="text-slate-700">Physical = Available + Reserved + Blocked + Awaiting-putaway</b> · <b>True variance = Physical − all four</b> = the real shrinkage.
+        <span class="text-indigo-600 font-semibold">Reserved</span> = allocated to unshipped orders ·
+        <span class="text-amber-600 font-semibold">Blocked</span> = damaged / QC / expired / lot-locked (on shelf, out of Available) ·
+        <span class="text-sky-600 font-semibold">Awaiting-putaway</span> = returns / cancels received but not yet binned.
+        Blocked &amp; Awaiting build from EasyEcom webhooks and firm up as events flow. Raw ₹ variance (before any bucket) was ${infMoney(s.netValue)}.
+      </div>
+      <div class="grid lg:grid-cols-2 gap-5">
+        <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Top TRUE ₹ variance by SKU</p><div style="height:300px"><canvas id="ica-top"></canvas></div></div>
+        <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Raw variance trend (by day)</p><div style="height:300px"><canvas id="ica-trend"></canvas></div></div>
+      </div>
+      <div class="card p-4">
+        <div class="flex flex-wrap items-center gap-2 mb-3">
+          <p class="text-xs font-bold text-slate-500 uppercase tracking-wide">Per-SKU reconciliation — Physical vs (Available + Reserved) · click a row for count history</p>
+          <input id="ica-search" placeholder="Search SKU…" class="filter-input w-48 ml-auto">
+        </div>
+        <div id="ica-table" class="overflow-x-auto"></div>
+      </div>
+      ${d.reservedRollup&&d.reservedRollup.length?`<div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-3">Reserved stock — allocated to unshipped orders (click a SKU for the orders)</p><div id="ica-reserved" class="overflow-x-auto"></div></div>`:''}
+      ${d.uncounted&&d.uncounted.length?`<div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Not yet counted — ${d.uncounted.length} of ${s.trackedTotal} tracked SKUs</p><div class="flex flex-wrap gap-1.5">${d.uncounted.map(u=>`<span class="px-2 py-1 rounded-lg bg-slate-100 text-slate-600 text-xs font-mono" title="${escapeHtml(u.product_name||'')}">${escapeHtml(u.sku)}</span>`).join('')}</div></div>`:''}
+      ${d.counters&&d.counters.length?`<div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">By counter</p><div class="flex flex-wrap gap-3">${d.counters.map(c=>`<div class="px-3 py-2 rounded-lg bg-slate-50 text-sm"><b class="text-slate-700">${escapeHtml((c.by||'').split('@')[0])}</b> · ${c.counts} counts</div>`).join('')}</div></div>`:''}`;
+    document.getElementById('ica-search')?.addEventListener('input',()=>{ clearTimeout(window._icaT); window._icaT=setTimeout(icaRenderTable,250); });
+    icaCharts(); icaRenderTable(); icaRenderReserved();
+  }catch(e){ body.innerHTML=`<div class="card p-6 text-sm text-rose-600">${escapeHtml(e.message)}</div>`; }
+}
+function icaKpi(l,v,sub,cls){ return `<div class="card p-4"><p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${l}</p><p class="text-2xl font-bold mt-1 tabular-nums ${cls||'text-slate-800'}">${v}</p>${sub?`<p class="text-xs text-slate-400 mt-0.5">${sub}</p>`:''}</div>`; }
+function icaCharts(){
+  const top=[..._icaData.perSku].filter(s=>s.trueValueVar!==0).slice(0,12);
+  if(_icaChartTop)_icaChartTop.destroy();
+  _icaChartTop=new Chart(document.getElementById('ica-top'),{type:'bar',data:{labels:top.map(s=>s.sku),datasets:[{data:top.map(s=>s.trueValueVar),backgroundColor:top.map(s=>s.trueValueVar<0?'#f43f5e':'#f59e0b'),borderRadius:4}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>'₹'+Number(c.raw).toLocaleString('en-IN')+' (true)'}}},scales:{x:{beginAtZero:true}}}});
+  const t=_icaData.trend||[];
+  if(_icaChartTrend)_icaChartTrend.destroy();
+  _icaChartTrend=new Chart(document.getElementById('ica-trend'),{type:'line',data:{labels:t.map(x=>x.day),datasets:[
+    {label:'Net units (phys−avail)',data:t.map(x=>x.net),borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,0.15)',tension:0.3,fill:true},
+    {label:'Gross |units|',data:t.map(x=>x.gross),borderColor:'#f59e0b',tension:0.3}
+  ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true,position:'bottom'}},scales:{y:{beginAtZero:true}}}});
+}
+function icaRenderTable(){
+  const wrap=document.getElementById('ica-table'); if(!wrap||!_icaData) return;
+  const q=(document.getElementById('ica-search')?.value||'').trim().toLowerCase();
+  let rows=_icaData.perSku.filter(s=>!q||(s.sku+' '+(s.product_name||'')).toLowerCase().includes(q));
+  const fn={sku:s=>s.sku,system:s=>s.system,reserved:s=>s.reserved,blocked:s=>s.blocked,awaiting:s=>s.awaiting,adjSystem:s=>s.adjSystem,physical:s=>s.physical,trueDiff:s=>s.trueDiff,trueValueVar:s=>s.trueValueVar,counts:s=>s.counts}[_icaSort.k]||(s=>s.trueValueVar);
+  rows=[...rows].sort((a,b)=>{const x=fn(a),y=fn(b); if(typeof x==='string')return _icaSort.d*String(x).localeCompare(String(y)); return _icaSort.d*((x||0)-(y||0));});
+  const TH='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap cursor-pointer select-none hover:text-indigo-600';
+  const TD='px-3 py-2 border-b border-slate-100 text-sm';
+  const car=k=>_icaSort.k===k?(_icaSort.d<0?'▾':'▴'):'';
+  const cols=[['sku','SKU'],['product','Product'],['system','Avail','r'],['reserved','Reserved','r'],['blocked','Blocked','r'],['awaiting','Await','r'],['adjSystem','Adj sys','r'],['physical','Physical','r'],['trueDiff','True diff','r'],['trueValueVar','True ₹','r'],['status','Status']];
+  const head=cols.map(([k,h,a])=>`<th class="${TH} ${a==='r'?'text-right':''}" ${['product','status'].includes(k)?'':`data-s="${k}"`}>${h} ${['product','status'].includes(k)?'':car(k)}</th>`).join('');
+  const tb=rows.map(s=>{ const match=s.trueDiff===0;
+    return `<tr class="hover:bg-indigo-50/40 cursor-pointer ica-row ${match?'':'bg-rose-50/30'}" data-sku="${escapeHtml(s.sku)}" title="Click for full count history">
+      <td class="${TD} font-mono font-semibold text-slate-700 whitespace-nowrap">${escapeHtml(s.sku)}</td>
+      <td class="${TD} text-slate-600 max-w-[200px] truncate" title="${escapeHtml(s.product_name||'')}">${escapeHtml(s.product_name||'')}</td>
+      <td class="${TD} text-right tabular-nums text-slate-500">${invNum(s.system)}</td>
+      <td class="${TD} text-right tabular-nums text-indigo-600">${s.reserved?'+'+invNum(s.reserved):'0'}</td>
+      <td class="${TD} text-right tabular-nums text-amber-600">${s.blocked?'+'+invNum(s.blocked):'0'}</td>
+      <td class="${TD} text-right tabular-nums text-sky-600">${s.awaiting?'+'+invNum(s.awaiting):'0'}</td>
+      <td class="${TD} text-right tabular-nums font-semibold text-slate-700">${invNum(s.adjSystem)}</td>
+      <td class="${TD} text-right tabular-nums">${invNum(s.physical)}</td>
+      <td class="${TD} text-right tabular-nums font-bold ${match?'text-emerald-600':(s.trueDiff>0?'text-amber-600':'text-rose-600')}">${s.trueDiff>0?'+':''}${invNum(s.trueDiff)}</td>
+      <td class="${TD} text-right tabular-nums font-semibold ${s.trueValueVar<0?'text-rose-600':s.trueValueVar>0?'text-amber-600':'text-slate-400'}">${infMoney(s.trueValueVar)}</td>
+      <td class="${TD}">${match?'<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700">Match</span>':(s.trueDiff<0?'<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-100 text-rose-700">Short</span>':'<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-700">Excess</span>')}</td></tr>`;
+  }).join('')||`<tr><td colspan="11" class="px-4 py-10 text-center text-sm text-slate-400">No SKUs match.</td></tr>`;
+  wrap.innerHTML=`<table class="w-full"><thead><tr>${head}</tr></thead><tbody>${tb}</tbody></table>`;
+  wrap.querySelectorAll('th[data-s]').forEach(th=>th.addEventListener('click',()=>{ const k=th.dataset.s; if(_icaSort.k===k)_icaSort.d*=-1; else _icaSort={k,d:k==='sku'?1:-1}; icaRenderTable(); }));
+  wrap.querySelectorAll('.ica-row').forEach(tr=>tr.addEventListener('click',()=>icaHistory(tr.dataset.sku)));
+}
+function icaRenderReserved(){
+  const wrap=document.getElementById('ica-reserved'); if(!wrap||!_icaData) return;
+  const rows=_icaData.reservedRollup||[];
+  const TH='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+  const TD='px-3 py-2 border-b border-slate-100 text-sm';
+  const fmtD=t=>t?new Date(t).toLocaleDateString('en-IN',{day:'2-digit',month:'short'}):'';
+  const tb=rows.map(r=>`<tr class="hover:bg-indigo-50/40 cursor-pointer ica-rrow" data-sku="${escapeHtml(r.sku)}" title="Click to see the orders reserving this SKU">
+    <td class="${TD} font-mono font-semibold text-slate-700 whitespace-nowrap">${escapeHtml(r.sku)}</td>
+    <td class="${TD} text-slate-600 max-w-[240px] truncate" title="${escapeHtml(r.product_name||'')}">${escapeHtml(r.product_name||'')}</td>
+    <td class="${TD} text-right tabular-nums font-bold text-indigo-600">${invNum(r.reserved)}</td>
+    <td class="${TD} text-right tabular-nums text-slate-500">${r.orders}</td>
+    <td class="${TD} text-slate-400 text-xs whitespace-nowrap">${fmtD(r.oldest)} – ${fmtD(r.newest)}</td></tr>`).join('')||`<tr><td colspan="5" class="px-4 py-8 text-center text-sm text-slate-400">No reserved stock right now.</td></tr>`;
+  wrap.innerHTML=`<table class="w-full"><thead><tr><th class="${TH}">SKU</th><th class="${TH}">Product</th><th class="${TH} text-right">Reserved units</th><th class="${TH} text-right">Open orders</th><th class="${TH}">Order dates</th></tr></thead><tbody>${tb}</tbody></table>`;
+  wrap.querySelectorAll('.ica-rrow').forEach(tr=>tr.addEventListener('click',()=>icaReservedOrders(tr.dataset.sku)));
+}
+function icaReservedOrders(sku){
+  const s=(_icaData.reservedRollup||[]).find(x=>x.sku===sku)||{};
+  const lines=(_icaData.reservedLines||[]).filter(l=>l.sku===sku).sort((a,b)=>new Date(b.order_date)-new Date(a.order_date));
+  const body=lines.map(l=>`<tr class="border-t border-slate-100">
+    <td class="py-2 pr-4 text-slate-500 whitespace-nowrap">${new Date(l.order_date).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'2-digit'})}</td>
+    <td class="py-2 pr-4 font-mono text-slate-600 whitespace-nowrap">${escapeHtml(l.order_ref||'')}</td>
+    <td class="py-2 pr-4"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-600 whitespace-nowrap">${escapeHtml(l.order_status||'')}</span></td>
+    <td class="py-2 text-right tabular-nums font-semibold text-slate-700">${invNum(l.units)}</td></tr>`).join('')||`<tr><td colspan="4" class="py-6 text-center text-slate-400">No open orders.</td></tr>`;
+  infModal('ica-res-modal',`
+    <div class="px-5 py-4 border-b border-slate-100 flex items-start justify-between sticky top-0 bg-white rounded-t-2xl z-10">
+      <div><div class="font-mono font-bold text-slate-800">${escapeHtml(sku)}</div><p class="text-sm text-slate-600 mt-0.5">${escapeHtml(s.product_name||'')}</p><p class="text-xs text-slate-400 mt-0.5"><b class="text-indigo-600">${invNum(s.reserved||0)}</b> units reserved across <b>${s.orders||0}</b> unshipped orders</p></div>
+      <button data-x class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button></div>
+    <div class="p-5"><table class="w-full text-sm"><thead><tr class="text-[10px] text-slate-400 uppercase tracking-wide text-left"><th class="pb-1 pr-4">Order date</th><th class="pb-1 pr-4">Order</th><th class="pb-1 pr-4">Status</th><th class="pb-1 text-right">Units</th></tr></thead><tbody>${body}</tbody></table></div>`,'max-w-xl');
+}
+function icaHistory(sku){
+  const s=_icaData.perSku.find(x=>x.sku===sku); if(!s) return;
+  const rows=[...s.history].reverse().map(h=>{
+    const res=h.reserved, blk=h.blocked, awp=h.awaiting, known=res!=null;
+    const adj=known?(h.system+(res||0)+(blk||0)+(awp||0)):null, trueD=adj==null?null:(h.physical-adj), match=trueD===0;
+    return `<tr class="border-t border-slate-100">
+      <td class="py-2 pr-3 text-slate-500 whitespace-nowrap">${new Date(h.at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</td>
+      <td class="py-2 pr-3 text-slate-500 whitespace-nowrap">${escapeHtml((h.by||'').split('@')[0])}</td>
+      <td class="py-2 pr-3 text-right tabular-nums text-slate-500">${invNum(h.system)}</td>
+      <td class="py-2 pr-3 text-right tabular-nums text-indigo-600">${res==null?'—':'+'+invNum(res)}</td>
+      <td class="py-2 pr-3 text-right tabular-nums text-amber-600">${blk==null?'—':'+'+invNum(blk)}</td>
+      <td class="py-2 pr-3 text-right tabular-nums text-sky-600">${awp==null?'—':'+'+invNum(awp)}</td>
+      <td class="py-2 pr-3 text-right tabular-nums">${invNum(h.physical)}</td>
+      <td class="py-2 text-right tabular-nums font-bold ${trueD==null?'text-slate-400':(match?'text-emerald-600':(trueD>0?'text-amber-600':'text-rose-600'))}">${trueD==null?'—':(trueD>0?'+':'')+invNum(trueD)}</td></tr>`;
+  }).join('');
+  infModal('ica-hist-modal',`
+    <div class="px-5 py-4 border-b border-slate-100 flex items-start justify-between sticky top-0 bg-white rounded-t-2xl z-10">
+      <div><div class="font-mono font-bold text-slate-800">${escapeHtml(s.sku)}</div><p class="text-sm text-slate-600 mt-0.5">${escapeHtml(s.product_name||'')}</p><p class="text-xs text-slate-400 mt-0.5">${s.counts} counts · latest true diff ${s.trueDiff>0?'+':''}${invNum(s.trueDiff)} (${infMoney(s.trueValueVar)})</p></div>
+      <button data-x class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button></div>
+    <div class="p-5 overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-[10px] text-slate-400 uppercase tracking-wide text-left"><th class="pb-1 pr-3">When</th><th class="pb-1 pr-3">By</th><th class="pb-1 pr-3 text-right">Avail</th><th class="pb-1 pr-3 text-right">Resv</th><th class="pb-1 pr-3 text-right">Blkd</th><th class="pb-1 pr-3 text-right">Await</th><th class="pb-1 pr-3 text-right">Physical</th><th class="pb-1 text-right">True diff</th></tr></thead><tbody>${rows}</tbody></table></div>`,'max-w-2xl');
+}
+// ═══════════════ End Count Analysis ═══════════════
 
 // ═══════════════ INFLUENCER MARKETING CRM (port of the standalone Influencer CRM) ═══════════════
 // Views: inf-dashboard · inf-discover · inf-influencers · inf-lists · inf-calendar · inf-mentions
