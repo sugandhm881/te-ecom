@@ -431,7 +431,31 @@ router.get('/inf/calendar', async (req, res) => {
             .select('id, influencer_id, expected_date, live_date, payment_status, video_url')
             .or(`and(expected_date.gte.${from},expected_date.lte.${to}),and(live_date.gte.${from},live_date.lte.${to})`);
         if (error) throw new Error(error.message);
-        const ids = [...new Set((vids || []).map(v => v.influencer_id))];
+        // Also surface each influencer's planned NEXT video (influencers.next_video_expected_date) as an
+        // "expected" entry — that's the source of the calendar's upcoming markers (influencer_videos rarely
+        // carries a forward expected_date). Rendered amber (expected) or red (overdue, if past) by the frontend.
+        const { data: nexts, error: nErr } = await supabase.from('influencers')
+            .select('id, next_video_expected_date')
+            .gte('next_video_expected_date', from).lte('next_video_expected_date', to);
+        if (nErr) throw new Error(nErr.message);
+        // Suppress a next-expected marker once the influencer has actually delivered: if they have any live
+        // video on/after their expected date they've posted, so a stale next_video_expected_date must NOT read
+        // as overdue nor duplicate the green 'live' pill on the same day. Only undelivered dates stay expected/overdue.
+        const nextIds = [...new Set((nexts || []).map(n => n.id))];
+        const lastLive = {};
+        for (let i = 0; i < nextIds.length; i += 300) {
+            const { data: lrs } = await supabase.from('influencer_videos')
+                .select('influencer_id, live_date').in('influencer_id', nextIds.slice(i, i + 300)).not('live_date', 'is', null);
+            (lrs || []).forEach(r => { if (r.live_date && (!lastLive[r.influencer_id] || r.live_date > lastLive[r.influencer_id])) lastLive[r.influencer_id] = r.live_date; });
+        }
+        const nextEntries = (nexts || [])
+            .filter(inf => !(lastLive[inf.id] && lastLive[inf.id] >= inf.next_video_expected_date))
+            .map(inf => ({
+                id: `next-${inf.id}`, influencer_id: inf.id, expected_date: inf.next_video_expected_date,
+                live_date: null, payment_status: null, video_url: null, source: 'next_expected',
+            }));
+        const allVids = [...(vids || []), ...nextEntries];
+        const ids = [...new Set(allVids.map(v => v.influencer_id))];
         let handles = {};
         if (ids.length) {
             for (let i = 0; i < ids.length; i += 300) {
@@ -439,7 +463,7 @@ router.get('/inf/calendar', async (req, res) => {
                 (data || []).forEach(x => { handles[x.id] = { handle: x.instagram_handle, name: x.name }; });
             }
         }
-        res.json({ success: true, from, to, videos: (vids || []).map(v => ({ ...v, influencer: handles[v.influencer_id] || null })) });
+        res.json({ success: true, from, to, videos: allVids.map(v => ({ ...v, influencer: handles[v.influencer_id] || null })) });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 

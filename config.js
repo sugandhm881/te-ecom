@@ -96,6 +96,7 @@ module.exports = {
     // Newer On-Hold flow that posts as a REPLY into the Ops/Daily Reports thread (preferred over _HOLD).
     TEAMS_WEBHOOK_WAREHOUSE_HOLD: process.env.TEAMS_WEBHOOK_WAREHOUSE_HOLD,
     TEAMS_WEBHOOK_AMAZON:    process.env.TEAMS_WEBHOOK_AMAZON,
+    TEAMS_WEBHOOK_INVENTORY: process.env.TEAMS_WEBHOOK_INVENTORY,   // daily inventory snapshot report (falls back to _WAREHOUSE)
     // --- Teams keyword listener (Graph delegated) ---
     TEAMS_TENANT_ID:     process.env.TEAMS_TENANT_ID,
     TEAMS_CLIENT_ID:     process.env.TEAMS_CLIENT_ID,

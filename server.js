@@ -113,6 +113,8 @@ const _VIEW_PERMS = [
     [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts']],
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
+    // Inventory Analytics.
+    [/^\/inventory\//i, 'inventory'],
 ];
 app.use('/api', (req, res, next) => {
     const perms = (req.user && req.user.permissions) || [];
@@ -141,6 +143,7 @@ app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll
 app.use('/api', require('./app/api/support_console'));        // Customer Support console (queue/calls/notes/contacts)
 app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
+app.use('/api', require('./app/api/inventory').router);       // Inventory Analytics (daily snapshot dashboard + Teams report)
 app.use('/api', docpharmaReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
 app.use('/api', docpharmaLedgerRoutes);
@@ -170,6 +173,13 @@ cron.schedule('15 3 * * *', async () => {
     console.log('[Charges] 3:15 AM IST — syncing RapidShyp freight/value for newly-final shipments…');
     const r = await syncChargesBatch(2500).catch(e => { console.error('[Charges] nightly error:', e.message); return null; });
     if (r) console.log(`[Charges] nightly done — processed ${r.processed}, updated ${r.updated}`);
+}, { timezone: 'Asia/Kolkata' });
+
+// Daily inventory snapshot → Microsoft Teams. The snapshot itself runs @ 00:00 IST (Supabase pg_cron
+// 'snapshot-inventory-daily-ist'); this posts the summary @ 00:30 IST, once that has finished.
+cron.schedule('30 0 * * *', async () => {
+    console.log('[Inventory] 00:30 IST — posting daily inventory snapshot to Teams…');
+    await require('./app/api/inventory').sendInventoryTeamsReport().catch(e => console.error('[Inventory] Teams report error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // DocPharma portal INGESTION — DocPharma doesn't webhook us (webhook_url is null), so every 3h we pull

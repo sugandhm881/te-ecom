@@ -686,6 +686,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('inf-mentions-view');
             if (typeof infMentionsInit === 'function') infMentionsInit();
             break;
+        case 'inventory':
+            activeLinkElement = document.getElementById('nav-inventory');
+            activeViewElement = document.getElementById('inventory-view');
+            if (typeof initInventory === 'function') initInventory();
+            break;
         case 'users':
             activeLinkElement = document.getElementById('nav-users');
             activeViewElement = document.getElementById('users-view');
@@ -4147,7 +4152,7 @@ const NAV_HREF = {
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon',
-    'nav-amazon-fba': 'amazon-fba', 'nav-users': 'users',
+    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-users': 'users',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
@@ -8876,6 +8881,153 @@ function srvRenderResult(data) {
   resultsEl.innerHTML = hero + stats + table + raw;
 }
 // ── End Serviceability ────────────────────────────────────────────────────────
+
+// ═══════════════ INVENTORY ANALYTICS (daily snapshot dashboard) ═══════════════
+// Reads /api/inventory/snapshot (latest daily inventory_snapshots — EasyEcom stock + b2c sales, pack→base).
+// DRR = units in period / period days; DOI = stock/DRR (999 if DRR=0 & stock>0; 0 if no stock).
+let _invRaw=null,_invChartDoi=null,_invChartTop=null,_invSort={k:'doi',d:1},_invWired=false,_invRowByKey=new Map();
+function invCompute(r,period){ const u7=Number(r.units_sold_7d)||0,u14=Number(r.units_sold_14d)||0,u30=Number(r.units_sold_30d)||0; const sold=period===14?u14:period===30?u30:u7; const stock=Number(r.available_quantity)||0; const drr=sold/period; const doi=stock<=0?0:drr<=0?999:stock/drr; return {sku:r.sku,name:r.product_name,warehouse:r.warehouse||'—',category:r.category||'—',stock,u7,u14,u30,drr:Math.round(drr*100)/100,doi:Math.round(doi*10)/10}; }
+// DOI → status. Bands MUST match the report (inventory_doi_low RPC + inventory-doi-image-teams):
+// Critical ≤7 · Warning ≤15 · Watch <30 · then Healthy ≤60 · Overstock >60. Keep the extra No-Sales
+// (drr=0, stock>0) & Overstock refinements the report omits — the report only lists items with DOI <30.
+function invStatus(i){
+  if(i.stock<=0) return ['Out of Stock','bg-rose-100 text-rose-700'];
+  if(i.drr<=0)   return ['No Sales','bg-slate-100 text-slate-500'];
+  if(i.doi<=7)   return ['Critical','bg-rose-100 text-rose-700'];
+  if(i.doi<=15)  return ['Warning','bg-amber-100 text-amber-700'];
+  if(i.doi<30)   return ['Watch','bg-yellow-100 text-yellow-800'];
+  if(i.doi<=60)  return ['Healthy','bg-emerald-100 text-emerald-700'];
+  return ['Overstock','bg-violet-100 text-violet-700'];
+}
+// Full numbers with Indian grouping (no 5.2K abbreviation) — inventory stock counts are exact figures.
+function invNum(n){ return Number(n||0).toLocaleString('en-IN'); }
+// Per-SKU detail popup: DRR & DOI across all three sales windows (7 / 14 / 30-day) for that SKU × warehouse.
+// Opened by clicking anywhere on a table row (see invRefresh) — reuses the generic infModal().
+function invDetailModalHtml(i){
+  const [sl,sc]=invStatus(i);
+  const wins=[['7-day',i.u7,7],['14-day',i.u14,14],['30-day',i.u30,30]].map(([lbl,sold,p])=>{
+    const drr=sold/p, doi=i.stock<=0?0:drr<=0?999:i.stock/drr; const [wl,wc]=invStatus({stock:i.stock,drr,doi});
+    return `<tr class="border-t border-slate-100">
+      <td class="py-2 pr-4 font-medium text-slate-600 whitespace-nowrap">${lbl}</td>
+      <td class="py-2 pr-4 text-right tabular-nums text-slate-600">${invNum(sold)}</td>
+      <td class="py-2 pr-4 text-right tabular-nums text-slate-700">${drr.toFixed(2)}</td>
+      <td class="py-2 pr-4 text-right tabular-nums font-semibold text-slate-800">${doi>=999?'999+':doi.toFixed(1)}</td>
+      <td class="py-2"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap ${wc}">${wl}</span></td></tr>`;
+  }).join('');
+  return `<div class="px-5 py-4 border-b border-slate-100 flex items-start justify-between sticky top-0 bg-white rounded-t-2xl z-10">
+      <div>
+        <div class="flex items-center gap-2"><span class="font-mono font-bold text-slate-800">${escapeHtml(i.sku)}</span>
+          <span class="px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap ${sc}">${sl}</span></div>
+        <p class="text-sm text-slate-600 mt-1">${escapeHtml(i.name||'—')}</p>
+        <p class="text-xs text-slate-400 mt-0.5">${escapeHtml(i.warehouse)} · ${escapeHtml(i.category)}</p>
+      </div>
+      <button data-x class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button></div>
+    <div class="p-5">
+      <div class="grid grid-cols-2 gap-3 mb-4">
+        <div class="rounded-xl bg-slate-50 p-3"><p class="text-[11px] text-slate-400 uppercase font-semibold tracking-wide">Stock on hand</p><p class="text-2xl font-bold tabular-nums ${i.stock<=0?'text-rose-600':'text-slate-800'}">${invNum(i.stock)}</p></div>
+        <div class="rounded-xl bg-slate-50 p-3"><p class="text-[11px] text-slate-400 uppercase font-semibold tracking-wide">Days of inventory</p><p class="text-2xl font-bold text-slate-800 tabular-nums">${i.doi>=999?'999+':i.doi.toFixed(1)}<span class="text-sm font-normal text-slate-400"> d</span></p></div>
+      </div>
+      <p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-2">DRR / DOI across all sales windows</p>
+      <table class="w-full text-sm"><thead><tr class="text-[10px] text-slate-400 uppercase tracking-wide text-left">
+        <th class="pb-1 pr-4 font-semibold">Window</th><th class="pb-1 pr-4 font-semibold text-right">Units sold</th>
+        <th class="pb-1 pr-4 font-semibold text-right">DRR /day</th><th class="pb-1 pr-4 font-semibold text-right">DOI days</th>
+        <th class="pb-1 font-semibold">Status</th></tr></thead><tbody>${wins}</tbody></table>
+    </div>`;
+}
+// Refresh button → genuine live re-pull from EasyEcom. Invokes POST /inventory/refresh-snapshot, which runs the
+// `snapshot-inventory` edge fn (fetch EasyEcom stock + 30d sales → rebuild today's snapshot), then reloads the view.
+// This is why a plain page reload never updated stock: it only re-read the stored snapshot; THIS rebuilds it.
+async function invSyncFromEasyEcom(){
+  const btn=document.getElementById('inv-refresh'); if(!btn) return;
+  const orig=btn.innerHTML; btn.disabled=true; btn.style.opacity='0.6'; btn.style.cursor='wait';
+  btn.textContent='Syncing EasyEcom… (~1–2 min)';
+  try{
+    const r=await fetch('/api/inventory/refresh-snapshot',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()}});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok||d.success===false) throw new Error(d.error||('HTTP '+r.status));
+    if(d.result&&d.result.skipped) showNotification&&showNotification('EasyEcom is rate-limited right now — try again in a minute. '+(d.result.reason||''),'error');
+    else showNotification&&showNotification('Inventory synced live from EasyEcom ✓','success');
+  }catch(e){ showNotification&&showNotification('EasyEcom sync failed: '+e.message,'error'); }
+  finally{ btn.disabled=false; btn.style.opacity=''; btn.style.cursor=''; btn.innerHTML=orig; initInventory(); }
+}
+async function initInventory(){
+  const body=document.getElementById('inv-body'); if(!body) return;
+  if(!_invWired){ _invWired=true;
+    document.getElementById('inv-period').addEventListener('change',invRefresh);
+    const rb=document.getElementById('inv-refresh');
+    rb.title='Pull live stock + sales from EasyEcom and rebuild today’s snapshot (~1–2 min)';
+    rb.addEventListener('click',invSyncFromEasyEcom);
+  }
+  body.innerHTML=brandLoader('Loading inventory snapshot…');
+  try{
+    const r=await fetch('/api/inventory/snapshot',{headers:{'Content-Type':'application/json',...getAuthHeaders()}});
+    const d=await r.json(); if(!r.ok||d.success===false) throw new Error(d.error||('HTTP '+r.status));
+    _invRaw=d;
+    const banner=d.stale?`<div class="rounded-xl bg-amber-50 ring-1 ring-amber-200 p-3 text-sm text-amber-800 mb-1">⚠️ Showing snapshot from <b>${escapeHtml(d.snapshot_date||'')}</b> — today's (${escapeHtml(d.today||'')} IST) snapshot hasn't run yet.</div>`
+      : d.snapshot_date?`<p class="text-xs text-slate-400 mb-1">Snapshot <b class="text-slate-600">${escapeHtml(d.snapshot_date)}</b> · ${(d.rows||[]).length} SKU × warehouse rows · captured 00:00 IST daily</p>`
+      : '<div class="rounded-xl bg-slate-50 ring-1 ring-slate-200 p-4 text-sm text-slate-500 mb-1">No snapshot available yet — the first one runs at midnight IST.</div>';
+    body.innerHTML=`${banner}
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="inv-kpis"></div>
+      <div class="card p-3"><div class="flex flex-wrap items-center gap-2">
+        <input id="inv-search" placeholder="Search SKU or product…" class="filter-input w-56">
+        <select id="inv-wh" class="filter-select"><option value="">All warehouses</option>${(d.warehouses||[]).map(w=>`<option value="${escapeHtml(w)}">${escapeHtml(w)}</option>`).join('')}</select>
+        <select id="inv-cat" class="filter-select"><option value="">All categories</option>${(d.categories||[]).map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select>
+        <span id="inv-count" class="text-xs text-slate-400 ml-auto"></span>
+      </div></div>
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">DOI distribution</p><div style="height:230px"><canvas id="inv-doi-chart"></canvas></div></div>
+        <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Top 10 fastest moving (DRR)</p><div style="height:230px"><canvas id="inv-top-chart"></canvas></div></div>
+      </div>
+      <div class="card p-4"><div id="inv-table" class="overflow-x-auto"></div></div>`;
+    document.getElementById('inv-search').addEventListener('input',invRefresh);
+    document.getElementById('inv-wh').addEventListener('change',invRefresh);
+    document.getElementById('inv-cat').addEventListener('change',invRefresh);
+    invRefresh();
+  }catch(e){ body.innerHTML=`<div class="card p-6 text-sm text-rose-600">${escapeHtml(e.message)}</div>`; }
+}
+function invRefresh(){
+  if(!_invRaw) return;
+  const period=Number(document.getElementById('inv-period').value)||7;
+  const q=(document.getElementById('inv-search')?.value||'').trim().toLowerCase();
+  const wh=document.getElementById('inv-wh')?.value||'', cat=document.getElementById('inv-cat')?.value||'';
+  const all=(_invRaw.rows||[]).map(r=>invCompute(r,period));
+  let rows=all.filter(i=>(!wh||i.warehouse===wh)&&(!cat||i.category===cat)&&(!q||(i.sku+' '+i.name).toLowerCase().includes(q)));
+  const sv={sku:i=>i.sku,name:i=>i.name,warehouse:i=>i.warehouse,category:i=>i.category,stock:i=>i.stock,drr:i=>i.drr,doi:i=>i.doi,status:i=>invStatus(i)[0]};
+  const fn=sv[_invSort.k]||(()=>0), dir=_invSort.d;
+  rows.sort((a,b)=>{const x=fn(a),y=fn(b); if(typeof x==='string'||typeof y==='string') return dir*String(x).localeCompare(String(y)); return dir*((x||0)-(y||0));});
+  // Low-stock alerts = Out of Stock (doi=0) + Critical (doi≤7). `doi<=7` catches both; No-Sales items are doi=999 so excluded.
+  const n=rows.length, avgDrr=n?rows.reduce((s,i)=>s+i.drr,0)/n:0, avgDoi=n?rows.reduce((s,i)=>s+Math.min(i.doi,999),0)/n:0, low=rows.filter(i=>i.doi<=7).length;
+  const cnt=document.getElementById('inv-count'); if(cnt) cnt.textContent=n+' of '+all.length+' rows';
+  const kpi=(l,v,s)=>`<div class="card p-4"><p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${l}</p><p class="text-2xl font-bold text-slate-800 mt-1 tabular-nums">${v}</p>${s?`<p class="text-xs text-slate-400 mt-0.5">${s}</p>`:''}</div>`;
+  document.getElementById('inv-kpis').innerHTML=kpi('Total SKUs',infN(n))+kpi('Avg daily run rate',avgDrr.toFixed(2),'units/day')+kpi('Avg days of inventory',avgDoi.toFixed(0),'days')+kpi('Low-stock alerts',low,'out of stock + DOI ≤7d');
+  const b=[0,0,0,0]; rows.forEach(i=>{ if(i.doi<=7)b[0]++; else if(i.doi<=15)b[1]++; else if(i.doi<30)b[2]++; else b[3]++; });
+  if(_invChartDoi)_invChartDoi.destroy();
+  _invChartDoi=new Chart(document.getElementById('inv-doi-chart'),{type:'bar',data:{labels:['Critical ≤7d','Warning ≤15d','Watch <30d','Healthy 30d+'],datasets:[{data:b,backgroundColor:['#f43f5e','#f59e0b','#eab308','#10b981'],borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{precision:0}}}}});
+  const top=[...rows].filter(i=>i.drr>0).sort((a,c)=>c.drr-a.drr).slice(0,10);
+  if(_invChartTop)_invChartTop.destroy();
+  _invChartTop=new Chart(document.getElementById('inv-top-chart'),{type:'bar',data:{labels:top.map(i=>i.sku),datasets:[{data:top.map(i=>i.drr),backgroundColor:'#6366f1',borderRadius:4}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{beginAtZero:true}}}});
+  const TH='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap cursor-pointer select-none hover:text-indigo-600';
+  const TD='px-3 py-2 border-b border-slate-100 text-sm';
+  const car=k=>_invSort.k===k?(_invSort.d<0?'▾':'▴'):'<span class="text-slate-300">↕</span>';
+  const cols=[['sku','SKU','l'],['name','Product','l'],['warehouse','Warehouse','l'],['category','Category','l'],['stock','Stock','r'],['drr','DRR','r'],['doi','DOI','r'],['status','Status','l']];
+  const head=cols.map(([k,h,a])=>`<th class="${TH} ${a==='r'?'text-right':''} ${_invSort.k===k?'!text-indigo-600':''}" data-sort="${k}">${h} ${car(k)}</th>`).join('');
+  _invRowByKey=new Map(rows.slice(0,600).map(i=>[i.sku+'|'+i.warehouse,i]));   // lookup for the row-click detail popup
+  const tb=rows.slice(0,600).map(i=>{ const [sl,sc]=invStatus(i); const key=i.sku+'|'+i.warehouse;
+    return `<tr class="hover:bg-indigo-50/40 cursor-pointer" data-key="${escapeHtml(key)}" title="Click for DRR / DOI across all windows">
+      <td class="${TD} font-mono font-semibold text-slate-700 whitespace-nowrap">${escapeHtml(i.sku)}</td>
+      <td class="${TD} text-slate-600 max-w-[240px] truncate" title="${escapeHtml(i.name||'')}">${escapeHtml(i.name||'—')}</td>
+      <td class="${TD} text-slate-500 whitespace-nowrap">${escapeHtml(i.warehouse)}</td>
+      <td class="${TD} text-slate-500">${escapeHtml(i.category)}</td>
+      <td class="${TD} text-right tabular-nums ${i.stock<=0?'text-rose-600 font-semibold':''}">${invNum(i.stock)}</td>
+      <td class="${TD} text-right tabular-nums">${i.drr.toFixed(2)}</td>
+      <td class="${TD} text-right tabular-nums font-semibold">${i.doi>=999?'999+':i.doi.toFixed(1)}</td>
+      <td class="${TD}"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap ${sc}">${sl}</span></td></tr>`; }).join('')
+    ||`<tr><td colspan="8" class="px-4 py-10 text-center text-sm text-slate-400">No SKUs match these filters.</td></tr>`;
+  document.getElementById('inv-table').innerHTML=`<table class="w-full"><thead><tr>${head}</tr></thead><tbody>${tb}</tbody></table>${rows.length>600?`<p class="text-xs text-slate-400 p-3 text-center">Showing first 600 of ${rows.length}</p>`:''}`;
+  document.getElementById('inv-table').querySelectorAll('th[data-sort]').forEach(th=>th.addEventListener('click',()=>{ const k=th.dataset.sort; if(_invSort.k===k)_invSort.d*=-1; else _invSort={k,d:['sku','name','warehouse','category','status'].includes(k)?1:-1}; invRefresh(); }));
+  document.getElementById('inv-table').querySelectorAll('tr[data-key]').forEach(tr=>tr.addEventListener('click',()=>{ const i=_invRowByKey.get(tr.dataset.key); if(i) infModal('inv-detail-modal',invDetailModalHtml(i),'max-w-lg'); }));
+}
+// ═══════════════ End Inventory Analytics ═══════════════
 
 // ═══════════════ INFLUENCER MARKETING CRM (port of the standalone Influencer CRM) ═══════════════
 // Views: inf-dashboard · inf-discover · inf-influencers · inf-lists · inf-calendar · inf-mentions

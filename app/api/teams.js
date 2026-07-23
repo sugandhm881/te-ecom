@@ -41,6 +41,7 @@ function slackToHtml(payload) {
             else if (b.type === 'section' && b.text) parts.push(mrkdwnHtml(b.text.text));
             else if (b.type === 'section' && Array.isArray(b.fields)) parts.push(b.fields.map(f => mrkdwnHtml(f.text)).join('<br>'));
             else if (b.type === 'context' && Array.isArray(b.elements)) parts.push(mrkdwnHtml(b.elements.map(e => e.text || '').join('  ')));  // context text already carries its own _italics_
+            else if (b.type === 'image' && b.image_url) parts.push(`<img src="${b.image_url}" alt="${String(b.alt_text || '').replace(/"/g, '&quot;')}" style="max-width:100%;border-radius:8px">`);
             // dividers dropped — the blank line between parts already separates sections
         }
     } else if (payload.text) {
@@ -68,6 +69,7 @@ function slackToCardBody(payload) {
                 ] });
             }
             else if (b.type === 'context' && Array.isArray(b.elements)) push({ type: 'TextBlock', text: mrkdwn(b.elements.map(e => e.text || '').join('  ')), isSubtle: true, size: 'Small', wrap: true });
+            else if (b.type === 'image' && b.image_url) push({ type: 'Image', url: b.image_url, altText: String(b.alt_text || ''), size: 'Stretch' });
             else if (b.type === 'divider') pendingSep = true;
         }
     } else if (payload.text) {
