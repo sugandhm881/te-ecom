@@ -53,15 +53,19 @@ router.get('/inventory/snapshot', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// Force a fresh snapshot NOW — invoke the snapshot-inventory edge fn (fetch EasyEcom stock + sales, rebuild). ~1-2 min.
+async function refreshSnapshot() {
+    const r = await axios.post(`${config.SUPABASE_URL}/functions/v1/snapshot-inventory`, {}, {
+        headers: { Authorization: `Bearer ${config.SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
+        timeout: 150000, validateStatus: () => true });
+    if (r.status >= 400) throw new Error((r.data && r.data.error) || `snapshot-inventory returned ${r.status}`);
+    return r.data;
+}
+
 // ── POST /inventory/refresh-snapshot — force a fresh snapshot NOW (invokes the edge fn, ~1-2 min). ──
 router.post('/inventory/refresh-snapshot', async (req, res) => {
-    try {
-        const r = await axios.post(`${config.SUPABASE_URL}/functions/v1/snapshot-inventory`, {}, {
-            headers: { Authorization: `Bearer ${config.SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
-            timeout: 150000, validateStatus: () => true });
-        if (r.status >= 400) return res.status(502).json({ success: false, error: (r.data && r.data.error) || `snapshot-inventory returned ${r.status}` });
-        res.json({ success: true, result: r.data });
-    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+    try { res.json({ success: true, result: await refreshSnapshot() }); }
+    catch (e) { res.status(502).json({ success: false, error: e.message }); }
 });
 
 // Build + post the daily inventory report to Teams as an IMAGE — the SAME dark "Low Inventory (DOI < 30d)"
@@ -103,4 +107,4 @@ router.post('/inventory/teams-report', async (req, res) => {
     catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-module.exports = { router, sendInventoryTeamsReport };
+module.exports = { router, sendInventoryTeamsReport, refreshSnapshot };

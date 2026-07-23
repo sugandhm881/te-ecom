@@ -175,11 +175,14 @@ cron.schedule('15 3 * * *', async () => {
     if (r) console.log(`[Charges] nightly done — processed ${r.processed}, updated ${r.updated}`);
 }, { timezone: 'Asia/Kolkata' });
 
-// Daily inventory snapshot → Microsoft Teams. The snapshot itself runs @ 00:00 IST (Supabase pg_cron
-// 'snapshot-inventory-daily-ist'); this posts the summary @ 00:30 IST, once that has finished.
-cron.schedule('30 0 * * *', async () => {
-    console.log('[Inventory] 00:30 IST — posting daily inventory snapshot to Teams…');
-    await require('./app/api/inventory').sendInventoryTeamsReport().catch(e => console.error('[Inventory] Teams report error:', e.message));
+// Daily inventory report → Microsoft Teams @ 06:30 IST. First re-syncs live from EasyEcom (rebuilds the
+// snapshot) so the morning report reflects CURRENT stock, then posts the DOI image. (The Supabase pg_cron
+// 'snapshot-inventory-daily-ist' @ 00:00 IST still keeps the dashboard fresh overnight.)
+cron.schedule('30 6 * * *', async () => {
+    const inv = require('./app/api/inventory');
+    console.log('[Inventory] 06:30 IST — syncing from EasyEcom then posting daily report to Teams…');
+    await inv.refreshSnapshot().catch(e => console.error('[Inventory] EasyEcom sync error (posting last snapshot):', e.message));
+    await inv.sendInventoryTeamsReport().catch(e => console.error('[Inventory] Teams report error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // DocPharma portal INGESTION — DocPharma doesn't webhook us (webhook_url is null), so every 3h we pull
