@@ -24,8 +24,11 @@ function normalizeSupabaseOrder(order) {
 
     const tags = (order.tags || '').toLowerCase();
     const isRapidShyp = !tags.includes('docpharma: in-progress');
-    // Influencer shipments carry the "Influencer" tag + an INFLUENCER company line (set by the Influencer CRM).
-    const isInfluencer = tags.includes('influencer') || String(addr.company || '').toLowerCase().includes('influencer');
+    // Influencer shipments carry the "Influencer" tag, an INFLUENCER company line, and an "(Influencer)"
+    // suffix on the recipient name (the name is what actually prints on the label + invoice).
+    const isInfluencer = tags.includes('influencer')
+        || String(addr.company || '').toLowerCase().includes('influencer')
+        || String(customerName || '').toLowerCase().includes('influencer');
 
     return {
         platform: 'Shopify',

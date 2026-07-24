@@ -311,7 +311,7 @@ function rawToDbRow(o) {
     // so any of them appearing marks the order as Influencer. Only address/tag/company/note are scanned
     // (never product names) to avoid false positives.
     const _infHay = [
-        o.tags, o.note, o.order_notes,
+        o.tags, o.note, o.order_notes, customerName,
         addr.company, addr.company_name, addr.Company,
         o.company, o.company_name, o.customer_type, o.buyer_type
     ].filter(Boolean).join(' ').toLowerCase();
