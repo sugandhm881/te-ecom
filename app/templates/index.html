@@ -838,12 +838,13 @@
             </header>
             
             <div class="p-8 max-w-7xl mx-auto w-full">
-                <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
+                <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
                     <div id="kpi-dashboard-all" class="card p-5 border-l-4 border-l-slate-600 shadow-sm"></div>
                     <div id="kpi-dashboard-new" class="card p-5 border-l-4 border-l-blue-500 shadow-sm"></div>
                     <div id="kpi-dashboard-shipped" class="card p-5 border-l-4 border-l-indigo-500 shadow-sm"></div>
                     <div id="kpi-dashboard-delivered" class="card p-5 border-l-4 border-l-emerald-500 shadow-sm"></div>
                     <div id="kpi-dashboard-cancelled" class="card p-5 border-l-4 border-l-rose-500 shadow-sm"></div>
+                    <div id="kpi-dashboard-rto" class="card p-5 border-l-4 border-l-amber-500 shadow-sm"></div>
                 </div>
 
                 <div class="card overflow-hidden">
@@ -906,13 +907,29 @@
                     </div>
                     <div class="flex flex-col gap-6">
                         <div class="card p-6 flex-1">
-                             <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Platform Share</h3>
+                             <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Order Status</h3>
                              <div class="relative h-48"><canvas id="platform-chart"></canvas></div>
                         </div>
                         <div class="card p-6 flex-1">
                              <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Payment Method</h3>
                              <div class="relative h-48"><canvas id="payment-chart"></canvas></div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Detail row: COD vs Prepaid · Top Products · Top Cities (all full-range accurate) -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+                    <div class="card p-6">
+                        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">COD vs Prepaid</h3>
+                        <div id="ins-payment-split"></div>
+                    </div>
+                    <div class="card p-6">
+                        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Top Products</h3>
+                        <div id="ins-top-products"></div>
+                    </div>
+                    <div class="card p-6">
+                        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Top Cities</h3>
+                        <div id="ins-top-cities"></div>
                     </div>
                 </div>
             </div>
@@ -2469,21 +2486,18 @@
         </div>
 
         <div id="inf-influencers-view" class="view-hidden">
-            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
-                <div><h1 class="text-xl font-bold text-slate-800">Influencers</h1>
-                    <p class="text-sm text-slate-400 mt-0.5" id="infi-sub">The full CRM — every creator in the system</p></div>
-                <div class="flex items-center gap-2 flex-wrap">
-                    <button id="infi-refresh-metrics" class="filter-btn" title="Re-scrape reel metrics for videos created or live in the last 10 days">↻ Refresh last 10 days</button>
-                    <button id="infi-export" class="filter-btn">⬇ Export CSV</button>
-                    <button id="infi-add" class="text-sm px-3 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">+ Add influencer</button>
-                </div>
-            </header>
-            <div class="p-8 space-y-4">
-                <div id="infi-progress" class="hidden card p-4">
-                    <div class="flex items-center justify-between text-sm mb-2"><span class="font-semibold text-slate-700">Refreshing reel metrics…</span><span id="infi-progress-label" class="text-slate-400"></span></div>
-                    <div class="w-full h-2 bg-slate-100 rounded-full overflow-hidden"><div id="infi-progress-bar" class="h-2 bg-indigo-500 rounded-full transition-all" style="width:0%"></div></div>
-                </div>
-                <div class="flex flex-wrap items-center gap-2">
+            <!-- Frozen header + filter bar: both stay pinned while the list scrolls -->
+            <div class="sticky top-0 z-30 bg-white shadow-sm">
+                <header class="bg-white px-8 py-5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                    <div><h1 class="text-xl font-bold text-slate-800">Influencers</h1>
+                        <p class="text-sm text-slate-400 mt-0.5" id="infi-sub">The full CRM — every creator in the system</p></div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <button id="infi-refresh-metrics" class="filter-btn" title="Re-scrape reel metrics for videos created or live in the last 10 days">↻ Refresh last 10 days</button>
+                        <button id="infi-export" class="filter-btn">⬇ Export CSV</button>
+                        <button id="infi-add" class="text-sm px-3 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">+ Add influencer</button>
+                    </div>
+                </header>
+                <div class="px-8 py-3 border-b border-slate-200 bg-white flex flex-wrap items-center gap-2">
                     <input id="infi-q" type="text" class="filter-input w-56" placeholder="Search name or @handle…">
                     <select id="infi-status" class="filter-select"><option value="">All statuses</option><option value="not_contacted">Not contacted</option><option value="reached_out">Reached out</option><option value="in_discussion">In discussion</option><option value="partnered">Partnered</option><option value="rejected">Rejected</option></select>
                     <select id="infi-niche" class="filter-select"><option value="">All niches</option></select>
@@ -2491,6 +2505,12 @@
                     <select id="infi-contact" class="filter-select"><option value="">Contact: any</option><option value="phone">Has phone</option><option value="email">Has email</option><option value="none">No contact info</option></select>
                     <button id="infi-reset" class="filter-btn">Reset</button>
                     <span id="infi-count" class="text-sm text-slate-400 ml-auto"></span>
+                </div>
+            </div>
+            <div class="p-8 space-y-4">
+                <div id="infi-progress" class="hidden card p-4">
+                    <div class="flex items-center justify-between text-sm mb-2"><span class="font-semibold text-slate-700">Refreshing reel metrics…</span><span id="infi-progress-label" class="text-slate-400"></span></div>
+                    <div class="w-full h-2 bg-slate-100 rounded-full overflow-hidden"><div id="infi-progress-bar" class="h-2 bg-indigo-500 rounded-full transition-all" style="width:0%"></div></div>
                 </div>
                 <div id="infi-bulkbar" class="hidden card px-4 py-3 flex flex-wrap items-center gap-2 ring-1 ring-indigo-200">
                     <span class="text-sm font-semibold text-indigo-700"><span id="infi-selcount">0</span> selected</span>
@@ -2620,7 +2640,7 @@
     </div>
 </div>
 
-<script src="/static/app.js?v=2026-07-24-signup-name"></script>
+<script src="/static/app.js?v=2026-07-24-inf-lists-fit"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

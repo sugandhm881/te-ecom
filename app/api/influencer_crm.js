@@ -34,6 +34,8 @@ async function logActivity(influencerId, type, description) {
 
 const num = v => (v === '' || v === null || v === undefined) ? null : Number(v);
 const cleanHandle = h => String(h || '').replace(/^@/, '').trim().toLowerCase();
+// Author label for activity/note descriptions — the user's real name (JWT `name` claim), not their email.
+const actorName = req => (req && req.user && (req.user.name || req.user.sub)) || 'portal';
 
 // Full outreach lifecycle — mirrors the statuses the original standalone Influencer CRM writes (the shared
 // DB already contains declined / not_replying / hold rows), so the portal can display AND set them all.
@@ -104,10 +106,11 @@ router.post('/inf/influencers', async (req, res) => {
             quoted_price: num(b.quoted_price), final_price: num(b.final_price),
             outreach_status: STATUSES.includes(b.outreach_status) ? b.outreach_status : 'not_contacted',
             notes: b.notes || null,
+            product_ids: Array.isArray(b.product_ids) ? b.product_ids : null,
         };
         const { data, error } = await supabase.from('influencers').insert(row).select('id').single();
         if (error) throw new Error(error.message);
-        await logActivity(data.id, 'note', `Added to CRM${b.source ? ' via ' + b.source : ''} by ${req.user && req.user.sub || 'portal'}`);
+        await logActivity(data.id, 'note', `Added to CRM${b.source ? ' via ' + b.source : ''} by ${actorName(req)}`);
         res.json({ success: true, id: data.id });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -139,6 +142,7 @@ router.post('/inf/influencer/:id', async (req, res) => {
         ['name', 'phone', 'email', 'niche', 'city', 'state', 'location', 'address1', 'address2', 'pincode',
          'bio', 'notes', 'engagement_quality', 'next_video_expected_date'].forEach(k => { if (b[k] !== undefined) patch[k] = b[k] || null; });
         ['follower_count', 'engagement_rate', 'quoted_price', 'final_price'].forEach(k => { if (b[k] !== undefined) patch[k] = num(b[k]); });
+        if (b.product_ids !== undefined) patch.product_ids = Array.isArray(b.product_ids) ? b.product_ids : null;   // default collab products
         let statusChanged = null;
         if (b.outreach_status !== undefined) {
             if (!STATUSES.includes(b.outreach_status)) return res.status(400).json({ success: false, error: 'Invalid outreach status.' });
@@ -148,7 +152,14 @@ router.post('/inf/influencer/:id', async (req, res) => {
         }
         const { error } = await supabase.from('influencers').update(patch).eq('id', id);
         if (error) throw new Error(error.message);
-        if (statusChanged) await logActivity(id, 'status_change', `Status changed to ${statusChanged.replace(/_/g, ' ')} by ${req.user && req.user.sub || 'portal'}`);
+        if (statusChanged) {
+            const noteTxt = String(b.note || '').trim().slice(0, 500);   // optional reason for the status change
+            const desc = `Status changed to ${statusChanged.replace(/_/g, ' ')} by ${actorName(req)}` + (noteTxt ? ` — “${noteTxt}”` : '');
+            await logActivity(id, 'status_change', desc);
+        } else if (b.note && String(b.note).trim()) {
+            // A standalone note (no status change) still gets logged to the activity feed.
+            await logActivity(id, 'note', `${String(b.note).trim().slice(0, 500)} — by ${actorName(req)}`);
+        }
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -176,7 +187,7 @@ router.post('/inf/influencers/bulk', async (req, res) => {
             const { error } = await supabase.from('influencers').update({ outreach_status: status, updated_at: new Date().toISOString() }).in('id', ids);
             if (error) throw new Error(error.message);
             await supabase.from('influencer_activities').insert(ids.map(i => ({
-                influencer_id: i, activity_type: 'status_change', description: `Status changed to ${status.replace(/_/g, ' ')} (bulk) by ${req.user && req.user.sub || 'portal'}`,
+                influencer_id: i, activity_type: 'status_change', description: `Status changed to ${status.replace(/_/g, ' ')} (bulk) by ${actorName(req)}`,
             })));
             return res.json({ success: true, updated: ids.length });
         }
@@ -219,7 +230,7 @@ router.post('/inf/videos', async (req, res) => {
         if (!row.payment_status) row.payment_status = 'pending';
         const { data, error } = await supabase.from('influencer_videos').insert(row).select('id').single();
         if (error) throw new Error(error.message);
-        await logActivity(b.influencer_id, 'video_added', `Video added${row.expected_date ? ' (expected ' + row.expected_date + ')' : ''} by ${req.user && req.user.sub || 'portal'}`);
+        await logActivity(b.influencer_id, 'video_added', `Video added${row.expected_date ? ' (expected ' + row.expected_date + ')' : ''} by ${actorName(req)}`);
         res.json({ success: true, id: data.id });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -238,7 +249,7 @@ router.post('/inf/videos/:id', async (req, res) => {
         const { error } = await supabase.from('influencer_videos').update(patch).eq('id', req.params.id);
         if (error) throw new Error(error.message);
         if (before && patch.payment_status && patch.payment_status !== before.payment_status) {
-            await logActivity(before.influencer_id, 'payment', `Payment marked ${patch.payment_status} by ${req.user && req.user.sub || 'portal'}`);
+            await logActivity(before.influencer_id, 'payment', `Payment marked ${patch.payment_status} by ${actorName(req)}`);
         }
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
@@ -295,7 +306,7 @@ router.post('/inf/activities', async (req, res) => {
         if (!influencer_id || !String(description || '').trim()) return res.status(400).json({ success: false, error: 'influencer_id and description required' });
         await supabase.from('influencer_activities').insert({
             influencer_id, activity_type: 'note',
-            description: `${String(description).trim().slice(0, 480)} — ${req.user && req.user.sub || 'portal'}`,
+            description: `${String(description).trim().slice(0, 480)} — ${actorName(req)}`,
         });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
@@ -557,6 +568,7 @@ router.post('/inf/send-product', async (req, res) => {
             videoId: b.videoId, influencerId: b.influencerId,
             address1: b.address1, address2: b.address2 || '', city: b.city || '', state: b.state || '',
             pincode: b.pincode, phone: b.phone, email: b.email || undefined, name: b.name || 'Influencer',
+            handle: b.handle || undefined,               // → INFLUENCER @handle company line on label/invoice
             productIds: b.productIds.map(String),
         }, 120000);
         if (r.status >= 400) return res.status(502).json({ success: false, error: (r.data && (r.data.error || r.data.details)) || `create-order returned ${r.status}` });
@@ -565,8 +577,68 @@ router.post('/inf/send-product', async (req, res) => {
             address1: b.address1, address2: b.address2 || null, city: b.city || null, state: b.state || null,
             pincode: b.pincode, phone: b.phone, updated_at: new Date().toISOString(),
         }).eq('id', b.influencerId).then(() => {}).catch(() => {});
-        await logActivity(b.influencerId, 'product_sent', `Product sent — Shopify draft order ${r.data.draftOrderId} (${b.productIds.length} item${b.productIds.length > 1 ? 's' : ''}) by ${req.user && req.user.sub || 'portal'}`);
-        res.json({ success: true, draftOrderId: r.data.draftOrderId, draftOrderUrl: r.data.draftOrderUrl });
+        const orderName = r.data.orderName || r.data.orderId || r.data.draftOrderId;
+        await logActivity(b.influencerId, 'product_sent', `Prepaid order ${orderName} created (${b.productIds.length} item${b.productIds.length > 1 ? 's' : ''}) by ${actorName(req)}`);
+        res.json({ success: true, orderId: r.data.orderId || r.data.draftOrderId, orderName, orderUrl: r.data.orderUrl || r.data.draftOrderUrl });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Track an influencer order's courier status — reads OUR tracking data (no Shopify admin redirect).
+// Matches the video's Shopify order id → `orders` mirror (AWB/courier/tracking_status) → `shipment_journey_ecom`
+// (milestone timeline). Returns a compact tracking object the CRM renders as a customer-style timeline.
+router.get('/inf/order-tracking', async (req, res) => {
+    try {
+        const videoId = req.query.videoId;
+        if (!videoId) return res.status(400).json({ success: false, error: 'videoId required' });
+        const { data: vid } = await supabase.from('influencer_videos')
+            .select('shopify_draft_order_id, shopify_draft_order_url, product_sent').eq('id', videoId).maybeSingle();
+        const orderId = vid && vid.shopify_draft_order_id;
+        if (!orderId) return res.json({ success: true, tracking: null });
+
+        const { data: ord } = await supabase.from('orders')
+            .select('id, name, awb_number, courier_name, tracking_status, fulfillment_status, cancelled_at, created_at')
+            .eq('id', String(orderId)).maybeSingle();
+        const awb = ord && ord.awb_number;
+
+        let j = null;
+        if (awb) {
+            const { data } = await supabase.from('shipment_journey_ecom')
+                .select('awb, courier, outcome, dispatched_at, out_for_delivery_at, delivered_at, rto_at, first_edd, attempts, ndr_reasons, dest_city, dest_state')
+                .eq('awb', awb).maybeSingle();
+            j = data || null;
+        }
+
+        const cancelled = !!(ord && ord.cancelled_at);
+        const outcome = (j && j.outcome) || '';
+        // Human status: cancelled → RTO → delivered → tracking_status → in-transit vs processing.
+        let status = 'Processing';
+        if (cancelled) status = 'Cancelled';
+        else if (/rto/i.test(outcome) || /rto/i.test(ord && ord.tracking_status || '')) status = 'RTO';
+        else if (/deliver/i.test(outcome) || /deliver/i.test(ord && ord.tracking_status || '')) status = 'Delivered';
+        else if (awb) status = 'In Transit';
+
+        const closeAt = /rto/i.test(outcome) ? (j && j.rto_at) : (j && j.delivered_at);
+        const milestones = [
+            { key: 'ordered', label: 'Order placed', at: ord && ord.created_at },
+            { key: 'dispatched', label: 'Dispatched', at: j && j.dispatched_at },
+            { key: 'ofd', label: 'Out for delivery', at: j && j.out_for_delivery_at },
+            { key: /rto/i.test(outcome) ? 'rto' : 'delivered', label: /rto/i.test(outcome) ? 'Returned (RTO)' : 'Delivered', at: closeAt },
+        ];
+
+        res.json({
+            success: true,
+            tracking: {
+                orderId: String(orderId), orderName: ord && ord.name || `#${orderId}`,
+                status, cancelled, awb: awb || null,
+                courier: (ord && ord.courier_name) || (j && j.courier) || null,
+                eta: (j && j.first_edd) || null,
+                dest: [j && j.dest_city, j && j.dest_state].filter(Boolean).join(', ') || null,
+                attempts: (j && j.attempts) != null ? j.attempts : null,
+                ndr: (j && j.ndr_reasons) || null,
+                shopifyUrl: vid.shopify_draft_order_url || null,
+                milestones,
+            },
+        });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 

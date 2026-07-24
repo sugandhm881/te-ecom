@@ -306,8 +306,20 @@ function rawToDbRow(o) {
     const easyecomId = String(o.order_id || o.orderId || o.id || '');
     if (!easyecomId) return null;
 
+    // Customer category. Influencer shipments (created by the Influencer CRM) carry the "Influencer" order
+    // tag AND an "INFLUENCER @handle" company line on the address — both flow from Shopify through EasyEcom,
+    // so any of them appearing marks the order as Influencer. Only address/tag/company/note are scanned
+    // (never product names) to avoid false positives.
+    const _infHay = [
+        o.tags, o.note, o.order_notes,
+        addr.company, addr.company_name, addr.Company,
+        o.company, o.company_name, o.customer_type, o.buyer_type
+    ].filter(Boolean).join(' ').toLowerCase();
+    const customerType = _infHay.includes('influencer') ? 'Influencer' : 'Regular';
+
     return {
         order_id:             easyecomId,
+        customer_type:        customerType,
         // marketplace_invoice_num echoes the store_order_id (Shopify order name) we sent
         reference_code:       o.reference_code || o.marketplace_invoice_num || null,
         marketplace_order_id: o.marketplace_order_id || null,
@@ -381,6 +393,8 @@ function dbRowToDashboard(row) {
         courier: row.courier_name || null,
         isRapidShyp: false,
         tags: row.tags || '',
+        customerType: row.customer_type || 'Regular',
+        isInfluencer: (row.customer_type || '') === 'Influencer',
         shipping_address: addr,
         line_items: row.line_items || []
     };

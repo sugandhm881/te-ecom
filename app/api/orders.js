@@ -24,6 +24,8 @@ function normalizeSupabaseOrder(order) {
 
     const tags = (order.tags || '').toLowerCase();
     const isRapidShyp = !tags.includes('docpharma: in-progress');
+    // Influencer shipments carry the "Influencer" tag + an INFLUENCER company line (set by the Influencer CRM).
+    const isInfluencer = tags.includes('influencer') || String(addr.company || '').toLowerCase().includes('influencer');
 
     return {
         platform: 'Shopify',
@@ -39,8 +41,11 @@ function normalizeSupabaseOrder(order) {
         paymentMethod: order.financial_status === 'paid' ? 'Prepaid' : 'COD',
         awb,
         courier: order.courier_name || null,
+        tracking_status: order.tracking_status || null,   // needed by the enrich loop's status derivation (was dropped → delivered/RTO stayed 'Shipped')
         isRapidShyp,
         tags: order.tags,
+        customerType: isInfluencer ? 'Influencer' : 'Regular',
+        isInfluencer,
         shipping_address: addr,
         line_items: lineItems
     };
@@ -57,12 +62,32 @@ router.get('/get-orders', async (req, res) => {
         // Date-aware window (default 30d, clamp 1–90). The table is capped for performance; the KPI
         // cards get ACCURATE full-window counts from cheap count queries below, so 7-day and 30-day
         // views show genuinely different numbers even when the table itself is truncated.
+        // Prefer an EXACT [from,to] window (so the KPI counts match the calendar range the user picked,
+        // e.g. "Yesterday" = just yesterday, not a rolling 48h). Falls back to the rolling `days` window.
+        const rangeFrom = req.query.from, rangeTo = req.query.to;
+        const useRange = rangeFrom && rangeTo && moment(rangeFrom).isValid() && moment(rangeTo).isValid();
         const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 90);
-        const since = moment().subtract(days, 'days').toISOString();
+        const since = useRange ? moment(rangeFrom).toISOString() : moment().subtract(days, 'days').toISOString();
+        const until = useRange ? moment(rangeTo).toISOString() : moment().add(1, 'day').toISOString();  // open-ended → no future orders exist, so effectively uncapped
         // Keep the TABLE light for a snappy render (KPI cards use the accurate full-window counts below,
         // so the table cap doesn't affect the headline numbers). 500 recent rows renders smoothly.
         const TABLE_LIMIT = 500;
-        const K = () => supabase.from('orders').select('*', { count: 'exact', head: true }).gte('created_at', since);
+        const K = () => supabase.from('orders').select('*', { count: 'exact', head: true }).gte('created_at', since).lte('created_at', until);
+
+        // Status "bucket" for the TABLE query — so clicking a KPI card (e.g. Delivered / RTO) fetches THOSE
+        // orders from the DB, not just filters the most-recent 500 (which are almost all New). Same
+        // tracking_status conditions as the KPI count queries below, so the table matches the card's number.
+        const bucket = String(req.query.bucket || '').toLowerCase();
+        const applyBucket = q => {
+            switch (bucket) {
+                case 'new':       return q.is('tracking_status', null).is('cancelled_at', null);
+                case 'delivered': return q.ilike('tracking_status', 'delivered');
+                case 'rto':       return q.ilike('tracking_status', '%rto%');
+                case 'cancelled': return q.or('cancelled_at.not.is.null,tracking_status.ilike.cancelled,tracking_status.ilike.lost').or('tracking_status.is.null,tracking_status.not.ilike.%rto%');
+                case 'intransit': return q.not('tracking_status', 'is', null).not('tracking_status', 'ilike', 'delivered').not('tracking_status', 'ilike', '%rto%').not('tracking_status', 'ilike', 'cancelled').not('tracking_status', 'ilike', 'lost').is('cancelled_at', null);
+                default:          return q;   // 'All' / unknown → no bucket
+            }
+        };
 
         // ── 1. FETCH ALL DATA IN PARALLEL ──────────────────
         // (Amazon orders removed 2026-07; EasyEcom-only orders removed 2026-07-17 — the Orders
@@ -77,11 +102,11 @@ router.get('/get-orders', async (req, res) => {
             holdMarkRows,
             dpRejectedRows,
             routedMarkRows,
-            cntTotal, cntDelivered, cntCancelled, cntNew,
+            cntTotal, cntDelivered, cntCancelled, cntRto, cntNew,
             heldEeRows
         ] = await Promise.all([
-            // Shopify orders from Supabase with embedded line items + shipping address
-            supabase
+            // Shopify orders from Supabase with embedded line items + shipping address (bucket-filtered)
+            applyBucket(supabase
                 .from('orders')
                 .select(`
                     id, order_number, name, created_at, financial_status,
@@ -91,6 +116,7 @@ router.get('/get-orders', async (req, res) => {
                     order_shipping_addresses(first_name, last_name, name, address1, address2, city, province, zip, phone)
                 `)
                 .gte('created_at', since)
+                .lte('created_at', until))
                 .order('created_at', { ascending: false })
                 .limit(TABLE_LIMIT),
 
@@ -123,7 +149,9 @@ router.get('/get-orders', async (req, res) => {
             //    synced tracking_status, matching the dashboard's status buckets closely) ──
             K(),                                                                                        // total
             K().ilike('tracking_status', 'delivered'),                                                 // delivered (exact — excludes 'RTO Delivered')
-            K().or('cancelled_at.not.is.null,tracking_status.ilike.%rto%,tracking_status.ilike.cancelled,tracking_status.ilike.lost'), // cancelled / RTO
+            // Cancelled (pure): cancelled/lost, EXCLUDING anything RTO (kept disjoint from the RTO count below).
+            K().or('cancelled_at.not.is.null,tracking_status.ilike.cancelled,tracking_status.ilike.lost').or('tracking_status.is.null,tracking_status.not.ilike.%rto%'),
+            K().ilike('tracking_status', '%rto%'),                                                      // RTO (returned to origin, incl. 'RTO Delivered')
             K().is('tracking_status', null).is('cancelled_at', null),                                   // new / processing (no tracking yet)
 
             // Authoritative held-orders list (EasyEcom order_status "On Hold") — a small dedicated query
@@ -131,10 +159,10 @@ router.get('/get-orders', async (req, res) => {
             supabase.from('b2c_order_easycom').select('reference_code, store_order_id').ilike('order_status', '%hold%').gte('order_date', since).limit(1000)
         ]);
         // In-transit = everything else (has tracking, moving forward, not delivered/RTO/new).
-        const kTotal = cntTotal.count || 0, kDelivered = cntDelivered.count || 0, kCancelled = cntCancelled.count || 0, kNew = cntNew.count || 0;
+        const kTotal = cntTotal.count || 0, kDelivered = cntDelivered.count || 0, kCancelled = cntCancelled.count || 0, kRto = cntRto.count || 0, kNew = cntNew.count || 0;
         const kpis = {
-            total: kTotal, delivered: kDelivered, cancelled: kCancelled, newProcessing: kNew,
-            inTransit: Math.max(0, kTotal - kDelivered - kCancelled - kNew),
+            total: kTotal, delivered: kDelivered, cancelled: kCancelled, rto: kRto, newProcessing: kNew,
+            inTransit: Math.max(0, kTotal - kDelivered - kCancelled - kRto - kNew),
         };
 
         if (shopifyRes.error) {
@@ -294,9 +322,12 @@ router.get('/get-orders', async (req, res) => {
                 else if (['PICKUP_SCHEDULED', 'PICKUP_GENERATED'].includes(rawStatus)) order.status = 'Pickup Scheduled';
             }
 
-            // Also use Supabase tracking_status if no cache entry
-            if (!awbNumber && order.tracking_status) {
-                const ts = (order.tracking_status || '').toUpperCase();
+            // Fall back to the order's OWN synced tracking_status whenever there's no RapidShyp tracking-cache
+            // entry (e.g. DocPharma orders never hit that cache) — otherwise a delivered/RTO order wrongly
+            // keeps its stale 'Shipped' (fulfilled) status. Normalise separators so 'rto in transit' /
+            // 'out for delivery' match too. (Was gated on !awbNumber, which skipped every AWB'd DP order.)
+            if (!(awbNumber && trackingCache[String(awbNumber)]) && order.tracking_status) {
+                const ts = (order.tracking_status || '').toUpperCase().replace(/[\s-]+/g, '_');
                 if      (ts.includes('RTO') || ts.includes('RETURN')) order.status = 'RTO';
                 else if (ts === 'DELIVERED')                           order.status = 'Delivered';
                 else if (ts === 'OUT_FOR_DELIVERY')                    order.status = 'Out For Delivery';
@@ -352,11 +383,40 @@ router.get('/get-orders', async (req, res) => {
 
         // Object response: orders (capped table) + accurate full-window KPI counts + meta.
         // (Older callers that expected a bare array are handled by the frontend unwrapper.)
-        res.json({ orders: allOrders, kpis, total: kpis.total, shown: allOrders.length, truncated: kpis.total > allOrders.length, days });
+        // Truncated = we hit the row cap (there may be more). Bucketed views (e.g. Delivered=210 < cap)
+        // return everything, so they're not flagged truncated even though kpis.total (full range) is larger.
+        res.json({ orders: allOrders, kpis, total: kpis.total, shown: allOrders.length, truncated: allOrders.length >= TABLE_LIMIT, bucket: bucket || null, days });
 
     } catch (e) {
         console.error('CRITICAL ERROR in get-orders:', e);
         res.status(500).json({ error: e.message });
+    }
+});
+
+// ── Order Insights — accurate aggregates over the FULL selected range (not the capped table). ──────────
+// Powers the Order Insights dashboard: KPIs (revenue/AOV/status split), daily trend, COD-vs-Prepaid, and
+// top products/cities — all computed in SQL so they don't undercount like the old client-side rollup did.
+router.get('/orders-insights', async (req, res) => {
+    try {
+        const from = req.query.from && moment(req.query.from).isValid() ? moment(req.query.from).toISOString() : moment().subtract(30, 'days').toISOString();
+        const to = req.query.to && moment(req.query.to).isValid() ? moment(req.query.to).toISOString() : moment().add(1, 'day').toISOString();
+        const [summary, trend, products, cities] = await Promise.all([
+            supabase.rpc('orders_insights_summary', { p_from: from, p_to: to }),
+            supabase.rpc('orders_insights_trend', { p_from: from, p_to: to }),
+            supabase.rpc('orders_top_products', { p_from: from, p_to: to, p_limit: 10 }),
+            supabase.rpc('orders_top_cities', { p_from: from, p_to: to, p_limit: 10 }),
+        ]);
+        if (summary.error) throw new Error(summary.error.message);
+        res.json({
+            success: true,
+            summary: summary.data || {},
+            trend: trend.data || [],
+            topProducts: products.data || [],
+            topCities: cities.data || [],
+        });
+    } catch (e) {
+        console.error('[orders-insights] error:', e.message);
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
