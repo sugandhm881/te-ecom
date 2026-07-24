@@ -80,6 +80,7 @@ const cron = require('node-cron');
 app.use('/api', authRoutes);
 app.use('/api/admin', require('./app/api/users'));
 app.use('/api/admin', require('./app/api/email_settings').router);   // admin-only email/SMTP settings
+app.use('/api/admin', require('./app/api/user_activity').adminRouter);  // admin-only User Analytics
 
 // --- Require a valid JWT for ALL data APIs below. Public: login/signup (handled above) + external webhooks. ---
 const { tokenRequired: _apiAuth, requirePermission } = require('./app/auth');
@@ -110,7 +111,7 @@ const _VIEW_PERMS = [
     [/^\/late-deliveries/i, 'claims-sla'],
     [/^\/intransit-late/i, 'claims-sla'],
     // Customer Support console — any support view permission unlocks its API group.
-    [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts']],
+    [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist']],
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
     // Inventory Analytics. Stock Count (WH-only) + its deep Count Analysis (manager-only) are separate perms —
@@ -145,6 +146,7 @@ app.use('/api', amazonFbaRoutes);
 app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll
 app.use('/api', require('./app/api/support_console'));        // Customer Support console (queue/calls/notes/contacts)
+app.use('/api', require('./app/api/user_activity').router);   // activity logging (POST /activity — any signed-in user)
 app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
 app.use('/api', require('./app/api/inventory').router);       // Inventory Analytics (daily snapshot dashboard + Teams report)
 app.use('/api', docpharmaReconRoutes);
@@ -333,6 +335,15 @@ cron.schedule('45 9 * * 1', async () => {
     console.log('[Late-Del] Mon 9:45 AM IST — sending weekly late-delivery report…');
     try { const r = await deliveryReportsRoutes.sendLateDeliveriesReport({ days: 30 }); console.log('[Late-Del]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[Late-Del] error:', e.message); }
+}, { timezone: 'Asia/Kolkata' });
+
+// First-OFD-late report (first delivery attempt after the promised EDD — a courier SLA breach) — weekly,
+// Monday 9:50 AM IST, terminal-stage date in the last 30 days ending yesterday. Sends SEPARATE emails per
+// platform (RapidShyp rows → RapidShyp recipients, DocPharma rows → DocPharma recipients). No-op if empty.
+cron.schedule('50 9 * * 1', async () => {
+    console.log('[First-OFD] Mon 9:50 AM IST — sending weekly first-OFD-late report…');
+    try { const r = await deliveryReportsRoutes.sendFirstOfdReport({ days: 30 }); console.log('[First-OFD]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
+    catch (e) { console.error('[First-OFD] error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
 // RapidShyp cache sync for EasyEcom-shipped orders — every 3 hours + once at startup. Keeps the

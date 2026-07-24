@@ -15,6 +15,7 @@ module.exports = {
     // Settings → Email (app_email_settings), falling back to the EMAIL_* values below.
     APP_USER_EMAIL: process.env.APP_USER_EMAIL,
     APP_USER_PASSWORD: process.env.APP_USER_PASSWORD,
+    APP_USER_NAME: process.env.APP_USER_NAME,      // display name for the .env bootstrap admin (welcome splash)
 
     // --- Email Reporting ---
     EMAIL_HOST: process.env.EMAIL_HOST,

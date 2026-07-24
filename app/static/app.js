@@ -221,7 +221,7 @@ async function handleLogin() {
         if (data.otp_required) { _otpShow(data); return; }   // 2FA: password OK → OTP step
         authToken = data.token;
         localStorage.setItem('authToken', authToken);
-        showApp();
+        afterLogin(true);
     } catch (error) {
         showNotification(error.message, true);
     } finally {
@@ -273,7 +273,7 @@ async function _otpVerify() {
         if (!r.ok) throw new Error(d.message || 'OTP verification failed');
         authToken = d.token; localStorage.setItem('authToken', authToken);
         _otpBack();   // reset the login card for the next sign-in
-        showApp();
+        afterLogin(true);
     } catch (e) { showNotification(e.message, true); }
     finally { _otpBusy = false; hideLoader(); }
 }
@@ -288,14 +288,118 @@ async function _otpResend() {
     } catch (e) { showNotification(e.message, true); }
 }
 
-function logout() {
+function _clearSession() {
     authToken = null; localStorage.removeItem('authToken');
+    clearTimeout(_sessionTimer); _sessionTimer = null;
+    document.getElementById('welcome-splash')?.remove();
+    document.getElementById('welcome-splash-style')?.remove();
     if(loginEmailEl) loginEmailEl.value = '';
     if(loginPasswordEl) loginPasswordEl.value = '';
-    showLogin();
+    // Drop the #view hash so the NEXT sign-in lands on the home dashboard, not the page they left.
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (_) {}
+}
+// Silent logout (session expiry / 401 / auto-logout) — straight back to the login screen.
+function logout() { _clearSession(); showLogin(); }
+// Manual "Sign Out" — a brief branded loader (logo), then a thank-you confirmation page (not straight to login).
+function signOut() {
+    _clearSession();
+    if (loginView) loginView.style.display = 'none';
+    if (appView) appView.style.display = 'none';
+    const so = document.getElementById('signout-view'); if (so) so.style.display = 'none';
+    showLoader();
+    setTimeout(() => { hideLoader(true); showSignoutConfirm(); }, 2500);   // ~2.5s loader before the thank-you page
+}
+function showSignoutConfirm() {
+    const v = document.getElementById('signout-view');
+    if (!v) { showLogin(); return; }
+    if (loginView) loginView.style.display = 'none';
+    if (appView) appView.style.display = 'none';
+    document.getElementById('app-sidebar')?.removeAttribute('data-perms');
+    v.style.display = 'flex';
+}
+
+// Reveal the app after a successful sign-in. `fresh` = a brand-new login (show the welcome splash);
+// on a silent token-restore (page refresh) we skip the splash but still arm the 6-hour auto-logout.
+function afterLogin(fresh) {
+    showApp();                                  // sets currentUser (incl. name) via applyPermissions
+    scheduleAutoLogout();
+    if (fresh) { logActivity('login', null); showWelcomeSplash((currentUser && (currentUser.name || currentUser.email)) || ''); }
+}
+
+// 6-hour session: auto-logout the instant the token's own expiry passes (server also 401s any request then).
+let _sessionTimer = null;
+function scheduleAutoLogout() {
+    clearTimeout(_sessionTimer); _sessionTimer = null;
+    const exp = (parseJwt(authToken) || {}).exp;               // seconds since epoch
+    if (!exp) return;
+    const ms = exp * 1000 - Date.now();
+    if (ms <= 0) { logout(); return; }
+    _sessionTimer = setTimeout(() => {
+        showNotification('Your 6-hour session has ended. Please sign in again.', true);
+        logout();
+    }, Math.min(ms, 2147483647));
+}
+
+// Time-aware greeting used by the welcome popup.
+function _wsGreeting() { const h = new Date().getHours(); return h < 5 ? 'Good night' : h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : h < 21 ? 'Good evening' : 'Good night'; }
+// Brief welcome shown right after sign-in — a dark-premium greeting card floating over the dashboard,
+// which is left visible but blurred + dimmed behind it (a modal, not a full-screen takeover). ~3.4s.
+function showWelcomeSplash(name) {
+    document.getElementById('welcome-splash')?.remove();
+    document.getElementById('welcome-splash-style')?.remove();
+    const style = document.createElement('style');
+    style.id = 'welcome-splash-style';
+    style.textContent = `
+      @keyframes wsBackIn { from { opacity:0 } to { opacity:1 } }
+      @keyframes wsCardIn { 0% { opacity:0; transform:translateY(18px) scale(.94) } 100% { opacity:1; transform:translateY(0) scale(1) } }
+      @keyframes wsRise { from { opacity:0; transform:translateY(12px) } to { opacity:1; transform:translateY(0) } }
+      @keyframes wsLogoIn { 0% { opacity:0; transform:scale(.55) rotate(-10deg) } 60% { transform:scale(1.08) rotate(3deg) } 100% { opacity:1; transform:scale(1) rotate(0) } }
+      @keyframes wsRing { 0% { transform:scale(.85); opacity:.6 } 100% { transform:scale(1.9); opacity:0 } }
+      @keyframes wsSheen { from { background-position:-200% center } to { background-position:200% center } }
+      @keyframes wsBar { from { transform:scaleX(0) } to { transform:scaleX(1) } }
+      @keyframes wsSpark { 0% { opacity:0; transform:translateY(8px) scale(.6) } 30% { opacity:1 } 100% { opacity:0; transform:translateY(-24px) scale(1) } }
+      #welcome-splash .ws-spark { position:absolute; width:6px; height:6px; border-radius:50%; background:#c4b5fd; box-shadow:0 0 10px 2px rgba(167,139,250,.7); animation:wsSpark 2.6s ease-in-out infinite; }
+      @media (prefers-reduced-motion: reduce) { #welcome-splash *, #welcome-splash::before { animation-duration:.01ms !important; animation-iteration-count:1 !important; } }
+    `;
+    document.head.appendChild(style);
+
+    // With a real display name → name is the hero, "Welcome back…" the subtext. With only an email
+    // (no name set yet) → keep the hero clean ("Welcome back") and show the email as the subtext.
+    const hasName = name && !String(name).includes('@');
+    const heroText = hasName ? String(name).trim().split(/\s+/)[0] : 'Welcome back';   // first name only
+    const subText = hasName ? 'Welcome back to Ecom Central' : (name || 'Welcome to Ecom Central');
+
+    const el = document.createElement('div');
+    el.id = 'welcome-splash';
+    // Transparent, blurred, dimmed backdrop → the live dashboard stays visible (faded) behind the card.
+    el.style.cssText = 'position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;padding:1.25rem;background:rgba(8,11,26,.5);-webkit-backdrop-filter:blur(9px);backdrop-filter:blur(9px);animation:wsBackIn .5s ease both;';
+    el.innerHTML = `
+      <div style="position:relative;display:flex;align-items:center;gap:24px;max-width:calc(100vw - 32px);padding:30px 40px 30px 32px;border-radius:24px;color:#fff;background:linear-gradient(165deg,#211d54,#111536 60%,#0b0f26);border:1px solid rgba(129,140,248,.28);box-shadow:0 40px 90px rgba(49,46,129,.55),inset 0 1px 0 rgba(255,255,255,.06);animation:wsCardIn .6s cubic-bezier(.2,.9,.25,1.1) both;">
+        <div style="position:relative;width:72px;height:72px;flex:none;">
+          <span style="position:absolute;inset:0;border-radius:20px;box-shadow:0 0 0 2px rgba(129,140,248,.55);animation:wsRing 2.2s ease-out infinite;"></span>
+          <span style="position:absolute;inset:0;border-radius:20px;box-shadow:0 0 0 2px rgba(129,140,248,.4);animation:wsRing 2.2s ease-out .9s infinite;"></span>
+          <img src="/static/assets/ecom-logo.png" alt="Ecom Central" style="position:relative;width:72px;height:72px;border-radius:20px;background:#fff;box-shadow:0 22px 55px rgba(99,102,241,.55);animation:wsLogoIn .85s cubic-bezier(.2,.85,.25,1) both;">
+          <span class="ws-spark" style="top:-6px;left:50%;animation-delay:.6s;"></span>
+          <span class="ws-spark" style="top:22%;right:-9px;animation-delay:1.1s;background:#93c5fd;"></span>
+          <span class="ws-spark" style="bottom:2px;left:-8px;animation-delay:1.6s;background:#f0abfc;"></span>
+        </div>
+        <div style="display:flex;flex-direction:column;min-width:0;">
+          <p style="margin:0;font-size:.7rem;letter-spacing:.3em;text-transform:uppercase;font-weight:700;color:#a5b4fc;animation:wsRise .55s ease .35s both;">${ecEsc(_wsGreeting())}</p>
+          <h1 style="margin:.28rem 0 0;font-size:clamp(1.5rem,5vw,1.9rem);font-weight:800;letter-spacing:-.02em;background:linear-gradient(90deg,#e0e7ff,#a78bfa 40%,#818cf8 68%,#e0e7ff);background-size:220% auto;-webkit-background-clip:text;background-clip:text;color:transparent;animation:wsRise .55s ease .5s both, wsSheen 3s linear .95s infinite;">${ecEsc(heroText)}</h1>
+          <span style="margin-top:.5rem;font-size:.9rem;color:#c7d2fe;font-weight:500;animation:wsRise .55s ease .68s both;">${ecEsc(subText)}</span>
+          <div style="margin-top:16px;width:96px;height:3px;border-radius:3px;background:linear-gradient(90deg,#6366f1,#a855f7);box-shadow:0 0 16px rgba(139,92,246,.6);transform-origin:left;animation:wsBar 2.8s cubic-bezier(.4,0,.2,1) .8s both;"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(el);
+    setTimeout(() => {
+        el.style.transition = 'opacity .45s ease';
+        el.style.opacity = '0';
+        setTimeout(() => { el.remove(); style.remove(); }, 470);
+    }, 3400);
 }
 
 function showLogin() {
+    const so = document.getElementById('signout-view'); if (so) so.style.display = 'none';
     if (loginView) loginView.style.display = 'flex';
     if (appView) appView.style.display = 'none';
     // Re-hide the nav so the next user who logs in never sees the previous user's dashboards.
@@ -303,6 +407,7 @@ function showLogin() {
 }
 
 function showApp() {
+    const so = document.getElementById('signout-view'); if (so) so.style.display = 'none';
     if (loginView) loginView.style.display = 'none';
     if (appView) appView.style.display = 'flex';
     applyPermissions();
@@ -316,6 +421,24 @@ function showApp() {
 // --- API ---
 function getAuthHeaders() { return authToken ? { "Authorization": `Bearer ${authToken}` } : {}; }
 
+// Fire-and-forget activity log (powers the admin User Analytics dashboard). Never blocks or errors the UI.
+let _lastActivity = { view: null, at: 0 };
+function logActivity(event, view) {
+    if (!authToken) return;
+    if (event === 'view') {   // debounce repeated same-view hits (e.g. programmatic re-navigations)
+        const now = Date.now();
+        if (view === _lastActivity.view && now - _lastActivity.at < 2000) return;
+        _lastActivity = { view, at: now };
+    }
+    try {
+        fetch('/api/activity', {
+            method: 'POST', keepalive: true,
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({ event, view: view || null }),
+        }).catch(() => {});
+    } catch (_) {}
+}
+
 // --- Roles & permissions (client-side nav gating; server enforces the admin routes) ---
 let currentUser = null;
 function parseJwt(t) { try { const b = String(t).split('.')[1].replace(/-/g, '+').replace(/_/g, '/'); return JSON.parse(atob(b + '='.repeat((4 - b.length % 4) % 4))); } catch (_) { return {}; } }
@@ -325,10 +448,10 @@ function applyPermissions() {
     const legacy = (c.role === undefined && c.permissions === undefined);
     const isAdmin = legacy || c.role === 'admin' || (Array.isArray(c.permissions) && c.permissions.includes('*'));
     const perms = new Set(Array.isArray(c.permissions) ? c.permissions : []);
-    currentUser = { email: c.sub, role: isAdmin ? 'admin' : (c.role || 'user'), isAdmin, permissions: [...perms] };
+    currentUser = { email: c.sub, name: c.name || null, role: isAdmin ? 'admin' : (c.role || 'user'), isAdmin, permissions: [...perms] };
     try {
         document.querySelectorAll('#app-sidebar .sidebar-link').forEach(a => {
-            if (a.id === 'nav-users') { a.style.display = isAdmin ? '' : 'none'; return; }
+            if (a.id === 'nav-users' || a.id === 'nav-user-analytics') { a.style.display = isAdmin ? '' : 'none'; return; }
             const key = (typeof NAV_HREF !== 'undefined') ? NAV_HREF[a.id] : null;
             a.style.display = (isAdmin || (key && perms.has(key))) ? '' : 'none';
         });
@@ -348,22 +471,27 @@ function canView(view) { return !currentUser || currentUser.isAdmin || (currentU
 function canSendEmails() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('send-escalation-emails'))); }
 
 async function handleSignup() {
+    const name = String((document.getElementById('signup-name') || {}).value || '').trim();
     const email = (document.getElementById('signup-email') || {}).value;
     const mobile = String((document.getElementById('signup-mobile') || {}).value || '').replace(/\D/g, '');
     const password = (document.getElementById('signup-password') || {}).value;
     const msg = document.getElementById('auth-msg');
+    if (!name) {
+        if (msg) { msg.textContent = 'Please enter your name.'; msg.className = 'text-sm text-center mt-4 text-rose-400'; }
+        return;
+    }
     if (!/^[6-9]\d{9}$/.test(mobile)) {
-        if (msg) { msg.textContent = 'Enter a valid 10-digit mobile number.'; msg.className = 'text-sm text-center mt-4 text-rose-500'; }
+        if (msg) { msg.textContent = 'Enter a valid 10-digit mobile number.'; msg.className = 'text-sm text-center mt-4 text-rose-400'; }
         return;
     }
     showLoader();
     try {
-        const r = await fetch('/api/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, mobile, password }) });
+        const r = await fetch('/api/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email, mobile, password }) });
         const d = await r.json();
         if (!r.ok) throw new Error(d.message || 'Sign up failed');
         _authToggle(false);
-        if (msg) { msg.textContent = d.message || 'Account created — pending admin approval.'; msg.className = 'text-sm text-center mt-4 text-emerald-600'; }
-    } catch (e) { if (msg) { msg.textContent = e.message; msg.className = 'text-sm text-center mt-4 text-rose-500'; } }
+        if (msg) { msg.textContent = d.message || 'Account created — pending admin approval.'; msg.className = 'text-sm text-center mt-4 text-emerald-400'; }
+    } catch (e) { if (msg) { msg.textContent = e.message; msg.className = 'text-sm text-center mt-4 text-rose-400'; } }
     finally { hideLoader(); }
 }
 function _authToggle(toSignup) {
@@ -518,6 +646,7 @@ function navigate(view) {
     }
     showLoader();
     console.log("Navigating to:", view);
+    logActivity('view', view);   // record the dashboard visit for User Analytics (debounced inside)
     currentView = view;
     // Reflect the current view in the URL, so refresh / open-in-new-tab / bookmark reopen the same page.
     if (view && ('#' + view) !== location.hash) { try { history.replaceState(null, '', '#' + view); } catch (e) {} }
@@ -641,6 +770,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('support-contacts-view');
             if (typeof supContactsInit === 'function') supContactsInit();
             break;
+        case 'support-blacklist':
+            activeLinkElement = document.getElementById('nav-support-blacklist');
+            activeViewElement = document.getElementById('support-blacklist-view');
+            if (typeof supBlacklistInit === 'function') supBlacklistInit();
+            break;
         case 'ops-control':
             activeLinkElement = document.getElementById('nav-ops-control');
             activeViewElement = document.getElementById('ops-control-view');
@@ -705,6 +839,11 @@ function navigate(view) {
             activeLinkElement = document.getElementById('nav-users');
             activeViewElement = document.getElementById('users-view');
             if (typeof usersInit === 'function') usersInit();
+            break;
+        case 'user-analytics':
+            activeLinkElement = document.getElementById('nav-user-analytics');
+            activeViewElement = document.getElementById('user-analytics-view');
+            if (typeof uaInit === 'function') uaInit();
             break;
     }
 
@@ -3130,6 +3269,7 @@ async function renderEmailSettings(){
     set('es-smtp-host', s.smtp_host); set('es-smtp-port', s.smtp_port);
     set('es-from', s.from_email || s.smtp_user); set('es-rapidshyp', s.rapidshyp_email);
     set('es-to', s.to_emails); set('es-cc', s.cc_emails);
+    set('es-dp-to', s.docpharma_to_emails); set('es-dp-cc', s.docpharma_cc_emails);
     // Password: show a placeholder indicating one is already stored; blank = keep unchanged.
     const pass=document.getElementById('es-smtp-pass'); if(pass){ pass.value=''; pass.placeholder = s.password_set ? '•••••• (stored — leave blank to keep)' : (f.password_set ? '•••••• (using server default)' : 'not set'); }
     // Fallback placeholders on blank fields.
@@ -3147,6 +3287,7 @@ async function saveEmailSettings(){
     smtp_host:val('es-smtp-host'), smtp_port:val('es-smtp-port'),
     smtp_password:document.getElementById('es-smtp-pass')?.value||'',   // blank = keep existing
     from_email:val('es-from'), rapidshyp_email:val('es-rapidshyp'), to_emails:val('es-to'), cc_emails:val('es-cc'),
+    docpharma_to_emails:val('es-dp-to'), docpharma_cc_emails:val('es-dp-cc'),
   };
   if(st){ st.textContent='Saving…'; st.className='text-sm text-slate-500'; }
   try{
@@ -3174,9 +3315,14 @@ const _claimsState = {
   srto: { rows: [], sortKey: 'freight_total', dir: -1 },
   late: { rows: [], sortKey: 'days_late', dir: -1 },
   intransit: { rows: [], sortKey: 'days_overdue', dir: -1 },
+  ofd: { rows: [], sortKey: 'ofd_late', dir: -1 },
 };
-const _CLAIMS_TABS = ['srto', 'late', 'intransit'];
-const _CLAIMS_PANEL = { srto: 'claims-panel-srto', late: 'claims-panel-late', intransit: 'claims-panel-intransit' };
+const _CLAIMS_TABS = ['srto', 'late', 'intransit', 'ofd'];
+const _CLAIMS_PANEL = { srto: 'claims-panel-srto', late: 'claims-panel-late', intransit: 'claims-panel-intransit', ofd: 'claims-panel-ofd' };
+// Each tab loads independently — its own GET endpoint, tbody, label, and (below) its own date range.
+const _CLAIMS_URL = { srto: '/api/silent-rto-claims', late: '/api/late-deliveries', intransit: '/api/intransit-late', ofd: '/api/first-ofd-late' };
+const _CLAIMS_TBODY = { srto: 'srto-tbody', late: 'late-tbody', intransit: 'itl-tbody', ofd: 'ofd-tbody' };
+const _CLAIMS_LABEL = { srto: 'Silent-RTO Claims', late: 'Late Deliveries', intransit: 'In-transit · Overdue', ofd: 'First-OFD Late' };
 let _claimsOpenAwb = null;            // the currently-expanded row (one at a time)
 const _claimsDetail = {};             // awb → { loading, journey, scans, dp, live, edd, error }
 const _claimsFilter = { q: '', platform: '', payment: '', courier: '', zone: '' };
@@ -3185,15 +3331,20 @@ const _inr = n => '₹' + (Number(n) || 0).toLocaleString('en-IN', { maximumFrac
 const _dmy = ts => { if(!ts) return ''; const s = new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); const p = s.split('-'); return p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : s; };
 const _ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 function claimsInit(){
+  // Seed each tab with its OWN default range (last 30 days) — date filter is per-tab, not shared.
+  const d = new Date(); const defFrom = _ymd(new Date(d.getFullYear(), d.getMonth(), d.getDate() - 30)), defTo = _ymd(d);
+  _CLAIMS_TABS.forEach(t => { const st = _claimsState[t]; if(!st.from){ st.from = defFrom; st.to = defTo; } });
   const from = document.getElementById('claims-from'), to = document.getElementById('claims-to');
-  if(from && !from.value){ const d = new Date(); from.value = _ymd(new Date(d.getFullYear(), d.getMonth(), d.getDate() - 30)); to.value = _ymd(d); }
+  if(from){ from.value = _claimsState[_claimsTab].from; to.value = _claimsState[_claimsTab].to; }
+  const lbl = document.getElementById('claims-active-tab'); if(lbl) lbl.textContent = _CLAIMS_LABEL[_claimsTab] || 'current';
   if(!_claimsWired){
     _claimsWired = true;
-    document.getElementById('claims-apply')?.addEventListener('click', claimsLoad);
+    document.getElementById('claims-apply')?.addEventListener('click', claimsApplyDates);
     document.querySelectorAll('.claims-tab').forEach(b => b.addEventListener('click', () => claimsSwitch(b.dataset.tab)));
     document.getElementById('srto-send')?.addEventListener('click', () => claimsSend('srto'));
     document.getElementById('late-send')?.addEventListener('click', () => claimsSend('late'));
     document.getElementById('itl-send')?.addEventListener('click', () => claimsSend('intransit'));
+    document.getElementById('ofd-send')?.addEventListener('click', () => claimsSend('ofd'));
     document.getElementById('claims-search')?.addEventListener('input', e => { _claimsFilter.q = e.target.value.trim(); claimsRender(); });
     document.getElementById('claims-f-platform')?.addEventListener('change', e => { _claimsFilter.platform = e.target.value; claimsRender(); });
     document.getElementById('claims-f-payment')?.addEventListener('change', e => { _claimsFilter.payment = e.target.value; claimsRender(); });
@@ -3209,9 +3360,9 @@ function claimsInit(){
         claimsRender();
       });
     });
-    if(canSendEmails()){ ['srto-send', 'late-send', 'itl-send'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = ''; }); }
+    if(canSendEmails()){ ['srto-send', 'late-send', 'itl-send', 'ofd-send'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = ''; }); }
     // Click a row to expand its full detail (date log + scan log). Delegated per panel body.
-    ['srto-tbody', 'late-tbody', 'itl-tbody'].forEach(id => {
+    ['srto-tbody', 'late-tbody', 'itl-tbody', 'ofd-tbody'].forEach(id => {
       document.getElementById(id)?.addEventListener('click', e => {
         if(e.target.closest('a')) return;                       // let links inside the detail work
         const tr = e.target.closest('tr[data-awb]'); if(!tr) return;
@@ -3222,7 +3373,14 @@ function claimsInit(){
       });
     });
   }
-  claimsLoad();
+  claimsLoadTab(_claimsTab, true);
+}
+// Apply button — commits the date inputs to the ACTIVE tab's own range, then reloads only that tab.
+function claimsApplyDates(){
+  const st = _claimsState[_claimsTab];
+  st.from = document.getElementById('claims-from')?.value || st.from;
+  st.to = document.getElementById('claims-to')?.value || st.to;
+  claimsLoadTab(_claimsTab, true);
 }
 // Fetch the full journey + scan log for one AWB (shared shipment-detail endpoint; cached).
 async function claimsLoadDetail(awb){
@@ -3255,6 +3413,7 @@ function claimsDetailRow(r, which){
     pieces.push(`Total: <b class="text-rose-600">${r.freight_total != null ? _inr(r.freight_total) : '—'}</b>`);
     pieces.push(`Invoice: <b class="text-slate-700">${r.shipment_value != null ? _inr(r.shipment_value) : '—'}</b>`);
   } else if(which === 'late'){ pieces.push(`Days late: <b class="text-rose-600">${r.days_late}</b>`); }
+  else if(which === 'ofd'){ pieces.push(`First OFD: <b class="text-slate-700">${_dmy(r.out_for_delivery_at)}</b>`); pieces.push(`RTO date: <b class="text-slate-700">${_dmy(r.terminal_at)}</b>`); pieces.push(`Days late (OFD): <b class="text-rose-600">${r.ofd_late}</b>`); }
   else { pieces.push(`Days overdue: <b class="text-amber-600">${r.days_overdue}</b>`); }
   const reasons = (j && j.ndr_reasons && j.ndr_reasons.length) ? `<span>Reasons: <b class="text-slate-700">${ecEsc(j.ndr_reasons.join('; '))}</b></span>` : '';
   const meta = `<div class="text-xs text-slate-500 mt-3 flex flex-wrap gap-x-4 gap-y-1">${pieces.map(p => `<span>${p}</span>`).join('')}${reasons}</div>`;
@@ -3284,37 +3443,40 @@ function claimsClearFilters(){
 }
 function claimsSwitch(tab){
   _claimsTab = tab; _claimsOpenAwb = null;
+  // Reflect THIS tab's own date range in the shared inputs (date filter is per-tab).
+  const st = _claimsState[tab];
+  const f = document.getElementById('claims-from'), t = document.getElementById('claims-to');
+  if(f && st.from) f.value = st.from; if(t && st.to) t.value = st.to;
+  const lbl = document.getElementById('claims-active-tab'); if(lbl) lbl.textContent = _CLAIMS_LABEL[tab] || 'current';
   document.querySelectorAll('.claims-tab').forEach(b => { const on = b.dataset.tab === tab;
     b.classList.toggle('border-indigo-600', on); b.classList.toggle('text-indigo-700', on);
     b.classList.toggle('border-transparent', !on); b.classList.toggle('text-slate-500', !on); });
-  _CLAIMS_TABS.forEach(t => { const p = document.getElementById(_CLAIMS_PANEL[t]); if(p) p.style.display = t === tab ? '' : 'none'; });
-  claimsRender();
+  _CLAIMS_TABS.forEach(t2 => { const p = document.getElementById(_CLAIMS_PANEL[t2]); if(p) p.style.display = t2 === tab ? '' : 'none'; });
+  claimsLoadTab(tab);   // lazy — fetches on first view, otherwise just re-renders the cached rows
 }
-async function claimsLoad(){
-  const from = document.getElementById('claims-from')?.value, to = document.getElementById('claims-to')?.value;
-  const qs = `?from=${from}&to=${to}`;
+// Load ONE tab using its own stored date range. force=true always refetches (Apply / first init); otherwise
+// a tab already loaded just re-renders. Each tab is independent, so only the requested tbody is touched.
+async function claimsLoadTab(which, force){
+  const st = _claimsState[which];
+  if(st.loaded && !force){ claimsRender(); return; }
   _claimsOpenAwb = null;
-  ['srto-tbody', 'late-tbody', 'itl-tbody'].forEach(id => { const t = document.getElementById(id); if(t) t.innerHTML = '<tr><td colspan="7">'+brandLoader()+'</td></tr>'; });
+  const tb = document.getElementById(_CLAIMS_TBODY[which]); if(tb) tb.innerHTML = '<tr><td colspan="7">'+brandLoader()+'</td></tr>';
   try{
-    const [a, b, c] = await Promise.all([
-      fetch('/api/silent-rto-claims' + qs, { headers: getAuthHeaders() }).then(r => r.json()),
-      fetch('/api/late-deliveries' + qs, { headers: getAuthHeaders() }).then(r => r.json()),
-      fetch('/api/intransit-late' + qs, { headers: getAuthHeaders() }).then(r => r.json()),
-    ]);
-    _claimsState.srto.rows = (a && a.success && a.rows) ? a.rows : [];
-    _claimsState.late.rows = (b && b.success && b.rows) ? b.rows : [];
-    _claimsState.intransit.rows = (c && c.success && c.rows) ? c.rows : [];
+    const qs = `?from=${st.from}&to=${st.to}`;
+    const r = await fetch(_CLAIMS_URL[which] + qs, { headers: getAuthHeaders() });
+    const d = await r.json();
+    st.rows = (d && d.success && d.rows) ? d.rows : [];
+    st.loaded = true;
     await eeHoldRefresh();
     claimsPopulateFilters();
-    claimsRender();
+    if(_claimsTab === which) claimsRender();
   }catch(e){
-    const t = document.getElementById(_CLAIMS_PANEL[_claimsTab] ? _claimsTab === 'srto' ? 'srto-tbody' : _claimsTab === 'late' ? 'late-tbody' : 'itl-tbody' : 'srto-tbody');
-    if(t) t.innerHTML = `<tr><td colspan="7" class="px-4 py-8 text-center text-rose-500">${ecEsc(e.message)}</td></tr>`;
+    if(tb) tb.innerHTML = `<tr><td colspan="7" class="px-4 py-8 text-center text-rose-500">${ecEsc(e.message)}</td></tr>`;
   }
 }
 // Populate courier/zone dropdowns from the union of all datasets (options stable across tabs).
 function claimsPopulateFilters(){
-  const all = [..._claimsState.srto.rows, ..._claimsState.late.rows, ..._claimsState.intransit.rows];
+  const all = [..._claimsState.srto.rows, ..._claimsState.late.rows, ..._claimsState.intransit.rows, ..._claimsState.ofd.rows];
   const uniq = k => [...new Set(all.map(r => r[k]).filter(Boolean))].sort();
   const fill = (id, vals, cur) => { const el = document.getElementById(id); if(!el) return;
     const first = el.querySelector('option'); el.innerHTML = ''; el.appendChild(first);
@@ -3335,7 +3497,7 @@ function claimsApply(which){
     if(f.q){ const q = f.q.toLowerCase(); if(!String(r.order_name || '').toLowerCase().includes(q) && !String(r.awb || '').toLowerCase().includes(q)) return false; }
     return true;
   });
-  const k = st.sortKey, dir = st.dir, dateKeys = ['order_date', 'first_edd', 'delivered_at', 'rto_at'], numKeys = ['freight_total', 'shipment_value', 'days_late', 'days_overdue'];
+  const k = st.sortKey, dir = st.dir, dateKeys = ['order_date', 'first_edd', 'delivered_at', 'rto_at', 'out_for_delivery_at', 'terminal_at'], numKeys = ['freight_total', 'shipment_value', 'days_late', 'days_overdue', 'ofd_late'];
   rows.sort((a, b) => {
     let av = a[k], bv = b[k];
     if(dateKeys.includes(k)){ av = av ? new Date(av).getTime() : 0; bv = bv ? new Date(bv).getTime() : 0; }
@@ -3353,7 +3515,7 @@ function claimsCaret(which){
     th.classList.toggle('text-slate-700', active);
   });
 }
-function claimsRender(){ if(_claimsTab === 'srto') claimsRenderSrto(); else if(_claimsTab === 'late') claimsRenderLate(); else claimsRenderIntransit(); }
+function claimsRender(){ if(_claimsTab === 'srto') claimsRenderSrto(); else if(_claimsTab === 'late') claimsRenderLate(); else if(_claimsTab === 'ofd') claimsRenderOfd(); else claimsRenderIntransit(); }
 function claimsRenderSrto(){
   const rows = claimsApply('srto'), count = rows.length;
   const freight = rows.reduce((a, r) => a + (Number(r.freight_total) || 0), 0);
@@ -3426,18 +3588,44 @@ function claimsRenderIntransit(){
   claimsCaret('intransit');
   const cc = document.getElementById('claims-count'); if(cc) cc.textContent = `${count} shown`;
 }
+function claimsRenderOfd(){
+  const rows = claimsApply('ofd'), count = rows.length;
+  const avg = count ? Math.round(rows.reduce((a, r) => a + r.ofd_late, 0) / count * 100) / 100 : 0;
+  const max = rows.reduce((m, r) => Math.max(m, r.ofd_late), 0);
+  const severe = rows.filter(r => r.ofd_late >= 4).length;
+  document.getElementById('ofd-kpi-count').textContent = count;
+  document.getElementById('ofd-kpi-avg').textContent = avg;
+  document.getElementById('ofd-kpi-max').textContent = max + 'd';
+  document.getElementById('ofd-kpi-severe').textContent = severe;
+  document.getElementById('ofd-tbody').innerHTML = count ? rows.map(r => { const open = r.awb === _claimsOpenAwb;
+    let out = `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer ${open?'bg-indigo-50/60':''}" data-awb="${ecEsc(r.awb)}">
+    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}${eeHoldChip(r.order_name)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
+    <td class="px-4 py-2.5 text-slate-500">${_dmy(r.first_edd)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${_dmy(r.out_for_delivery_at)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${_dmy(r.terminal_at)}</td>
+    <td class="px-4 py-2.5 text-right font-bold ${r.ofd_late >= 4 ? 'text-rose-600' : 'text-amber-600'}">${r.ofd_late}</td></tr>`;
+    if(open) out += claimsDetailRow(r, 'ofd');
+    return out; }).join('')
+    : '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">No first-OFD-late RTOs match.</td></tr>';
+  claimsCaret('ofd');
+  const cc = document.getElementById('claims-count'); if(cc) cc.textContent = `${count} shown`;
+}
 async function claimsSend(which){
   const from = document.getElementById('claims-from')?.value, to = document.getElementById('claims-to')?.value;
   const cfg = {
     srto: { url: '/api/silent-rto-claims/send', status: 'srto-status', msg: 'Email the silent-RTO claim list to RapidShyp for this date range?' },
-    late: { url: '/api/late-deliveries/send', status: 'late-status', msg: 'Email the late-delivery report to the configured recipients?' },
-    intransit: { url: '/api/intransit-late/send', status: 'itl-status', msg: 'Email the overdue in-transit chase list to the configured recipients?' },
+    late: { url: '/api/late-deliveries/send', status: 'late-status', msg: 'Email the late-delivery report? A separate email goes to each platform\'s recipients (RapidShyp / DocPharma).' },
+    intransit: { url: '/api/intransit-late/send', status: 'itl-status', msg: 'Email the overdue in-transit chase list? A separate email goes to each platform\'s recipients (RapidShyp / DocPharma).' },
+    ofd: { url: '/api/first-ofd-late/send', status: 'ofd-status', msg: 'Email the First-OFD-late RTO report (first attempt after the promised EDD) to RapidShyp?' },
   }[which];
   const st = document.getElementById(cfg.status);
   if(!confirm(cfg.msg)) return;
   if(st){ st.textContent = 'Sending…'; st.className = 'text-sm text-slate-500'; }
   try{
-    const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ from, to }) });
+    const body = { from, to, source: _claimsFilter.platform || undefined };
+    const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify(body) });
     const d = await r.json();
     if(!r.ok || !d.success) throw new Error(d.message || 'Send failed');
     if(st){ st.textContent = d.message || 'Sent ✓'; st.className = 'text-sm text-emerald-600'; }
@@ -4152,6 +4340,95 @@ function supContactModal(){
     catch(e){ st.textContent=e.message; st.className='text-sm text-rose-600 mr-auto'; }
   });
 }
+// ── Blacklisted phone numbers (block with reason · unblock) ─────────────────
+let _blkWired=false, _blk={ blocked:[], history:[], q:'', histOpen:false };
+function supBlacklistInit(){
+  if(!_blkWired){ _blkWired=true;
+    document.getElementById('blk-add')?.addEventListener('click',supBlacklistModal);
+    document.getElementById('blk-search')?.addEventListener('input',e=>{ _blk.q=e.target.value.trim().toLowerCase(); supBlacklistRender(); });
+    document.getElementById('blk-hist-toggle')?.addEventListener('click',()=>{ _blk.histOpen=!_blk.histOpen;
+      document.getElementById('blk-history')?.classList.toggle('hidden',!_blk.histOpen);
+      document.getElementById('blk-hist-chev')?.classList.toggle('rotate-90',_blk.histOpen); supBlacklistRender(); });
+  }
+  supBlacklistLoad();
+}
+async function supBlacklistLoad(){
+  const t=document.getElementById('blk-table'); if(t) t.innerHTML=brandLoader();
+  try{
+    const d=await supFetch('/api/support/blacklist');
+    _blk.blocked=d.blocked||[]; _blk.history=d.history||[];
+    supBlacklistRender();
+  }catch(e){ if(t) t.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }
+}
+function _blkDate(ts){ return ts?new Date(ts).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—'; }
+function supBlacklistRender(){
+  const TH='px-4 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+  const TD='px-4 py-3 text-sm text-slate-700 border-b border-slate-100 align-middle';
+  const q=_blk.q;
+  const match=r=>!q||String(r.phone||'').includes(q)||String(r.reason||'').toLowerCase().includes(q);
+  const rows=_blk.blocked.filter(match);
+  const t=document.getElementById('blk-table');
+  t.innerHTML=rows.length?`<table class="w-full"><thead><tr>${['Phone','Reason','Blocked by','Blocked on',''].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+    rows.map(r=>`<tr class="hover:bg-slate-50">
+      <td class="${TD} font-semibold font-mono text-slate-800">${escapeHtml(r.phone)}</td>
+      <td class="${TD} max-w-[320px]">${escapeHtml(r.reason||'—')}</td>
+      <td class="${TD} text-xs text-slate-500">${escapeHtml(r.added_by||'—')}</td>
+      <td class="${TD} text-xs text-slate-500">${_blkDate(r.created_at)}</td>
+      <td class="${TD} text-right"><button class="blk-unblock text-xs px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 font-semibold hover:bg-emerald-50" data-id="${r.id}" data-phone="${escapeHtml(r.phone)}">Unblock</button></td></tr>`).join('')
+  }</tbody></table>`:`<div class="text-slate-400 text-sm p-10 text-center">${q?'No blacklisted numbers match.':'No numbers blacklisted yet — click “Blacklist a number”.'}</div>`;
+  t.querySelectorAll('.blk-unblock').forEach(b=>b.addEventListener('click',async()=>{
+    if(!(await supConfirm({ title:'Unblock this number?', message:b.dataset.phone+' will be removed from the blacklist.', confirmLabel:'Unblock' }))) return;
+    try{ await supFetch('/api/support/blacklist/'+b.dataset.id+'/unblock',{method:'POST'}); showNotification('Number unblocked'); supBlacklistLoad(); }
+    catch(e){ showNotification(e.message,true); } }));
+  const cc=document.getElementById('blk-count'); if(cc) cc.textContent=`${rows.length} blacklisted`;
+  // History (unblocked) table
+  if(_blk.histOpen){
+    const h=document.getElementById('blk-hist-table');
+    const hist=_blk.history.filter(match);
+    h.innerHTML=hist.length?`<table class="w-full"><thead><tr>${['Phone','Reason','Unblocked by','Unblocked on',''].map(x=>`<th class="${TH}">${x}</th>`).join('')}</tr></thead><tbody>${
+      hist.map(r=>`<tr class="hover:bg-slate-50">
+        <td class="${TD} font-mono text-slate-500">${escapeHtml(r.phone)}</td>
+        <td class="${TD} text-slate-500 max-w-[320px]">${escapeHtml(r.reason||'—')}</td>
+        <td class="${TD} text-xs text-slate-500">${escapeHtml(r.unblocked_by||'—')}</td>
+        <td class="${TD} text-xs text-slate-500">${_blkDate(r.unblocked_at)}</td>
+        <td class="${TD} text-right"><button class="blk-reblock text-xs px-3 py-1.5 rounded-lg border border-rose-200 text-rose-700 font-semibold hover:bg-rose-50" data-phone="${escapeHtml(r.phone)}" data-reason="${escapeHtml(r.reason||'')}">Re-block</button></td></tr>`).join('')
+    }</tbody></table>`:'<div class="text-slate-400 text-sm p-8 text-center">Nothing unblocked yet.</div>';
+    h.querySelectorAll('.blk-reblock').forEach(b=>b.addEventListener('click',()=>supBlacklistModal(b.dataset.phone,b.dataset.reason)));
+  }
+}
+function supBlacklistModal(phone,reason){
+  document.getElementById('blk-modal')?.remove();
+  const wrap=document.createElement('div'); wrap.id='blk-modal';
+  wrap.className='fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+  wrap.innerHTML=`<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-md flex flex-col">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200"><h3 class="text-lg font-bold text-slate-800">Blacklist a number</h3>
+      <button class="blk-close text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div>
+    <div class="p-6 space-y-4">
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Phone number <span class="text-rose-500">*</span></label>
+        <input id="blk-phone" type="tel" inputmode="numeric" maxlength="10" class="filter-input w-full" placeholder="10-digit mobile number" value="${escapeHtml(typeof phone==='string'?phone:'')}"></div>
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Reason</label>
+        <textarea id="blk-reason" rows="3" class="filter-input w-full !h-auto py-2 resize-none" placeholder="Why is this number being blacklisted?">${escapeHtml(typeof reason==='string'?reason:'')}</textarea></div>
+    </div>
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200">
+      <span id="blk-status" class="text-sm mr-auto"></span>
+      <button class="blk-close px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="blk-save" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700">Blacklist</button></div></div>`;
+  document.body.appendChild(wrap);
+  const close=()=>wrap.remove();
+  wrap.querySelectorAll('.blk-close').forEach(b=>b.addEventListener('click',close));
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  const pin=document.getElementById('blk-phone');
+  pin.addEventListener('input',e=>{ e.target.value=e.target.value.replace(/\D/g,'').slice(0,10); });
+  document.getElementById('blk-save').addEventListener('click',async()=>{
+    const st=document.getElementById('blk-status');
+    const phoneV=pin.value.trim(), reasonV=document.getElementById('blk-reason').value.trim();
+    if(!/^\d{10}$/.test(phoneV)){ st.textContent='Enter a valid 10-digit number.'; st.className='text-sm text-rose-600 mr-auto'; return; }
+    try{ await supFetch('/api/support/blacklist',{method:'POST',body:JSON.stringify({ phone:phoneV, reason:reasonV })});
+      showNotification('Number blacklisted'); close(); supBlacklistLoad(); }
+    catch(e){ st.textContent=e.message; st.className='text-sm text-rose-600 mr-auto'; }
+  });
+  setTimeout(()=>pin.focus(),50);
+}
 // ═════════════════ END CUSTOMER SUPPORT CONSOLE ═════════════════
 
 // ─────────── Deep-linkable views (open-in-new-tab / refresh / bookmark) ───────────
@@ -4162,9 +4439,9 @@ const NAV_HREF = {
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon',
-    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-users': 'users',
+    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
-    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts',
+    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-support-blacklist': 'support-blacklist',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
     'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions'
 };
@@ -4870,20 +5147,21 @@ document.getElementById('nav-docpharma-recon')?.addEventListener('click', (e) =>
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
 document.getElementById('nav-claims-sla')?.addEventListener('click', (e) => { e.preventDefault(); navigate('claims-sla'); });
-['support-dashboard','support-queue','support-orders','support-calls','support-contacts'].forEach(v =>
+['support-dashboard','support-queue','support-orders','support-calls','support-contacts','support-blacklist'].forEach(v =>
     document.getElementById('nav-' + v)?.addEventListener('click', (e) => { e.preventDefault(); navigate(v); }));
 document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
 document.getElementById('nav-amazon-fba')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-fba'); });
 document.getElementById('nav-inventory-count')?.addEventListener('click', (e) => { e.preventDefault(); navigate('inventory-count'); });
 document.getElementById('nav-inventory-count-analysis')?.addEventListener('click', (e) => { e.preventDefault(); navigate('inventory-count-analysis'); });
 document.getElementById('nav-users')?.addEventListener('click', (e) => { e.preventDefault(); navigate('users'); });
+document.getElementById('nav-user-analytics')?.addEventListener('click', (e) => { e.preventDefault(); navigate('user-analytics'); });
 
 // ═══════════════ USERS & PERMISSIONS (admin) ═══════════════
 const PERM_GROUPS = [
   ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['docpharma-recon','DocPharma Recon'],['amazon-fba','Amazon FBA']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
-  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts']]],
+  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['support-blacklist','Blacklist Numbers']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
   ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
@@ -4894,8 +5172,10 @@ const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
 const PERM_TOTAL = PERM_CATALOG.length;
 const _PC_CHECK = '<svg viewBox="0 0 20 20" fill="none"><path d="M5 10l3 3 7-7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const _AVCOLORS = ['bg-indigo-500','bg-emerald-500','bg-rose-500','bg-amber-500','bg-sky-500','bg-violet-500','bg-teal-500','bg-fuchsia-500'];
-function _avatar(email){ const local=(email||'?').split('@')[0]; const parts=local.split(/[.\-_]+/).filter(Boolean);
-  const initials=(parts.length>1?parts[0][0]+parts[1][0]:local.slice(0,2)).toUpperCase();
+function _avatar(email, name){
+  const src=(name&&name.trim())?name.trim():(email||'?').split('@')[0];
+  const parts=src.split(/[.\-_\s]+/).filter(Boolean);
+  const initials=(parts.length>1?parts[0][0]+parts[1][0]:src.slice(0,2)).toUpperCase();
   let h=0; for(const c of (email||'')) h=(h*31+c.charCodeAt(0))>>>0; return {initials, color:_AVCOLORS[h%_AVCOLORS.length]}; }
 function _permGroupOf(key){ for(const [g,items] of PERM_GROUPS) if(items.some(p=>p[0]===key)) return g; return ''; }
 function _usersUpdateCount(card){ const n=card.querySelectorAll('.perm-chip.is-on').length; const el=card.querySelector('.dpu-count'); if(el) el.textContent=n; }
@@ -4981,7 +5261,7 @@ function renderUsers(users){
   const summary=`<div class="flex items-center gap-2 mb-4 text-sm"><span class="text-slate-500"><b class="text-slate-800">${users.length}</b> user${users.length!==1?'s':''}</span>${pending?`<span class="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-xs font-semibold ring-1 ring-amber-200">${pending} pending approval</span>`:''}</div>`;
   box.innerHTML = summary + (users.map(u=>{
     const isAdmin=(u.role==='admin');
-    const av=_avatar(u.email);
+    const av=_avatar(u.email, u.name);
     const all=(u.permissions&&u.permissions.includes('*'));
     const perms=new Set(all?PERM_CATALOG.map(p=>p[0]):(u.permissions||[]));
     const granted=isAdmin?PERM_TOTAL:perms.size;
@@ -4990,9 +5270,11 @@ function renderUsers(users){
       <div class="flex items-center gap-3 min-w-0">
         <div class="w-10 h-10 rounded-full ${av.color} text-white flex items-center justify-center font-bold text-sm shrink-0">${av.initials}</div>
         <div class="min-w-0">
-          <div class="flex items-center gap-2 flex-wrap"><span class="font-semibold text-slate-800 break-all">${ecEsc(u.email)}</span>
+          <div class="flex items-center gap-2 flex-wrap"><span class="font-semibold text-slate-800 break-all">${ecEsc(u.name || u.email)}</span>
             <span class="text-[11px] px-2 py-0.5 rounded-full ring-1 ${badge(u.status)}">${ecEsc(u.status)}</span>
-            ${isAdmin?'<span class="text-[11px] px-2 py-0.5 rounded-full ring-1 bg-indigo-50 text-indigo-700 ring-indigo-200">admin</span>':''}</div>
+            ${isAdmin?'<span class="text-[11px] px-2 py-0.5 rounded-full ring-1 bg-indigo-50 text-indigo-700 ring-indigo-200">admin</span>':''}
+            <button data-act="name" title="${u.name?'Edit':'Set'} display name" class="text-slate-400 hover:text-indigo-600 p-0.5 rounded hover:bg-indigo-50">${SUP_ICON_EDIT}</button></div>
+          ${u.name?`<div class="text-xs text-slate-400 mt-0.5 break-all">${ecEsc(u.email)}</div>`:''}
           <div class="text-xs text-slate-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
             <span>${isAdmin?'Full access — signs in with the app credentials':`<span class="dpu-count font-semibold text-slate-500">${granted}</span> of ${PERM_TOTAL} dashboards`}</span>
             <span class="text-slate-300">·</span>
@@ -5008,7 +5290,7 @@ function renderUsers(users){
         ${!isAdmin?'<button data-act="delete" title="Delete user" class="text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg w-8 h-8 flex items-center justify-center"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>':''}
       </div>
     </div>`;
-    if(isAdmin) return `<div class="card p-5" data-uid="${u.id}" data-email="${ecEsc(u.email)}" data-mobile="${ecEsc(u.mobile||'')}">${head}</div>`;
+    if(isAdmin) return `<div class="card p-5" data-uid="${u.id}" data-email="${ecEsc(u.email)}" data-name="${ecEsc(u.name||'')}" data-mobile="${ecEsc(u.mobile||'')}">${head}</div>`;
     const groups=PERM_GROUPS.map(([gname,items])=>{
       const chips=items.map(([k,label])=>`<button type="button" data-perm="${k}" class="perm-chip ${perms.has(k)?'is-on':''}"><span class="pc-box">${_PC_CHECK}</span>${ecEsc(label)}</button>`).join('');
       return `<div><div class="flex items-center justify-between mb-1.5"><span class="text-[11px] font-bold uppercase tracking-wide text-slate-400">${gname}</span><button type="button" data-group="${gname}" class="text-[11px] text-indigo-500 hover:text-indigo-700 font-medium">toggle all</button></div><div class="flex flex-wrap gap-1.5">${chips}</div></div>`;
@@ -5016,7 +5298,7 @@ function renderUsers(users){
     const primary=(u.status==='active')
       ? '<button data-act="save" class="text-xs px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 shadow-sm">Save access</button>'
       : '<button data-act="approve" class="text-xs px-4 py-2 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700 shadow-sm">✓ Approve &amp; grant</button>';
-    return `<div class="card p-5 ${u.status==='pending'?'ring-1 ring-amber-200':''}" data-uid="${u.id}" data-email="${ecEsc(u.email)}" data-mobile="${ecEsc(u.mobile||'')}">
+    return `<div class="card p-5 ${u.status==='pending'?'ring-1 ring-amber-200':''}" data-uid="${u.id}" data-email="${ecEsc(u.email)}" data-name="${ecEsc(u.name||'')}" data-mobile="${ecEsc(u.mobile||'')}">
       ${head}
       <div class="dpu-perms ${collapsed?'hidden':''}">
         <div class="mt-4 grid sm:grid-cols-2 gap-x-8 gap-y-4">${groups}</div>
@@ -5046,6 +5328,7 @@ function usersListClick(e){
   const id=card.dataset.uid, act=btn.dataset.act;
   if(act==='toggle'){ const sec=card.querySelector('.dpu-perms'), chev=btn.querySelector('.dpu-chev'); if(sec){ sec.classList.toggle('hidden'); if(chev) chev.classList.toggle('rotate-180', !sec.classList.contains('hidden')); } return; }
   if(act==='mobile'){ usrMobileModal(id, card.dataset.email, card.dataset.mobile||''); return; }
+  if(act==='name'){ usrNameModal(id, card.dataset.email, card.dataset.name||''); return; }
   const perms=()=>[...card.querySelectorAll('.perm-chip.is-on')].map(c=>c.dataset.perm);
   if(act==='approve') usersUpdate(id,{status:'active',permissions:perms()},'Approved & access granted');
   else if(act==='disable') usersUpdate(id,{status:'disabled'},'Disabled');
@@ -5054,7 +5337,37 @@ function usersListClick(e){
     supConfirm({ title:'Delete this user?', message:card.dataset.email+' will lose access permanently. This cannot be undone.', confirmLabel:'Delete', danger:true }).then(ok=>{ if(!ok) return;
       fetch('/api/admin/users/'+id,{method:'DELETE',headers:getAuthHeaders()}).then(r=>r.json()).then(d=>{ showNotification(d.success?'Deleted':(d.message||'Failed'),!d.success); loadUsers(); }); }); }
 }
-// Own add-user modal (email + mandatory mobile + temp password) — replaces the old browser prompt().
+// Edit a user's display name (shown on the welcome splash + Users list). Blank clears it → falls back to email.
+function usrNameModal(id, email, current){
+  document.getElementById('usr-name-modal')?.remove();
+  const wrap=document.createElement('div');
+  wrap.id='usr-name-modal';
+  wrap.className='fixed inset-0 z-[70] bg-slate-900/40 backdrop-blur-[2px] flex items-center justify-center p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-2xl w-full max-w-md sup-pop">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+      <div><h3 class="font-bold text-slate-800">${current?'Edit':'Set'} display name</h3><p class="text-xs text-slate-400 mt-0.5">${ecEsc(email||'')}</p></div>
+      <button data-x class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
+    <div class="p-5">
+      <input id="usrname-input" type="text" maxlength="80" class="filter-input w-full" placeholder="e.g. Sugandh Mishra" value="${ecEsc(current||'')}">
+      <p class="text-[11px] text-slate-400 mt-2">Shown on the welcome screen after sign-in. Leave blank to use the email.</p>
+      <p id="usrname-err" class="text-xs text-rose-500 mt-2 hidden"></p></div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="usrname-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Save</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap||e.target.closest('[data-x]')) wrap.remove(); });
+  const inp=document.getElementById('usrname-input');
+  document.getElementById('usrname-save').addEventListener('click', async ()=>{
+    const name=inp.value.trim();
+    const perr=document.getElementById('usrname-err');
+    try{ const r=await fetch('/api/admin/users/'+id,{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({name})});
+      const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed');
+      wrap.remove(); showNotification('Display name saved'); loadUsers();
+    }catch(e){ perr.textContent=e.message; perr.classList.remove('hidden'); }
+  });
+  setTimeout(()=>inp.focus(),50);
+}
+// Own add-user modal (name + email + mandatory mobile + temp password) — replaces the old browser prompt().
 function usersAddPrompt(){
   document.getElementById('usr-add-modal')?.remove();
   const wrap=document.createElement('div');
@@ -5065,6 +5378,8 @@ function usersAddPrompt(){
       <h3 class="font-bold text-slate-800">Add user</h3>
       <button data-x class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
     <div class="p-5 space-y-4">
+      <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Name <span class="text-slate-400 font-normal normal-case">(shown on welcome screen)</span></label>
+        <input id="usradd-name" type="text" maxlength="80" class="filter-input w-full" placeholder="e.g. Sugandh Mishra"></div>
       <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Email</label>
         <input id="usradd-email" type="email" class="filter-input w-full" placeholder="name@company.com"></div>
       <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Mobile number <span class="text-rose-500">*</span></label>
@@ -5082,13 +5397,14 @@ function usersAddPrompt(){
   document.getElementById('usradd-mobile').addEventListener('input',e=>{ e.target.value=e.target.value.replace(/\D/g,'').slice(0,10); });
   const err=t=>{ const p=document.getElementById('usradd-err'); p.textContent=t; p.classList.remove('hidden'); };
   document.getElementById('usradd-save').addEventListener('click', async ()=>{
+    const name=document.getElementById('usradd-name').value.trim();
     const email=document.getElementById('usradd-email').value.trim().toLowerCase();
     const mobile=document.getElementById('usradd-mobile').value.trim();
     const password=document.getElementById('usradd-pass').value;
     if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return err('Enter a valid email address.');
     if(!/^[6-9]\d{9}$/.test(mobile)) return err('Enter a valid 10-digit mobile number.');
     if(String(password).length<6) return err('Password must be at least 6 characters.');
-    try{ const r=await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({email,mobile,password,permissions:[]})});
+    try{ const r=await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({name,email,mobile,password,permissions:[]})});
       const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed');
       wrap.remove(); showNotification('User added — now grant dashboards below.'); loadUsers();
     }catch(e){ err(e.message); }
@@ -5126,6 +5442,98 @@ function usrMobileModal(id, email, current){
     }catch(e){ perr.textContent=e.message; perr.classList.remove('hidden'); }
   });
   setTimeout(()=>inp.focus(),50);
+}
+
+// ═══════════════ USER ANALYTICS (admin) — who uses which dashboards, how often, how long ═══════════════
+let _uaWired=false, _uaData=null;
+const UA_VIEW_LABEL=(()=>{ const m={}; (typeof PERM_CATALOG!=='undefined'?PERM_CATALOG:[]).forEach(([k,l])=>m[k]=l); m['users']='Users'; m['user-analytics']='User Analytics'; return m; })();
+function uaLabel(v){ return v ? (UA_VIEW_LABEL[v] || String(v).replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase())) : '—'; }
+function uaFmtMin(m){ m=Math.round(m||0); return m<60?m+'m':(Math.floor(m/60)+'h '+(m%60)+'m'); }
+function uaWhen(ts){ return ts?new Date(ts).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'—'; }
+function uaInit(){
+  const from=document.getElementById('ua-from'), to=document.getElementById('ua-to');
+  if(from && !from.value){ const d=new Date(); from.value=_ymd(new Date(d.getFullYear(),d.getMonth(),d.getDate()-30)); to.value=_ymd(d); }
+  if(!_uaWired){ _uaWired=true;
+    document.getElementById('ua-apply')?.addEventListener('click', uaLoad);
+    document.getElementById('ua-users')?.addEventListener('click', e=>{ const b=e.target.closest('button[data-email]'); if(b) uaUserModal(b.dataset.email); });
+  }
+  uaLoad();
+}
+async function uaLoad(){
+  const from=document.getElementById('ua-from')?.value, to=document.getElementById('ua-to')?.value;
+  const kp=document.getElementById('ua-kpis'); if(kp) kp.innerHTML='<div class="col-span-full">'+brandLoaderSm('Loading analytics…')+'</div>';
+  try{
+    const r=await fetch(`/api/admin/user-analytics?from=${from}&to=${to}`,{headers:getAuthHeaders()});
+    const d=await r.json(); if(!d.success) throw new Error(d.error||'Failed');
+    _uaData=d; uaRender(d);
+  }catch(e){ if(kp) kp.innerHTML=`<div class="col-span-full text-rose-500 text-sm">${ecEsc(e.message)}</div>`; }
+}
+function uaKpi(label,val,sub,color){ return `<div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">${label}</p><p class="text-2xl font-bold ${color||'text-slate-800'} mt-1">${val}</p>${sub?`<p class="text-xs text-slate-400 mt-0.5">${sub}</p>`:''}</div>`; }
+function uaBars(byView){
+  if(!byView.length) return '<p class="text-sm text-slate-400">No page views in this range.</p>';
+  const max=Math.max(1,...byView.map(v=>v.count));
+  return byView.slice(0,12).map(v=>`<div class="mb-3">
+    <div class="flex items-center justify-between text-xs mb-1"><span class="font-medium text-slate-700">${ecEsc(uaLabel(v.view))}</span><span class="text-slate-400 tabular-nums">${v.count} views · ${uaFmtMin(v.minutes)}</span></div>
+    <div class="h-2 rounded-full bg-slate-100 overflow-hidden"><div class="h-full rounded-full" style="width:${Math.round(v.count/max*100)}%;background:linear-gradient(90deg,#6366f1,#8b5cf6)"></div></div></div>`).join('');
+}
+function uaDayChart(byDay){
+  if(!byDay.length) return '<p class="text-sm text-slate-400">No activity in this range.</p>';
+  const max=Math.max(1,...byDay.map(x=>x.count));
+  const bars=byDay.map(x=>`<div class="flex-1 flex items-end" title="${x.date} · ${x.count} events" style="min-width:3px"><div class="w-full rounded-t" style="height:${Math.max(3,Math.round(x.count/max*100))}%;background:linear-gradient(180deg,#818cf8,#6366f1)"></div></div>`).join('');
+  const f=byDay[0].date, l=byDay[byDay.length-1].date;
+  return `<div class="flex items-end gap-1 h-32">${bars}</div><div class="flex justify-between text-[11px] text-slate-400 mt-2"><span>${f}</span><span>${l}</span></div>`;
+}
+function uaRender(d){
+  document.getElementById('ua-kpis').innerHTML =
+    uaKpi('Active users', d.totals.activeUsers, 'in this range') +
+    uaKpi('Page views', d.totals.pageViews.toLocaleString('en-IN'), null, 'text-indigo-600') +
+    uaKpi('Logins', d.totals.logins.toLocaleString('en-IN')) +
+    uaKpi('Est. active time', uaFmtMin(d.totals.estMinutes), 'across all users', 'text-emerald-600');
+  document.getElementById('ua-features').innerHTML = uaBars(d.byView);
+  document.getElementById('ua-byday').innerHTML = uaDayChart(d.byDay);
+  const TH='px-4 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+  const TD='px-4 py-3 text-sm text-slate-700 border-b border-slate-100 align-middle';
+  const box=document.getElementById('ua-users');
+  if(!d.users.length){ box.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">No activity recorded yet — it starts logging as people sign in and open dashboards.</div>'; return; }
+  box.innerHTML=`<table class="w-full"><thead><tr>${['User','Role','Last active','Active days','Page views','Est. time','Top dashboard',''].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+    d.users.map(u=>{ const av=_avatar(u.email,u.name);
+      return `<tr class="hover:bg-slate-50">
+        <td class="${TD}"><div class="flex items-center gap-2.5"><div class="w-8 h-8 rounded-full ${av.color} text-white flex items-center justify-center font-bold text-xs shrink-0">${av.initials}</div><div class="min-w-0"><div class="font-semibold text-slate-800 truncate">${ecEsc(u.name||u.email)}</div>${u.name?`<div class="text-[11px] text-slate-400 truncate">${ecEsc(u.email)}</div>`:''}</div></div></td>
+        <td class="${TD}">${u.role==='admin'?'<span class="text-[11px] px-2 py-0.5 rounded-full ring-1 bg-indigo-50 text-indigo-700 ring-indigo-200">admin</span>':'<span class="text-xs text-slate-400">user</span>'}</td>
+        <td class="${TD} text-xs text-slate-500 whitespace-nowrap">${uaWhen(u.lastActive)}</td>
+        <td class="${TD} tabular-nums">${u.activeDays}</td>
+        <td class="${TD} tabular-nums font-semibold">${u.pageViews.toLocaleString('en-IN')}</td>
+        <td class="${TD} tabular-nums text-emerald-600 font-semibold">${uaFmtMin(u.estMinutes)}</td>
+        <td class="${TD} text-xs">${ecEsc(uaLabel(u.topView))}</td>
+        <td class="${TD} text-right"><button data-email="${ecEsc(u.email)}" class="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-indigo-600 font-semibold hover:bg-indigo-50">Details</button></td></tr>`;
+    }).join('')
+  }</tbody></table>`;
+}
+async function uaUserModal(email){
+  const from=document.getElementById('ua-from')?.value, to=document.getElementById('ua-to')?.value;
+  document.getElementById('ua-modal')?.remove();
+  const wrap=document.createElement('div'); wrap.id='ua-modal';
+  wrap.className='fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+  wrap.innerHTML=`<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[88vh] flex flex-col">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200"><h3 class="text-base font-bold text-slate-800 truncate">${ecEsc(email)}</h3>
+      <button class="ua-close text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div>
+    <div class="p-6 overflow-y-auto" id="ua-modal-body">${brandLoaderSm('Loading…')}</div></div>`;
+  document.body.appendChild(wrap);
+  const close=()=>wrap.remove();
+  wrap.querySelectorAll('.ua-close').forEach(b=>b.addEventListener('click',close));
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  try{
+    const r=await fetch(`/api/admin/user-analytics/user?email=${encodeURIComponent(email)}&from=${from}&to=${to}`,{headers:getAuthHeaders()});
+    const d=await r.json(); if(!d.success) throw new Error(d.error||'Failed');
+    const t=d.totals;
+    const kpis=`<div class="grid grid-cols-4 gap-2 mb-5">
+      ${[['Page views',t.pageViews],['Logins',t.logins],['Active days',t.activeDays],['Est. time',uaFmtMin(t.estMinutes)]].map(([k,v])=>`<div class="rounded-lg bg-slate-50 border border-slate-100 p-3 text-center"><div class="text-lg font-bold text-slate-800">${v}</div><div class="text-[10px] text-slate-400 uppercase tracking-wide mt-0.5">${k}</div></div>`).join('')}</div>`;
+    const feats=`<h4 class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Dashboards used</h4>${uaBars(d.byView)}`;
+    const rec=`<h4 class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2 mt-5">Recent activity</h4><div class="space-y-1.5 max-h-56 overflow-auto pr-1">${
+      (d.recent||[]).map(e=>`<div class="flex items-center gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${uaWhen(e.at)}</span><span class="text-slate-700">${e.event==='login'?'<span class="text-emerald-600 font-medium">Signed in</span>':ecEsc(uaLabel(e.view))}</span></div>`).join('') || '<div class="text-slate-400 text-xs">No recent activity.</div>'
+    }</div>`;
+    document.getElementById('ua-modal-body').innerHTML=kpis+feats+rec;
+  }catch(e){ const b=document.getElementById('ua-modal-body'); if(b) b.innerHTML=`<div class="text-rose-500 text-sm">${ecEsc(e.message)}</div>`; }
 }
 
 // ═══════════════ AMAZON FBA (Insights · Live inventory · Restock forecast) ═══════════════
@@ -8010,7 +8418,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('otp-back')?.addEventListener('click', _otpBack);
     document.getElementById('otp-resend')?.addEventListener('click', _otpResend);
     document.getElementById('auth-toggle')?.addEventListener('click', () => { const sf = document.getElementById('signup-form'); _authToggle(!!(sf && sf.classList.contains('hidden'))); });
-    logoutBtn?.addEventListener('click', logout);
+    logoutBtn?.addEventListener('click', signOut);
+    document.getElementById('signout-login-btn')?.addEventListener('click', showLogin);
     
     navOrdersDashboard?.addEventListener('click', (e) => { e.preventDefault(); navigate('orders-dashboard'); });
     navOrderInsights?.addEventListener('click', (e) => { e.preventDefault(); navigate('order-insights'); });
@@ -8088,7 +8497,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const savedToken = localStorage.getItem('authToken');
     if (savedToken) {
         authToken = savedToken;
-        showApp();
+        const exp = (parseJwt(authToken) || {}).exp;          // drop a token that's already past its 6-hour life
+        if (exp && exp * 1000 <= Date.now()) { logout(); }
+        else afterLogin(false);                               // restore session (no splash) + arm auto-logout
     } else {
         showLogin();
     }

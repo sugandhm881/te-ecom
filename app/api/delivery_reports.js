@@ -12,13 +12,18 @@ const { requirePermission } = require('../auth');
 // other users only if the admin granted them this permission on the Users page). See server.js _VIEW_PERMS
 // for the additional per-dashboard view gate on the claims routes.
 const requireEmailSender = requirePermission('send-escalation-emails');
-const { getEmailConfig, sendMail } = require('./email_settings');
+const { getEmailConfig, sendMail, recipientsFor } = require('./email_settings');
 const { aiComplete, isConfigured: aiConfigured } = require('./ai');
 
 const pct = (n, d) => (d > 0 ? Math.round((n / d) * 1000) / 10 : 0); // 1-dp percentage
 // Calendar day in IST (en-CA → YYYY-MM-DD). Timestamps are stored as UTC instants; slicing the raw
 // UTC string would mis-date orders placed 00:00–05:30 IST (they fall on the previous UTC day).
 const dayKey = ts => (ts ? new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) : null);
+// DD-MM-YYYY in IST — the display format for ALL report emails (subject + body). dayKey stays YYYY-MM-DD
+// for internal grouping/sorting; dmy is used only where a human reads the date.
+const dmy = ts => { const k = dayKey(ts); if (!k) return ''; const p = k.split('-'); return `${p[2]}-${p[1]}-${p[0]}`; };
+// Turn a YYYY-MM-DD label (as produced by resolveRange's fmt) into DD-MM-YYYY.
+const dmyLabel = ymd => { const p = String(ymd || '').split('-'); return p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : String(ymd || ''); };
 
 // Every shipment maps to EXACTLY ONE of these 5 states — the partition that sums to "tracked".
 //   delivered_first + delivered_ndr + rto + ndr_pending + in_transit === total tracked
@@ -546,7 +551,7 @@ function resolveRange(src, defaultDays = 30) {
     const fromISO = new Date(from.getFullYear(), from.getMonth(), from.getDate()).toISOString();
     const toISO = new Date(to.getFullYear(), to.getMonth(), to.getDate(), 23, 59, 59).toISOString();
     const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    return { fromISO, toISO, fromLabel: fmt(from), toLabel: fmt(to), rangeLabel: `${fmt(from)} → ${fmt(to)}` };
+    return { fromISO, toISO, fromLabel: fmt(from), toLabel: fmt(to), rangeLabel: `${fmt(from)} → ${fmt(to)}`, rangeLabelDMY: `${dmyLabel(fmt(from))} → ${dmyLabel(fmt(to))}` };
 }
 // A rolling window of `days` that ENDS yesterday (used by the scheduled report crons — "till yesterday").
 function rangeEndingYesterday(days) {
@@ -556,7 +561,32 @@ function rangeEndingYesterday(days) {
     const fromISO = new Date(from.getFullYear(), from.getMonth(), from.getDate()).toISOString();
     const toISO = new Date(yest.getFullYear(), yest.getMonth(), yest.getDate(), 23, 59, 59).toISOString();
     const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    return { fromISO, toISO, fromLabel: fmt(from), toLabel: fmt(yest), rangeLabel: `${fmt(from)} → ${fmt(yest)}` };
+    return { fromISO, toISO, fromLabel: fmt(from), toLabel: fmt(yest), rangeLabel: `${fmt(from)} → ${fmt(yest)}`, rangeLabelDMY: `${dmyLabel(fmt(from))} → ${dmyLabel(fmt(yest))}` };
+}
+// Given a range object (from resolveRange/rangeEndingYesterday), the DMY label for email display.
+const emailRangeLabel = rg => rg.rangeLabelDMY || dmyLabel(rg.fromLabel) + ' → ' + dmyLabel(rg.toLabel);
+const PLATFORM_LABEL = { rapidshyp: 'RapidShyp', docpharma: 'DocPharma' };
+
+// Send a delivery report as SEPARATE emails per platform — RapidShyp rows go to the RapidShyp recipients,
+// DocPharma rows to the DocPharma recipients (each configured in Settings → Email & Reports). `source`
+// restricts to one platform; otherwise BOTH are attempted. A platform is skipped when it has no matching
+// rows OR no recipient configured. fetchFn(fromISO,toISO,platform,extra) → rows; buildFn(rows,rangeLabel,
+// platform,extra) → { subject, html }. Returns { ok, skipped?, reason?, to, count, results }.
+async function sendReportPerPlatform({ fetchFn, buildFn, rg, source, extra }) {
+    const platforms = source ? [source] : ['rapidshyp', 'docpharma'];
+    const results = [];
+    for (const p of platforms) {
+        const rows = await fetchFn(rg.fromISO, rg.toISO, p, extra);
+        if (!rows.length) { results.push({ platform: p, count: 0, skipped: true, reason: `${PLATFORM_LABEL[p] || p}: none in range` }); continue; }
+        const rcpt = await recipientsFor(p);
+        if (!rcpt.to.length) { results.push({ platform: p, count: rows.length, skipped: true, reason: `${PLATFORM_LABEL[p] || p}: no recipient set in Settings` }); continue; }
+        const mail = buildFn(rows, emailRangeLabel(rg), p, extra);
+        const r = await sendMail({ to: rcpt.to, cc: rcpt.cc, subject: mail.subject, html: mail.html });
+        results.push({ platform: p, count: rows.length, to: r.to });
+    }
+    const sent = results.filter(r => !r.skipped);
+    if (!sent.length) return { ok: false, skipped: true, reason: results.map(r => r.reason).join(' · '), results };
+    return { ok: true, to: [...new Set(sent.flatMap(r => r.to || []))], count: sent.reduce((a, r) => a + r.count, 0), results };
 }
 
 // ── #2 Silent RTO: returned to origin with ZERO delivery attempts → freight is disputable with RapidShyp.
@@ -588,7 +618,7 @@ function buildSilentRtoMail(rows, rangeLabel) {
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.order_name)}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.awb)}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.courier || '')}</td>
-        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dayKey(r.order_date) || ''}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dmy(r.order_date)}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;text-align:right;">${r.freight_total != null ? inr(r.freight_total) : '—'}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;text-align:right;">${r.shipment_value != null ? inr(r.shipment_value) : '—'}</td></tr>`).join('');
     const totalRow = `<tr style="font-weight:700;background:#eef2ff"><td colspan="4" style="padding:9px 10px;">Total — ${s.count} shipments</td><td style="padding:9px 10px;text-align:right;">${inr(s.totalFreight)}</td><td style="padding:9px 10px;text-align:right;">${inr(s.totalValue)}</td></tr>`;
@@ -602,26 +632,27 @@ function buildSilentRtoMail(rows, rangeLabel) {
 }
 async function sendSilentRtoReport(opts = {}) {
     const rg = opts.fromISO ? opts : rangeEndingYesterday(opts.days || 7);
-    const rows = await fetchSilentRto(rg.fromISO, rg.toISO);
+    const rows = await fetchSilentRto(rg.fromISO, rg.toISO);          // RapidShyp-only by design
     if (!rows.length) return { ok: false, skipped: true, reason: 'No silent-RTO shipments in the selected range.' };
-    const mail = buildSilentRtoMail(rows, rg.rangeLabel);
-    let recipient = opts.to;
-    if (!recipient) { const cfg = await getEmailConfig(); recipient = cfg && cfg.rapidshyp; }
-    if (!recipient) throw new Error('No RapidShyp recipient set — add it in Settings → Email & Reports.');
-    const r = await sendMail({ to: recipient, subject: mail.subject, html: mail.html });
+    const mail = buildSilentRtoMail(rows, emailRangeLabel(rg));
+    let to = opts.to, cc;
+    if (!to) { const rcpt = await recipientsFor('rapidshyp'); to = rcpt.to; cc = rcpt.cc; }
+    if (!to || !to.length) throw new Error('No RapidShyp recipient set — add it in Settings → Email & Reports.');
+    const r = await sendMail({ to, cc, subject: mail.subject, html: mail.html });
     return { ok: true, to: r.to, count: rows.length };
 }
 
 // ── #5 Late deliveries: DELIVERED after the promised EDD (delivered_at > first_edd), only delivered.
-async function fetchLateDeliveries(fromISO, toISO) {
+async function fetchLateDeliveries(fromISO, toISO, source) {
     const rows = []; const PAGE = 1000;
     for (let offset = 0; ; offset += PAGE) {
-        const { data, error } = await supabase.from('shipment_journey_ecom')
+        let q = supabase.from('shipment_journey_ecom')
             .select('awb, order_name, source, courier, order_date, first_edd, delivered_at, payment_mode, zone, dest_state, dest_city, shipment_value')
             .eq('outcome', 'delivered')                            // both platforms (RapidShyp + DocPharma)
             .not('first_edd', 'is', null).not('delivered_at', 'is', null)
-            .gte('order_date', fromISO).lte('order_date', toISO)
-            .order('order_date', { ascending: false }).range(offset, offset + PAGE - 1);
+            .gte('order_date', fromISO).lte('order_date', toISO);
+        if (source) q = q.eq('source', source);                    // honor the dashboard's platform filter
+        const { data, error } = await q.order('order_date', { ascending: false }).range(offset, offset + PAGE - 1);
         if (error) throw new Error(error.message);
         rows.push(...(data || []));
         if (!data || data.length < PAGE) break;
@@ -641,14 +672,15 @@ function lateSummary(rows) {
     rows.forEach(r => { const x = r.days_late; buckets[x === 1 ? '1 day' : x <= 3 ? '2-3 days' : x <= 7 ? '4-7 days' : '8+ days']++; });
     return { count: n, avgDaysLate: n ? round2(rows.reduce((a, r) => a + r.days_late, 0) / n) : 0, maxDaysLate: rows.reduce((m, r) => Math.max(m, r.days_late), 0), buckets };
 }
-function buildLateMail(rows, rangeLabel) {
+function buildLateMail(rows, rangeLabel, platform) {
     const s = lateSummary(rows);
+    const pTag = platform ? ` · ${PLATFORM_LABEL[platform] || platform}` : '';
     const body = rows.map((r, i) => `<tr style="background:${i % 2 ? '#f8fafc' : '#fff'}">
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.order_name)}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.awb)}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.courier || '')}</td>
-        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dayKey(r.first_edd) || ''}</td>
-        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dayKey(r.delivered_at) || ''}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dmy(r.first_edd)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dmy(r.delivered_at)}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;text-align:right;font-weight:700;color:${r.days_late >= 4 ? '#b91c1c' : '#b45309'};">${r.days_late}</td></tr>`).join('');
     const html = mailShell('Late Deliveries — Promise Date Exceeded',
         'Orders delivered AFTER their promised delivery date (delivered only).',
@@ -656,15 +688,11 @@ function buildLateMail(rows, rangeLabel) {
         ['Order', 'AWB', 'Courier', 'Promised (EDD)', 'Delivered', 'Days late'],
         [5], body,
         `${s.count} late · avg ${s.avgDaysLate} days · worst ${s.maxDaysLate} days.`);
-    return { subject: `Late Deliveries — ${s.count} orders past promise date (${rangeLabel})`, html };
+    return { subject: `Late Deliveries${pTag} — ${s.count} orders past promise date (${rangeLabel})`, html };
 }
 async function sendLateDeliveriesReport(opts = {}) {
     const rg = opts.fromISO ? opts : rangeEndingYesterday(opts.days || 30);
-    const rows = await fetchLateDeliveries(rg.fromISO, rg.toISO);
-    if (!rows.length) return { ok: false, skipped: true, reason: 'No late deliveries in the selected range.' };
-    const mail = buildLateMail(rows, rg.rangeLabel);
-    const r = await sendMail({ to: opts.to, subject: mail.subject, html: mail.html });   // to undefined → configured default recipients
-    return { ok: true, to: r.to, count: rows.length };
+    return sendReportPerPlatform({ fetchFn: fetchLateDeliveries, buildFn: buildLateMail, rg, source: opts.source });
 }
 
 // ── In-transit but PAST promise date: overdue shipments not yet delivered/RTO (proactive chase list).
@@ -673,16 +701,17 @@ function overdueDays(edd) {
     if (!e || !t || t <= e) return 0;
     return Math.round((new Date(t + 'T00:00:00Z') - new Date(e + 'T00:00:00Z')) / 86400000);
 }
-async function fetchIntransitLate(fromISO, toISO) {
+async function fetchIntransitLate(fromISO, toISO, source) {
     const nowISO = new Date().toISOString();
     const rows = []; const PAGE = 1000;
     for (let offset = 0; ; offset += PAGE) {
-        const { data, error } = await supabase.from('shipment_journey_ecom')
+        let q = supabase.from('shipment_journey_ecom')
             .select('awb, order_name, source, courier, order_date, first_edd, payment_mode, zone, dest_state, dest_city, outcome, status_code, ndr_count, shipment_value')
             .in('outcome', ['in_transit', 'ndr_pending'])          // still on the way (not delivered/rto/lost)
             .not('first_edd', 'is', null).lt('first_edd', nowISO)   // promise date already passed
-            .gte('order_date', fromISO).lte('order_date', toISO)
-            .order('first_edd', { ascending: true }).range(offset, offset + PAGE - 1);
+            .gte('order_date', fromISO).lte('order_date', toISO);
+        if (source) q = q.eq('source', source);                    // honor the dashboard's platform filter
+        const { data, error } = await q.order('first_edd', { ascending: true }).range(offset, offset + PAGE - 1);
         if (error) throw new Error(error.message);
         rows.push(...(data || []));
         if (!data || data.length < PAGE) break;
@@ -696,14 +725,15 @@ function intransitSummary(rows) {
     rows.forEach(r => { const x = r.days_overdue; buckets[x <= 2 ? '1-2 days' : x <= 5 ? '3-5 days' : x <= 10 ? '6-10 days' : '10+ days']++; });
     return { count: n, avgOverdue: n ? round2(rows.reduce((a, r) => a + r.days_overdue, 0) / n) : 0, maxOverdue: rows.reduce((m, r) => Math.max(m, r.days_overdue), 0), severe: buckets['6-10 days'] + buckets['10+ days'], buckets };
 }
-function buildIntransitMail(rows, rangeLabel) {
+function buildIntransitMail(rows, rangeLabel, platform) {
     const s = intransitSummary(rows);
+    const pTag = platform ? ` · ${PLATFORM_LABEL[platform] || platform}` : '';
     const body = rows.map((r, i) => `<tr style="background:${i % 2 ? '#f8fafc' : '#fff'}">
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.order_name)}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.awb)}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.courier || '')}</td>
-        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dayKey(r.order_date) || ''}</td>
-        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dayKey(r.first_edd) || ''}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dmy(r.order_date)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dmy(r.first_edd)}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;text-align:right;font-weight:700;color:${r.days_overdue >= 6 ? '#b91c1c' : '#b45309'};">${r.days_overdue}</td></tr>`).join('');
     const html = mailShell('In-Transit — Overdue (Promise Date Passed)',
         'Shipments still in transit whose promised delivery date has already passed — please chase.',
@@ -711,24 +741,81 @@ function buildIntransitMail(rows, rangeLabel) {
         ['Order', 'AWB', 'Courier', 'Order date', 'Promised (EDD)', 'Days overdue'],
         [5], body,
         `${s.count} overdue · avg ${s.avgOverdue} days · worst ${s.maxOverdue} days · ${s.severe} over 5 days.`);
-    return { subject: `In-Transit Overdue — ${s.count} shipments past promise date (${rangeLabel})`, html };
+    return { subject: `In-Transit Overdue${pTag} — ${s.count} shipments past promise date (${rangeLabel})`, html };
 }
 async function sendIntransitLateReport(opts = {}) {
     const rg = opts.fromISO ? opts : resolveRange({ from: null, to: null }, 30);
-    const rows = await fetchIntransitLate(rg.fromISO, rg.toISO);
-    if (!rows.length) return { ok: false, skipped: true, reason: 'No overdue in-transit shipments in the selected range.' };
-    const mail = buildIntransitMail(rows, rg.rangeLabel);
-    const r = await sendMail({ to: opts.to, subject: mail.subject, html: mail.html });
-    return { ok: true, to: r.to, count: rows.length };
+    return sendReportPerPlatform({ fetchFn: fetchIntransitLate, buildFn: buildIntransitMail, rg, source: opts.source });
+}
+
+// ── First-OFD Late (RTO / SLA claim): the courier's FIRST out-for-delivery scan happened AFTER the
+//    promised EDD — delivery wasn't even ATTEMPTED until the promise had already passed. This is a courier
+//    SLA breach, claimable regardless of the final outcome (Delivered or RTO). Unlike the other reports,
+//    the date range filters on the TERMINAL-STAGE DATE (rto_at), NOT order date — so it reports on
+//    shipments that RTO'd within the window. RTO-only: an RTO whose first attempt was already late is the
+//    claimable case (a late DELIVERY is covered by the Late-Deliveries report). first_edd = promise EDD;
+//    out_for_delivery_at = first OFD.
+async function fetchFirstOfdLate(fromISO, toISO, source) {
+    const out = [];
+    const PAGE = 1000;
+    for (let offset = 0; ; offset += PAGE) {
+        let q = supabase.from('shipment_journey_ecom')
+            .select('awb, order_name, source, courier, order_date, first_edd, out_for_delivery_at, delivered_at, rto_at, payment_mode, zone, dest_state, dest_city, outcome, ndr_count, attempts, shipment_value')
+            .eq('outcome', 'rto')
+            .not('out_for_delivery_at', 'is', null).not('first_edd', 'is', null)
+            .gte('rto_at', fromISO).lte('rto_at', toISO);
+        if (source) q = q.eq('source', source);                        // honor the platform filter
+        const { data, error } = await q.order('rto_at', { ascending: false }).range(offset, offset + PAGE - 1);
+        if (error) throw new Error(error.message);
+        out.push(...(data || []));
+        if (!data || data.length < PAGE) break;
+    }
+    // Keep only shipments whose FIRST OFD is LATER than the promised EDD (compared by IST calendar day, as
+    // first_edd is stamped end-of-day). ofd_late = whole days the first attempt slipped past the promise.
+    return out.map(r => {
+        const ofd_late = lateDays(r.first_edd, r.out_for_delivery_at);
+        if (ofd_late <= 0) return null;
+        return { ...r, ofd_late, terminal_at: r.rto_at, terminal_stage: 'RTO' };
+    }).filter(Boolean).sort((a, b) => b.ofd_late - a.ofd_late);
+}
+function firstOfdSummary(rows) {
+    const n = rows.length;
+    const buckets = { '1 day': 0, '2-3 days': 0, '4-7 days': 0, '8+ days': 0 };
+    rows.forEach(r => { const x = r.ofd_late; buckets[x === 1 ? '1 day' : x <= 3 ? '2-3 days' : x <= 7 ? '4-7 days' : '8+ days']++; });
+    return { count: n, rto: n, severe: rows.filter(r => r.ofd_late >= 4).length, avgLate: n ? round2(rows.reduce((a, r) => a + r.ofd_late, 0) / n) : 0, maxLate: rows.reduce((m, r) => Math.max(m, r.ofd_late), 0), buckets };
+}
+function buildFirstOfdMail(rows, rangeLabel, platform) {
+    const s = firstOfdSummary(rows);
+    const pTag = platform ? ` · ${PLATFORM_LABEL[platform] || platform}` : '';
+    const body = rows.map((r, i) => `<tr style="background:${i % 2 ? '#f8fafc' : '#fff'}">
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.order_name)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.awb)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.courier || '')}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dmy(r.first_edd)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dmy(r.out_for_delivery_at)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dmy(r.terminal_at)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;text-align:right;font-weight:700;color:${r.ofd_late >= 4 ? '#b91c1c' : '#b45309'};">${r.ofd_late}</td></tr>`).join('');
+    const html = mailShell('First-OFD Late — RTO, First Attempt After Promised EDD',
+        'RTO shipments whose FIRST out-for-delivery scan happened after the promised delivery date — delivery was not even attempted until the promise had already passed.',
+        rangeLabel,
+        ['Order', 'AWB', 'Courier', 'Promised (EDD)', 'First OFD', 'RTO date', 'Days late (OFD)'],
+        [6], body,
+        `${s.count} RTOs · avg ${s.avgLate} days late · worst ${s.maxLate} days · ${s.severe} over 4 days late.`,
+        'RTO-date window');
+    return { subject: `First-OFD Late${pTag} — ${s.count} RTOs, first attempt after promise EDD (${rangeLabel})`, html };
+}
+async function sendFirstOfdReport(opts = {}) {
+    const rg = opts.fromISO ? opts : rangeEndingYesterday(opts.days || 30);
+    return sendReportPerPlatform({ fetchFn: fetchFirstOfdLate, buildFn: buildFirstOfdMail, rg, source: opts.source });
 }
 
 // Shared email chrome — a titled card with a striped table; `rightCols` are right-aligned header cells.
-function mailShell(title, subtitle, rangeLabel, headers, rightCols, bodyRows, footNote) {
+function mailShell(title, subtitle, rangeLabel, headers, rightCols, bodyRows, footNote, windowLabel) {
     const th = headers.map((h, i) => `<th style="text-align:${rightCols.includes(i) ? 'right' : 'left'};padding:8px 10px;border-bottom:2px solid #cbd5e1;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:#475569;">${esc(h)}</th>`).join('');
     return `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#0f172a;max-width:840px;">
       <h2 style="margin:0 0 4px;font-size:18px;">${esc(title)}</h2>
       <p style="margin:0 0 2px;color:#64748b;font-size:13px;">${esc(subtitle)}</p>
-      <p style="margin:0 0 16px;color:#94a3b8;font-size:12px;">Order window: ${esc(rangeLabel)}</p>
+      <p style="margin:0 0 16px;color:#94a3b8;font-size:12px;">${esc(windowLabel || 'Order window')}: ${esc(rangeLabel)}</p>
       <table style="border-collapse:collapse;width:100%;font-size:12px;"><thead><tr>${th}</tr></thead><tbody>${bodyRows}</tbody></table>
       ${footNote ? `<p style="margin:14px 0 0;color:#94a3b8;font-size:11px;">${esc(footNote)}</p>` : ''}
       <p style="margin:18px 0 0;color:#94a3b8;font-size:11px;">— Ecom Central</p></div>`;
@@ -745,7 +832,7 @@ router.get('/silent-rto-claims', async (req, res) => {
 router.post('/silent-rto-claims/send', requireEmailSender, async (req, res) => {
     try {
         const rg = resolveRange(req.body || {});
-        const out = await sendSilentRtoReport({ ...rg, to: (req.body && req.body.to) || undefined });
+        const out = await sendSilentRtoReport({ ...rg });   // recipient comes from Settings (RapidShyp email), not req.body
         if (out.skipped) return res.status(400).json({ success: false, message: out.reason });
         res.json({ success: true, message: `Sent ${out.count} claim(s) to ${out.to.join(', ')}` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -760,7 +847,7 @@ router.get('/late-deliveries', async (req, res) => {
 router.post('/late-deliveries/send', requireEmailSender, async (req, res) => {
     try {
         const rg = resolveRange(req.body || {});
-        const out = await sendLateDeliveriesReport({ ...rg, to: (req.body && req.body.to) || undefined });
+        const out = await sendLateDeliveriesReport({ ...rg, source: (req.body && req.body.source) || undefined });
         if (out.skipped) return res.status(400).json({ success: false, message: out.reason });
         res.json({ success: true, message: `Sent ${out.count} row(s) to ${out.to.join(', ')}` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -775,7 +862,23 @@ router.get('/intransit-late', async (req, res) => {
 router.post('/intransit-late/send', requireEmailSender, async (req, res) => {
     try {
         const rg = resolveRange(req.body || {});
-        const out = await sendIntransitLateReport({ ...rg, to: (req.body && req.body.to) || undefined });
+        const out = await sendIntransitLateReport({ ...rg, source: (req.body && req.body.source) || undefined });
+        if (out.skipped) return res.status(400).json({ success: false, message: out.reason });
+        res.json({ success: true, message: `Sent ${out.count} row(s) to ${out.to.join(', ')}` });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+router.get('/first-ofd-late', async (req, res) => {
+    try {
+        const rg = resolveRange(req);
+        const source = req.query.source && req.query.source !== 'all' ? req.query.source : undefined;
+        const rows = await fetchFirstOfdLate(rg.fromISO, rg.toISO, source);   // RTO-only
+        res.json({ success: true, range: { from: rg.fromLabel, to: rg.toLabel }, summary: firstOfdSummary(rows), rows });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+router.post('/first-ofd-late/send', requireEmailSender, async (req, res) => {
+    try {
+        const rg = resolveRange(req.body || {});
+        const out = await sendFirstOfdReport({ ...rg, source: (req.body && req.body.source) || undefined });
         if (out.skipped) return res.status(400).json({ success: false, message: out.reason });
         res.json({ success: true, message: `Sent ${out.count} row(s) to ${out.to.join(', ')}` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -932,5 +1035,6 @@ router.get('/likely-fake-insight', async (req, res) => {
 router.sendSilentRtoReport = sendSilentRtoReport;
 router.sendLateDeliveriesReport = sendLateDeliveriesReport;
 router.sendIntransitLateReport = sendIntransitLateReport;
+router.sendFirstOfdReport = sendFirstOfdReport;
 
 module.exports = router;

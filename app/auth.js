@@ -31,13 +31,15 @@ function assertStrongSecret() {
     return s;
 }
 
-// Accepts an email string (legacy/env-admin bootstrap → admin) or a { email, role, permissions } object.
+// Sessions last 6 hours — after that any request 401s and the client auto-logs-out (see app.js).
+const SESSION_TTL = '6h';
+// Accepts an email string (legacy/env-admin bootstrap → admin) or a { email, role, permissions, name } object.
 function generateToken(user) {
     try {
         const claims = typeof user === 'string'
-            ? { sub: user, role: 'admin', permissions: ['*'] }
-            : { sub: user.email, role: user.role || 'user', permissions: user.permissions || [] };
-        return jwt.sign(claims, assertStrongSecret(), { expiresIn: '1d' });
+            ? { sub: user, role: 'admin', permissions: ['*'], name: null }
+            : { sub: user.email, role: user.role || 'user', permissions: user.permissions || [], name: user.name || null };
+        return jwt.sign(claims, assertStrongSecret(), { expiresIn: SESSION_TTL });
     } catch (e) {
         console.error('[Auth] Cannot generate token:', e.message);
         return null;

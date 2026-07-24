@@ -523,6 +523,44 @@ router.delete('/support/contacts/:id', async (req, res) => {
     res.json({ success: true });
 });
 
+// ── Blacklisted phone numbers (block a customer number with a reason · unblock later) ──────────────
+// Any support user (the route group is already gated to support-view permissions) can block/unblock;
+// the actor is recorded. Unblock is a SOFT delete (active=false + who/when) so history is preserved.
+const cleanPhone = p => String(p || '').replace(/\D/g, '').slice(-10);   // normalize to 10-digit Indian mobile
+router.get('/support/blacklist', async (req, res) => {
+    try {
+        const [act, hist] = await Promise.all([
+            supabase.from('blocked_numbers_ecom').select('*').eq('active', true).order('created_at', { ascending: false }),
+            supabase.from('blocked_numbers_ecom').select('*').eq('active', false).order('unblocked_at', { ascending: false }).limit(100),
+        ]);
+        if (act.error) throw new Error(act.error.message);
+        res.json({ success: true, blocked: act.data || [], history: hist.data || [], isAdmin: isAdmin(req) });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+router.post('/support/blacklist', async (req, res) => {
+    const b = req.body || {};
+    const phone = cleanPhone(b.phone);
+    if (phone.length !== 10) return res.status(400).json({ success: false, error: 'Enter a valid 10-digit phone number.' });
+    const reason = String(b.reason || '').trim().slice(0, 500) || null;
+    try {
+        // Already actively blocked? Report it instead of erroring on the unique index.
+        const { data: existing } = await supabase.from('blocked_numbers_ecom').select('id').eq('phone', phone).eq('active', true).maybeSingle();
+        if (existing) return res.status(409).json({ success: false, error: 'This number is already blacklisted.' });
+        const { error } = await supabase.from('blocked_numbers_ecom').insert({ phone, reason, added_by: req.user.sub, active: true });
+        if (error) throw new Error(error.message);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+router.post('/support/blacklist/:id/unblock', async (req, res) => {
+    try {
+        const { error } = await supabase.from('blocked_numbers_ecom')
+            .update({ active: false, unblocked_by: req.user.sub, unblocked_at: new Date().toISOString() })
+            .eq('id', req.params.id).eq('active', true);
+        if (error) throw new Error(error.message);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 // ── Support Console Team (old console's /admin/team, now inside our Users page) ─────────────────────
 // Lists the Supabase-auth agents (profiles + user_roles) that the ORIGINAL console used; promote/demote
 // writes user_roles ('admin' row present = admin). These roles govern the old console; our portal RBAC

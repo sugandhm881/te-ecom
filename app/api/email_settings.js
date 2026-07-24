@@ -28,8 +28,26 @@ async function getEmailConfig() {
     const to = s.to_emails ? splitList(s.to_emails) : splitList(config.RECIPIENT_EMAIL);
     const cc = splitList(s.cc_emails);
     const rapidshyp = (s.rapidshyp_email || '').trim() || null;
+    // Per-platform recipient sets — the delivery reports send ONE email per platform to its own people:
+    //   RapidShyp rows → RapidShyp recipients, DocPharma rows → DocPharma recipients.
+    // RapidShyp To = the general To list (or the single RapidShyp claims email as a fallback). DocPharma
+    // To = its own list. Each platform's CC defaults to the shared cc_emails so the internal team is copied.
+    const docTo = splitList(s.docpharma_to_emails);
+    const docCc = s.docpharma_cc_emails ? splitList(s.docpharma_cc_emails) : cc;
+    const rsTo = to.length ? to : (rapidshyp ? [rapidshyp] : []);
+    const platforms = {
+        rapidshyp: { to: rsTo, cc },
+        docpharma: { to: docTo, cc: docCc },
+    };
     if (!host || !user || !pass) return null;     // not enough to send
-    return { host, port, user, pass, from, to, cc, rapidshyp };
+    return { host, port, user, pass, from, to, cc, rapidshyp, platforms };
+}
+
+// Recipients for a given platform ('rapidshyp' | 'docpharma'). Returns { to:[], cc:[] } (may be empty).
+async function recipientsFor(platform) {
+    const cfg = await getEmailConfig();
+    const p = cfg && cfg.platforms && cfg.platforms[platform];
+    return p || { to: [], cc: [] };
 }
 
 // Send an email through the resolved config. opts: { subject, html, text, to?, cc?, attachments? }.
@@ -64,6 +82,7 @@ router.get('/email-settings', async (req, res) => {
         success: true,
         settings: {
             from_email: s.from_email || '', to_emails: s.to_emails || '', cc_emails: s.cc_emails || '',
+            docpharma_to_emails: s.docpharma_to_emails || '', docpharma_cc_emails: s.docpharma_cc_emails || '',
             rapidshyp_email: s.rapidshyp_email || '', smtp_host: s.smtp_host || '',
             smtp_port: s.smtp_port || '', smtp_user: s.smtp_user || '',
             password_set: !!s.smtp_password_enc, updated_at: s.updated_at || null, updated_by: s.updated_by || null,
@@ -84,6 +103,8 @@ router.post('/email-settings', async (req, res) => {
         from_email: (b.from_email || '').trim() || null,
         to_emails: (b.to_emails || '').trim() || null,
         cc_emails: (b.cc_emails || '').trim() || null,
+        docpharma_to_emails: (b.docpharma_to_emails || '').trim() || null,
+        docpharma_cc_emails: (b.docpharma_cc_emails || '').trim() || null,
         rapidshyp_email: (b.rapidshyp_email || '').trim() || null,
         smtp_host: (b.smtp_host || '').trim() || null,
         smtp_port: b.smtp_port ? parseInt(b.smtp_port, 10) || null : null,
@@ -115,4 +136,4 @@ router.post('/email-settings/test', async (req, res) => {
     }
 });
 
-module.exports = { router, getEmailConfig, sendMail };
+module.exports = { router, getEmailConfig, sendMail, recipientsFor };

@@ -13,7 +13,7 @@ const cleanMobile = m => String(m || '').replace(/\D/g, '').slice(-10);
 // List all users.
 router.get('/users', async (req, res) => {
     const { data, error } = await supabase.from('app_users_ecom')
-        .select('id, email, mobile, role, status, permissions, created_by, created_at')
+        .select('id, email, name, mobile, role, status, permissions, created_by, created_at')
         .order('created_at', { ascending: false });
     if (error) return res.status(500).json({ message: error.message });
     res.json({ success: true, users: data || [] });
@@ -21,11 +21,12 @@ router.get('/users', async (req, res) => {
 
 // Update a user's status / role / permissions (approve, disable, re-scope).
 router.post('/users/:id', async (req, res) => {
-    const { status, role, permissions, mobile } = req.body || {};
+    const { status, role, permissions, mobile, name } = req.body || {};
     const patch = { updated_at: new Date().toISOString() };
     if (status && ['pending', 'active', 'disabled'].includes(status)) patch.status = status;
     if (role && ['admin', 'user'].includes(role)) patch.role = role;
     if (Array.isArray(permissions)) patch.permissions = permissions;
+    if (name !== undefined) patch.name = String(name || '').trim().slice(0, 80) || null;   // display name (welcome splash)
     if (mobile !== undefined) {
         const m = cleanMobile(mobile);
         if (!MOBILE_RX.test(m)) return res.status(400).json({ message: 'A valid 10-digit mobile number is required.' });
@@ -41,13 +42,14 @@ router.post('/users', async (req, res) => {
     const email = norm(req.body && req.body.email);
     const password = (req.body && req.body.password) || '';
     const mobile = cleanMobile(req.body && req.body.mobile);
+    const name = String((req.body && req.body.name) || '').trim().slice(0, 80) || null;
     const permissions = Array.isArray(req.body && req.body.permissions) ? req.body.permissions : [];
     if (!email || !password) return res.status(400).json({ message: 'Email and password are required.' });
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ message: 'Please enter a valid email.' });
     if (!MOBILE_RX.test(mobile)) return res.status(400).json({ message: 'A valid 10-digit mobile number is required.' });
     if (String(password).length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' });
     const { error } = await supabase.from('app_users_ecom').insert({
-        email, password_hash: hashPassword(password), mobile, role: 'user', status: 'active', permissions, created_by: req.user.sub
+        email, name, password_hash: hashPassword(password), mobile, role: 'user', status: 'active', permissions, created_by: req.user.sub
     });
     if (error) return res.status(409).json({ message: 'That email already exists.' });
     res.json({ success: true });
