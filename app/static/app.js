@@ -1414,23 +1414,22 @@ function renderOrders(o) {
             <td class="p-4 font-medium text-slate-900">${formatCurrency(order.total)}</td>
             <td class="p-4 ord-status-cell"><span class="px-3 py-1 text-xs font-semibold rounded-full whitespace-nowrap ${getStatusBadge(order.status)}">${order.status}</span>${ordHoldChipHtml(order)}</td>
             <td class="p-4 text-right">
-                 <button class="text-slate-400 hover:text-indigo-600 focus:outline-none" onclick="toggleDetails('${order.id}')">
-                    <svg class="w-5 h-5 transform transition-transform duration-200" id="arrow-${order.id}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                 <button class="text-slate-400 hover:text-indigo-600 focus:outline-none" onclick="openOrderModal('${order.id}')" title="View order details">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
                  </button>
             </td>
         `;
 
-        // Details Row — LAZY: an empty hidden placeholder. The heavy content (item images, workflow
-        // buttons) is built on FIRST expand only. Pre-building it for every order doubled the DOM and
-        // fired hundreds of image loads per render (browsers fetch imgs even in display:none rows).
-        const detailsRow = document.createElement('tr');
-        detailsRow.id = `details-${order.id}`;
-        detailsRow.className = 'hidden bg-slate-50/50';
-        detailsRow.dataset.lazy = '1';
-        detailsRow.innerHTML = '<td colspan="10" class="p-0"></td>';
+        // Detail opens in a POPUP now (openOrderModal) instead of an inline expand row. This keeps the
+        // table at ~503 rows instead of ~1000, and the heavy detail lives in a single modal — so scrolling
+        // and viewing an order never janks, and a background re-render can't disturb the open detail.
         _ordersById.set(String(order.id), order);
-
-        return [mainRow, detailsRow];
+        mainRow.classList.add('cursor-pointer');
+        mainRow.addEventListener('click', (e) => {
+            if (e.target.closest('input,button,a,label,select,.no-modal')) return;   // let controls work
+            openOrderModal(String(order.id));
+        });
+        return mainRow;
     };
 
     // Progressive render: the first chunk paints now (so the click returns instantly), the rest fill in
@@ -1441,7 +1440,7 @@ function renderOrders(o) {
         if (token !== _ordersRenderToken) return; // superseded by a newer render (filter/nav/refresh)
         const frag = document.createDocumentFragment();
         const end = Math.min(_ri + chunkSize, o.length);
-        for (; _ri < end; _ri++) { const r = buildRow(o[_ri]); frag.appendChild(r[0]); frag.appendChild(r[1]); }
+        for (; _ri < end; _ri++) { frag.appendChild(buildRow(o[_ri])); }
         ordersListEl.appendChild(frag);
         if (_ri < o.length) requestAnimationFrame(() => step(150));
     };
@@ -1679,10 +1678,16 @@ async function eeHoldSubmit(orderName, isHold) {
         setTimeout(() => document.getElementById('ee-hold-modal')?.remove(), 700);
     } catch (e) { st.textContent = e.message; st.className = 'text-sm text-rose-600 mr-auto'; btn.disabled = false; }
 }
-// Rebuild an order's expanded detail content in place (after hold/unhold etc.).
+// Rebuild an order's detail content in place (after hold/unhold etc.).
 function refreshOrderDetailRow(orderId) {
-    const details = document.getElementById(`details-${orderId}`);
     const order = _ordersById.get(String(orderId));
+    // Detail now lives in a popup — rebuild it there if it's the open order.
+    const modal = document.getElementById('order-detail-modal');
+    if (modal && order && modal.dataset.orderId === String(orderId)) {
+        const body = modal.querySelector('.overflow-y-auto');
+        if (body) body.innerHTML = buildOrderDetailHtml(order);
+    }
+    const details = document.getElementById(`details-${orderId}`);   // legacy inline (none now)
     if (details && order && !details.dataset.lazy) details.firstElementChild.innerHTML = buildOrderDetailHtml(order);
     // Patch the main row's status cell chip too.
     const row = document.querySelector(`tr[data-order-id="${(window.CSS && CSS.escape) ? CSS.escape(String(orderId)) : String(orderId)}"]`);
@@ -1770,16 +1775,38 @@ async function changeWarehouseModal(orderName) {
     });
 }
 
-function toggleDetails(id) {
-    const details = document.getElementById(`details-${id}`);
-    const arrow = document.getElementById(`arrow-${id}`);
-    if (details && details.classList.contains('hidden') && details.dataset.lazy) {
-        // First open → build the content now (lazy). Subsequent toggles just show/hide.
-        const order = _ordersById.get(String(id));
-        if (order) { details.firstElementChild.innerHTML = buildOrderDetailHtml(order); delete details.dataset.lazy; }
-    }
-    if(details) details.classList.toggle('hidden');
-    if(arrow) arrow.classList.toggle('rotate-180');
+// Order detail now opens in a popup (kept the old name as an alias so any caller still works).
+function toggleDetails(id) { openOrderModal(id); }
+
+function _orderModalEsc(e) { if (e.key === 'Escape') closeOrderModal(); }
+function closeOrderModal() {
+    const m = document.getElementById('order-detail-modal');
+    if (m) m.remove();
+    document.removeEventListener('keydown', _orderModalEsc);
+}
+function openOrderModal(id) {
+    const order = _ordersById.get(String(id));
+    if (!order) return;
+    document.getElementById('order-detail-modal')?.remove();
+    const nm = (order.name && order.name !== 'N/A') ? order.name : (order.buyerName || '');
+    const wrap = document.createElement('div');
+    wrap.id = 'order-detail-modal';
+    wrap.dataset.orderId = String(id);
+    wrap.className = 'fixed inset-0 flex items-center justify-center p-4 bg-slate-900/50';
+    wrap.style.zIndex = '90';
+    wrap.style.webkitBackdropFilter = 'blur(4px)';
+    wrap.style.backdropFilter = 'blur(4px)';
+    wrap.innerHTML =
+        `<div class="bg-white w-full max-w-3xl max-h-[88vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+            <div class="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 shrink-0">
+                <div class="font-bold text-slate-800 truncate">${escapeHtml(order.id)}${nm ? ` <span class="text-slate-400 font-normal text-sm ml-1">${escapeHtml(nm)}</span>` : ''}</div>
+                <button class="text-slate-400 hover:text-slate-700 text-2xl leading-none px-1" onclick="closeOrderModal()" aria-label="Close">&times;</button>
+            </div>
+            <div class="overflow-y-auto flex-1">${buildOrderDetailHtml(order)}</div>
+        </div>`;
+    wrap.addEventListener('click', (e) => { if (e.target === wrap) closeOrderModal(); });
+    document.body.appendChild(wrap);
+    document.addEventListener('keydown', _orderModalEsc);
 }
 
 // --- BULK ACTION HANDLERS ---
@@ -4549,6 +4576,8 @@ async function loadInitialData() {
     // + double re-render every minute). Collapsing to one and skipping hidden tabs removes the periodic jank.
     setInterval(() => {
         if (document.hidden) return; // don't churn CPU/network in a background tab
+        // Don't re-render while the user is reading an order in the detail popup. Defer until it's closed.
+        if (document.getElementById('order-detail-modal')) return;
         silentRefreshOrders();       // fetches orders + COD, then re-renders the current view
     }, 60000);
 }

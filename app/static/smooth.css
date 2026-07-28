@@ -1,0 +1,52 @@
+/* ============================================================================
+   smooth.css — MOTION & POLISH layer for the existing indigo/slate theme.
+   NO colour changes. Login/welcome-grade smoothness via CHEAP, targeted rules
+   only (no attribute-substring selectors, no page-wide scroll animation, no
+   always-on backdrop-filter) so it never janks the large orders table.
+   Loaded after tailwind.css. Reversible — remove this file + its <link>.
+   ========================================================================== */
+
+:root{
+  --ease-spring: cubic-bezier(.2,.9,.25,1.1);
+  --ease-out:    cubic-bezier(.2,.9,.25,1.05);
+}
+
+/* ── Primary (indigo) buttons: gentle lift + press ────────────────────────── */
+button.bg-indigo-600, a.bg-indigo-600, button.bg-indigo-700, a.bg-indigo-700{
+  transition: transform .16s var(--ease-spring), box-shadow .18s ease, filter .16s ease;
+}
+button.bg-indigo-600:hover, a.bg-indigo-600:hover,
+button.bg-indigo-700:hover, a.bg-indigo-700:hover{
+  transform: translateY(-1px); box-shadow: 0 14px 32px rgba(79,70,229,.30);
+}
+button:active, a.bg-indigo-600:active, .btn:active{ transform: translateY(0) scale(.98); }
+/* Secondary/ghost + generic buttons: smooth state changes */
+button, [role="button"], .btn{ transition: background-color .18s ease, color .18s ease, border-color .18s ease, box-shadow .18s ease, transform .16s var(--ease-spring); }
+
+/* ── Nav links + inputs: smooth (cheap paint-only) ────────────────────────── */
+.sidebar-link{ transition: background-color .18s ease, color .18s ease, transform .16s var(--ease-spring); }
+.sidebar-link:hover{ transform: translateX(2px); }
+input, select, textarea, .filter-select, .filter-input, .filter-btn{
+  transition: border-color .16s ease, box-shadow .16s ease, background-color .16s ease, color .16s ease;
+}
+
+/* ── View transition — active dashboard panel rises in on navigate (once) ─── */
+@keyframes smoothRise{ from{ opacity:0; transform: translateY(10px) } to{ opacity:1; transform: translateY(0) } }
+main > div:not(.hidden):not(#app-topbar){ animation: smoothRise .38s var(--ease-out); }
+
+/* ── Popups / modals — spring-in card (no page-wide backdrop-filter) ───────── */
+@keyframes smoothPop{ 0%{opacity:0; transform: translateY(16px) scale(.955)} 100%{opacity:1; transform: translateY(0) scale(1)} }
+.fixed.inset-0.flex.items-center > *{ animation: smoothPop .40s var(--ease-spring) both; }
+
+/* ── Perf: the sticky header's backdrop-blur re-blurs the whole scrolling table
+   every frame → scroll jank on the large orders table. The header is ~95% opaque
+   anyway, so drop the blur (look is virtually identical, scroll stays smooth). ── */
+header.backdrop-blur, header.backdrop-blur-sm, .sticky.backdrop-blur{ -webkit-backdrop-filter:none !important; backdrop-filter:none !important; }
+#delivery-perf-view header, #docpharma-recon-view header{ -webkit-backdrop-filter:none !important; backdrop-filter:none !important; }
+
+/* ── Notification toast — already slides; give it the spring easing ───────── */
+#notification{ transition-timing-function: var(--ease-out) !important; }
+
+@media (prefers-reduced-motion: reduce){
+  *, *::before, *::after{ animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
+}

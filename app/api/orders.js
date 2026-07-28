@@ -100,7 +100,6 @@ router.get('/get-orders', async (req, res) => {
             shopifyRes,
             shipmentRows,
             awbRows,
-            trackingRows,
             easyecomRows,
             holdMarkRows,
             dpRejectedRows,
@@ -126,7 +125,8 @@ router.get('/get-orders', async (req, res) => {
             // Supabase workflow caches (replaces MongoDB)
             supabase.from('shipment_cache_ecom').select('order_id, shipment_id'),
             supabase.from('awb_cache_ecom').select('*'),
-            supabase.from('rapidshyp_tracking_ecom').select('awb, raw_status'),
+            // NOTE: rapidshyp_tracking_ecom is NO LONGER fetched whole here (it's 27k+ rows → ~2s).
+            // It's fetched below, filtered to just the AWBs on this page. See "RapidShyp tracking".
 
             // EasyEcom rows — MAPPING ONLY (easyecomOrderId/status onto Shopify orders, for the
             // hold/unhold feature + hold-mark reconciliation). EasyEcom-only orders (Flipkart etc.)
@@ -208,10 +208,7 @@ router.get('/get-orders', async (req, res) => {
             if (row.shipment_id) awbCache[String(row.shipment_id)] = row;
         });
 
-        const trackingCache = {};
-        (trackingRows.data || []).forEach(row => {
-            if (row.awb) trackingCache[String(row.awb)] = row;
-        });
+        // (trackingCache is built later, from a filtered fetch — see "RapidShyp tracking" below.)
 
         // ── 3. NORMALIZE ORDERS — Shopify only ──────────────
         const shopifyOrders = (shopifyRes.data || []).map(normalizeSupabaseOrder);
@@ -285,7 +282,22 @@ router.get('/get-orders', async (req, res) => {
         // Shopify fulfillment holds (upstream of EasyEcom) — baked in too so the Orders dashboard shows a
         // hold chip / filters them, same as EE holds. Never shows a Shopify-held order as if it's normal.
         const shopHoldByName = {};
-        const { data: shopHoldRows } = await supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'shopify_hold');
+        // RapidShyp tracking: fetch ONLY the rows for the AWBs actually on this page (was: the ENTIRE
+        // 27k-row rapidshyp_tracking_ecom table on every request — the ~2s bottleneck in /get-orders).
+        // Runs in parallel with the Shopify-hold marks query. Chunked so the .in() URL never gets too long.
+        const awbSet = new Set();
+        allOrders.forEach(o => { if (o.awb) awbSet.add(String(o.awb)); });
+        Object.values(awbCache).forEach(a => { if (a && a.awb) awbSet.add(String(a.awb)); });   // tiny remap cache
+        const awbList = [...awbSet];
+        const awbChunks = [];
+        for (let i = 0; i < awbList.length; i += 200) awbChunks.push(awbList.slice(i, i + 200));
+        const [shopHoldRes, ...trackingChunks] = await Promise.all([
+            supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'shopify_hold'),
+            ...awbChunks.map(c => supabase.from('rapidshyp_tracking_ecom').select('awb, raw_status').in('awb', c))
+        ]);
+        const shopHoldRows = shopHoldRes.data;
+        const trackingCache = {};
+        trackingChunks.forEach(r => (r.data || []).forEach(row => { if (row.awb) trackingCache[String(row.awb)] = row; }));
         (shopHoldRows || []).forEach(m => { shopHoldByName[m.order_name] = { reason: m.note || '', by: m.created_by || null, at: m.created_at || null }; });
 
         // ── 4. ENRICH WITH SUPABASE WORKFLOW CACHE ──────────

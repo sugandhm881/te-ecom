@@ -6,6 +6,8 @@
 <title>Ecom Central - Unified Dashboard</title>
 <link rel="icon" type="image/png" href="/static/assets/ecom-logo.png">
 <link rel="stylesheet" href="/static/tailwind.css"><!-- pre-built Tailwind — replaces the runtime cdn.tailwindcss.com JIT compiler (huge per-render cost) -->
+<link rel="stylesheet" href="/static/smooth.css?v=2026-07-29e"><!-- motion/polish layer — smoother popups/loaders/transitions on the SAME original colours -->
+<link rel="stylesheet" href="/static/accent.css?v=2026-07-29a"><!-- accent recolour: indigo → login/welcome violet gradient (everything else unchanged) -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -2657,7 +2659,7 @@
     </div>
 </div>
 
-<script src="/static/app.js?v=2026-07-28-kwikship"></script>
+<script src="/static/app.js?v=2026-07-29-modal"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

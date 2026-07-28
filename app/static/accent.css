@@ -1,0 +1,59 @@
+/* ============================================================================
+   accent.css — replace the app's INDIGO accent with the LOGIN/WELCOME violet
+   gradient (#6366f1 → #7c3aed), everywhere, so the whole app matches the login
+   and welcome screens. This is ONLY an accent recolour — backgrounds, text,
+   neutrals and layout are unchanged. Loaded after tailwind.css + smooth.css.
+   Reversible: remove this file + its <link>. No body-class gate (always on).
+   ============================================================================ */
+
+:root{ --accent: #7c3aed; }   /* used by e.g. #delivery-perf-view .dp-kpi::before (was #4f46e5) */
+
+/* ── Active sidebar nav → the login button's violet gradient ──────────────── */
+.sidebar-link.active{
+  background-color: transparent !important;
+  background-image: linear-gradient(90deg,#6366f1,#7c3aed) !important;
+  box-shadow: 0 8px 20px rgba(99,102,241,.40) !important;
+}
+
+/* ── Solid indigo fills / buttons → violet gradient ───────────────────────── */
+.bg-indigo-600, .bg-indigo-700, .bg-indigo-800{
+  background-color: transparent !important;
+  background-image: linear-gradient(90deg,#6366f1,#7c3aed) !important;
+}
+.hover\:bg-indigo-700:hover, .hover\:bg-indigo-600:hover{
+  background-color: transparent !important;
+  background-image: linear-gradient(90deg,#818cf8,#8b5cf6) !important;
+}
+.bg-indigo-500{ background-color:#6366f1 !important; }
+.bg-indigo-100{ background-color:#ede9fe !important; }
+.bg-indigo-50, .bg-indigo-50\/50{ background-color:#f5f3ff !important; }
+
+/* ── Indigo text → violet ─────────────────────────────────────────────────── */
+.text-indigo-700, .text-indigo-600{ color:#7c3aed !important; }
+.text-indigo-500{ color:#6366f1 !important; }
+.text-indigo-400{ color:#8b5cf6 !important; }
+.text-indigo-300{ color:#c4b5fd !important; }
+.hover\:text-indigo-600:hover, .hover\:text-indigo-700:hover, .hover\:text-indigo-300:hover{ color:#7c3aed !important; }
+
+/* ── Borders / rings / form accents → violet ──────────────────────────────── */
+.border-indigo-600, .border-indigo-500, .border-indigo-400, .border-indigo-300{ border-color:#7c3aed !important; }
+.border-indigo-200, .border-indigo-100{ border-color:#ddd6fe !important; }
+.border-t-indigo-600{ border-top-color:#7c3aed !important; }   /* brandLoader spinner arc */
+.ring-indigo-500, .ring-indigo-400{ --tw-ring-color:rgba(124,58,237,.40) !important; }
+.ring-indigo-300, .ring-indigo-200, .ring-indigo-100{ --tw-ring-color:rgba(124,58,237,.20) !important; }
+.accent-indigo-600{ accent-color:#7c3aed !important; }
+.focus\:ring-indigo-500:focus{ --tw-ring-color:rgba(124,58,237,.40) !important; }
+.focus\:border-indigo-500:focus{ border-color:#7c3aed !important; }
+
+/* ── Gradient stops (from/to/via-indigo) → violet ─────────────────────────── */
+.from-indigo-700, .from-indigo-600, .from-indigo-500{ --tw-gradient-from:#6366f1 var(--tw-gradient-from-position) !important; --tw-gradient-to:rgba(99,102,241,0) var(--tw-gradient-to-position) !important; --tw-gradient-stops:var(--tw-gradient-from),var(--tw-gradient-to) !important; }
+.to-indigo-700, .to-indigo-600, .to-indigo-500{ --tw-gradient-to:#7c3aed var(--tw-gradient-to-position) !important; }
+
+/* ── Global loader ring → violet (matches login) ──────────────────────────── */
+.loader-ring{ border-top-color:#7c3aed !important; border-right-color:#c4b5fd !important; }
+.loader-dot{ background:#7c3aed !important; }
+
+/* ── View-CSS active states that hard-code indigo #4f46e5 → violet ────────── */
+#amazon-review-view .amzrev-preset.active,
+#amazon-review-view .amzrev-sf.sf-all.active,
+#amazon-review-view .amzrev-sf.sf-sent.active{ background:#7c3aed !important; border-color:#7c3aed !important; }

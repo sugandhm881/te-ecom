@@ -83,16 +83,36 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
     // Order by the unique `shopify_id` for stable, gap-free .range() paging (tied timestamps can't drop rows).
     const COLS = 'shopify_id, total_price, raw_rapidshyp_status, docpharma_data, note_attributes, source_name, referring_site, cancelled_at, rapidshyp_webhook_status, fulfillment_status, fulfillments';
     const PAGE = 1000;
+
+    // The Facebook insights call is a live Meta API round-trip and is INDEPENDENT of the order
+    // fetch — kick it off now so Meta's latency overlaps the DB pagination instead of stacking
+    // after it (was: paginate fully, THEN await FB — the two slow parts ran back-to-back).
+    const fbAdsPromise = getFacebookAds(since, until);
+
+    // Fetch orders in parallel: page 0 with an exact count to learn the total, then request every
+    // remaining page at once via Promise.all (was: one sequential .range() round-trip per 1000 rows).
+    const buildOrdersPage = (from, withCount) => supabase.from('enriched_orders_ecom')
+        .select(COLS, withCount ? { count: 'exact' } : undefined)
+        .gte(dateCol, startDate).lte(dateCol, endDate)
+        .order('shopify_id', { ascending: true })
+        .range(from, from + PAGE - 1);
+
     const shopifyOrdersInRange = [];
-    for (let from = 0; ; from += PAGE) {
-        const { data, error } = await supabase.from('enriched_orders_ecom').select(COLS)
-            .gte(dateCol, startDate).lte(dateCol, endDate)
-            .order('shopify_id', { ascending: true })
-            .range(from, from + PAGE - 1);
-        if (error) { console.error('[Supabase] enriched_orders_ecom fetch error:', error.message); break; }
-        if (!data || !data.length) break;
-        shopifyOrdersInRange.push(...data);
-        if (data.length < PAGE) break;
+    const firstPage = await buildOrdersPage(0, true);
+    if (firstPage.error) {
+        console.error('[Supabase] enriched_orders_ecom fetch error:', firstPage.error.message);
+    } else {
+        shopifyOrdersInRange.push(...(firstPage.data || []));
+        const totalOrders = firstPage.count != null ? firstPage.count : shopifyOrdersInRange.length;
+        if (totalOrders > shopifyOrdersInRange.length) {
+            const reqs = [];
+            for (let from = PAGE; from < totalOrders; from += PAGE) reqs.push(buildOrdersPage(from, false));
+            const pages = await Promise.all(reqs);
+            for (const p of pages) {
+                if (p.error) { console.error('[Supabase] enriched_orders_ecom fetch error:', p.error.message); continue; }
+                shopifyOrdersInRange.push(...(p.data || []));
+            }
+        }
     }
 
     const orders = (shopifyOrdersInRange || []).map(row => ({
@@ -106,7 +126,7 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
         referring_site: row.referring_site
     }));
 
-    const fbAds = await getFacebookAds(since, until);
+    const fbAds = await fbAdsPromise;
 
     const performanceData = {};
     const fbAdMap = {};

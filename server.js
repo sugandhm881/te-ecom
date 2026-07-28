@@ -1,10 +1,14 @@
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const path = require('path');
 const config = require('./config');
 const { supabase } = require('./app/supabase');
 
 const app = express();
+// gzip/deflate every response (all API JSON + the app shell + static). ~80–90% smaller transfer on the
+// big dashboard payloads (orders, delivery-perf, docpharma, insights…) → much faster loads, identical data.
+app.use(compression());
 
 // Middleware
 // CORS restricted to the app's own origin(s). Same-origin dashboard calls send no Origin header and are
@@ -61,8 +65,11 @@ app.use((req, res, next) => {
 });
 
 // Static Files
-app.use('/static', express.static(path.join(__dirname, 'app/static')));
-app.use('/templates', express.static(path.join(__dirname, 'app/templates')));
+// Long-cache static assets (JS/CSS/vendor/images) in the browser → no re-download on every visit, so the
+// app shell loads instantly on repeat loads. Safe: the versioned files carry `?v=` cache-busters that change
+// on each update (a new query string = a fresh URL), and index.html itself is served no-cache below.
+app.use('/static', express.static(path.join(__dirname, 'app/static'), { maxAge: '30d', etag: true }));
+app.use('/templates', express.static(path.join(__dirname, 'app/templates'), { maxAge: '7d', etag: true }));
 
 // --- Import Routes ---
 const authRoutes = require('./app/api/auth_routes');

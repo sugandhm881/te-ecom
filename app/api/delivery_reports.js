@@ -44,25 +44,32 @@ const STATE_LABEL = {
     in_transit: 'In-transit',
 };
 
+const _JOURNEY_COLS = 'awb, order_name, source, courier, outcome, attempts, ndr_count, reached_delivery, first_attempt_success, ndr_reasons, out_for_delivery_at, delivered_at, rto_at, dispatched_at, order_date, first_edd, status_code, payment_mode, zone, order_type, dest_state, dest_city, dest_pincode';
 async function fetchJourneys(fromISO, toISO, source, payment, zone, courier, orderType, state) {
-    const rows = [];
     const PAGE = 1000;
-    for (let offset = 0; ; offset += PAGE) {
-        let q = supabase
-            .from('shipment_journey_ecom')
-            .select('awb, order_name, source, courier, outcome, attempts, ndr_count, reached_delivery, first_attempt_success, ndr_reasons, out_for_delivery_at, delivered_at, rto_at, dispatched_at, order_date, first_edd, status_code, payment_mode, zone, order_type, dest_state, dest_city, dest_pincode')
-            .gte('order_date', fromISO)
-            .lte('order_date', toISO);
-        if (source && source !== 'all') q = q.eq('source', source);      // 'rapidshyp' | 'docpharma'
+    // One filtered page query. `withCount` (page 0 only) makes Postgres return the TOTAL match count so the
+    // remaining pages can be fetched in PARALLEL (was: sequential page-after-page — the main slowness here).
+    const build = (offset, withCount) => {
+        let q = supabase.from('shipment_journey_ecom');
+        q = withCount ? q.select(_JOURNEY_COLS, { count: 'exact' }) : q.select(_JOURNEY_COLS);
+        q = q.gte('order_date', fromISO).lte('order_date', toISO);
+        if (source && source !== 'all') q = q.eq('source', source);      // 'rapidshyp' | 'docpharma' | 'kwikship'
         if (payment && payment !== 'all') q = q.ilike('payment_mode', payment); // 'COD' | 'prepaid'
         if (zone && zone !== 'all') q = q.eq('zone', zone);              // exact zone label
         if (courier && courier !== 'all') q = q.eq('courier', courier);  // exact courier name
         if (orderType && orderType !== 'all') q = q.eq('order_type', orderType); // 'new' | 'repeat'
         if (state && state !== 'all') q = q.ilike('dest_state', state);   // destination state (e.g. 'Kerala')
-        const { data, error } = await q.order('order_date', { ascending: false }).range(offset, offset + PAGE - 1);
-        if (error) throw new Error(error.message);
-        rows.push(...(data || []));
-        if (!data || data.length < PAGE) break;
+        return q.order('order_date', { ascending: false }).range(offset, offset + PAGE - 1);
+    };
+    const first = await build(0, true);
+    if (first.error) throw new Error(first.error.message);
+    const rows = first.data || [];
+    const total = first.count != null ? first.count : rows.length;
+    if (total > rows.length) {   // fetch the rest concurrently
+        const reqs = [];
+        for (let offset = PAGE; offset < total; offset += PAGE) reqs.push(build(offset, false));
+        const pages = await Promise.all(reqs);
+        for (const p of pages) { if (p.error) throw new Error(p.error.message); rows.push(...(p.data || [])); }
     }
     return rows;
 }
@@ -164,7 +171,23 @@ router.get('/delivery-performance', async (req, res) => {
 
         // Fetch WITHOUT zone/state/courier filters so all three dropdowns list every option in range;
         // then narrow in-memory (single query). Zone + State match ANY of the selected values.
-        const allRows = await fetchJourneys(fromISO, toISO, source, payment, 'all', 'all', orderType, 'all');
+        // Compute the previous equal-length window up-front so it fetches in PARALLEL with the current one
+        // (compare mode) instead of after it — halving the DB wait when comparing.
+        let prevWin = null;
+        if (compare) {
+            const d0 = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+            const d1 = new Date(to.getFullYear(), to.getMonth(), to.getDate());
+            const lenDays = Math.round((d1 - d0) / 86400000) + 1;      // inclusive day count
+            const pTo = new Date(d0); pTo.setDate(pTo.getDate() - 1);   // day before current start
+            const pFrom = new Date(pTo); pFrom.setDate(pFrom.getDate() - (lenDays - 1));
+            prevWin = { from: pFrom, to: pTo,
+                fromISO: new Date(pFrom.getFullYear(), pFrom.getMonth(), pFrom.getDate()).toISOString(),
+                toISO: new Date(pTo.getFullYear(), pTo.getMonth(), pTo.getDate(), 23, 59, 59).toISOString() };
+        }
+        const [allRows, prevRowsRaw] = await Promise.all([
+            fetchJourneys(fromISO, toISO, source, payment, 'all', 'all', orderType, 'all'),
+            prevWin ? fetchJourneys(prevWin.fromISO, prevWin.toISO, source, payment, 'all', 'all', orderType, 'all') : Promise.resolve(null),
+        ]);
         const courierCount = {}, stateCount = {}, stateDisp = {}, zoneCount = {};
         allRows.forEach(r => {
             const c = r.courier || 'Unknown'; courierCount[c] = (courierCount[c] || 0) + 1;
@@ -185,18 +208,11 @@ router.get('/delivery-performance', async (req, res) => {
             (stateSet.size === 0 || stateSet.has(String(r.dest_state || '').toLowerCase()));
         const rows = allRows.filter(matchFilters);
 
-        // ── Compare mode: same filters over the immediately-preceding equal-length window ──
+        // ── Compare mode: previous equal-length window (already fetched in parallel above) ──
         let compareOut = null;
-        if (compare) {
-            const d0 = new Date(from.getFullYear(), from.getMonth(), from.getDate());
-            const d1 = new Date(to.getFullYear(), to.getMonth(), to.getDate());
-            const lenDays = Math.round((d1 - d0) / 86400000) + 1;      // inclusive day count
-            const pTo = new Date(d0); pTo.setDate(pTo.getDate() - 1);   // day before current start
-            const pFrom = new Date(pTo); pFrom.setDate(pFrom.getDate() - (lenDays - 1));
-            const pFromISO = new Date(pFrom.getFullYear(), pFrom.getMonth(), pFrom.getDate()).toISOString();
-            const pToISO = new Date(pTo.getFullYear(), pTo.getMonth(), pTo.getDate(), 23, 59, 59).toISOString();
-            const pRows = (await fetchJourneys(pFromISO, pToISO, source, payment, 'all', 'all', orderType, 'all')).filter(matchFilters);
-            compareOut = { range: { from: fmtLocal(pFrom), to: fmtLocal(pTo) }, kpis: summarizeAll(pRows) };
+        if (compare && prevRowsRaw) {
+            const pRows = prevRowsRaw.filter(matchFilters);
+            compareOut = { range: { from: fmtLocal(prevWin.from), to: fmtLocal(prevWin.to) }, kpis: summarizeAll(pRows) };
         }
 
         // ── KPIs — denominator is TOTAL SHIPPED (= resolved: delivered + RTO). In-transit shown apart.
