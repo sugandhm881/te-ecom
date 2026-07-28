@@ -6,6 +6,7 @@ const router = express.Router();
 const ExcelJS = require('exceljs');
 const { supabase } = require('../supabase');
 const { fetchRsShipment, parseScanDate, parseDpDate } = require('./delivery_journey');
+const { fetchKwikshipShipment, parseKwikDate } = require('./kwikship_sync');
 const { fetchDocpharmaDetails } = require('./helpers');
 const { requirePermission } = require('../auth');
 // Email-send routes below are gated by the 'send-escalation-emails' capability (admins pass via '*';
@@ -475,13 +476,31 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
             code: s.rapidshyp_status_code || s.status_code || '',
             location: s.scan_location || s.location || s.city || '',
         })).filter(x => x.desc).sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+        // Kwikship status_history → { at, desc, code, location } (its own shape; used for both cache-read + live).
+        const ksHuman = s => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const ksScans = (hist) => (hist || [])
+            .map(h => ({ at: parseKwikDate(h.datetime || h.date), desc: h.description || ksHuman(h.status), code: h.status || '', location: h.location || '' }))
+            .filter(x => x.desc).sort((a, b) => (a.at || '').localeCompare(b.at || ''));
 
-        let scans = (j && j.raw && Array.isArray(j.raw.scans)) ? norm(j.raw.scans) : null;
+        // Serve from the cached scan log if we have one — raw.scans (RapidShyp) or raw.status_history (Kwikship).
+        let scans = (j && j.raw && Array.isArray(j.raw.scans)) ? norm(j.raw.scans)
+            : (j && j.raw && Array.isArray(j.raw.status_history)) ? ksScans(j.raw.status_history)
+            : null;
         let live = false;
         let dpInfo = null;   // DocPharma-only: tracking link + current status + promise EDD (no scan log upstream)
 
         if (!scans || !scans.length) {
-            if (j?.source !== 'docpharma') {                       // RapidShyp by AWB
+            if (j?.source === 'kwikship') {                        // Kwikship — real status_history timeline (by AWB)
+                const ks = await fetchKwikshipShipment(awb);
+                if (ks.found && ks.statusHistory && ks.statusHistory.length) {
+                    scans = ksScans(ks.statusHistory); live = true;
+                    if (j && !(j.raw && Array.isArray(j.raw.status_history))) {   // cache back so repeat views cost 0 API calls (matches RapidShyp)
+                        supabase.from('shipment_journey_ecom')
+                            .update({ raw: { status_history: ks.statusHistory, status: ks.status, captured_at: new Date().toISOString() } })
+                            .eq('awb', awb).then(() => {}).catch(() => {});
+                    }
+                }
+            } else if (j?.source !== 'docpharma') {                // RapidShyp by AWB
                 const rs = await fetchRsShipment(awb);
                 if (rs.found && rs.scans && rs.scans.length) {
                     scans = norm(rs.scans); live = true;
@@ -492,7 +511,7 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
                     }
                 }
             }
-            if ((!scans || !scans.length) && j?.order_name) {      // DocPharma fallback by order name
+            if ((!scans || !scans.length) && j?.source !== 'kwikship' && j?.order_name) {      // DocPharma fallback by order name
                 try {
                     const dp = await fetchDocpharmaDetails(String(j.order_name).replace('#', '').trim());
                     const so = (dp && dp.suborders && dp.suborders[0]) || {};
@@ -565,7 +584,7 @@ function rangeEndingYesterday(days) {
 }
 // Given a range object (from resolveRange/rangeEndingYesterday), the DMY label for email display.
 const emailRangeLabel = rg => rg.rangeLabelDMY || dmyLabel(rg.fromLabel) + ' → ' + dmyLabel(rg.toLabel);
-const PLATFORM_LABEL = { rapidshyp: 'RapidShyp', docpharma: 'DocPharma' };
+const PLATFORM_LABEL = { rapidshyp: 'RapidShyp', docpharma: 'DocPharma', kwikship: 'KwikShip' };
 
 // Send a delivery report as SEPARATE emails per platform — RapidShyp rows go to the RapidShyp recipients,
 // DocPharma rows to the DocPharma recipients (each configured in Settings → Email & Reports). `source`
@@ -573,7 +592,7 @@ const PLATFORM_LABEL = { rapidshyp: 'RapidShyp', docpharma: 'DocPharma' };
 // rows OR no recipient configured. fetchFn(fromISO,toISO,platform,extra) → rows; buildFn(rows,rangeLabel,
 // platform,extra) → { subject, html }. Returns { ok, skipped?, reason?, to, count, results }.
 async function sendReportPerPlatform({ fetchFn, buildFn, rg, source, extra }) {
-    const platforms = source ? [source] : ['rapidshyp', 'docpharma'];
+    const platforms = source ? [source] : ['rapidshyp', 'docpharma', 'kwikship'];
     const results = [];
     for (const p of platforms) {
         const rows = await fetchFn(rg.fromISO, rg.toISO, p, extra);

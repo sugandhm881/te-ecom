@@ -1329,7 +1329,7 @@
                 <!-- Shared filters (client-side, apply to the active tab) -->
                 <div class="flex flex-wrap items-center gap-2 mb-6">
                     <input id="claims-search" type="text" placeholder="Search order / AWB…" class="filter-input w-56">
-                    <select id="claims-f-platform" class="filter-select"><option value="">All platforms</option><option value="rapidshyp">RapidShyp</option><option value="docpharma">DocPharma</option></select>
+                    <select id="claims-f-platform" class="filter-select"><option value="">All platforms</option><option value="rapidshyp">RapidShyp</option><option value="docpharma">DocPharma</option><option value="kwikship">KwikShip</option></select>
                     <select id="claims-f-payment" class="filter-select"><option value="">All payments</option><option value="COD">COD</option><option value="Prepaid">Prepaid</option></select>
                     <select id="claims-f-courier" class="filter-select"><option value="">All couriers</option></select>
                     <select id="claims-f-zone" class="filter-select"><option value="">All zones</option></select>
@@ -1524,7 +1524,7 @@
                 <div class="flex flex-wrap items-center gap-2">
                     <input id="supo-q" type="text" placeholder="Search order / phone / email / AWB…" class="filter-input w-64">
                     <select id="supo-bucket" class="filter-select"><option value="">All buckets</option></select>
-                    <select id="supo-partner" class="filter-select"><option value="">All partners</option><option value="rapidshyp">rapidshyp</option><option value="docpharma">docpharma</option></select>
+                    <select id="supo-partner" class="filter-select"><option value="">All partners</option><option value="rapidshyp">rapidshyp</option><option value="docpharma">docpharma</option><option value="kwikship">kwikship</option></select>
                     <select id="supo-courier" class="filter-select"><option value="">All couriers</option></select>
                     <select id="supo-status" class="filter-select"><option value="">All statuses</option></select>
                     <button id="supo-reset" class="filter-btn">Reset</button>
@@ -2141,6 +2141,7 @@
                 <button data-s="all" class="px-3 py-1.5 bg-indigo-600 text-white">All</button>
                 <button data-s="rapidshyp" class="px-3 py-1.5 text-slate-600">RapidShyp</button>
                 <button data-s="docpharma" class="px-3 py-1.5 text-slate-600">DocPharma</button>
+                <button data-s="kwikship" class="px-3 py-1.5 text-slate-600">KwikShip</button>
               </div>
               <div class="flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200" id="dp-payment">
                 <button data-p="all" class="px-3 py-1.5 bg-indigo-600 text-white">All</button>
@@ -2656,7 +2657,7 @@
     </div>
 </div>
 
-<script src="/static/app.js?v=2026-07-28-voice-agent"></script>
+<script src="/static/app.js?v=2026-07-28-kwikship"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

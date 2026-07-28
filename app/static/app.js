@@ -113,6 +113,14 @@ const platformLogos = {
     Flipkart: 'https://brandeps.com/logo-download/F/Flipkart-logo-vector-01.svg',
     Shopify: 'https://www.vectorlogo.zone/logos/shopify/shopify-icon.svg',
 };
+// Display label for a shipment_journey_ecom `source` (delivery platform).
+function platformLabel(src) {
+    const s = String(src || '').toLowerCase();
+    if (s === 'docpharma') return 'DocPharma';
+    if (s === 'kwikship') return 'KwikShip';
+    if (s === 'rapidshyp') return 'RapidShyp';
+    return src ? src.charAt(0).toUpperCase() + src.slice(1) : '—';
+}
 
 // --- HELPER FUNCTIONS ---
 function showNotification(message, isError = false) {
@@ -3379,7 +3387,7 @@ function claimsDetailRow(r, which){
   const dest = [r.dest_city, r.dest_state].filter(Boolean).join(', ');
   const pieces = [`📍 <b class="text-slate-700">${ecEsc(dest || '—')}</b>${r.zone ? ` · Zone ${ecEsc(r.zone)}` : ''}`];
   if(r.payment_mode) pieces.push(`Payment: <b class="text-slate-700">${/cod/i.test(r.payment_mode) ? 'COD' : 'Prepaid'}</b>`);
-  if(r.source) pieces.push(`Platform: <b class="text-slate-700">${/docpharma/i.test(r.source) ? 'DocPharma' : 'RapidShyp'}</b>`);
+  if(r.source) pieces.push(`Platform: <b class="text-slate-700">${platformLabel(r.source)}</b>`);
   if(j){ pieces.push(`Attempts: <b class="text-slate-700">${j.attempts || 0}</b>`); pieces.push(`NDRs: <b class="text-slate-700">${j.ndr_count || 0}</b>`); }
   if(which === 'srto'){
     pieces.push(`Forward freight: <b class="text-slate-700">${r.freight_forward != null ? _inr(r.freight_forward) : '—'}</b>`);

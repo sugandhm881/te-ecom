@@ -65,6 +65,12 @@ module.exports = {
     RAPIDSHYP_API_KEY: process.env.RAPIDSHYP_API_KEY,
     RAPIDSHYP_API_URL: process.env.RAPIDSHYP_API_URL || 'https://api.rapidshyp.com/rapidshyp/apis/v1/',
     DOCPHARMA_API_KEY: process.env.DOCPHARMA_API_KEY,
+    // Kwikship (GoKwik) — shipping aggregator, PULL-only (no webhook). The nightly 2 AM cron pulls
+    // tracking for Kwikship-allocated orders (b2c_order_easycom.location = 'kwikship') by AWB via the
+    // Public API. Auth = gk-app-id + gk-app-secret headers (Dashboard → Admin → Account → API Keys).
+    KWIKSHIP_APP_ID: _envFile.KWIKSHIP_APP_ID || process.env.KWIKSHIP_APP_ID,
+    KWIKSHIP_APP_SECRET: _envFile.KWIKSHIP_APP_SECRET || process.env.KWIKSHIP_APP_SECRET,
+    KWIKSHIP_BASE_URL: process.env.KWIKSHIP_BASE_URL || 'https://api.gokwik.co/kwikship',   // staging: https://sandboxapi.gokwik.co/kwikship
     // Warehouse origin pincode used for serviceability / EDD estimates
     PICKUP_PINCODE: process.env.PICKUP_PINCODE || '122101',
     // Slack word that triggers the DocPharma→MWH report. LIVE leaves this unset → "rejected";

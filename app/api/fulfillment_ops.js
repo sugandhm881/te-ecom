@@ -3,9 +3,26 @@ const router  = express.Router();
 const axios   = require('axios');
 const config  = require('../../config');
 const { getRapidshypTimeline, fetchDocpharmaDetails, extractDocpharmaStatusString } = require('./helpers');
+const { fetchKwikshipShipment } = require('./kwikship_sync');
 const { supabase } = require('../supabase');
 
 const GQL_URL = `https://${config.SHOPIFY_SHOP_URL}/admin/api/2025-01/graphql.json`;
+
+// Kwikship (GoKwik) live-tracking fallback — RapidShyp 400s on GoKwik AWBs, so when RapidShyp/DocPharma
+// yield nothing, ask Kwikship's API by AWB (returns 404 for non-Kwikship AWBs → null, so this is safe to
+// try for any order). Returns { events (newest-first), status } | null.
+async function kwikshipTrack(awb) {
+    try {
+        const ks = await fetchKwikshipShipment(awb);
+        if (!ks || !ks.found || !ks.statusHistory || !ks.statusHistory.length) return null;
+        const human = s => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const events = ks.statusHistory
+            .map(h => ({ status: h.description || human(h.status), timestamp: h.datetime || h.date || '', location: h.location || '' }))
+            .filter(ev => ev.status)
+            .sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));   // newest first
+        return { events, status: human(ks.status) || (events[0] && events[0].status) || '' };
+    } catch (_e) { return null; }
+}
 
 const RS_URL  = 'https://api.rapidshyp.com/rapidshyp/apis/v1/track_order';
 const RS_HDR  = () => ({ 'rapidshyp-token': config.RAPIDSHYP_API_KEY, 'Content-Type': 'application/json' });
@@ -203,6 +220,21 @@ router.get('/track/:awb', async (req, res) => {
             console.error(`[Track] RapidShyp error for ${awb}:`, rsErr.message);
         }
 
+        // ── 1b. Kwikship (GoKwik) fallback — RapidShyp 400s on GoKwik AWBs ─────
+        if (!events.length) {
+            const ks = await kwikshipTrack(awb);
+            if (ks && ks.events.length) {
+                events = ks.events;
+                if (ks.status) {
+                    rsLiveStatus = ks.status;
+                    supabase.from('rapidshyp_tracking_ecom').upsert(
+                        { awb, raw_status: ks.status, last_checked: Date.now() / 1000, updated_at: new Date().toISOString() },
+                        { onConflict: 'awb' }
+                    ).then(() => {}).catch(() => {});
+                }
+            }
+        }
+
         // ── 2. EasyEcom from Supabase ─────────────────────────────────────────
         const { data: eeRow } = await supabase
             .from('b2c_order_easycom')
@@ -356,10 +388,20 @@ router.get('/track-order/:numericId', async (req, res) => {
                     if (!events.length) events = [{ status: dpStatus, timestamp: '', location: 'DocPharma' }];
                     console.log(`[TrackOrder] ${order.name} → RapidShyp empty → DocPharma: ${dpStatus}`);
                 } else {
-                    console.log(`[TrackOrder] ${order.name} → no status from RapidShyp or DocPharma — left blank`);
+                    console.log(`[TrackOrder] ${order.name} → no status from RapidShyp or DocPharma — trying Kwikship…`);
                 }
             } catch (dpErr) {
                 console.error(`[TrackOrder] DocPharma fallback error for ${order.name}:`, dpErr.message);
+            }
+        }
+
+        // 2c. Kwikship (GoKwik) fallback — RapidShyp 400s on GoKwik AWBs. Try Kwikship's API by AWB.
+        if (!rsStatus || !events.length) {
+            const ks = await kwikshipTrack(latestAWB);
+            if (ks && ks.events.length) {
+                events = ks.events;
+                if (ks.status) rsStatus = ks.status;
+                console.log(`[TrackOrder] ${order.name} → Kwikship: ${ks.status || '(events only)'} (${events.length} events)`);
             }
         }
 

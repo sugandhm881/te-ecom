@@ -92,7 +92,12 @@ Ecom Central is a single-server operations hub that unifies order management, sh
 **Design principles**
 
 - **DB-first reads:** dashboards read from synced Supabase tables; live courier APIs are called only to fill gaps (then cached back).
-- **Single journey pipeline:** `app/api/delivery_journey.js` is the one parser/writer for `shipment_journey_ecom`; webhooks, backfills and crons all flow through it.
+- **Single journey pipeline:** `app/api/delivery_journey.js` is the one parser/writer for `shipment_journey_ecom`; webhooks, backfills and crons all flow through it. Three delivery **sources** feed it: `rapidshyp` (webhook + scan timeline), `docpharma` (portal pull, milestones only), `kwikship` (nightly pull, `status_history` timeline — see below). All share the `saveJourney()` writer + `source` column; `PLATFORM_LABEL`/`platformLabel()` map source → display name.
+- **Re-allocation cleanup (`supersedeStaleJourneys`):** the journey table is keyed by **AWB**, so re-allocating an order to a new AWB/aggregator (e.g. RapidShyp → deassign → Kwikship) would leave the OLD AWB's row orphaned — stuck non-final and **double-counting** the order in the dashboard/KPIs. After saving the current shipment's journey, every writer (`updateJourneyForOrder` for RS/DP, `updateKwikshipJourney` + the `kwikship-webhook`) deletes any other **non-final** journey row for the same `order_name` on a different AWB. A final (delivered/RTO) leg is always kept as history.
+- **Kwikship (GoKwik) sync** — TWO paths, same as RapidShyp (real-time webhook + a cron backstop):
+  - **Webhook (real-time):** GoKwik's dashboard *Merchant Webhooks* (Bearer-token auth; triggers Pickup Completed / OFD / Undelivered / RTO Initiated / Delivered) POST to the Supabase Edge Function **`kwikship-webhook`** (HTTPS; the Node app is HTTP-only, so — like `rapidshyp-webhook` — the receiver is an edge fn, `verify_jwt=false` + its own token check). On each event it fetches the authoritative `status_history` from Kwikship's API and upserts `shipment_journey_ecom` (source=`kwikship`). URL: `…/functions/v1/kwikship-webhook`. **Audit trail:** every hit is recorded in table **`kwikship_webhook_log`** (received_at, awb, order_name, cur_status, outcome, result, **user_agent**, source_ip, raw **payload**) — so it's provable which hits are real GoKwik events (their UA ≠ a manual `curl`) and it captures GoKwik's real payload shape. Query: `select * from kwikship_webhook_log order by received_at desc`.
+  - **Cron backstop (`app/api/kwikship_sync.js`):** a **2 AM IST cron** (`syncKwikship`) refreshes journeys for **only Kwikship-allocated orders** — identified by EasyEcom's own field **`raw_data->>'courier_aggregator_name' = 'GoKwik Outbound'`** (RapidShyp reads `'RapidShyp- Outbound'`; both ship from the same warehouse so the generated `location` column can't distinguish them). Skips already-final shipments → one Kwikship API call per non-final shipment, zero wasted calls. Manual re-sync: `POST /api/kwikship/sync` (delivery-perf perm).
+  - The AWB EasyEcom stores (the courier AWB, e.g. Delhivery) resolves directly on Kwikship's `GET /shipments/:awb` (verified: GoKwik AWBs 200, RapidShyp AWBs 404 — so the RapidShyp/DocPharma cron never writes a conflicting row). If an order is re-allocated (e.g. Kwikship→cancelled→RapidShyp), `courier_aggregator_name` updates and it moves to the correct sync automatically.
 - **Server-enforced permissions:** UI hiding is cosmetic; every view-specific API group is gated by middleware in `server.js`.
 - **Fail-safe reporting:** report dedup lists abort the run when unreadable (never re-spam), and Slack posting is code-disabled (Teams-only) unless explicitly re-enabled.
 
@@ -116,7 +121,7 @@ ecom-central-Staging/
 ├── Caddyfile.example          # Reverse-proxy (HTTPS) reference config
 ├── supabase/                  # SQL migrations + edge functions
 │   ├── *.sql                  # table definitions (serviceability, dp_rejected_handled, …)
-│   └── functions/             # rapidshyp-webhook, msg91-cod-webhook (Deno edge functions)
+│   └── functions/             # rapidshyp-webhook, kwikship-webhook, msg91-cod-webhook (Deno edge functions)
 └── app/
     ├── auth.js                # JWT issue/verify, scrypt hashing, requireAdmin/requirePermission
     ├── supabase.js            # Supabase service-role client singleton
@@ -128,6 +133,7 @@ ecom-central-Staging/
     └── api/                   # One module per domain
         ├── orders.js              # Shopify orders + enrichment
         ├── delivery_journey.js    # Journey parser/writer + freight sync + backfills (CLI)
+        ├── kwikship_sync.js       # Kwikship (GoKwik) tracking → journeys (source=kwikship); nightly 2 AM cron (CLI)
         ├── delivery_reports.js    # Delivery-perf API + Silent-RTO/Late/Overdue + marks + critical email
         ├── warehouse_slack_report.js  # Warehouse/DocPharma-rejected/On-Hold reports (Teams)
         ├── teams.js               # Outbound Teams Adaptive Cards (Power Automate webhooks)
@@ -375,6 +381,7 @@ All schedules run in **Asia/Kolkata** inside the server process (`server.js` unl
 | `45 */6 * * *` | Journey gap-fill — refresh non-final shipments (webhooks are primary) |
 | `15 3 * * *` | **RapidShyp charges sync** — price newly-final shipments (freight + value + EDD backfill), batches of 2500 |
 | `40 */3 * * *` | DocPharma portal ingest (they have no webhooks) + once ~40s after boot |
+| `0 2 * * *` | **Kwikship (GoKwik) tracking sync** — backstop for the `kwikship-webhook`; pull `status_history` for non-final Kwikship-allocated orders (`courier_aggregator_name='GoKwik Outbound'`) → `shipment_journey_ecom` (source=kwikship) |
 | `30 2 * * *` | New/Repeat order-type + destination refresh (SQL RPCs) + once after boot |
 | `0 */2 * * *` | RapidShyp sync — last 7 days (skips 16:00 slot) |
 | `0 16 * * *` | RapidShyp sync — full month-to-date |
@@ -405,6 +412,7 @@ All schedules run in **Asia/Kolkata** inside the server process (`server.js` unl
 | **Shopify** | Orders, fulfillments, customers, tags (GraphQL/REST) | `orders.js`, sync scripts |
 | **RapidShyp** | `track_order` (scan timelines), `shipment_details` (freight/`final_freights`, invoice value, EDD — lookup by AWB), serviceability; inbound webhook (Supabase edge function) | `delivery_journey.js`, `shipping.js`, `serviceability.js` |
 | **DocPharma** | `POST /fetch-details` (status milestones only — **no scan log**), partner portal ingest (auto-login), invoices/ledger recon. Heavily rate-limited — all checks are cached | `helpers.js`, `docpharma_*.js` |
+| **Kwikship (GoKwik)** | `GET /api/v1/shipments/:awb` → `status_history[]` (a real scan timeline). Auth = `gk-app-id`+`gk-app-secret` headers. **Real-time `kwikship-webhook` edge fn** (GoKwik Merchant Webhooks) + nightly 2 AM cron backstop → `shipment_journey_ecom` source=`kwikship` (ONLY Kwikship-allocated orders, see below). Live-tracking modals fall back to Kwikship when RapidShyp/DocPharma 400 (the Fulfillment-Ops `/track`,`/track-order` handlers + the Delivery-Perf `/delivery-performance/shipment/:awb` branch, which **caches the scan log on first view** into `raw.status_history` — repeat views cost 0 API, mirroring RapidShyp's `raw.scans` cache; read back via `ksScans()`) | `kwikship_sync.js`, `fulfillment_ops.js`, `delivery_reports.js`, `functions/kwikship-webhook` |
 | **EasyEcom** | B2C order sync, on-hold report, JWT-auth API | `easyecom.js` |
 | **Amazon SP-API** | Orders, review-request eligibility ("Request a Review"), FBA stock/inbound | `amazon*.js` |
 | **Meta (Facebook) Ads** | Ad set / ad performance metrics | `adset_performance.js`, `ad_performance.js` |
@@ -458,6 +466,7 @@ Defined in `.env` (git-ignored — **never commit**), read exclusively through `
 | Shopify | `SHOPIFY_TOKEN`, `SHOPIFY_SHOP_URL` |
 | RapidShyp | `RAPIDSHYP_API_KEY`, `RAPIDSHYP_API_URL` |
 | DocPharma | `DOCPHARMA_API_KEY`, `DP_PORTAL_EMAIL`, `DP_PORTAL_PASSWORD`, `DP_PORTAL_TOKEN`, `DP_TRIGGER_WORD` |
+| Kwikship (GoKwik) | Node `.env`: `KWIKSHIP_APP_ID`, `KWIKSHIP_APP_SECRET` (→ `gk-app-id`/`gk-app-secret` headers), `KWIKSHIP_BASE_URL` (default `https://api.gokwik.co/kwikship`). **Supabase Edge secrets** (for `kwikship-webhook`): same `KWIKSHIP_APP_ID`/`KWIKSHIP_APP_SECRET` + `KWIKSHIP_WEBHOOK_SECRET` (the Bearer token pasted into GoKwik's webhook Token field) |
 | EasyEcom | `EASYECOM_BASE_URL`, `EASYECOM_API_KEY`, `EASYECOM_WH_KEY` (Shifupro location key), `EASYECOM_WH2_KEY` (DocPharma/DP Bangalore location key — for change-warehouse routing), `EASYECOM_JWT`, `EASYECOM_EMAIL`, `EASYECOM_PASSWORD`, `EASYECOM_WEBHOOK_TOKEN` |
 | Amazon SP-API | `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`, `AWS_REGION`, `LWA_CLIENT_ID`, `LWA_CLIENT_SECRET`, `REFRESH_TOKEN`, `MARKETPLACE_ID`, `BASE_URL` |
 | Meta Ads | `FACEBOOK_AD_ACCOUNT_ID`, `FACEBOOK_ACCESS_TOKEN` |
@@ -527,6 +536,7 @@ Run from the repo root (they load `.env` themselves):
 | `node app/api/delivery_journey.js fix-intransit [days] [conc]` | Re-check stuck in-transit rows |
 | `node app/api/delivery_journey.js reprocess-final [days] [conc] [outcome] [source]` | Re-parse final rows with current classifier |
 | `node app/api/delivery_journey.js fix-docpharma [conc] [all]` | Re-fetch/re-classify DocPharma rows (use conc ≤ 2 — DP rate-limits hard) |
+| `node app/api/kwikship_sync.js sync [days] [conc]` | Sync Kwikship (GoKwik) tracking for Kwikship-allocated orders → `shipment_journey_ecom` (source=kwikship) |
 | `node app/api/warehouse_slack_report.js [offset] [dry]` | Warehouse report (add `dry` to preview without posting) |
 | `node app/api/warehouse_slack_report.js dp [dry]` | DocPharma-rejected report |
 | `node app/api/warehouse_slack_report.js hold [dry]` | EasyEcom On-Hold report |

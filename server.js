@@ -90,6 +90,7 @@ const docpharmaOverviewRoutes = require('./app/api/docpharma_overview');
 const docpharmaInventoryRoutes = require('./app/api/docpharma_inventory');
 const { ingestRecentDocpharmaOrders } = require('./app/api/docpharma_portal');
 const { backfillJourneys, syncChargesBatch } = require('./app/api/delivery_journey');
+const { syncKwikship } = require('./app/api/kwikship_sync');
 const cron = require('node-cron');
 
 // --- Register Routes ---
@@ -126,6 +127,7 @@ const _VIEW_PERMS = [
     [/^\/silent-rto-claims/i, 'claims-sla'],
     [/^\/late-deliveries/i, 'claims-sla'],
     [/^\/intransit-late/i, 'claims-sla'],
+    [/^\/kwikship\//i, 'delivery-perf'],   // manual Kwikship tracking re-sync (cron runs nightly 2 AM)
     // Customer Support console — any support view permission unlocks its API group.
     [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist']],
     [/^\/voice-(config|order-lookup|order-list)/i, 'support-voice'],   // Voice Agent tool endpoints — permitted users / admins only
@@ -145,6 +147,16 @@ app.use('/api', (req, res, next) => {
     }
     next();
 });
+// Kwikship manual re-sync — pull latest tracking for Kwikship-allocated orders on demand (the nightly
+// 2 AM cron does this automatically). delivery-perf permission (rule above); admins pass.
+app.post('/api/kwikship/sync', async (req, res) => {
+    try {
+        const days = Math.min(parseInt(req.body && req.body.days, 10) || 30, 90);
+        const r = await syncKwikship({ days });
+        res.json({ ok: !r.skipped, ...r });
+    } catch (e) { console.error('[Kwikship] manual sync error:', e.message); res.status(500).json({ ok: false, message: e.message }); }
+});
+
 // Voice Agent tool endpoints — JWT-required (auth middleware above) + support-voice permission; admins pass.
 // config: hand the browser tool its Sarvam key (from .env) + Supabase URL/anon key (for the call-log tables).
 app.get('/api/voice-config', (req, res) => res.json({
@@ -274,6 +286,16 @@ cron.schedule('40 */3 * * *', async () => {
     await ingestRecentDocpharmaOrders().catch(e => console.error('[DP portal] ingest error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 setTimeout(() => { ingestRecentDocpharmaOrders().catch(e => console.error('[DP portal] startup ingest error:', e.message)); }, 40000);
+
+// Kwikship (GoKwik) tracking sync — DAILY at 2:00 AM IST. Kwikship is pull-only (no webhook). Refreshes
+// journeys ONLY for Kwikship-allocated orders (raw_data.courier_aggregator_name = 'GoKwik Outbound') that
+// aren't already final — one Kwikship API call per non-final shipment, zero wasted calls. Writes into the
+// shared shipment_journey_ecom with source='kwikship'.
+cron.schedule('0 2 * * *', async () => {
+    console.log('[Kwikship] 2:00 AM IST — syncing tracking for Kwikship-allocated orders…');
+    try { const r = await syncKwikship({ days: 30 }); console.log('[Kwikship]', r.skipped ? `skipped (${r.reason})` : `updated ${r.updated}/${r.processed} (of ${r.total} Kwikship orders)`); }
+    catch (e) { console.error('[Kwikship] cron error:', e.message); }
+}, { timezone: 'Asia/Kolkata' });
 
 // New/Repeat classification — re-tag journey rows from Shopify's "Repeat" order tag. Pure SQL (0 API),
 // via the refresh_journey_order_type() DB function. Daily at 2:30 AM IST + once shortly after startup.

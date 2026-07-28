@@ -232,6 +232,25 @@ async function saveJourney(awb, orderName, source, journey, orderDate, raw, paym
     return !error;
 }
 
+// When an order is re-allocated to a NEW AWB/aggregator (e.g. RapidShyp → deassign → Kwikship), the OLD
+// AWB's journey row is orphaned — it never finalizes and DOUBLE-COUNTS the order in the dashboard/KPIs
+// (once per source). After saving the CURRENT shipment's journey, drop any other NON-FINAL journey row for
+// the same order that is keyed on a different AWB. Only non-final rows are removed (a genuinely delivered/RTO
+// leg is kept as history). `keepAwb` is the current allocation's AWB (the one we just saved). Returns count.
+async function supersedeStaleJourneys(orderName, keepAwb) {
+    const name = String(orderName || '').replace('#', '').trim();
+    if (!name || !keepAwb) return 0;
+    const { data, error } = await supabase.from('shipment_journey_ecom')
+        .delete()
+        .eq('order_name', name)
+        .eq('is_final', false)
+        .neq('awb', keepAwb)
+        .select('awb, source');
+    if (error) { console.error('[Journey] supersede error:', error.message); return 0; }
+    if (data && data.length) console.log(`[Journey] ${name}: superseded ${data.length} stale row(s) [${data.map(r => `${r.source}:${r.awb}`).join(', ')}] — kept ${keepAwb}`);
+    return data ? data.length : 0;
+}
+
 const _sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Fetch a RapidShyp shipment's scan timeline. Retries on rate-limit/timeout (bursts get throttled).
@@ -397,6 +416,7 @@ async function updateJourneyForOrder(orderName, awb, courier, orderDate, payment
             // it with ZERO API calls at download time.
             const raw = j.rto_no_attempt ? { scans: rs.scans, status: rs.status, status_code: rs.statusCode, captured_at: new Date().toISOString() } : null;
             await saveJourney(awb, orderName, 'rapidshyp', j, orderDate, raw, paymentMode);
+            if (orderName) await supersedeStaleJourneys(orderName, awb);   // drop a stale row from a prior aggregator
             return 'rapidshyp';
         }
     }
@@ -406,7 +426,9 @@ async function updateJourneyForOrder(orderName, awb, courier, orderDate, payment
             const ld = (dp.suborders && dp.suborders[0] && dp.suborders[0].logistic_details) || {};
             const j = parseDocpharmaJourney(dp);
             if (!j.zone && zoneHint) j.zone = zoneHint;
-            await saveJourney(awb || ld.tracking_number || orderName, orderName, 'docpharma', j, orderDate, null, paymentMode);
+            const dpAwb = awb || ld.tracking_number || orderName;
+            await saveJourney(dpAwb, orderName, 'docpharma', j, orderDate, null, paymentMode);
+            if (orderName) await supersedeStaleJourneys(orderName, dpAwb);   // drop a stale row from a prior aggregator
             return 'docpharma';
         }
     }
@@ -628,7 +650,7 @@ async function reprocessDocpharma({ concurrency = 4, onlyBadDelivered = true } =
     return { processed: rows.length, changed, changes };
 }
 
-module.exports = { classifyScan, parseScanDate, parseDpDate, parseRapidshypJourney, parseDocpharmaJourney, saveJourney, fetchRsShipment, fetchRsShipmentDetails, syncRsCharges, syncChargesBatch, backfillCharges, updateJourneyForOrder, backfillJourneys, backfillTatZone, reprocessInTransit, reprocessFinal, reprocessDocpharma };
+module.exports = { classifyScan, parseScanDate, parseDpDate, zoneFromState, parseRapidshypJourney, parseDocpharmaJourney, saveJourney, supersedeStaleJourneys, fetchRsShipment, fetchRsShipmentDetails, syncRsCharges, syncChargesBatch, backfillCharges, updateJourneyForOrder, backfillJourneys, backfillTatZone, reprocessInTransit, reprocessFinal, reprocessDocpharma };
 
 // CLI: node app/api/delivery_journey.js backfill [days] [concurrency] [olderThanDays]
 //   `backfill 90 2 30` → gentle 30–90 day window only (skips the already-done recent 30 days)
