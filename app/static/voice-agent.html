@@ -1,0 +1,1434 @@
+<!--
+================================================================================
+  THE ELEMENT — VOICE AGENT (Sarvam AI: STT + LLM + TTS)
+  Internal tool — embedded in Ecom Central under Customer Support.
+  NOTE: Sarvam API key is entered at runtime (never hard-code / commit it).
+  Supabase tables required: agent_call_logs, agent_training_examples
+  (SQL to create them is in the app: "show SQL to create it" links).
+================================================================================
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>The Element - Voice Agent</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #F7F6F3;
+    --surface: #ffffff;
+    --surface-muted: #F0EEE9;
+    --border: rgba(0,0,0,0.10);
+    --border-strong: rgba(0,0,0,0.18);
+    --text: #1a1a18;
+    --text-2: #5a5955;
+    --text-3: #8a8880;
+    --accent: #2E6B4F;
+    --accent-bg: #EAF4EE;
+    --accent-border: #A8D4B8;
+    --accent-text: #1D4D36;
+    --danger: #A32D2D;
+    --danger-bg: #FCEBEB;
+    --danger-border: #F09595;
+    --warning-bg: #FDF4E7;
+    --warning-border: #F5C67A;
+    --warning-text: #854F0B;
+    --radius: 10px;
+    --radius-sm: 6px;
+    --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.05);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 24px 16px 48px;
+  }
+
+  .container { width: 100%; max-width: 560px; }
+
+  .header { text-align: center; margin-bottom: 24px; }
+  .header .brand { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-3); margin-bottom: 4px; }
+  .header h1 { font-size: 20px; font-weight: 600; color: var(--text); }
+
+  .card { background: var(--surface); border-radius: var(--radius); border: 1px solid var(--border); box-shadow: var(--shadow); padding: 20px; margin-bottom: 12px; }
+  .card-title { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); margin-bottom: 12px; }
+
+  .call-type-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .call-type-btn { padding: 12px 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--surface); cursor: pointer; text-align: center; font-size: 12px; font-weight: 500; color: var(--text-2); transition: all 0.15s; line-height: 1.3; }
+  .call-type-btn:hover { background: var(--surface-muted); }
+  .call-type-btn.active { border: 2px solid var(--accent); background: var(--accent-bg); color: var(--accent-text); }
+  .call-type-btn .icon { font-size: 22px; display: block; margin-bottom: 5px; }
+
+  .field-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .field-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+
+  label { font-size: 11px; font-weight: 600; color: var(--text-3); letter-spacing: 0.04em; text-transform: uppercase; }
+  input, select { padding: 9px 11px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font-size: 14px; font-family: inherit; color: var(--text); background: var(--surface); outline: none; transition: border-color 0.15s; width: 100%; }
+  input:focus, select:focus { border-color: var(--accent); }
+
+  .btn-primary { width: 100%; padding: 13px; border-radius: var(--radius); background: var(--accent); border: none; color: #fff; font-size: 15px; font-weight: 600; font-family: inherit; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: opacity 0.15s; margin-top: 4px; }
+  .btn-primary:hover { opacity: 0.88; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-secondary { padding: 8px 16px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-2); font-size: 13px; font-family: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background 0.15s; }
+  .btn-secondary:hover { background: var(--surface-muted); }
+
+  .btn-danger { padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--danger-border); background: var(--danger-bg); color: var(--danger); font-size: 12px; font-family: inherit; cursor: pointer; display: flex; align-items: center; gap: 5px; transition: opacity 0.15s; }
+  .btn-danger:hover { opacity: 0.8; }
+
+  .call-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: var(--surface); border-radius: var(--radius-sm); border: 1px solid var(--border); margin-bottom: 10px; }
+  .call-meta { display: flex; align-items: center; gap: 8px; }
+  .call-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .call-dot.active { background: #3EBD6A; box-shadow: 0 0 0 3px rgba(62,189,106,0.2); }
+  .call-dot.processing { background: #EF9F27; }
+  .call-dot.ended { background: var(--text-3); }
+  .call-meta-text { font-size: 13px; font-weight: 500; color: var(--text); }
+
+  .chat-area { min-height: 260px; max-height: 340px; overflow-y: auto; padding: 8px 2px; margin-bottom: 12px; scroll-behavior: smooth; }
+  .chat-empty { display: flex; align-items: center; justify-content: center; height: 180px; color: var(--text-3); font-size: 13px; gap: 6px; }
+
+  .bubble-row { display: flex; margin-bottom: 10px; }
+  .bubble-row.agent { justify-content: flex-start; }
+  .bubble-row.user { justify-content: flex-end; }
+  .agent-avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--accent-bg); display: flex; align-items: center; justify-content: center; margin-right: 8px; flex-shrink: 0; margin-top: 2px; font-size: 13px; }
+  .bubble { max-width: 76%; padding: 9px 13px; font-size: 14px; line-height: 1.55; border: 1px solid var(--border); }
+  .bubble.agent { background: var(--surface-muted); border-radius: 4px 12px 12px 12px; color: var(--text); }
+  .bubble.user { background: var(--accent-bg); border-radius: 12px 4px 12px 12px; color: var(--accent-text); border-color: var(--accent-border); }
+  .bubble-row.info { justify-content: center; }
+  .bubble.info { background: var(--warning-bg); border-color: var(--warning-border); border-radius: 6px; color: var(--warning-text); font-size: 12px; max-width: 100%; }
+
+  .status-bar { text-align: center; font-size: 12px; color: var(--text-3); margin-bottom: 10px; min-height: 18px; }
+  .error-bar { padding: 9px 13px; background: var(--danger-bg); border: 1px solid var(--danger-border); border-radius: var(--radius-sm); color: var(--danger); font-size: 13px; margin-bottom: 10px; }
+  .warning-bar { padding: 9px 13px; background: var(--warning-bg); border: 1px solid var(--warning-border); border-radius: var(--radius-sm); color: var(--warning-text); font-size: 13px; margin-bottom: 10px; }
+
+  .mic-btn { width: 100%; padding: 15px; border-radius: var(--radius); font-size: 15px; font-weight: 600; font-family: inherit; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 9px; user-select: none; -webkit-user-select: none; transition: all 0.1s; border: 1.5px solid var(--border-strong); background: var(--surface); color: var(--text); }
+  .mic-btn.recording { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); animation: pulse 1s ease-in-out infinite; }
+  .mic-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(163,45,45,0.3); } 50% { box-shadow: 0 0 0 6px rgba(163,45,45,0); } }
+
+  .call-end-section { text-align: center; padding: 8px 0; }
+  .call-end-section p { font-size: 13px; color: var(--text-3); margin-bottom: 14px; }
+
+  .hidden { display: none !important; }
+
+  .chat-area::-webkit-scrollbar { width: 4px; }
+  .chat-area::-webkit-scrollbar-track { background: transparent; }
+  .chat-area::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <div class="brand">The Element &middot; Internal Tool</div>
+    <h1>Voice Agent</h1>
+    <div style="display:flex;gap:0;margin-top:14px;border:1px solid var(--border-strong);border-radius:var(--radius);overflow:hidden">
+      <button onclick="switchTab('agent')" id="tab-agent" style="flex:1;padding:8px;font-size:13px;font-weight:600;font-family:inherit;border:none;cursor:pointer;background:var(--accent);color:#fff">📞 Call Agent</button>
+      <button onclick="switchTab('trainer')" id="tab-trainer" style="flex:1;padding:8px;font-size:13px;font-weight:600;font-family:inherit;border:none;cursor:pointer;background:var(--surface);color:var(--text-2)">🧠 Train Agent</button>
+      <button onclick="switchTab('logs')" id="tab-logs" style="flex:1;padding:8px;font-size:13px;font-weight:600;font-family:inherit;border:none;cursor:pointer;background:var(--surface);color:var(--text-2)">📋 Call Logs</button>
+    </div>
+  </div>
+
+  <!-- AGENT TAB -->
+  <div id="tab-agent-content">
+  <div id="setup-panel">
+    <div class="card">
+      <div class="card-title">Call type</div>
+      <div class="call-type-grid">
+        <button class="call-type-btn active" data-type="cod_confirm" onclick="selectCallType(this)"><span class="icon">📦</span>COD Confirmation</button>
+        <button class="call-type-btn" data-type="rto_recovery" onclick="selectCallType(this)"><span class="icon">🔄</span>RTO Recovery</button>
+        <button class="call-type-btn" data-type="feedback_7day" onclick="selectCallType(this)"><span class="icon">⭐</span>7-Day Feedback</button>
+        <button class="call-type-btn" data-type="followup_3day" onclick="selectCallType(this)"><span class="icon">💬</span>Day-3 Check-in</button>
+        <button class="call-type-btn" data-type="upsell" onclick="selectCallType(this)"><span class="icon">🛍️</span>Upsell / Cross-sell</button>
+        <button class="call-type-btn" data-type="winback" onclick="selectCallType(this)"><span class="icon">🔁</span>Win-back</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Call settings</div>
+      <div class="field-grid-2" style="margin-bottom:12px">
+        <div class="field">
+          <label for="lang-select">Language</label>
+          <select id="lang-select">
+            <option value="hi-IN">Hindi</option>
+            <option value="ta-IN">Tamil</option>
+            <option value="kn-IN">Kannada</option>
+            <option value="ml-IN">Malayalam</option>
+            <option value="te-IN">Telugu</option>
+            <option value="bn-IN">Bengali</option>
+            <option value="mr-IN">Marathi</option>
+            <option value="gu-IN">Gujarati</option>
+            <option value="pa-IN">Punjabi</option>
+            <option value="en-IN">English</option>
+          </select>
+        </div>
+        <div class="field" style="position:relative">
+          <label for="order-id">Order ID</label>
+          <input id="order-id" type="text" autocomplete="off" placeholder="Search order id..." value=""/>
+          <div id="order-dd" class="hidden" style="position:absolute;top:100%;left:0;right:0;z-index:60;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);margin-top:2px;max-height:240px;overflow:auto;box-shadow:0 8px 24px rgba(0,0,0,0.14)"></div>
+        </div>
+      </div>
+      <div class="field-grid-3">
+        <div class="field"><label for="customer-name">Customer name</label><input id="customer-name" type="text" placeholder="auto-filled from order"/></div>
+        <div class="field"><label for="product">Product</label><input id="product" type="text" placeholder="auto-filled"/></div>
+        <div class="field"><label for="amount">Amount (₹)</label><input id="amount" type="text" placeholder="auto"/></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">API keys</div>
+      <div class="field" style="margin-bottom:12px">
+        <label for="api-key">Sarvam API key</label>
+        <input id="api-key" type="password" value="" placeholder="sk_..."/>
+      </div>
+      <div class="field-grid-2">
+        <div class="field"><label for="sb-url">Supabase URL</label><input id="sb-url" type="text" placeholder="https://xxxx.supabase.co"/></div>
+        <div class="field"><label for="sb-key">Supabase anon key</label><input id="sb-key" type="password" placeholder="eyJ..."/></div>
+      </div>
+      <div style="margin-top:8px;font-size:11px;color:var(--text-3)">Optional - enables live order lookup from your database during the call</div>
+    </div>
+
+    <div id="setup-error" class="error-bar hidden"></div>
+    <button class="btn-primary" onclick="startCallWithTraining()">📞 Start call</button>
+  </div>
+
+  <!-- CALL PANEL -->
+  <div id="call-panel" class="hidden">
+    <div class="call-header">
+      <div class="call-meta">
+        <div class="call-dot active" id="call-dot"></div>
+        <span class="call-meta-text" id="call-meta-text">COD Confirmation &middot; Hindi &middot; #TE25-36142</span>
+      </div>
+      <button class="btn-danger" onclick="endCall()" id="end-call-btn">⏹ End call</button>
+    </div>
+
+    <div class="card" style="padding: 12px 16px;">
+      <div class="chat-area" id="chat-area">
+        <div class="chat-empty" id="chat-empty"><span>⏳</span> Starting call...</div>
+      </div>
+      <div class="status-bar" id="status-bar"></div>
+      <div id="call-error" class="error-bar hidden"></div>
+      <button class="mic-btn" id="mic-btn" onmousedown="startRecording()" onmouseup="stopRecording()" ontouchstart="event.preventDefault(); startRecording();" ontouchend="event.preventDefault(); stopRecording();" disabled>🎙️ Hold to speak</button>
+      <div class="call-end-section hidden" id="call-end-section">
+        <p id="call-summary"></p>
+        <div id="save-status" style="font-size:12px;color:var(--text-3);margin-bottom:10px;min-height:16px"></div>
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+          <button class="btn-secondary" onclick="viewTranscript()">📄 View transcript</button>
+          <button class="btn-secondary" onclick="resetCall()">+ New call</button>
+        </div>
+        <div id="transcript-panel" class="hidden" style="margin-top:14px;text-align:left">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <span style="font-size:12px;font-weight:600;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em">Transcript</span>
+            <button onclick="copyTranscript()" style="font-size:11px;padding:3px 8px;border:0.5px solid var(--border-strong);border-radius:4px;background:var(--surface);cursor:pointer">Copy</button>
+          </div>
+          <div id="summary-box" class="hidden" style="background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:6px;padding:10px 12px;margin-bottom:10px;font-size:13px;line-height:1.5;color:var(--warning-text)"></div>
+          <div id="transcript-box" style="background:var(--surface-muted);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.7;white-space:pre-wrap;max-height:220px;overflow-y:auto;color:var(--text)"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </div><!-- end tab-agent-content -->
+
+  <!-- TRAINER TAB -->
+  <div id="tab-trainer-content" class="hidden">
+    <div class="card">
+      <div class="card-title">How training works</div>
+      <p style="font-size:13px;color:var(--text-2);line-height:1.6;margin:0">Review call logs from the Logs tab. For each call, mark it as a <strong>Good example</strong> (agent did well) or <strong>Bad example</strong> (agent went wrong + write what it should have said). These save to Supabase and auto-inject into the system prompt on every future call.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Add training example</div>
+      <div class="field-grid-2" style="margin-bottom:12px">
+        <div class="field">
+          <label for="train-call-type">Call type</label>
+          <select id="train-call-type">
+            <option value="cod_confirm">COD Confirmation</option>
+            <option value="rto_recovery">RTO Recovery</option>
+            <option value="feedback_7day">7-Day Feedback</option>
+            <option value="followup_3day">Day-3 Check-in</option>
+            <option value="upsell">Upsell</option>
+            <option value="winback">Win-back</option>
+            <option value="all">All call types</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="train-lang">Language</label>
+          <select id="train-lang">
+            <option value="all">All languages</option>
+            <option value="Hindi">Hindi</option>
+            <option value="Tamil">Tamil</option>
+            <option value="Telugu">Telugu</option>
+            <option value="Kannada">Kannada</option>
+            <option value="Malayalam">Malayalam</option>
+            <option value="English">English</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field" style="margin-bottom:12px">
+        <label for="train-type">Example type</label>
+        <div style="display:flex;gap:8px;margin-top:4px">
+          <button onclick="setExampleType('good')" id="ex-good" style="flex:1;padding:8px;border-radius:var(--radius-sm);border:1px solid var(--accent-border);background:var(--accent-bg);color:var(--accent-text);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer">✓ Good example</button>
+          <button onclick="setExampleType('bad')" id="ex-bad" style="flex:1;padding:8px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:var(--surface);color:var(--text-2);font-family:inherit;font-size:13px;cursor:pointer">✕ Bad example</button>
+          <button onclick="setExampleType('verbatim')" id="ex-verbatim" style="flex:1;padding:8px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:var(--surface);color:var(--text-2);font-family:inherit;font-size:13px;cursor:pointer">📝 Verbatim line</button>
+        </div>
+      </div>
+
+      <div id="good-fields">
+        <div class="field" style="margin-bottom:12px">
+          <label for="train-good-dialogue">Good dialogue (paste Agent/Customer turns)</label>
+          <textarea id="train-good-dialogue" rows="6" style="width:100%;padding:9px 11px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box;color:var(--text);background:var(--surface)" placeholder="Agent: ...&#10;Customer: ...&#10;Agent: ..."></textarea>
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label for="train-good-note">Why is this good? (optional note)</label>
+          <input id="train-good-note" type="text" placeholder="Short, warm, stayed in Hindi, confirmed cleanly"/>
+        </div>
+      </div>
+
+      <div id="bad-fields" class="hidden">
+        <div class="field" style="margin-bottom:12px">
+          <label for="train-bad-dialogue">What the agent said (bad)</label>
+          <textarea id="train-bad-dialogue" rows="4" style="width:100%;padding:9px 11px;border:1px solid var(--danger-border);border-radius:var(--radius-sm);font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box;color:var(--text);background:var(--danger-bg)" placeholder="Agent: Hello! I am calling from The Element skincare brand to confirm your Cash on Delivery order number..."></textarea>
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label for="train-bad-correction">What it should have said instead</label>
+          <textarea id="train-bad-correction" rows="4" style="width:100%;padding:9px 11px;border:1px solid var(--accent-border);border-radius:var(--radius-sm);font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box;color:var(--text);background:var(--accent-bg)" placeholder="Agent: ..."></textarea>
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label for="train-bad-reason">What went wrong</label>
+          <input id="train-bad-reason" type="text" placeholder="Switched to English, too long, read out full order details robotically"/>
+        </div>
+      </div>
+
+      <div id="verbatim-fields" class="hidden">
+        <div class="field" style="margin-bottom:12px">
+          <label for="train-verbatim-moment">When to say this</label>
+          <select id="train-verbatim-moment">
+            <optgroup label="Call flow">
+              <option value="opening">Opening greeting</option>
+              <option value="closing_positive">Closing - confirmed / positive</option>
+              <option value="closing_negative">Closing - cancelled / negative</option>
+            </optgroup>
+            <optgroup label="COD / Order">
+              <option value="confirmed">Customer confirmed COD</option>
+              <option value="cancelled">Customer wants to cancel</option>
+              <option value="hesitant">Customer is hesitant</option>
+              <option value="rto_reattempt">Customer agrees to reattempt delivery</option>
+              <option value="tracking">Customer asks for tracking / AWB</option>
+            </optgroup>
+            <optgroup label="Price objections">
+              <option value="objection_price">Too expensive / price objection</option>
+              <option value="objection_compare_price">Comparing to cheaper brand</option>
+              <option value="objection_free_shipping">Asking for free shipping or discount</option>
+            </optgroup>
+            <optgroup label="Product objections">
+              <option value="objection_trust">Will it work? / Trust objection</option>
+              <option value="objection_ingredients">Concern about ingredients / chemicals</option>
+              <option value="objection_skin_type">Not sure if it suits their skin type</option>
+              <option value="objection_side_effects">Worried about side effects</option>
+              <option value="objection_slow_results">Not seeing results yet</option>
+              <option value="objection_already_tried">Already tried other products</option>
+            </optgroup>
+            <optgroup label="Timing objections">
+              <option value="objection_busy">Customer is busy / bad time</option>
+              <option value="objection_later">Will order later / not now</option>
+              <option value="objection_travel">Travelling / not home for delivery</option>
+            </optgroup>
+            <optgroup label="Upsell / Cross-sell">
+              <option value="upsell_transition">Transitioning to product recommendation</option>
+              <option value="upsell_interest">Customer shows interest in another product</option>
+              <option value="upsell_decline">Customer declines recommendation</option>
+            </optgroup>
+            <optgroup label="Other">
+              <option value="wrong_number">Wrong number / not the right person</option>
+              <option value="callback_request">Customer asks to call back later</option>
+              <option value="custom">Custom moment (describe below)</option>
+            </optgroup>
+          </select>
+        </div>
+        <div id="custom-moment-field" class="hidden field" style="margin-bottom:12px">
+          <label for="train-verbatim-custom">Describe the moment (since you picked "Custom")</label>
+          <input id="train-verbatim-custom" type="text" placeholder="e.g. Customer says product is too oily"/>
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label for="train-verbatim-trigger">Customer trigger (what they say to cause this response)</label>
+          <input id="train-verbatim-trigger" type="text" placeholder="e.g. bahut mehnga hai / it's too expensive / price kam karo" style="margin-bottom:6px"/>
+          <div style="font-size:11px;color:var(--text-3)">Helps the agent recognise when to use this script</div>
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label for="train-verbatim-text">Agent response - exact script</label>
+          <textarea id="train-verbatim-text" rows="4" style="width:100%;padding:9px 11px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box;color:var(--text);background:var(--surface)" placeholder="Use [customer_name] as a placeholder for the customer's name"></textarea>
+          <div style="font-size:11px;color:var(--text-3);margin-top:4px">Use [customer_name] as a placeholder for the customer's name</div>
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label for="train-verbatim-followup">What to do if customer still objects (optional)</label>
+          <input id="train-verbatim-followup" type="text" placeholder="e.g. If they still say too expensive - offer Rs.50 prepaid discount"/>
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label for="train-verbatim-lang">Language of this script</label>
+          <select id="train-verbatim-lang">
+            <option value="Hindi">Hindi</option>
+            <option value="Tamil">Tamil</option>
+            <option value="Telugu">Telugu</option>
+            <option value="Kannada">Kannada</option>
+            <option value="Malayalam">Malayalam</option>
+            <option value="English">English</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="trainer-status" style="font-size:12px;color:var(--text-3);margin-bottom:10px;min-height:16px"></div>
+      <button class="btn-primary" onclick="saveTrainingExample()">Save example</button>
+    </div>
+
+    <div class="card" id="existing-examples-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div class="card-title" style="margin:0">Saved examples</div>
+        <button onclick="loadExamples()" style="font-size:11px;padding:3px 8px;border:0.5px solid var(--border-strong);border-radius:4px;background:var(--surface);cursor:pointer">Refresh</button>
+      </div>
+      <div id="examples-list" style="font-size:13px;color:var(--text-3)">Add Supabase credentials in the Call Agent tab, then save an example to see them here.</div>
+    </div>
+  </div>
+
+  <!-- LOGS TAB -->
+  <div id="tab-logs-content" class="hidden">
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div class="card-title" style="margin:0">Recent call logs</div>
+        <button onclick="loadCallLogs()" style="font-size:11px;padding:3px 8px;border:0.5px solid var(--border-strong);border-radius:4px;background:var(--surface);cursor:pointer">Load from Supabase</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:12px">Needs Supabase credentials from the Call Agent tab.</div>
+      <div id="logs-filter" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+        <select id="log-filter-type" style="font-size:12px;padding:5px 8px" onchange="filterLogs()">
+          <option value="all">All call types</option>
+          <option value="cod_confirm">COD Confirmation</option>
+          <option value="rto_recovery">RTO Recovery</option>
+          <option value="feedback_7day">7-Day Feedback</option>
+          <option value="followup_3day">Day-3 Check-in</option>
+          <option value="upsell">Upsell</option>
+          <option value="winback">Win-back</option>
+        </select>
+        <select id="log-filter-lang" style="font-size:12px;padding:5px 8px" onchange="filterLogs()">
+          <option value="all">All languages</option>
+          <option value="Hindi">Hindi</option>
+          <option value="Tamil">Tamil</option>
+          <option value="Telugu">Telugu</option>
+          <option value="Kannada">Kannada</option>
+          <option value="Malayalam">Malayalam</option>
+        </select>
+      </div>
+      <div id="logs-list" style="font-size:13px;color:var(--text-3)">Click "Load from Supabase" to fetch recent calls.</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const SARVAM_BASE = "https://api.sarvam.ai";
+
+const LANG_LABELS = {
+  "hi-IN":"Hindi","ta-IN":"Tamil","kn-IN":"Kannada","ml-IN":"Malayalam",
+  "te-IN":"Telugu","bn-IN":"Bengali","mr-IN":"Marathi","gu-IN":"Gujarati",
+  "pa-IN":"Punjabi","en-IN":"English"
+};
+
+const TTS_SUPPORTED = ["hi-IN","ta-IN","kn-IN","ml-IN","te-IN","bn-IN","mr-IN","gu-IN","pa-IN","en-IN"];
+
+const PRODUCT_KNOWLEDGE = `
+PRODUCT KNOWLEDGE - The Element:
+Philosophy: Ayurveda + modern science. "Skin from within" - topical actives combined with Ayurvedic ingestibles. Made in India, no parabens, no sulphates, cruelty free. Works for Indian skin tones and Indian climate.
+
+Hero products:
+- Skin Drops (30ml, Rs.1299): Brightening face oil. Saffron, Kumkumadi, Vitamin C, Rosehip. Reduces dark spots, evens skin tone, adds glow. 3-4 drops at night. Visible results in 3-4 weeks.
+- Brightening Serum / NA Serum (30ml, Rs.999): Niacinamide + Ayurvedic herbs. Reduces pigmentation, controls oil, minimises pores. AM + PM after cleansing.
+- Acne Serum / SA Serum (30ml, Rs.899): 2% Salicylic Acid + Tea Tree + Neem. Targets active acne, prevents breakouts. PM only on affected areas.
+- Sunscreen SPF50 (50g, Rs.799): Lightweight, no white cast. Zinc Oxide + Aloe Vera. Works on all Indian skin tones.
+
+Complementary pairs:
+- Skin Drops + Brightening Serum = full brightening routine
+- SA Serum + Sunscreen = complete acne routine
+- Any product + Sunscreen = always recommend sunscreen as an add-on
+
+If customer asks about ingredients, how to use, expected results, or how products work together - answer naturally from the above. Keep it to 1-2 sentences on a call. If customer is hesitant, use product benefit to reinforce value before offering any discount.
+`;
+
+const SYSTEM_PROMPTS = {
+  cod_confirm: (lang, o) => `You are a friendly, professional call agent from The Element, an Ayurvedic skincare brand based in India. You are making an outbound call to confirm a Cash on Delivery (COD) order.
+
+Order details:
+- Order ID: #${o.orderId}
+- Customer name: ${o.customerName}
+- Product: ${o.product}
+- Amount: Rs.${o.amount}
+
+${PRODUCT_KNOWLEDGE}
+
+Your objectives in order:
+1. Greet the customer warmly by name
+2. Briefly confirm the order details
+3. Ask them to confirm they will be available to receive the COD delivery
+4. If they confirm - thank them and say the order will arrive in 3-5 days
+5. If they ask about the product - share 1-2 key benefits naturally, don't oversell
+6. If they hesitate or want to cancel - first mention 1 key product benefit, then offer Rs.50 prepaid discount as a nudge
+
+Rules:
+- VERY SHORT responses - max 2 sentences per turn. This is a phone call.
+- Respond ONLY in ${lang}. Never switch to another language.
+- Be warm and natural, like a real human agent. Not robotic.
+- Do not mention you are an AI.`,
+
+  rto_recovery: (lang, o) => `You are a friendly, professional call agent from The Element, an Ayurvedic skincare brand. You are calling a customer whose order was returned to origin (RTO) because delivery could not be completed.
+
+Order details:
+- Order ID: #${o.orderId}
+- Customer name: ${o.customerName}
+- Product: ${o.product}
+- Amount: Rs.${o.amount}
+
+${PRODUCT_KNOWLEDGE}
+
+Your objectives:
+1. Greet the customer warmly by name
+2. Let them know their order could not be delivered and was returned
+3. Ask if they still want the product and why delivery failed
+4. Offer to reattempt with a correct address or preferred time slot
+5. If they ask about the product - share 1-2 relevant benefits to reinforce their interest
+6. If they want to cancel - mention one specific benefit of the product they ordered, then close gracefully without pushing
+
+Rules:
+- VERY SHORT responses - max 2 sentences per turn. This is a phone call.
+- Respond ONLY in ${lang}. Never switch languages.
+- Warm and non-pushy tone. Never guilt the customer.
+- Do not mention you are an AI.`,
+
+  feedback_7day: (lang, o) => `You are a friendly customer care agent from The Element, an Ayurvedic skincare brand. You are calling a customer 7 days after their order was delivered to collect feedback.
+
+Order details:
+- Order ID: #${o.orderId}
+- Customer name: ${o.customerName}
+- Product: ${o.product}
+
+${PRODUCT_KNOWLEDGE}
+
+Your objectives:
+1. Greet the customer by name and introduce yourself
+2. Ask how they are finding the product after 7 days of use
+3. Collect a rating from 1-5
+4. Ask one specific feedback question relevant to the product (glow, skin feel, acne reduction, texture, etc.)
+5. If happy - suggest one complementary product from the knowledge base that pairs well with what they ordered
+6. If seeing slow results - reassure with expected timeline (3-4 weeks for visible change) and tip on correct usage
+7. If unhappy - empathize and offer to connect them with The Element skincare expert team
+
+Rules:
+- VERY SHORT responses - max 2 sentences per turn.
+- Respond ONLY in ${lang}. Never switch languages.
+- Curious and genuinely interested tone, not scripted.
+- Do not mention you are an AI.`,
+
+  followup_3day: (lang, o) => `You are a warm customer care agent from The Element, an Ayurvedic skincare brand. The customer received their order 3 days ago and you are calling for an early check-in.
+
+Order details:
+- Order ID: #${o.orderId}
+- Customer name: ${o.customerName}
+- Product: ${o.product}
+
+${PRODUCT_KNOWLEDGE}
+
+Your objectives:
+1. Greet them warmly by name and mention you are checking in on their new product
+2. Ask if they have tried it yet and what their first impression is
+3. Share the correct usage tip for the product (timing, quantity, how to apply)
+4. Set the right expectation - visible results take 3-4 weeks with daily use
+5. Ask if they have any questions about usage or ingredients
+6. Close warmly and wish them good results
+
+Rules:
+- VERY SHORT responses - max 2 sentences per turn.
+- Respond ONLY in ${lang}. Never switch languages.
+- Encouraging and friendly tone. Like a knowledgeable friend, not a sales agent.
+- Do not mention you are an AI.`,
+
+  upsell: (lang, o) => `You are a knowledgeable beauty advisor from The Element, an Ayurvedic skincare brand. The customer is a happy existing customer and you are calling to share a relevant product recommendation.
+
+Customer details:
+- Customer name: ${o.customerName}
+- Last product purchased: ${o.product}
+- Order ID: #${o.orderId}
+
+${PRODUCT_KNOWLEDGE}
+
+Your objectives:
+1. Greet them warmly and reference their previous purchase positively
+2. Ask briefly how they are finding the product - 1 sentence, don't linger
+3. Transition naturally: say you wanted to share something that works well with what they have
+4. Recommend the right complementary product based on what they bought:
+   - Skin Drops bought - recommend Brightening Serum (boosts brightening results)
+   - SA Serum bought - recommend Sunscreen (essential with any acne routine)
+   - Brightening Serum bought - recommend Skin Drops (completes the stack)
+   - Any product - Sunscreen is always a relevant add-on
+5. Mention the price and one key benefit only
+6. If interested - tell them to order on theelement.skin or you can arrange it
+7. If not interested - thank them and close warmly
+
+Rules:
+- VERY SHORT responses - max 2 sentences per turn.
+- Respond ONLY in ${lang}. Never switch languages.
+- Soft recommendation, never pushy. Let curiosity do the work.
+- Do not mention you are an AI.`,
+
+  winback: (lang, o) => `You are a caring customer success agent from The Element, an Ayurvedic skincare brand. This customer bought from you before but has not purchased in over 60 days. You are calling to reconnect.
+
+Customer details:
+- Customer name: ${o.customerName}
+- Last product purchased: ${o.product}
+- Order ID: #${o.orderId}
+
+${PRODUCT_KNOWLEDGE}
+
+Your objectives:
+1. Greet them warmly and mention they are a valued previous customer
+2. Ask how their skin has been doing and if they are still using the product
+3. If they stopped - ask why gently (ran out? no results? switched brands?)
+4. Based on their response:
+   - Ran out - remind them consistency is key for results, encourage reorder
+   - No results - ask about their routine, suggest correct usage, offer help
+   - Switched brands - acknowledge it warmly, briefly say what makes The Element different (Ayurvedic + science, Indian skin formulation, no harsh chemicals)
+   - Personal reason - empathize and offer to stay in touch
+5. Offer a 10% comeback discount: code BACK10 on theelement.skin
+6. Close warmly regardless of outcome - leave them feeling good about the brand
+
+Rules:
+- VERY SHORT responses - max 2 sentences per turn.
+- Respond ONLY in ${lang}. Never switch languages.
+- Warm and genuinely caring. This is a relationship call, not a sales call.
+- Do not mention you are an AI.`,
+};
+
+// State
+let selectedCallType = "cod_confirm";
+let chatHistory = [];
+let mediaRecorder = null;
+let audioChunks = [];
+let isRecording = false;
+let turnCount = 0;
+let currentApiKey = "";
+let supabaseUrl = "";
+let supabaseKey = "";
+let liveOrderData = null;
+
+const TRACKING_KEYWORDS = [
+  "tracking", "track", "awb", "courier", "shipment", "where is", "where's", "delivery status",
+  "when will", "dispatch", "shipped", "out for delivery"
+];
+
+function hasTrackingIntent(text) {
+  const lower = text.toLowerCase();
+  return TRACKING_KEYWORDS.some(kw => lower.includes(kw.toLowerCase()));
+}
+
+async function fetchOrderFromSupabase(orderId) {
+  // Order lookup is PROXIED through the ecom-central backend (service key) so real orders resolve without
+  // opening anon read on the RLS-locked orders/shipment tables. Returns { order, shipment } as before.
+  try {
+    const tok = localStorage.getItem('authToken');
+    const r = await fetch('/api/voice-order-lookup?orderId=' + encodeURIComponent(String(orderId).replace(/^#/, '').trim()),
+      tok ? { headers: { 'Authorization': 'Bearer ' + tok } } : {});
+    if (!r.ok) { addBubble("system-info", "Order lookup failed (" + r.status + ") — need to be logged in."); return null; }
+    const d = await r.json();
+    if (!d || !d.order) { addBubble("system-info", "Order not found: " + orderId); return null; }
+    return { order: d.order, shipment: d.shipment || null };
+  } catch(e) {
+    addBubble("system-info", "Order lookup error: " + e.message);
+    return null;
+  }
+}
+
+function buildOrderContext(data) {
+  if (!data) return "";
+  const { order, shipment } = data;
+  let ctx = "\n\nLIVE ORDER DATA FROM DATABASE:\n";
+  ctx += `Order: ${order.name}\n`;
+  ctx += `Amount: Rs.${order.total_price}\n`;
+  ctx += `Payment status: ${order.financial_status || "unknown"}\n`;
+  ctx += `Fulfillment: ${order.fulfillment_status || "unfulfilled"}\n`;
+  const awb = order._awb || order.awb_number || order.awb || "";
+  if (awb) ctx += `AWB number: ${awb}\n`;
+  const courier = order.courier_name || order.courier || order.shipping_carrier || "";
+  if (courier) ctx += `Courier: ${courier}\n`;
+  if (order.tracking_status) ctx += `Tracking status: ${order.tracking_status}\n`;
+  if (order.last_tracked_at) ctx += `Last update: ${new Date(order.last_tracked_at).toLocaleDateString("en-IN")}\n`;
+  if (shipment) {
+    if (shipment.dispatched_at) ctx += `Dispatched on: ${new Date(shipment.dispatched_at).toLocaleDateString("en-IN")}\n`;
+    if (shipment.attempts) ctx += `Delivery attempts: ${shipment.attempts}\n`;
+    if (shipment.ndr_count && shipment.ndr_count > 0) ctx += `Failed attempts (NDR): ${shipment.ndr_count}\n`;
+    if (shipment.ndr_reasons) ctx += `Reason for non-delivery: ${shipment.ndr_reasons}\n`;
+    if (shipment.outcome) ctx += `Current outcome: ${shipment.outcome}\n`;
+  }
+  ctx += "\nIf customer asks for AWB or tracking number - read it out clearly digit by digit. If asked for a tracking link, say they can track on the courier website using their AWB number.";
+  return ctx;
+}
+
+function selectCallType(btn) {
+  document.querySelectorAll(".call-type-btn").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  selectedCallType = btn.dataset.type;
+}
+
+function getOrderInfo() {
+  return {
+    orderId: document.getElementById("order-id").value.trim(),
+    customerName: document.getElementById("customer-name").value.trim(),
+    product: document.getElementById("product").value.trim(),
+    amount: document.getElementById("amount").value.trim(),
+  };
+}
+
+function getLangCode() { return document.getElementById("lang-select").value; }
+function getLangLabel() { return LANG_LABELS[getLangCode()]; }
+
+async function callSTT(blob) {
+  const fd = new FormData();
+  fd.append("file", blob, "audio.webm");
+  fd.append("model", "saaras:v3");
+  fd.append("mode", "transcribe");
+  fd.append("language_code", getLangCode());
+  const r = await fetch(`${SARVAM_BASE}/speech-to-text`, {
+    method: "POST",
+    headers: { "api-subscription-key": currentApiKey },
+    body: fd
+  });
+  if (!r.ok) { const t = await r.text(); throw new Error(`STT ${r.status}: ${t.slice(0, 200)}`); }
+  const d = await r.json();
+  return d.transcript || "";
+}
+
+async function callChat(history, systemPrompt) {
+  const r = await fetch(`${SARVAM_BASE}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "api-subscription-key": currentApiKey },
+    body: JSON.stringify({
+      model: "sarvam-30b",
+      messages: [{ role: "system", content: systemPrompt }, ...history],
+      max_tokens: 300,
+      temperature: 0.75,
+      reasoning_effort: null
+    })
+  });
+  if (!r.ok) { const t = await r.text(); throw new Error(`Chat ${r.status}: ${t.slice(0, 200)}`); }
+  const d = await r.json();
+  return d.choices[0].message.content.trim();
+}
+
+async function callTTS(text) {
+  const langCode = getLangCode();
+  const ttsLang = TTS_SUPPORTED.includes(langCode) ? langCode : "hi-IN";
+  const r = await fetch(`${SARVAM_BASE}/text-to-speech`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "api-subscription-key": currentApiKey },
+    body: JSON.stringify({
+      inputs: [text],
+      target_language_code: ttsLang,
+      speaker: "priya",
+      model: "bulbul:v3",
+      speech_sample_rate: 24000,
+      enable_preprocessing: true,
+      output_audio_codec: "wav"
+    })
+  });
+  if (!r.ok) { const t = await r.text(); throw new Error(`TTS ${r.status}: ${t.slice(0, 200)}`); }
+  const d = await r.json();
+  return d.audios?.[0] || null;
+}
+
+function playAudio(b64) {
+  return new Promise((resolve, reject) => {
+    const audio = new Audio("data:audio/wav;base64," + b64);
+    audio.onended = resolve;
+    audio.onerror = reject;
+    audio.play().catch(reject);
+  });
+}
+
+function addBubble(role, text) {
+  const area = document.getElementById("chat-area");
+  const empty = document.getElementById("chat-empty");
+  if (empty) empty.remove();
+  const row = document.createElement("div");
+  if (role === "system-info") {
+    row.className = "bubble-row info";
+    const b = document.createElement("div");
+    b.className = "bubble info";
+    b.textContent = text;
+    row.appendChild(b);
+    area.appendChild(row);
+    area.scrollTop = area.scrollHeight;
+    return;
+  }
+  row.className = `bubble-row ${role === "assistant" ? "agent" : "user"}`;
+  if (role === "assistant") {
+    const av = document.createElement("div");
+    av.className = "agent-avatar";
+    av.textContent = "🎧";
+    row.appendChild(av);
+  }
+  const b = document.createElement("div");
+  b.className = `bubble ${role === "assistant" ? "agent" : "user"}`;
+  b.textContent = text;
+  row.appendChild(b);
+  area.appendChild(row);
+  area.scrollTop = area.scrollHeight;
+}
+
+function setStatus(text) { document.getElementById("status-bar").textContent = text; }
+function setCallError(text) { const el = document.getElementById("call-error"); if (text) { el.textContent = text; el.classList.remove("hidden"); } else el.classList.add("hidden"); }
+function setMicEnabled(enabled) { document.getElementById("mic-btn").disabled = !enabled; }
+function setDot(state) { document.getElementById("call-dot").className = "call-dot " + state; }
+
+async function startCall() {
+  const apiKey = document.getElementById("api-key").value.trim();
+  if (!apiKey) {
+    const el = document.getElementById("setup-error");
+    el.textContent = "Enter your Sarvam API key above.";
+    el.classList.remove("hidden");
+    return;
+  }
+  currentApiKey = apiKey;
+  supabaseUrl = document.getElementById("sb-url").value.replace(/[^\x20-\x7E]/g, "").trim();
+  supabaseKey = document.getElementById("sb-key").value.replace(/[^\x20-\x7E]/g, "").trim();
+
+  const order = getOrderInfo();
+  const langLabel = getLangLabel();
+  const callTypeLabel = {
+    cod_confirm: "COD Confirmation", rto_recovery: "RTO Recovery", feedback_7day: "7-Day Feedback",
+    followup_3day: "Day-3 Check-in", upsell: "Upsell", winback: "Win-back"
+  }[selectedCallType] || "Call";
+
+  chatHistory = []; turnCount = 0; liveOrderData = null;
+
+  document.getElementById("setup-panel").classList.add("hidden");
+  document.getElementById("call-panel").classList.remove("hidden");
+  document.getElementById("call-meta-text").textContent = `${callTypeLabel} · ${langLabel} · #${order.orderId}`;
+  document.getElementById("call-end-section").classList.add("hidden");
+  document.getElementById("mic-btn").classList.remove("hidden");
+  setDot("active");
+
+  setStatus("Fetching order from database...");
+  liveOrderData = await fetchOrderFromSupabase(order.orderId);
+  if (liveOrderData && liveOrderData.order) {
+    const lo = liveOrderData.order;
+    // fill the form + the in-memory order object (so the AI prompt uses the real customer/product/amount)
+    if (lo._customer) { order.customerName = lo._customer; document.getElementById("customer-name").value = lo._customer; }
+    if (lo._product)  { order.product = lo._product; document.getElementById("product").value = lo._product; }
+    if (lo.total_price != null) { order.amount = lo.total_price; document.getElementById("amount").value = lo.total_price; }
+    addBubble("system-info", "Live order data loaded" + (lo._awb ? " · AWB: " + lo._awb : " · No AWB yet"));
+  }
+
+  setStatus("Agent is opening the call...");
+  const systemPrompt = SYSTEM_PROMPTS[selectedCallType](langLabel, order) + buildOrderContext(liveOrderData);
+  const openingInstruction = `Open the call now. Greet ${order.customerName} warmly in ${langLabel} only. Keep it to 1-2 short sentences.`;
+
+  try {
+    const agentText = await callChat([{ role: "user", content: openingInstruction }], systemPrompt);
+    addBubble("assistant", agentText);
+    chatHistory.push({ role: "assistant", content: agentText });
+    turnCount++;
+    setStatus("Speaking...");
+    const audio = await callTTS(agentText);
+    if (audio) await playAudio(audio);
+    setStatus("Hold the button below to respond");
+    setMicEnabled(true);
+  } catch (e) {
+    setCallError("Failed to start: " + e.message);
+    setStatus("");
+    setDot("ended");
+  }
+}
+
+async function startRecording() {
+  if (isRecording) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+    audioChunks = [];
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.start(100);
+    isRecording = true;
+    const btn = document.getElementById("mic-btn");
+    btn.textContent = "🔴 Release to send";
+    btn.classList.add("recording");
+    setStatus("Listening...");
+    setCallError(null);
+  } catch (e) {
+    setCallError("Mic access denied - allow microphone in your browser and try again.");
+  }
+}
+
+async function stopRecording() {
+  if (!isRecording || !mediaRecorder) return;
+  isRecording = false;
+  const btn = document.getElementById("mic-btn");
+  btn.textContent = "🎙️ Hold to speak";
+  btn.classList.remove("recording");
+  setMicEnabled(false);
+  setDot("processing");
+  setStatus("Transcribing...");
+  mediaRecorder.stop();
+  mediaRecorder.stream.getTracks().forEach(t => t.stop());
+  await new Promise(r => mediaRecorder.onstop = r);
+
+  const order = getOrderInfo();
+  const langLabel = getLangLabel();
+  const systemPrompt = SYSTEM_PROMPTS[selectedCallType](langLabel, order);
+
+  try {
+    const blob = new Blob(audioChunks, { type: "audio/webm" });
+    const transcript = await callSTT(blob);
+    if (!transcript || !transcript.trim()) {
+      setStatus("Didn't catch that - try again");
+      setMicEnabled(true);
+      setDot("active");
+      return;
+    }
+    addBubble("user", transcript);
+
+    let enrichedTranscript = transcript;
+    if (hasTrackingIntent(transcript) && liveOrderData) {
+      const orderCtx = buildOrderContext(liveOrderData);
+      enrichedTranscript = transcript + "\n\n[SYSTEM: Customer is asking about tracking/delivery status." + orderCtx + "]";
+    } else if (hasTrackingIntent(transcript) && !liveOrderData) {
+      setStatus("Looking up order...");
+      liveOrderData = await fetchOrderFromSupabase(order.orderId);
+      if (liveOrderData) {
+        const orderCtx = buildOrderContext(liveOrderData);
+        enrichedTranscript = transcript + "\n\n[SYSTEM: Customer is asking about tracking/delivery status." + orderCtx + "]";
+      }
+    }
+
+    chatHistory.push({ role: "user", content: enrichedTranscript });
+    turnCount++;
+    setStatus("Agent thinking...");
+    const agentReply = await callChat(chatHistory, systemPrompt);
+    addBubble("assistant", agentReply);
+    chatHistory.push({ role: "assistant", content: agentReply });
+    turnCount++;
+    setStatus("Speaking...");
+    setDot("processing");
+    const audio = await callTTS(agentReply);
+    if (audio) await playAudio(audio);
+    setStatus("Hold the button to respond");
+    setDot("active");
+    setMicEnabled(true);
+  } catch (e) {
+    setCallError(e.message);
+    setStatus("");
+    setMicEnabled(true);
+    setDot("active");
+  }
+}
+
+async function endCall() {
+  if (mediaRecorder) { try { mediaRecorder.stop(); mediaRecorder.stream?.getTracks().forEach(t => t.stop()); } catch {} }
+  isRecording = false;
+  setDot("ended");
+  setStatus("");
+  setMicEnabled(false);
+  document.getElementById("end-call-btn").classList.add("hidden");
+  document.getElementById("mic-btn").classList.add("hidden");
+  document.getElementById("call-end-section").classList.remove("hidden");
+  document.getElementById("transcript-panel").classList.add("hidden");
+  const exchanges = Math.ceil(turnCount / 2);
+  const order = getOrderInfo();
+  document.getElementById("call-summary").textContent = `${exchanges} exchanges · Call ended · #${order.orderId}`;
+  await saveCallLog();
+}
+
+function buildTranscriptText() {
+  const msgs = chatHistory.filter(m => m.role === "user" || m.role === "assistant");
+  return msgs.map(m => `${m.role === "assistant" ? "Agent" : "Customer"}: ${m.content}`).join("\n\n");
+}
+
+async function generateSummary(transcriptText) {
+  if (!transcriptText || !currentApiKey) return null;
+  try {
+    const r = await fetch(`${SARVAM_BASE}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "api-subscription-key": currentApiKey },
+      body: JSON.stringify({
+        model: "sarvam-30b",
+        messages: [
+          { role: "system", content: "You summarize customer call transcripts for a skincare brand. Be concise. Output in English regardless of the language of the call." },
+          { role: "user", content: `Summarize this call in 3-4 bullet points. Include: (1) call outcome, (2) customer sentiment, (3) any issues raised, (4) next action if any.\n\n${transcriptText}` }
+        ],
+        max_tokens: 200,
+        temperature: 0.3,
+        reasoning_effort: null
+      })
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d.choices[0].message.content.trim();
+  } catch { return null; }
+}
+
+async function saveCallLog() {
+  const order = getOrderInfo();
+  const transcript = buildTranscriptText();
+  if (!transcript) return;
+  const saveEl = document.getElementById("save-status");
+  saveEl.textContent = "Generating summary...";
+  const summary = await generateSummary(transcript);
+  window._lastCallLog = {
+    orderId: order.orderId, customerName: order.customerName, callType: selectedCallType,
+    language: getLangLabel(), transcript, summary, calledAt: new Date().toISOString(), exchanges: Math.ceil(turnCount / 2)
+  };
+  if (supabaseUrl && supabaseKey) {
+    saveEl.textContent = "Saving to Supabase...";
+    try {
+      const url = supabaseUrl.replace(/\/$/, "");
+      const cleanKey = supabaseKey.replace(/[^\x20-\x7E]/g, "").trim();
+      const r = await fetch(`${url}/rest/v1/agent_call_logs`, {
+        method: "POST",
+        headers: { "apikey": cleanKey, "Authorization": "Bearer " + cleanKey, "Content-Type": "application/json", "Prefer": "return=minimal" },
+        body: JSON.stringify({
+          order_id: order.orderId, customer_name: order.customerName, call_type: selectedCallType,
+          language: getLangLabel(), transcript, summary, exchanges: Math.ceil(turnCount / 2), called_at: new Date().toISOString()
+        })
+      });
+      if (r.ok) { saveEl.textContent = "Saved to Supabase"; }
+      else {
+        const err = await r.text();
+        if (r.status === 404 || err.includes("does not exist")) {
+          saveEl.innerHTML = 'Table missing - <a href="#" onclick="showCreateSQL();return false" style="color:var(--accent-text)">show SQL to create it</a>';
+        } else { saveEl.textContent = "Save failed: " + r.status; }
+      }
+    } catch(e) { saveEl.textContent = "Save error: " + e.message; }
+  } else {
+    saveEl.textContent = "Transcript saved locally (add Supabase credentials to persist)";
+  }
+}
+
+function showCreateSQL() {
+  alert(`Run this in your Supabase SQL editor to create the call logs table:
+
+CREATE TABLE agent_call_logs (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  order_id text,
+  customer_name text,
+  call_type text,
+  language text,
+  transcript text,
+  summary text,
+  exchanges int,
+  called_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE agent_call_logs ENABLE ROW LEVEL SECURITY;`);
+}
+
+function viewTranscript() {
+  const panel = document.getElementById("transcript-panel");
+  const log = window._lastCallLog;
+  if (!log) return;
+  panel.classList.toggle("hidden");
+  document.getElementById("transcript-box").textContent = log.transcript;
+  const sBox = document.getElementById("summary-box");
+  if (log.summary) { sBox.textContent = "Summary\n" + log.summary; sBox.classList.remove("hidden"); }
+  else { sBox.classList.add("hidden"); }
+}
+
+function copyTranscript() {
+  const log = window._lastCallLog;
+  if (!log) return;
+  const text = (log.summary ? "SUMMARY\n" + log.summary + "\n\n" : "") + "TRANSCRIPT\n" + log.transcript;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = event.target;
+    btn.textContent = "Copied!";
+    setTimeout(() => btn.textContent = "Copy", 1500);
+  });
+}
+
+function resetCall() {
+  document.getElementById("call-panel").classList.add("hidden");
+  document.getElementById("setup-panel").classList.remove("hidden");
+  document.getElementById("end-call-btn").classList.remove("hidden");
+  document.getElementById("mic-btn").classList.remove("hidden");
+  document.getElementById("chat-area").innerHTML = `<div class="chat-empty" id="chat-empty"><span>⏳</span> Starting call...</div>`;
+  setCallError(null);
+  document.getElementById("setup-error").classList.add("hidden");
+  document.getElementById("save-status").textContent = "";
+  document.getElementById("transcript-panel").classList.add("hidden");
+  chatHistory = []; turnCount = 0; liveOrderData = null; window._lastCallLog = null;
+}
+
+function switchTab(tab) {
+  ['agent','trainer','logs'].forEach(t => {
+    document.getElementById('tab-' + t + '-content').classList.toggle('hidden', t !== tab);
+    const btn = document.getElementById('tab-' + t);
+    if (t === tab) { btn.style.background = 'var(--accent)'; btn.style.color = '#fff'; }
+    else { btn.style.background = 'var(--surface)'; btn.style.color = 'var(--text-2)'; }
+  });
+  if (tab === 'logs') loadCallLogs();
+  if (tab === 'trainer') loadExamples();
+}
+
+let currentExampleType = 'good';
+
+document.getElementById('train-verbatim-moment').addEventListener('change', function() {
+  const customField = document.getElementById('custom-moment-field');
+  if (customField) customField.classList.toggle('hidden', this.value !== 'custom');
+});
+
+function setExampleType(type) {
+  currentExampleType = type;
+  ['good','bad','verbatim'].forEach(t => {
+    document.getElementById(t + '-fields').classList.toggle('hidden', t !== type);
+    const btn = document.getElementById('ex-' + t);
+    if (t === type) { btn.style.background = 'var(--accent-bg)'; btn.style.border = '1px solid var(--accent-border)'; btn.style.color = 'var(--accent-text)'; btn.style.fontWeight = '600'; }
+    else { btn.style.background = 'var(--surface)'; btn.style.border = '1px solid var(--border-strong)'; btn.style.color = 'var(--text-2)'; btn.style.fontWeight = '400'; }
+  });
+}
+
+async function saveTrainingExample() {
+  const statusEl = document.getElementById('trainer-status');
+  const callType = document.getElementById('train-call-type').value;
+  const lang = document.getElementById('train-lang').value;
+  let record = { call_type: callType, language: lang, example_type: currentExampleType, created_at: new Date().toISOString() };
+
+  if (currentExampleType === 'good') {
+    const dialogue = document.getElementById('train-good-dialogue').value.trim();
+    if (!dialogue) { statusEl.textContent = 'Paste a dialogue first.'; return; }
+    record.good_dialogue = dialogue;
+    record.note = document.getElementById('train-good-note').value.trim();
+  } else if (currentExampleType === 'bad') {
+    const bad = document.getElementById('train-bad-dialogue').value.trim();
+    const correction = document.getElementById('train-bad-correction').value.trim();
+    if (!bad || !correction) { statusEl.textContent = 'Fill in both fields.'; return; }
+    record.bad_dialogue = bad;
+    record.correction = correction;
+    record.reason = document.getElementById('train-bad-reason').value.trim();
+  } else {
+    const text = document.getElementById('train-verbatim-text').value.trim();
+    if (!text) { statusEl.textContent = 'Enter the verbatim script.'; return; }
+    record.verbatim_text = text;
+    const moment = document.getElementById('train-verbatim-moment').value;
+    const customMoment = document.getElementById('train-verbatim-custom')?.value?.trim();
+    record.verbatim_moment = moment === 'custom' && customMoment ? customMoment : moment;
+    record.verbatim_lang = document.getElementById('train-verbatim-lang').value;
+    record.verbatim_trigger = document.getElementById('train-verbatim-trigger')?.value?.trim() || '';
+    record.verbatim_followup = document.getElementById('train-verbatim-followup')?.value?.trim() || '';
+  }
+
+  if (!window._trainingExamples) window._trainingExamples = [];
+  window._trainingExamples.push(record);
+  statusEl.textContent = 'Saved locally.';
+
+  if (supabaseUrl && supabaseKey) {
+    statusEl.textContent = 'Saving to Supabase...';
+    try {
+      const cleanKey = supabaseKey.replace(/[^ -~]/g, '').trim();
+      const url = supabaseUrl.replace(/\/$/, '');
+      const r = await fetch(`${url}/rest/v1/agent_training_examples`, {
+        method: 'POST',
+        headers: { 'apikey': cleanKey, 'Authorization': 'Bearer ' + cleanKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+        body: JSON.stringify(record)
+      });
+      if (r.ok) { statusEl.textContent = 'Saved to Supabase'; clearTrainingForm(); loadExamples(); }
+      else {
+        const err = await r.text();
+        if (r.status === 404 || err.includes('does not exist')) {
+          statusEl.innerHTML = 'Table missing - <a href="#" onclick="showTrainingSQL();return false" style="color:var(--accent-text)">show SQL to create it</a>';
+        } else { statusEl.textContent = 'Save failed: ' + r.status; }
+      }
+    } catch(e) { statusEl.textContent = 'Error: ' + e.message; }
+  }
+}
+
+function clearTrainingForm() {
+  ['train-good-dialogue','train-good-note','train-bad-dialogue','train-bad-correction','train-bad-reason','train-verbatim-text','train-verbatim-trigger','train-verbatim-followup','train-verbatim-custom'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+}
+
+function showTrainingSQL() {
+  alert(`Run this in your Supabase SQL editor:
+
+CREATE TABLE agent_training_examples (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  call_type text,
+  language text,
+  example_type text,
+  good_dialogue text,
+  note text,
+  bad_dialogue text,
+  correction text,
+  reason text,
+  verbatim_text text,
+  verbatim_moment text,
+  verbatim_trigger text,
+  verbatim_followup text,
+  verbatim_lang text,
+  active boolean DEFAULT true,
+  created_at timestamptz DEFAULT now()
+);`);
+}
+
+async function loadExamples() {
+  const el = document.getElementById('examples-list');
+  if (!supabaseUrl || !supabaseKey) { el.textContent = 'Enter Supabase credentials in the Call Agent tab first.'; return; }
+  el.textContent = 'Loading...';
+  try {
+    const cleanKey = supabaseKey.replace(/[^ -~]/g, '').trim();
+    const url = supabaseUrl.replace(/\/$/, '');
+    const r = await fetch(`${url}/rest/v1/agent_training_examples?active=eq.true&order=created_at.desc&limit=50`, { headers: { 'apikey': cleanKey, 'Authorization': 'Bearer ' + cleanKey } });
+    if (!r.ok) { el.textContent = 'Failed to load: ' + r.status; return; }
+    const examples = await r.json();
+    if (!examples.length) { el.textContent = 'No examples yet. Add some above.'; return; }
+    renderExamples(examples);
+  } catch(e) { el.textContent = 'Error: ' + e.message; }
+}
+
+function renderExamples(examples) {
+  const el = document.getElementById('examples-list');
+  const grouped = {};
+  examples.forEach(ex => { const key = ex.call_type + '|' + ex.language; if (!grouped[key]) grouped[key] = []; grouped[key].push(ex); });
+  el.innerHTML = '';
+  Object.entries(grouped).forEach(([key, exs]) => {
+    const [ct, lang] = key.split('|');
+    const section = document.createElement('div');
+    section.style.marginBottom = '16px';
+    const heading = document.createElement('div');
+    heading.style.cssText = 'font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-3);margin-bottom:8px';
+    heading.textContent = ct.replace(/_/g,' ') + ' · ' + lang;
+    section.appendChild(heading);
+    exs.forEach(ex => {
+      const card = document.createElement('div');
+      card.style.cssText = 'padding:10px 12px;border-radius:6px;margin-bottom:6px;font-size:12px;line-height:1.5;position:relative';
+      if (ex.example_type === 'good') {
+        card.style.background = 'var(--accent-bg)'; card.style.border = '1px solid var(--accent-border)';
+        card.innerHTML = '<strong style="color:var(--accent-text)">✓ Good</strong>' + (ex.note ? ' <span style="color:var(--text-3)">- ' + escHtml(ex.note) + '</span>' : '') + '<pre style="margin:6px 0 0;white-space:pre-wrap;font-family:inherit;font-size:12px;color:var(--text)">' + escHtml(ex.good_dialogue || '') + '</pre>';
+      } else if (ex.example_type === 'bad') {
+        card.style.background = 'var(--danger-bg)'; card.style.border = '1px solid var(--danger-border)';
+        card.innerHTML = '<strong style="color:var(--danger)">✕ Bad</strong>' + (ex.reason ? ' <span style="color:var(--text-3)">- ' + escHtml(ex.reason) + '</span>' : '') + '<pre style="margin:6px 0 4px;white-space:pre-wrap;font-family:inherit;font-size:12px;color:var(--danger);text-decoration:line-through">' + escHtml(ex.bad_dialogue || '') + '</pre>' + '<pre style="margin:0;white-space:pre-wrap;font-family:inherit;font-size:12px;color:var(--accent-text)">' + escHtml(ex.correction || '') + '</pre>';
+      } else {
+        card.style.background = 'var(--warning-bg)'; card.style.border = '1px solid var(--warning-border)';
+        card.innerHTML = '<strong style="color:var(--warning-text)">📝 ' + escHtml(ex.verbatim_moment || '') + ' (' + escHtml(ex.verbatim_lang || '') + ')</strong>' + (ex.verbatim_trigger ? '<div style="font-size:11px;color:var(--text-3);margin-top:3px">Trigger: ' + escHtml(ex.verbatim_trigger) + '</div>' : '') + '<pre style="margin:6px 0 0;white-space:pre-wrap;font-family:inherit;font-size:12px;color:var(--text)">' + escHtml(ex.verbatim_text || '') + '</pre>' + (ex.verbatim_followup ? '<div style="font-size:11px;color:var(--text-3);margin-top:4px;font-style:italic">If still objects: ' + escHtml(ex.verbatim_followup) + '</div>' : '');
+      }
+      const delBtn = document.createElement('button');
+      delBtn.textContent = '×';
+      delBtn.title = 'Remove from training';
+      delBtn.style.cssText = 'position:absolute;top:8px;right:8px;border:none;background:none;cursor:pointer;font-size:16px;color:var(--text-3);line-height:1';
+      delBtn.onclick = () => deactivateExample(ex.id, card);
+      card.appendChild(delBtn);
+      section.appendChild(card);
+    });
+    el.appendChild(section);
+  });
+}
+
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+async function deactivateExample(id, cardEl) {
+  if (!supabaseUrl || !supabaseKey) return;
+  const cleanKey = supabaseKey.replace(/[^ -~]/g, '').trim();
+  const url = supabaseUrl.replace(/\/$/, '');
+  try {
+    await fetch(`${url}/rest/v1/agent_training_examples?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: { 'apikey': cleanKey, 'Authorization': 'Bearer ' + cleanKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: false })
+    });
+    cardEl.style.opacity = '0.3';
+    setTimeout(() => cardEl.remove(), 400);
+  } catch(e) { console.error(e); }
+}
+
+async function fetchTrainingExamples(callType, lang) {
+  if (!supabaseUrl || !supabaseKey) return '';
+  try {
+    const cleanKey = supabaseKey.replace(/[^ -~]/g, '').trim();
+    const url = supabaseUrl.replace(/\/$/, '');
+    const filter = `active=eq.true&or=(call_type.eq.${callType},call_type.eq.all)&order=created_at.desc&limit=20`;
+    const r = await fetch(`${url}/rest/v1/agent_training_examples?${filter}`, { headers: { 'apikey': cleanKey, 'Authorization': 'Bearer ' + cleanKey } });
+    if (!r.ok) return '';
+    const examples = await r.json();
+    if (!examples.length) return '';
+    const relevant = examples.filter(ex => ex.language === 'all' || ex.language === lang || !ex.language);
+    if (!relevant.length) return '';
+    let block = `\n\nTRAINING EXAMPLES (learn from these):\n`;
+    const good = relevant.filter(e => e.example_type === 'good');
+    const bad = relevant.filter(e => e.example_type === 'bad');
+    const verbatim = relevant.filter(e => e.example_type === 'verbatim');
+    if (good.length) {
+      block += `\nGOOD EXAMPLES - follow this style:\n`;
+      good.slice(0,3).forEach((ex, i) => { block += `\nExample ${i+1}:\n${ex.good_dialogue}`; if (ex.note) block += `\n(Why good: ${ex.note})`; block += `\n`; });
+    }
+    if (bad.length) {
+      block += `\nBAD EXAMPLES - never do this:\n`;
+      bad.slice(0,3).forEach((ex, i) => { block += `\nBad ${i+1}: ${ex.bad_dialogue}`; if (ex.reason) block += `\nWhy wrong: ${ex.reason}`; block += `\nShould have said: ${ex.correction}\n`; });
+    }
+    if (verbatim.length) {
+      block += `\nVERBATIM SCRIPTS - use these exact words:\n`;
+      verbatim.forEach(ex => { block += `\nWhen ${ex.verbatim_moment} (${ex.verbatim_lang}): "${ex.verbatim_text}"\n`; });
+    }
+    return block;
+  } catch(e) { return ''; }
+}
+
+let allLogs = [];
+
+async function loadCallLogs() {
+  const el = document.getElementById('logs-list');
+  if (!supabaseUrl || !supabaseKey) { el.textContent = 'Enter Supabase credentials in the Call Agent tab first.'; return; }
+  el.textContent = 'Loading...';
+  try {
+    const cleanKey = supabaseKey.replace(/[^ -~]/g, '').trim();
+    const url = supabaseUrl.replace(/\/$/, '');
+    const r = await fetch(`${url}/rest/v1/agent_call_logs?order=called_at.desc&limit=30`, { headers: { 'apikey': cleanKey, 'Authorization': 'Bearer ' + cleanKey } });
+    if (!r.ok) { el.textContent = 'Failed: ' + r.status; return; }
+    allLogs = await r.json();
+    filterLogs();
+  } catch(e) { el.textContent = 'Error: ' + e.message; }
+}
+
+function filterLogs() {
+  const typeFilter = document.getElementById('log-filter-type').value;
+  const langFilter = document.getElementById('log-filter-lang').value;
+  const filtered = allLogs.filter(l => (typeFilter === 'all' || l.call_type === typeFilter) && (langFilter === 'all' || l.language === langFilter));
+  renderLogs(filtered);
+}
+
+function renderLogs(logs) {
+  const el = document.getElementById('logs-list');
+  if (!logs.length) { el.textContent = 'No calls found.'; return; }
+  el.innerHTML = '';
+  logs.forEach(log => {
+    const card = document.createElement('div');
+    card.style.cssText = 'border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:10px;overflow:hidden';
+    const header = document.createElement('div');
+    header.style.cssText = 'padding:10px 12px;display:flex;justify-content:space-between;align-items:center;background:var(--surface-muted);cursor:pointer';
+    header.innerHTML = `<div><span style="font-size:13px;font-weight:600;color:var(--text)">${escHtml(log.customer_name || '-')}</span><span style="font-size:12px;color:var(--text-3);margin-left:8px">#${escHtml(log.order_id || '')}</span></div><div style="display:flex;gap:8px;align-items:center"><span style="font-size:11px;background:var(--accent-bg);color:var(--accent-text);padding:2px 7px;border-radius:4px">${escHtml((log.call_type||'').replace(/_/g,' '))}</span><span style="font-size:11px;color:var(--text-3)">${escHtml(log.language || '')} · ${log.exchanges || 0} turns</span><span style="font-size:11px;color:var(--text-3)">${log.called_at ? new Date(log.called_at).toLocaleDateString('en-IN') : ''}</span></div>`;
+    const body = document.createElement('div');
+    body.classList.add('hidden');
+    body.style.cssText = 'padding:12px;border-top:1px solid var(--border)';
+    if (log.summary) {
+      const sumBox = document.createElement('div');
+      sumBox.style.cssText = 'background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:6px;padding:9px 11px;margin-bottom:10px;font-size:12px;line-height:1.6;white-space:pre-wrap;color:var(--warning-text)';
+      sumBox.textContent = log.summary;
+      body.appendChild(sumBox);
+    }
+    if (log.transcript) {
+      const tBox = document.createElement('pre');
+      tBox.style.cssText = 'font-size:12px;line-height:1.6;font-family:inherit;white-space:pre-wrap;color:var(--text);margin:0 0 10px';
+      tBox.textContent = log.transcript;
+      body.appendChild(tBox);
+    }
+    const trainBtn = document.createElement('button');
+    trainBtn.textContent = '+ Use as training example';
+    trainBtn.style.cssText = 'font-size:12px;padding:5px 12px;border:1px solid var(--accent-border);border-radius:4px;background:var(--accent-bg);color:var(--accent-text);font-family:inherit;cursor:pointer';
+    trainBtn.onclick = () => prefillTrainer(log);
+    body.appendChild(trainBtn);
+    header.onclick = () => body.classList.toggle('hidden');
+    card.appendChild(header);
+    card.appendChild(body);
+    el.appendChild(card);
+  });
+}
+
+function prefillTrainer(log) {
+  switchTab('trainer');
+  document.getElementById('train-call-type').value = log.call_type || 'cod_confirm';
+  document.getElementById('train-lang').value = log.language || 'all';
+  if (log.transcript) { setExampleType('good'); document.getElementById('train-good-dialogue').value = log.transcript; }
+  window.scrollTo(0, 0);
+}
+
+const _originalStartCall = startCall;
+async function startCallWithTraining() {
+  const ct = selectedCallType;
+  const lang = document.getElementById('lang-select') ? LANG_LABELS[document.getElementById('lang-select').value] : 'Hindi';
+  window._trainingContext = await fetchTrainingExamples(ct, lang);
+  await _originalStartCall();
+}
+
+const _originalPrompts = {};
+Object.keys(SYSTEM_PROMPTS).forEach(k => {
+  _originalPrompts[k] = SYSTEM_PROMPTS[k];
+  SYSTEM_PROMPTS[k] = (lang, o) => _originalPrompts[k](lang, o) + (window._trainingContext || '');
+});
+
+// Order-ID picker — a searchable dropdown of recent orders (backend /api/voice-order-list). On select it
+// auto-fills Customer name / Product / Amount from that order. Typing filters by order id (server-side).
+let _orderPickerDebounce = null;
+function initOrderPicker() {
+  const input = document.getElementById('order-id');
+  const dd = document.getElementById('order-dd');
+  if (!input || !dd) return;
+  const fetchList = async (q) => {
+    try {
+      const tok = localStorage.getItem('authToken');
+      const r = await fetch('/api/voice-order-list' + (q ? '?q=' + encodeURIComponent(q) : ''),
+        tok ? { headers: { 'Authorization': 'Bearer ' + tok } } : {});
+      if (!r.ok) return [];
+      const d = await r.json();
+      return d.orders || [];
+    } catch (_) { return []; }
+  };
+  const render = (orders) => {
+    if (!orders.length) { dd.innerHTML = '<div style="padding:10px 12px;font-size:12px;color:var(--text-3)">No orders found</div>'; dd.classList.remove('hidden'); return; }
+    dd.innerHTML = orders.map(o =>
+      `<div class="order-opt" data-name="${escHtml(o.name||'')}" data-cust="${escHtml(o.customer||'')}" data-prod="${escHtml(o.product||'')}" data-total="${escHtml(String(o.total||''))}" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border)">
+        <div style="font-weight:600;color:var(--text);font-size:13px">${escHtml(o.name||'')}</div>
+        <div style="font-size:11px;color:var(--text-3)">${escHtml(o.customer||'—')}${o.product?(' · '+escHtml(o.product)):''}${o.total?(' · ₹'+escHtml(String(o.total))):''}</div>
+      </div>`).join('');
+    dd.classList.remove('hidden');
+    dd.querySelectorAll('.order-opt').forEach(el => {
+      el.addEventListener('mouseenter', () => el.style.background = 'var(--surface-muted)');
+      el.addEventListener('mouseleave', () => el.style.background = '');
+      el.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        input.value = el.dataset.name;
+        document.getElementById('customer-name').value = el.dataset.cust || '';
+        document.getElementById('product').value = el.dataset.prod || '';
+        document.getElementById('amount').value = el.dataset.total || '';
+        dd.classList.add('hidden');
+      });
+    });
+  };
+  input.addEventListener('focus', async () => { render(await fetchList(input.value.trim())); });
+  input.addEventListener('input', () => {
+    clearTimeout(_orderPickerDebounce);
+    _orderPickerDebounce = setTimeout(async () => { render(await fetchList(input.value.trim())); }, 250);
+  });
+  document.addEventListener('click', (e) => { if (e.target !== input && !dd.contains(e.target)) dd.classList.add('hidden'); });
+}
+initOrderPicker();
+
+// Auto-load the Sarvam API key from the server (.env via /api/voice-config) so operators never paste it.
+// This is a same-origin page (embedded under the dashboard), so it can read the dashboard's JWT from
+// localStorage. If unavailable (e.g. opened without logging in), the key field stays editable for manual entry.
+(async () => {
+  try {
+    const tok = localStorage.getItem('authToken');
+    if (!tok) return;
+    const r = await fetch('/api/voice-config', { headers: { 'Authorization': 'Bearer ' + tok } });
+    if (!r.ok) return;
+    const d = await r.json();
+    const lock = (id, v) => { if (!v) return; const el = document.getElementById(id); if (!el) return; el.value = v; el.readOnly = true; el.style.background = 'var(--surface-muted)'; el.title = 'Loaded from server (.env)'; };
+    if (d) {
+      lock('api-key', d.sarvamKey);
+      lock('sb-url', d.supabaseUrl);
+      lock('sb-key', d.supabaseAnonKey);
+      supabaseUrl = (d.supabaseUrl || '').trim();
+      supabaseKey = (d.supabaseAnonKey || '').trim();
+    }
+  } catch (_) {}
+})();
+</script>
+</body>
+</html>

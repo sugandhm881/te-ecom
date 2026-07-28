@@ -16,6 +16,8 @@ module.exports = {
     APP_USER_EMAIL: process.env.APP_USER_EMAIL,
     APP_USER_PASSWORD: process.env.APP_USER_PASSWORD,
     APP_USER_NAME: process.env.APP_USER_NAME,      // display name for the .env bootstrap admin (welcome splash)
+    SARVAM_API_KEY: _envFile.SARVAM_API_KEY || process.env.SARVAM_API_KEY,   // Voice Agent tool — served via /api/voice-config to logged-in users
+    SUPABASE_ANON_KEY: _envFile.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY,   // public anon key — auto-filled into the Voice Agent tool
 
     // --- Email Reporting ---
     EMAIL_HOST: process.env.EMAIL_HOST,

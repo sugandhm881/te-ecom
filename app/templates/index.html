@@ -699,6 +699,10 @@
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636L5.636 18.364M12 3a9 9 0 100 18 9 9 0 000-18z"/></svg>
                         <span class="ml-3 text-sm font-medium">Blacklist Numbers</span>
                     </a>
+                    <a href="#" id="nav-support-voice" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m-4 0h8M12 1a3 3 0 00-3 3v6a3 3 0 006 0V4a3 3 0 00-3-3z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Voice Agent <span style="font-size:9px;font-weight:700;color:#c2410c;background:#ffedd5;padding:1px 5px;border-radius:6px;margin-left:4px">BETA</span></span>
+                    </a>
                 </div>
             </div>
 
@@ -1579,6 +1583,15 @@
                     <div id="blk-history" class="card overflow-hidden mt-3 hidden"><div class="overflow-x-auto" id="blk-hist-table"></div></div>
                 </div>
             </div>
+        </div>
+
+        <div id="support-voice-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Voice Agent <span style="font-size:10px;font-weight:700;color:#c2410c;background:#ffedd5;padding:2px 7px;border-radius:6px;margin-left:6px;vertical-align:middle">BETA · TESTING</span></h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Sarvam AI voice calling — COD confirmation, RTO recovery, feedback & more. Enter your Sarvam API key inside to begin.</p></div>
+                <a href="/static/voice-agent.html" target="_blank" class="px-3 py-2 rounded-lg text-sm font-medium text-slate-600 border border-slate-200 hover:bg-slate-50 inline-flex items-center gap-2 whitespace-nowrap">Open full screen ↗</a>
+            </header>
+            <iframe src="/static/voice-agent.html?v=2026-07-28e" allow="microphone; autoplay" title="Voice Agent" style="width:100%;height:calc(100vh - 92px);border:0;display:block;background:#F7F6F3"></iframe>
         </div>
 
         <div id="settings-view" class="view-hidden">
@@ -2643,7 +2656,7 @@
     </div>
 </div>
 
-<script src="/static/app.js?v=2026-07-28-combo-sku"></script>
+<script src="/static/app.js?v=2026-07-28-voice-agent"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

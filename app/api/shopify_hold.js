@@ -159,36 +159,42 @@ const _normAddr = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 const _fullAddr = a => [a && a.address1, a && a.address2, a && a.city, a && a.province, a && a.zip].filter(Boolean).join(', ');
 function reasonNoteFrom(reasons) { return (reasons || []).map(r => REASON_LABEL[r] || r).join(', ') || HOLD_NOTE; }
 async function holdReasons({ phone, financialStatus, createdAt, shopifyOrderId, totalPrice, address }) {
-    if (PREPAID_STATUSES.includes(String(financialStatus || '').toLowerCase())) return [];   // prepaid → no RTO risk
+    const fin = String(financialStatus || '').toLowerCase();
+    // FULLY-prepaid (paid / refunded / partially_refunded) → no COD collectable → never held.
+    // COD → all reasons below. PARTIALLY-PAID → still carries a COD balance, so held on the HIGH-VALUE (≥₹1500)
+    // rule only (the history / short-address reasons stay COD-specific).
+    if (['paid', 'refunded', 'partially_refunded'].includes(fin)) return [];
+    const isPartialPaid = fin === 'partially_paid';
     const reasons = [];
-    if (Number(totalPrice || 0) >= 1500) reasons.push('high_value');                          // reason: high value (₹1500 and above)
-    const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
-    let deliveredIds = [];   // this phone's PAST delivered order ids (for the short-address trust exception)
-    if (last10.length === 10) {
-        const before = new Date(createdAt || Date.now());
-        const { data } = await supabase.from('order_buckets').select('order_id, bucket, created_at').ilike('phone', `%${last10}`).limit(50);
-        const others = (data || []).filter(h => String(h.order_id) !== String(shopifyOrderId));
-        const last3Prior = others.filter(h => new Date(h.created_at) < before).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
-        // RULE: if ANY ONE of the last 3 prior orders was DELIVERED, the customer is trusted → do NOT auto-hold
-        // on the history reasons (recent non-delivery / in-flight). Only hold when NONE of the last 3 delivered.
-        const dCount    = last3Prior.filter(h => h.bucket === 'delivered').length;
-        const reliable  = dCount >= 1;
-        if (!reliable && last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket))) reasons.push('recent_undelivered');   // reason #2 — skipped when any of last 3 delivered
-        if (others.some(h => new Date(h.created_at) < before && !['delivered', 'rto', 'cancelled'].includes(h.bucket))) reasons.push('in_flight');   // reason #1 — an OLDER live order still open → THIS order is the repeat. Holds regardless of delivery history, but never the first of a concurrent batch.
-        deliveredIds = others.filter(h => h.bucket === 'delivered').map(h => h.order_id);
-    }
-    // reason: SHORT ADDRESS (< 100 chars) — terse/incomplete addresses are RTO-prone. Trust exception: skip if a
-    // PAST DELIVERED order for this customer used the SAME address (that exact address is proven to deliver).
-    const addrStr = String(address || '').trim();
-    if (addrStr && addrStr.length < 60) {
-        const curNorm = _normAddr(addrStr);
-        let deliveredSameAddr = false;
-        if (deliveredIds.length) {
-            const { data: addrs } = await supabase.from('order_shipping_addresses')
-                .select('order_id, address1, address2, city, province, zip').in('order_id', deliveredIds);
-            deliveredSameAddr = (addrs || []).some(a => _normAddr(_fullAddr(a)) === curNorm);
+    if (Number(totalPrice || 0) >= 1500) reasons.push('high_value');                          // high value ≥₹1500 — COD AND partial-paid
+    if (!isPartialPaid) {                                                                      // history + address reasons are COD-only
+        const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
+        let deliveredIds = [];   // this phone's PAST delivered order ids (for the short-address trust exception)
+        if (last10.length === 10) {
+            const before = new Date(createdAt || Date.now());
+            const { data } = await supabase.from('order_buckets').select('order_id, bucket, created_at').ilike('phone', `%${last10}`).limit(50);
+            const others = (data || []).filter(h => String(h.order_id) !== String(shopifyOrderId));
+            const last3Prior = others.filter(h => new Date(h.created_at) < before).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
+            // RULE: if ANY ONE of the last 3 prior orders was DELIVERED, the customer is trusted → skip the history reasons.
+            const dCount    = last3Prior.filter(h => h.bucket === 'delivered').length;
+            const reliable  = dCount >= 1;
+            if (!reliable && last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket))) reasons.push('recent_undelivered');   // reason #2 — skipped when any of last 3 delivered
+            if (others.some(h => new Date(h.created_at) < before && !['delivered', 'rto', 'cancelled'].includes(h.bucket))) reasons.push('in_flight');   // reason #1 — an OLDER live order still open → THIS order is the repeat
+            deliveredIds = others.filter(h => h.bucket === 'delivered').map(h => h.order_id);
         }
-        if (!deliveredSameAddr) reasons.push('short_address');
+        // reason: SHORT ADDRESS (<60 chars) — terse/incomplete addresses are RTO-prone. Trust exception: skip if a
+        // PAST DELIVERED order for this customer used the SAME address (that exact address is proven to deliver).
+        const addrStr = String(address || '').trim();
+        if (addrStr && addrStr.length < 60) {
+            const curNorm = _normAddr(addrStr);
+            let deliveredSameAddr = false;
+            if (deliveredIds.length) {
+                const { data: addrs } = await supabase.from('order_shipping_addresses')
+                    .select('order_id, address1, address2, city, province, zip').in('order_id', deliveredIds);
+                deliveredSameAddr = (addrs || []).some(a => _normAddr(_fullAddr(a)) === curNorm);
+            }
+            if (!deliveredSameAddr) reasons.push('short_address');
+        }
     }
     return reasons;
 }

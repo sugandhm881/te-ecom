@@ -36,11 +36,27 @@ const CSP = [
     "frame-ancestors 'self'",
     "form-action 'self'",
 ].join('; ');
+// Voice Agent (Sarvam AI) tool — a self-contained /static/voice-agent.html embedded in an iframe under Customer
+// Support. It legitimately reaches api.sarvam.ai + the operator's Supabase and plays data:/blob: TTS audio, so
+// that ONE file gets a scoped, slightly-relaxed CSP; every other response keeps the strict connect-src 'self'.
+const CSP_VOICE = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
+    "img-src 'self' data: https:",
+    "media-src 'self' data: blob:",
+    "connect-src 'self' https://api.sarvam.ai https://*.supabase.co",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "frame-ancestors 'self'",
+    "form-action 'self'",
+].join('; ');
 app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Content-Security-Policy', CSP);
+    res.setHeader('Content-Security-Policy', req.path === '/static/voice-agent.html' ? CSP_VOICE : CSP);
     next();
 });
 
@@ -112,6 +128,7 @@ const _VIEW_PERMS = [
     [/^\/intransit-late/i, 'claims-sla'],
     // Customer Support console — any support view permission unlocks its API group.
     [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist']],
+    [/^\/voice-(config|order-lookup|order-list)/i, 'support-voice'],   // Voice Agent tool endpoints — permitted users / admins only
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
     // Inventory Analytics. Stock Count (WH-only) + its deep Count Analysis (manager-only) are separate perms —
@@ -128,6 +145,65 @@ app.use('/api', (req, res, next) => {
     }
     next();
 });
+// Voice Agent tool endpoints — JWT-required (auth middleware above) + support-voice permission; admins pass.
+// config: hand the browser tool its Sarvam key (from .env) + Supabase URL/anon key (for the call-log tables).
+app.get('/api/voice-config', (req, res) => res.json({
+    sarvamKey: config.SARVAM_API_KEY || '',
+    supabaseUrl: process.env.SUPABASE_URL || '',
+    supabaseAnonKey: config.SUPABASE_ANON_KEY || '',
+}));
+// order lookup: proxied through the SERVICE key so the tool sees REAL orders WITHOUT opening anon read on the
+// RLS-locked orders / shipment_journey_ecom tables. Returns the shape the tool's buildOrderContext expects.
+const { supabase: _voiceSb } = require('./app/supabase');
+app.get('/api/voice-order-lookup', async (req, res) => {
+    try {
+        const id = String(req.query.orderId || '').replace(/^#/, '').trim();
+        if (!id) return res.status(400).json({ error: 'orderId required' });
+        const { data: rows } = await _voiceSb.from('orders')
+            .select('name, total_price, financial_status, fulfillment_status, awb_number, courier_name, tracking_status, created_at, order_shipping_addresses(first_name, last_name, name), order_line_items(title)')
+            .or(`name.eq.#${id},name.eq.${id}`).limit(1);
+        const order = rows && rows[0];
+        if (!order) return res.json({ order: null, shipment: null });
+        order._awb = order.awb_number || null;
+        // order_shipping_addresses is a one-to-one embed → PostgREST returns an OBJECT (not array); line_items is
+        // one-to-many → an array. Handle both shapes (same as normalizeSupabaseOrder in orders.js).
+        const _saRaw = order.order_shipping_addresses;
+        const _addr = Array.isArray(_saRaw) ? (_saRaw[0] || {}) : (_saRaw || {});
+        order._customer = _addr.name || `${_addr.first_name || ''} ${_addr.last_name || ''}`.trim() || '';
+        const _li = Array.isArray(order.order_line_items) ? order.order_line_items : (order.order_line_items ? [order.order_line_items] : []);
+        order._product = _li.length ? (_li[0].title || '') + (_li.length > 1 ? ` +${_li.length - 1} more` : '') : '';
+        let shipment = null;
+        if (order.awb_number) {
+            const { data: sj } = await _voiceSb.from('shipment_journey_ecom')
+                .select('dispatched_at, out_for_delivery_at, delivered_at, rto_at, attempts, ndr_count, ndr_reasons, outcome, courier, dest_city, dest_state, first_edd')
+                .eq('awb', order.awb_number).limit(1);
+            shipment = (sj && sj[0]) || null;
+        }
+        res.json({ order, shipment });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+// order list/search for the tool's Order-ID dropdown — recent orders, or matching ?q= (order name). Each row
+// carries customer name + first product + total so the tool can auto-fill those fields on select.
+app.get('/api/voice-order-list', async (req, res) => {
+    try {
+        const q = String(req.query.q || '').replace(/^#/, '').trim();
+        let query = _voiceSb.from('orders')
+            .select('name, total_price, created_at, order_shipping_addresses(first_name, last_name, name), order_line_items(title)')
+            .order('created_at', { ascending: false }).limit(50);
+        if (q) query = query.ilike('name', `%${q}%`);
+        const { data } = await query;
+        const out = (data || []).map(o => {
+            const _sa = o.order_shipping_addresses;                 // one-to-one → object; handle object OR array
+            const addr = Array.isArray(_sa) ? (_sa[0] || {}) : (_sa || {});
+            const customer = addr.name || `${addr.first_name || ''} ${addr.last_name || ''}`.trim() || '';
+            const li = Array.isArray(o.order_line_items) ? o.order_line_items : (o.order_line_items ? [o.order_line_items] : []);
+            const product = li.length ? (li[0].title || '') + (li.length > 1 ? ` +${li.length - 1} more` : '') : '';
+            return { name: o.name, customer, product, total: o.total_price };
+        });
+        res.json({ orders: out });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.use('/api', ordersRoutes);
 app.use('/api', adsetRoutes);
 app.use('/api', adRoutes);
@@ -320,30 +396,38 @@ cron.schedule('*/2 * * * *', async () => {
     } catch (e) { console.error('[ShopifyHold] cron error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
-// Silent-RTO claim mail → RapidShyp — weekly, Monday 9:30 AM IST, previous 7 days ending yesterday.
+// Silent-RTO claim mail → RapidShyp — weekly, Monday 9:30 AM IST, last 30 days ending yesterday.
 // Lists shipments RTO'd with no delivery attempt + their forward/RTO freight (disputable). No-op if
 // there are none or the RapidShyp recipient isn't set in Settings.
 cron.schedule('30 9 * * 1', async () => {
     console.log('[Silent-RTO] Mon 9:30 AM IST — sending weekly silent-RTO claim report to RapidShyp…');
-    try { const r = await deliveryReportsRoutes.sendSilentRtoReport({ days: 7 }); console.log('[Silent-RTO]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
+    try { const r = await deliveryReportsRoutes.sendSilentRtoReport({ days: 30 }); console.log('[Silent-RTO]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[Silent-RTO] error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
-// Late-delivery report (promise date exceeded, delivered only) — weekly, Monday 9:45 AM IST, last 30
-// days ending yesterday. Sent to the configured internal recipients.
-cron.schedule('45 9 * * 1', async () => {
-    console.log('[Late-Del] Mon 9:45 AM IST — sending weekly late-delivery report…');
+// Late-delivery report (promise date exceeded, delivered only) — ONCE EVERY 15 DAYS (1st & 16th) at 9:45 AM
+// IST, last 30 days ending yesterday. Sent to the configured internal recipients.
+cron.schedule('45 9 1,16 * *', async () => {
+    console.log('[Late-Del] 9:45 AM IST (1st/16th) — sending fortnightly late-delivery report…');
     try { const r = await deliveryReportsRoutes.sendLateDeliveriesReport({ days: 30 }); console.log('[Late-Del]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[Late-Del] error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
-// First-OFD-late report (first delivery attempt after the promised EDD — a courier SLA breach) — weekly,
-// Monday 9:50 AM IST, terminal-stage date in the last 30 days ending yesterday. Sends SEPARATE emails per
-// platform (RapidShyp rows → RapidShyp recipients, DocPharma rows → DocPharma recipients). No-op if empty.
-cron.schedule('50 9 * * 1', async () => {
-    console.log('[First-OFD] Mon 9:50 AM IST — sending weekly first-OFD-late report…');
+// First-OFD-late report (first delivery attempt after the promised EDD — a courier SLA breach) — DAILY at
+// 9:30 AM IST, terminal-stage date in the last 30 days ending yesterday. Sends SEPARATE emails per platform
+// (RapidShyp rows → RapidShyp recipients, DocPharma rows → DocPharma recipients). No-op if empty.
+cron.schedule('30 9 * * *', async () => {
+    console.log('[First-OFD] 9:30 AM IST — sending daily first-OFD-late report…');
     try { const r = await deliveryReportsRoutes.sendFirstOfdReport({ days: 30 }); console.log('[First-OFD]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[First-OFD] error:', e.message); }
+}, { timezone: 'Asia/Kolkata' });
+
+// In-transit-overdue report (still in transit past the promised EDD) — DAILY at 9:35 AM IST, last 30 days
+// ending yesterday. SEPARATE emails per platform (RapidShyp / DocPharma). No-op if empty / recipient unset.
+cron.schedule('35 9 * * *', async () => {
+    console.log('[Intransit-Late] 9:35 AM IST — sending daily in-transit-overdue report…');
+    try { const r = await deliveryReportsRoutes.sendIntransitLateReport({ days: 30 }); console.log('[Intransit-Late]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
+    catch (e) { console.error('[Intransit-Late] error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
 // RapidShyp cache sync for EasyEcom-shipped orders — every 3 hours + once at startup. Keeps the

@@ -184,10 +184,12 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
     // lag), but a cancelled order can't be held or called, so it's never a repeat candidate.
     const candCancelled = await eeCancelledSet(cand.map(c => c.order_name));
     cand = cand.filter(c => !candCancelled.has(String(c.order_name || '').replace('#', '').trim()));
-    // (1) COD only.
+    // (1) Drop FULLY-prepaid; keep COD + PARTIALLY-PAID (partial-paid still carries a COD balance, so it's held
+    // on the high-value ≥₹1500 rule — the history/short-address reasons stay COD-only, gated by isPartialPaid below).
     const finRows = cand.length ? await chunkedIn('orders', 'id, financial_status', 'id', cand.map(c => c.order_id)) : [];
     const finById = {}; finRows.forEach(o => { finById[String(o.id)] = (o.financial_status || '').toLowerCase(); });
-    cand = cand.filter(c => !PREPAID_STATUSES.includes(finById[String(c.order_id)] || ''));
+    const _fullyPrepaid = new Set(['paid', 'refunded', 'partially_refunded']);
+    cand = cand.filter(c => !_fullyPrepaid.has(finById[String(c.order_id)] || ''));
     // (4) ≥1 of the customer's last 3 PRIOR orders not delivered.
     const phones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
     const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, order_name, phone, bucket, created_at', 'phone', phones) : [];
@@ -236,11 +238,13 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
             const cNorm = _normA(cAddr);
             rShort = !all.some(h => h.bucket === 'delivered' && histAddrNormById[String(h.order_id)] === cNorm);
         }
+        // PARTIALLY-PAID orders are held on high value ONLY; the history/short-address reasons stay COD-specific.
+        const isPartialPaid = finById[String(c.order_id)] === 'partially_paid';
         const reasons = [];
-        if (rInflight) reasons.push('in_flight');
-        if (rRecent)   reasons.push('recent_undelivered');
-        if (rValue)    reasons.push('high_value');
-        if (rShort)    reasons.push('short_address');
+        if (!isPartialPaid && rInflight) reasons.push('in_flight');
+        if (!isPartialPaid && rRecent)   reasons.push('recent_undelivered');
+        if (rValue)                      reasons.push('high_value');
+        if (!isPartialPaid && rShort)    reasons.push('short_address');
         c.reasons = reasons;
         // Dashboard (anyReason): return the whole tagged base — /support/queue filters it. Auto-hold cron:
         // qualify by ANY of the 3 reasons (so high-value / in-flight orders auto-hold too, matching the panel).

@@ -805,6 +805,10 @@ function navigate(view) {
             activeViewElement = document.getElementById('support-blacklist-view');
             if (typeof supBlacklistInit === 'function') supBlacklistInit();
             break;
+        case 'support-voice':
+            activeLinkElement = document.getElementById('nav-support-voice');
+            activeViewElement = document.getElementById('support-voice-view');
+            break;   // self-contained iframe (/static/voice-agent.html) — no init needed
         case 'ops-control':
             activeLinkElement = document.getElementById('nav-ops-control');
             activeViewElement = document.getElementById('ops-control-view');
@@ -4419,7 +4423,7 @@ const NAV_HREF = {
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
-    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-support-blacklist': 'support-blacklist',
+    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-support-blacklist': 'support-blacklist', 'nav-support-voice': 'support-voice',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
     'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions'
 };
@@ -5125,7 +5129,7 @@ document.getElementById('nav-docpharma-recon')?.addEventListener('click', (e) =>
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
 document.getElementById('nav-claims-sla')?.addEventListener('click', (e) => { e.preventDefault(); navigate('claims-sla'); });
-['support-dashboard','support-queue','support-orders','support-calls','support-contacts','support-blacklist'].forEach(v =>
+['support-dashboard','support-queue','support-orders','support-calls','support-contacts','support-blacklist','support-voice'].forEach(v =>
     document.getElementById('nav-' + v)?.addEventListener('click', (e) => { e.preventDefault(); navigate(v); }));
 document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
 document.getElementById('nav-amazon-fba')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-fba'); });
@@ -5139,7 +5143,7 @@ const PERM_GROUPS = [
   ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['docpharma-recon','DocPharma Recon'],['amazon-fba','Amazon FBA']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
-  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['support-blacklist','Blacklist Numbers']]],
+  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['support-blacklist','Blacklist Numbers'],['support-voice','Voice Agent (beta)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
   ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
