@@ -198,6 +198,15 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
     const byPhone = {}; hist.forEach(h => { (byPhone[h.phone] = byPhone[h.phone] || []).push(h); });
     const TERMINAL = new Set(['delivered', 'rto', 'cancelled']);                 // final states → not "in-flight"
     const isCancelled = h => h.bucket === 'cancelled' || histCancelled.has(nkn(h.order_name));   // Shopify OR EasyEcom cancel
+    // Addresses for the `short_address` reason — the current candidates + each customer's PAST DELIVERED orders
+    // (the trust exception: a short address is NOT held if a past DELIVERED order used the same address).
+    const _normA = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const _fullA = a => [a.address1, a.address2, a.city, a.province, a.zip].filter(Boolean).join(', ');
+    const candAddrRows = cand.length ? await chunkedIn('order_shipping_addresses', 'order_id, address1, address2, city, province, zip', 'order_id', cand.map(c => c.order_id)) : [];
+    const deliveredHistIds = hist.filter(h => h.bucket === 'delivered').map(h => h.order_id);
+    const histAddrRows = deliveredHistIds.length ? await chunkedIn('order_shipping_addresses', 'order_id, address1, address2, city, province, zip', 'order_id', deliveredHistIds) : [];
+    const candAddrById = {}; candAddrRows.forEach(a => { candAddrById[String(a.order_id)] = _fullA(a); });
+    const histAddrNormById = {}; histAddrRows.forEach(a => { histAddrNormById[String(a.order_id)] = _normA(_fullA(a)); });
     return cand.filter(c => {
         const all = byPhone[c.phone] || [];
         c.orders_count = all.length;
@@ -219,10 +228,19 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
         const rInflight = all.some(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at) && !TERMINAL.has(h.bucket) && !isCancelled(h));
         // Reason `high_value` — this order is ₹1500 and above.
         const rValue    = Number(c.total_price || 0) >= 1500;
+        // Reason `short_address` — terse/incomplete address (<100 chars), unless a PAST DELIVERED order for this
+        // customer used the same address (proven deliverable).
+        const cAddr = candAddrById[String(c.order_id)] || '';
+        let rShort = false;
+        if (cAddr && cAddr.length < 60) {
+            const cNorm = _normA(cAddr);
+            rShort = !all.some(h => h.bucket === 'delivered' && histAddrNormById[String(h.order_id)] === cNorm);
+        }
         const reasons = [];
         if (rInflight) reasons.push('in_flight');
         if (rRecent)   reasons.push('recent_undelivered');
         if (rValue)    reasons.push('high_value');
+        if (rShort)    reasons.push('short_address');
         c.reasons = reasons;
         // Dashboard (anyReason): return the whole tagged base — /support/queue filters it. Auto-hold cron:
         // qualify by ANY of the 3 reasons (so high-value / in-flight orders auto-hold too, matching the panel).

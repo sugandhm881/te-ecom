@@ -329,8 +329,10 @@ router.post('/shopify-order', async (req, res) => {
             if (!ing.ok) console.warn(`[OrderSync] ${orderName}: dashboard upsert failed — ${ing.error}`);
             // Auto-hold repeat COD orders.
             const phone = (o.shipping_address && o.shipping_address.phone) || (o.customer && o.customer.phone) || o.phone || null;
+            const sa = o.shipping_address || {};
+            const address = [sa.address1, sa.address2, sa.city, sa.province, sa.zip].filter(Boolean).join(', ');
             const shopifyHold = require('./shopify_hold');
-            const reasons = await shopifyHold.holdReasons({ phone, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price });
+            const reasons = await shopifyHold.holdReasons({ phone, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price, address });
             if (!reasons.length) { console.log(`[ShopifyHold] ${orderName}: not a repeat-COD candidate → no hold`); return; }
             const r = await shopifyHold.autoHoldOrder(orderName, o.id, shopifyHold.reasonNoteFrom(reasons));
             console.log(`[ShopifyHold] ${orderName}: ${r.held ? 'HELD on Shopify ✓' : r.skipped ? 'skipped (' + r.skipped + ')' : 'hold FAILED (' + r.failed + ')'}`);

@@ -39,7 +39,7 @@ const actorName = req => (req && req.user && (req.user.name || req.user.sub)) ||
 
 // Full outreach lifecycle — mirrors the statuses the original standalone Influencer CRM writes (the shared
 // DB already contains declined / not_replying / hold rows), so the portal can display AND set them all.
-const STATUSES = ['not_contacted', 'reached_out', 'in_discussion', 'partnered', 'not_replying', 'declined', 'rejected', 'hold'];
+const STATUSES = ['not_contacted', 'reached_out', 'in_discussion', 'partnered', 'not_replying', 'declined', 'rejected', 'hold', 'expensive_profile'];
 
 // ── Dashboard summary ────────────────────────────────────────────────────────
 router.get('/inf/summary', async (req, res) => {
@@ -375,7 +375,7 @@ router.get('/inf/lists/:id', async (req, res) => {
         if (ids.length) {
             const [infs, vids] = await Promise.all([
                 supabase.from('influencers').select('id, instagram_handle, name, follower_count, niche, outreach_status, profile_image_url').in('id', ids),
-                supabase.from('influencer_videos').select('influencer_id, views, likes, comments, shares, live_date, quoted_price, final_price, gst_applicable, payment_status, product_sent, email_sent, is_ad_run').in('influencer_id', ids),
+                supabase.from('influencer_videos').select('influencer_id, views, likes, comments, shares, live_date, quoted_price, final_price, gst_applicable, payment_status, product_sent, email_sent, is_ad_run, payment_due_date, payment_date').in('influencer_id', ids),
             ]);
             const vidsBy = {};
             (vids.data || []).forEach(v => { (vidsBy[v.influencer_id] = vidsBy[v.influencer_id] || []).push(v); });
@@ -395,12 +395,17 @@ router.get('/inf/lists/:id', async (req, res) => {
                     : paidN === all.length ? 'paid'
                     : paidN > 0 ? 'partial'
                     : (all.find(v => v.payment_status) ? String(all[0].payment_status).toLowerCase() : 'unpaid');
+                // Representative dates: latest actual payment date (paid videos), and the earliest still-unpaid due date.
+                const _paidDates = all.map(v => v.payment_date).filter(Boolean).sort();
+                const _dueDates = all.filter(v => String(v.payment_status || '').toLowerCase() !== 'paid').map(v => v.payment_due_date).filter(Boolean).sort();
                 totals.quoted += quoted; totals.final += finalP; totals.gst += gst; totals.spend += spend; totals.views += views;
                 return {
                     ...i, videos: all.length, views_in_range: views, quoted, final: finalP,
                     gst: Math.round(gst), spend: Math.round(spend), cpm: views > 0 ? Math.round((spend / views) * 1000) : null,
                     likes: sum(inRange, 'likes'), comments: sum(inRange, 'comments'), shares: sum(inRange, 'shares'),
                     final_price: finalP, payment,
+                    payment_date: _paidDates.length ? _paidDates[_paidDates.length - 1] : null,
+                    payment_due_date: _dueDates.length ? _dueDates[0] : null,
                     product_sent: all.some(v => v.product_sent === true),
                     email_sent: all.some(v => v.email_sent === true),
                     ad_run: all.some(v => v.is_ad_run === true),
@@ -551,10 +556,15 @@ router.post('/inf/mentions/check', async (req, res) => {
 router.get('/inf/products', async (req, res) => {
     try {
         const { data, error } = await supabase.from('shopify_products')
-            .select('id, shopify_product_id, shopify_variant_id, product_title, variant_title, sku, price, image_url, inventory_quantity, product_status')
+            .select('id, shopify_product_id, shopify_variant_id, product_title, variant_title, sku, price, compare_at_price, product_type, tags, image_url, inventory_quantity, product_status')
             .eq('product_status', 'active').order('product_title');
         if (error) throw new Error(error.message);
-        res.json({ success: true, products: data || [] });
+        // Title lookup across ALL statuses so a previously-saved product_id that's now archived / drafted /
+        // filtered-out still resolves to a name in the picker chips (instead of showing the raw numeric id).
+        const { data: allNames } = await supabase.from('shopify_products').select('shopify_product_id, product_title, sku');
+        const names = {};
+        (allNames || []).forEach(p => { const k = String(p.shopify_product_id || ''); if (k && !names[k]) names[k] = p.product_title || (p.sku ? 'SKU ' + p.sku : null); });
+        res.json({ success: true, products: data || [], names });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
@@ -609,20 +619,26 @@ router.get('/inf/order-tracking', async (req, res) => {
         }
 
         const cancelled = !!(ord && ord.cancelled_at);
-        const outcome = (j && j.outcome) || '';
-        // Human status: cancelled → RTO → delivered → tracking_status → in-transit vs processing.
+        const outcome = String((j && j.outcome) || '').toLowerCase();     // journey's classified outcome (delivered/rto/in_transit…)
+        const ts = String((ord && ord.tracking_status) || '');            // raw courier string (loose — e.g. "delivery delayed")
+        // Precise matches: "delivery delayed" / "out for delivery" / "undelivered" are NOT "delivered".
+        const _isDeliveredStr = s => /\bdelivered\b/i.test(s) && !/undelivered/i.test(s);
+        const _isRtoStr = s => /\brto\b|\breturn/i.test(s);
+        // Prefer the journey outcome; only fall back to the raw tracking_status string when there's no journey.
+        const isRto = outcome ? outcome.includes('rto') : _isRtoStr(ts);
+        const isDelivered = outcome ? outcome === 'delivered' : _isDeliveredStr(ts);
         let status = 'Processing';
         if (cancelled) status = 'Cancelled';
-        else if (/rto/i.test(outcome) || /rto/i.test(ord && ord.tracking_status || '')) status = 'RTO';
-        else if (/deliver/i.test(outcome) || /deliver/i.test(ord && ord.tracking_status || '')) status = 'Delivered';
+        else if (isRto) status = 'RTO';
+        else if (isDelivered) status = 'Delivered';
         else if (awb) status = 'In Transit';
 
-        const closeAt = /rto/i.test(outcome) ? (j && j.rto_at) : (j && j.delivered_at);
+        const closeAt = isRto ? (j && j.rto_at) : (j && j.delivered_at);
         const milestones = [
             { key: 'ordered', label: 'Order placed', at: ord && ord.created_at },
             { key: 'dispatched', label: 'Dispatched', at: j && j.dispatched_at },
             { key: 'ofd', label: 'Out for delivery', at: j && j.out_for_delivery_at },
-            { key: /rto/i.test(outcome) ? 'rto' : 'delivered', label: /rto/i.test(outcome) ? 'Returned (RTO)' : 'Delivered', at: closeAt },
+            { key: isRto ? 'rto' : 'delivered', label: isRto ? 'Returned (RTO)' : 'Delivered', at: closeAt },
         ];
 
         res.json({

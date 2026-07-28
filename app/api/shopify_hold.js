@@ -153,13 +153,17 @@ async function autoHoldOrder(orderName, shopifyOrderId, reasonNote) {
 // Queue Repeat logic. Returned (not just a boolean) so the auto-holder can RECORD *why* it held — the panel then
 // shows the category even later, when the live-recomputed reason has changed (e.g. a prior order that was
 // 'undelivered' at hold time finalised to RTO and now hits the reliability exception, leaving no live reason).
-const REASON_LABEL = { high_value: 'high value (≥₹1500)', recent_undelivered: 'no delivery in last 3', in_flight: 'another live order' };
+const REASON_LABEL = { high_value: 'high value (≥₹1500)', recent_undelivered: 'no delivery in last 3', in_flight: 'another live order', short_address: 'short address (<60 chars)' };
+// Normalise an address for same-address comparison (case/space/punctuation-insensitive).
+const _normAddr = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+const _fullAddr = a => [a && a.address1, a && a.address2, a && a.city, a && a.province, a && a.zip].filter(Boolean).join(', ');
 function reasonNoteFrom(reasons) { return (reasons || []).map(r => REASON_LABEL[r] || r).join(', ') || HOLD_NOTE; }
-async function holdReasons({ phone, financialStatus, createdAt, shopifyOrderId, totalPrice }) {
+async function holdReasons({ phone, financialStatus, createdAt, shopifyOrderId, totalPrice, address }) {
     if (PREPAID_STATUSES.includes(String(financialStatus || '').toLowerCase())) return [];   // prepaid → no RTO risk
     const reasons = [];
     if (Number(totalPrice || 0) >= 1500) reasons.push('high_value');                          // reason: high value (₹1500 and above)
     const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
+    let deliveredIds = [];   // this phone's PAST delivered order ids (for the short-address trust exception)
     if (last10.length === 10) {
         const before = new Date(createdAt || Date.now());
         const { data } = await supabase.from('order_buckets').select('order_id, bucket, created_at').ilike('phone', `%${last10}`).limit(50);
@@ -171,6 +175,20 @@ async function holdReasons({ phone, financialStatus, createdAt, shopifyOrderId, 
         const reliable  = dCount >= 1;
         if (!reliable && last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket))) reasons.push('recent_undelivered');   // reason #2 — skipped when any of last 3 delivered
         if (others.some(h => new Date(h.created_at) < before && !['delivered', 'rto', 'cancelled'].includes(h.bucket))) reasons.push('in_flight');   // reason #1 — an OLDER live order still open → THIS order is the repeat. Holds regardless of delivery history, but never the first of a concurrent batch.
+        deliveredIds = others.filter(h => h.bucket === 'delivered').map(h => h.order_id);
+    }
+    // reason: SHORT ADDRESS (< 100 chars) — terse/incomplete addresses are RTO-prone. Trust exception: skip if a
+    // PAST DELIVERED order for this customer used the SAME address (that exact address is proven to deliver).
+    const addrStr = String(address || '').trim();
+    if (addrStr && addrStr.length < 60) {
+        const curNorm = _normAddr(addrStr);
+        let deliveredSameAddr = false;
+        if (deliveredIds.length) {
+            const { data: addrs } = await supabase.from('order_shipping_addresses')
+                .select('order_id, address1, address2, city, province, zip').in('order_id', deliveredIds);
+            deliveredSameAddr = (addrs || []).some(a => _normAddr(_fullAddr(a)) === curNorm);
+        }
+        if (!deliveredSameAddr) reasons.push('short_address');
     }
     return reasons;
 }

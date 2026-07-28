@@ -13,6 +13,9 @@
 <script src="/static/vendor/chart.min.js" defer></script>
 <style>
     /* Professional Typography & Scrollbar */
+    /* Global density: root font-size drives every rem-based size (text + padding + gaps), so lowering it
+       from the 16px browser default uniformly "zooms out" the whole app to fit more per screen. */
+    html { font-size: 15px; }
     body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -1490,7 +1493,7 @@
             </header>
             <div class="p-8 space-y-4">
                 <div class="flex items-center gap-1 border-b border-slate-200" id="sup-tabs">
-                    <button data-tab="repeat" class="sup-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">Repeat customers <span class="sup-tab-count"></span></button>
+                    <button data-tab="repeat" class="sup-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">Hold Orders <span class="sup-tab-count"></span></button>
                     <button data-tab="und" class="sup-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-indigo-600 text-indigo-700">Undelivered <span class="sup-tab-count"></span></button>
                     <button data-tab="changed" class="sup-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">Status changed <span class="sup-tab-count"></span></button>
                 </div>
@@ -2499,7 +2502,7 @@
                 </header>
                 <div class="px-8 py-3 border-b border-slate-200 bg-white flex flex-wrap items-center gap-2">
                     <input id="infi-q" type="text" class="filter-input w-56" placeholder="Search name or @handle…">
-                    <select id="infi-status" class="filter-select"><option value="">All statuses</option><option value="not_contacted">Not contacted</option><option value="reached_out">Reached out</option><option value="in_discussion">In discussion</option><option value="partnered">Partnered</option><option value="rejected">Rejected</option></select>
+                    <select id="infi-status" class="filter-select"><option value="">All statuses</option><option value="not_contacted">Not contacted</option><option value="reached_out">Reached out</option><option value="in_discussion">In discussion</option><option value="partnered">Partnered</option><option value="not_replying">Not replying</option><option value="declined">Declined</option><option value="rejected">Rejected</option><option value="hold">Hold</option><option value="expensive_profile">Expensive Profile</option></select>
                     <select id="infi-niche" class="filter-select"><option value="">All niches</option></select>
                     <select id="infi-bucket" class="filter-select"><option value="">All sizes</option><option value="nano">Nano &lt;10K</option><option value="micro">Micro 10-100K</option><option value="macro">Macro 100K-1M</option><option value="mega">Mega &gt;1M</option></select>
                     <select id="infi-contact" class="filter-select"><option value="">Contact: any</option><option value="phone">Has phone</option><option value="email">Has email</option><option value="none">No contact info</option></select>
@@ -2640,7 +2643,7 @@
     </div>
 </div>
 
-<script src="/static/app.js?v=2026-07-24-inf-lists-fit"></script>
+<script src="/static/app.js?v=2026-07-28-combo-sku"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

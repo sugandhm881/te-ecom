@@ -3753,14 +3753,15 @@ async function supLoadQueue(){
 }
 // Repeat-tab call-reason tags — shows which of the 3 reasons put this order on the call list.
 const SUP_REASON_META={
-  in_flight:['🚚','In-flight','bg-sky-100 text-sky-700','Customer has another order still in transit / not yet delivered'],
-  recent_undelivered:['⚠️','Recent non-delivery','bg-rose-100 text-rose-700','≥1 of the last 3 orders was not delivered (RTO / undelivered)'],
-  high_value:['💰','Above ₹1500','bg-emerald-100 text-emerald-700','Order value is above ₹1500'],
+  in_flight:['🚚','In-flight','bg-sky-100 text-sky-700','Customer has another order still in transit / not yet delivered','bg-sky-50 text-sky-700'],
+  recent_undelivered:['⚠️','Recent non-delivery','bg-rose-100 text-rose-700','≥1 of the last 3 orders was not delivered (RTO / undelivered)','bg-rose-50 text-rose-700'],
+  high_value:['💰','Above ₹1500','bg-emerald-100 text-emerald-700','Order value is above ₹1500','bg-emerald-50 text-emerald-700'],
+  short_address:['📍','Short address','bg-amber-100 text-amber-700','Address is under 60 characters (often incomplete → RTO-prone); skipped if a past order was delivered to the same address','bg-amber-50 text-amber-700'],
 };
 function supReasonChips(r){
   if(!r.reasons||!r.reasons.length) return '';
-  return ' '+r.reasons.map(k=>{ const m=SUP_REASON_META[k]; if(!m) return '';
-    return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold ${m[2]} whitespace-nowrap align-middle" title="${m[3]}">${m[0]} ${m[1]}</span>`; }).join(' ');
+  return r.reasons.map(k=>{ const m=SUP_REASON_META[k]; if(!m) return '';
+    return `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${m[4]||m[2]} whitespace-nowrap align-middle" title="${m[3]}">${m[0]} ${m[1]}</span>`; }).join(' ');
 }
 // Column comparator for header-click sorting. Time columns (created_at / last_scan_at) compare by epoch
 // with empty values ALWAYS last (regardless of direction); other columns are case-insensitive strings.
@@ -3802,20 +3803,27 @@ function supQueueTable(){
     list.slice(0,500).map(r=>{ const ph=String(r.phone||'').replace(/\D/g,'').slice(-10); const dupN=ph?(_phoneCount[ph]||0):0;
       return `<tr class="sup-row cursor-pointer hover:bg-slate-50 ${r.msg91_confirmed?'bg-sky-50/50':''}" data-oid="${escapeHtml(r.order_id)}">
       <td class="${TD} font-mono font-semibold"${dupN>1?' style="border-left:4px solid #d946ef"':''}>${escapeHtml(r.order_name||r.order_id)}${_supTab!=='repeat'?eeHoldChip(r.order_name):''}</td>
-      <td class="${TD}">${ph?`<a href="tel:+91${ph}" onclick="event.stopPropagation()" class="text-indigo-600 font-medium hover:underline">${ph}</a>`:'<span class="text-slate-300">no phone</span>'}
-        ${r.orders_count?` <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-violet-100 text-violet-700">${r.orders_count} orders</span>`:''}
-        ${dupN>1?` <span class="inline-block px-1.5 py-0.5 rounded-full text-[10px] font-bold" style="background:#fae8ff;color:#a21caf;border:1px solid #f0abfc" title="This customer has ${dupN} orders in the queue right now — likely duplicate / concurrent orders">🔁 ${dupN}× same customer</span>`:''}
-        ${r.msg91_confirmed?' <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}${_supTab==='repeat'?supReasonChips(r):''}</td>
+      <td class="${TD}">
+        <div class="flex items-center gap-1.5 flex-wrap">
+          ${ph?`<a href="tel:+91${ph}" onclick="event.stopPropagation()" class="text-indigo-600 font-semibold hover:underline tabular-nums">${ph}</a>`:'<span class="text-slate-300">no phone</span>'}
+          ${r.orders_count?`<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500" title="${r.orders_count} order${r.orders_count>1?'s':''} on record for this customer">${r.orders_count} order${r.orders_count>1?'s':''}</span>`:''}
+          ${dupN>1?`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold" style="background:#fdf4ff;color:#a21caf" title="This customer has ${dupN} orders in the queue right now — likely duplicate / concurrent orders">🔁 ${dupN}×</span>`:''}
+          ${r.msg91_confirmed?`<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-50 text-sky-700" title="Customer confirmed via MSG91">✓ Confirmed</span>`:''}
+        </div>
+        ${_supTab==='repeat'&&r.reasons&&r.reasons.length?`<div class="flex items-center gap-1 flex-wrap mt-1">${supReasonChips(r)}</div>`:''}
+      </td>
       ${showBucket?`<td class="${TD}">${supBadge(r.bucket)}</td>`:''}
       <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
       <td class="${TD}"><div>${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}</div>${r.awb_number?`<div class="text-[10px] mt-0.5">${supAwbLink(r.awb_number,r.order_name,r.courier)}</div>`:''}</td>
       ${showScan?`<td class="${TD} whitespace-nowrap">${r.last_scan_at?`<span class="text-slate-500" title="Latest AWB scan by courier: ${new Date(r.last_scan_at).toLocaleString()}">🛰 ${supRelTime(r.last_scan_at)}</span>`:'<span class="text-slate-300">—</span>'}</td>`:''}
-      <td class="${TD}"><div class="flex items-center gap-2.5">
-        ${supHoldControl(r)}
-        ${r.latest_note?`<div class="min-w-0 border-l-2 border-amber-300 pl-2">
-          <div class="text-xs text-slate-600 italic truncate max-w-[230px]" title="${escapeHtml(r.latest_note)}">“${escapeHtml(r.latest_note)}”</div>
-          <div class="text-[10px] text-slate-400 truncate">${escapeHtml(r.latest_note_by||'')}${r.latest_note_by&&r.latest_note_at?' · ':''}${r.latest_note_at?supRelTime(r.latest_note_at):''}</div></div>`:''}
-        <button class="sup-note-btn ml-auto inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-bold border transition-colors ${r.note_count?'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100':'bg-white text-slate-400 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="${r.note_count?'View / add notes':'Add a note'}">📝${r.note_count?` <span class="min-w-[16px] h-4 px-1 rounded-full bg-amber-200/80 text-amber-800 text-[10px] leading-4 text-center">${r.note_count}</span>`:' <span class="font-medium">+</span>'}</button></div></td></tr>`; }).join('')
+      <td class="${TD}"><div class="flex items-start gap-2">
+        <div class="flex-1 min-w-0 space-y-1.5">
+          <div class="flex items-center gap-1.5 flex-wrap">${supHoldControl(r)}</div>
+          ${r.latest_note?`<div class="min-w-0 border-l-2 border-slate-200 pl-2">
+            <div class="text-xs text-slate-500 italic truncate max-w-[260px]" title="${escapeHtml(r.latest_note)}">“${escapeHtml(r.latest_note)}”</div>
+            <div class="text-[10px] text-slate-400 truncate">${escapeHtml(r.latest_note_by||'')}${r.latest_note_by&&r.latest_note_at?' · ':''}${r.latest_note_at?supRelTime(r.latest_note_at):''}</div></div>`:''}
+        </div>
+        <button style="flex-shrink:0" class="sup-note-btn inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors ${r.note_count?'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100':'bg-white text-slate-400 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="${r.note_count?'View / add notes':'Add a note'}">📝${r.note_count?` <span class="min-w-[16px] h-4 px-1 rounded-full bg-amber-200/80 text-amber-800 text-[10px] leading-4 text-center">${r.note_count}</span>`:' <span class="font-medium">+</span>'}</button></div></td></tr>`; }).join('')
   }</tbody></table>${list.length>500?`<div class="text-xs text-slate-400 p-3 text-center">Showing first 500 of ${list.length}</div>`:''}`;
   c.querySelectorAll('th[data-sort]').forEach(th=>th.addEventListener('click',()=>{
     const k=th.dataset.sort, dd=parseInt(th.dataset.dir,10)||1;
@@ -3837,7 +3845,7 @@ function supReleasedChip(h){
   const who=supPrettyUser(h.by)||'someone', when=h.at?supRelTime(h.at):'';
   const full=h.at?new Date(h.at).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'';
   const m=String(h.reason||'').match(/^held for:\s*(.+)$/i), why=m?m[1]:'';   // category captured at hold time (recordReleased)
-  return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-500 border border-slate-200 whitespace-nowrap" title="Hold released by ${escapeHtml(h.by||'')}${full?' · '+full:''}${why?' · was held for: '+escapeHtml(why):''}">🔓 Unheld by ${escapeHtml(who)}${when?' · '+when:''}${why?' · was: '+escapeHtml(why):''}</span>`;
+  return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500 whitespace-nowrap" title="Hold released by ${escapeHtml(h.by||'')}${full?' · '+full:''}${why?' · was held for: '+escapeHtml(why):''}">🔓 Unheld by ${escapeHtml(who)}${when?' · '+when:''}</span>`;
 }
 // Hold controls for the Repeat tab. Picks the RIGHT system: held-on-Shopify → Release Shopify;
 // held-on-EasyEcom → Unhold EasyEcom; else if the order is already imported into EasyEcom → Hold
@@ -3848,13 +3856,13 @@ function supHoldControl(r){
   if(_supTab!=='repeat') return '';
   const h=r.shopify_hold, oid=escapeHtml(r.order_id), oname=escapeHtml(r.order_name||'');
   if(h && h.status==='held'){ const why=(h.reason && h.reason!=='Repeat COD — awaiting customer confirmation')?h.reason:'';   // category captured at hold time
-    return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''}${why?' — '+escapeHtml(why):''} — won't ship / import to EasyEcom until released">🔒 Shopify hold${h.by==='auto'?' (auto)':''}${why?' · '+escapeHtml(why):''}</span> <button class="sup-unhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Release Shopify</button>`; }
-  if(r.ee_hold) return `<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="On hold in EasyEcom">⏸ EasyEcom hold</span> <button class="sup-eeunhold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Unhold EasyEcom</button>`;
+    return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-50 text-rose-700 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''}${why?' — '+escapeHtml(why):''} — won't ship / import to EasyEcom until released">🔒 Shopify hold${h.by==='auto'?' · auto':''}</span> <button class="sup-unhold-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Release Shopify</button>`; }
+  if(r.ee_hold) return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 whitespace-nowrap" title="On hold in EasyEcom">⏸ EasyEcom hold</span> <button class="sup-eeunhold-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Unhold EasyEcom</button>`;
   const rel=supReleasedChip(h);                      // history: was held, then released by a human (or auto)
   if(r.bucket !== 'order_to_dispatch') return rel;   // past pickup → call only (still surface the release history)
-  if(r.in_ee) return `${rel?rel+' ':''}<button class="sup-eehold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-amber-500 text-white hover:bg-amber-600 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Order is already in EasyEcom — pause it there (before manifest)">⏸ Hold EasyEcom</button>`;
+  if(r.in_ee) return `${rel?rel+' ':''}<button class="sup-eehold-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-amber-500 text-white hover:bg-amber-600 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Order is already in EasyEcom — pause it there (before manifest)">⏸ Hold EasyEcom</button>`;
   const failed = h && h.status==='failed';
-  return `${rel?rel+' ':''}${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200 whitespace-nowrap" title="Shopify hold failed: ${escapeHtml(h.reason||'')}">⚠️ Shopify hold failed</span> `:''}<button class="sup-hold-btn px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Not yet in EasyEcom — hold on Shopify (stops it importing / shipping)">🔒 Hold Shopify</button>`;
+  return `${rel?rel+' ':''}${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 whitespace-nowrap" title="Shopify hold failed: ${escapeHtml(h.reason||'')}">⚠️ Shopify hold failed</span> `:''}<button class="sup-hold-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Not yet in EasyEcom — hold on Shopify (stops it importing / shipping)">🔒 Hold Shopify</button>`;
 }
 async function supDoHold(oid,oname,btn){
   btn.disabled=true; const t=btn.innerHTML; btn.textContent='Holding…';
@@ -9708,7 +9716,7 @@ function icaHistory(sku){
 // ═══════════════ INFLUENCER MARKETING CRM (port of the standalone Influencer CRM) ═══════════════
 // Views: inf-dashboard · inf-discover · inf-influencers · inf-lists · inf-calendar · inf-mentions
 async function infFetch(url, opts){ const r=await fetch(url,{...(opts||{}),headers:{'Content-Type':'application/json',...getAuthHeaders(),...((opts||{}).headers||{})}}); const d=await r.json().catch(()=>({})); if(!r.ok||d.success===false) throw new Error(d.error||d.message||('HTTP '+r.status)); return d; }
-const INF_STATUS={not_contacted:['Not Contacted','bg-slate-100 text-slate-600'],reached_out:['Reached Out','bg-sky-50 text-sky-700'],in_discussion:['In Conversation','bg-violet-50 text-violet-700'],partnered:['Partnered','bg-emerald-50 text-emerald-700'],not_replying:['Not Replying','bg-amber-100 text-amber-700'],declined:['Declined','bg-rose-50 text-rose-600'],rejected:['Rejected','bg-red-100 text-red-700'],hold:['Hold','bg-yellow-100 text-yellow-800']};
+const INF_STATUS={not_contacted:['Not Contacted','bg-slate-100 text-slate-600'],reached_out:['Reached Out','bg-sky-50 text-sky-700'],in_discussion:['In Conversation','bg-violet-50 text-violet-700'],partnered:['Partnered','bg-emerald-50 text-emerald-700'],not_replying:['Not Replying','bg-amber-100 text-amber-700'],declined:['Declined','bg-rose-50 text-rose-600'],rejected:['Rejected','bg-red-100 text-red-700'],hold:['Hold','bg-yellow-100 text-yellow-800'],expensive_profile:['Expensive Profile','bg-orange-100 text-orange-700']};
 function infBadge(s){ const [l,c]=INF_STATUS[s]||[s||'—','bg-slate-100 text-slate-500']; return `<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap ${c}">${escapeHtml(l)}</span>`; }
 // Optional note prompt shown when an influencer's status is changed. Resolves to the note text ('' if the
 // user skips) — the status is applied either way (the note is non-mandatory, just logged to the activity feed).
@@ -9768,7 +9776,7 @@ function infQuickNotePrompt(){
 const INFL_STATUS_STYLE={
   not_contacted:['#f1f5f9','#475569'], reached_out:['#e0f2fe','#0369a1'], in_discussion:['#ede9fe','#6d28d9'],
   partnered:['#d1fae5','#047857'], not_replying:['#fef3c7','#b45309'], declined:['#ffe4e6','#e11d48'],
-  rejected:['#fee2e2','#b91c1c'], hold:['#fef9c3','#a16207'],
+  rejected:['#fee2e2','#b91c1c'], hold:['#fef9c3','#a16207'], expensive_profile:['#ffedd5','#c2410c'],
 };
 function inflColorStatusBtn(sel){
   if(!sel) return; const wrap=sel.closest('.csel'); if(!wrap) return;
@@ -10031,6 +10039,7 @@ function infDetailRender(wrap){
         <span>Final <b class="text-slate-700">${v.final_price!=null?infMoney(v.final_price):'—'}</b></span>
         <span>GST <b class="text-slate-700">${v.gst_applicable?'18%':'No'}</b></span>
         ${v.ad_code?`<span>Code <b class="text-slate-700">${escapeHtml(v.ad_code)}</b></span>`:''}
+        ${v.payment_date?`<span>💰 Paid <b class="text-emerald-700">${_dmy(v.payment_date)}</b></span>`:v.payment_due_date?`<span>💰 Due <b class="text-slate-700">${_dmy(v.payment_due_date)}</b></span>`:''}
         ${v.metrics_fetched_at?`<span class="text-slate-400">metrics ${supRelTime(v.metrics_fetched_at)}</span>`:''}
       </div>
       <div class="flex flex-wrap gap-1.5 mt-3">
@@ -10127,7 +10136,7 @@ function infDetailRender(wrap){
     try{ await infFetch('/api/inf/activities',{method:'POST',body:JSON.stringify({influencer_id:inf.id,description:t})}); infDetailReload(wrap); }catch(e){ showNotification(e.message,true); } });
   const vidById=vid=>wrap._data.videos.find(v=>String(v.id)===String(vid));
   wrap.querySelectorAll('.infv-pay').forEach(s=>s.addEventListener('change',async()=>{
-    try{ await infFetch('/api/inf/videos/'+s.dataset.vid,{method:'POST',body:JSON.stringify({payment_status:s.value,...(s.value==='paid'?{payment_date:new Date().toISOString().slice(0,10)}:{})})}); showNotification('Payment status saved'); }catch(e){ showNotification(e.message,true); } }));
+    try{ await infFetch('/api/inf/videos/'+s.dataset.vid,{method:'POST',body:JSON.stringify({payment_status:s.value,...(s.value==='paid'?{payment_date:new Date().toISOString().slice(0,10)}:{})})}); showNotification('Payment status saved'); infDetailReload(wrap); }catch(e){ showNotification(e.message,true); } }));
   wrap.querySelectorAll('.infv-pay').forEach(s=>{ try{ ecEnhanceSelect(s); }catch(_){} });   // project-standard .csel dropdown (not the native OS one)
   wrap.querySelectorAll('.infv-edit').forEach(b=>b.addEventListener('click',()=>infVideoModal(inf.id,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
   wrap.querySelectorAll('.infv-send').forEach(b=>b.addEventListener('click',()=>infSendProductModal(inf,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
@@ -10197,9 +10206,41 @@ function infListsControl(wrap){
   document.addEventListener('click',e=>{ if(box&&!box.contains(e.target)) panel.classList.add('hidden'); });
 }
 
+// Build product groups (SOLO + COMBO) keyed by shopify_product_id → {title,img,sku,price,mrp,stock,combo}.
+// Excludes only junk: ₹0 "freebie" dupes (🎁 / "freebie" tag) and no-SKU test items (e.g. a "framed print").
+// Representative variant: for a COMBO product → its bundle "Combo Pack" variant (real combo SKU + MRP); for a
+// SOLO product → the base single unit (explicit "Pack of 1"/"Default Title", else the cheapest, e.g. the
+// "15 Days Pack" TE-BDR1 not the 2-month TE-BDR4). Each row shows SKU + actual MRP. Shared by the collab
+// picker AND the Send-product list.
+function infProductGroups(){
+  const byPid={};
+  (_infProducts||[]).forEach(p=>{ (byPid[p.shopify_product_id]=byPid[p.shopify_product_id]||[]).push(p); });
+  const isFreebie=p=>/freebie/i.test(p.tags||'')||/^🎁/.test(String(p.product_title||''));   // ₹0 marketing-freebie duplicate SKUs
+  const hasSku=p=>!!String(p.sku||'').trim();
+  const out={};
+  Object.entries(byPid).forEach(([pid,vs])=>{
+    const usable=vs.filter(v=>hasSku(v)&&!isFreebie(v)); if(!usable.length) return;   // real, sellable variants only
+    const combo=vs.some(v=>(v.product_type||'').toLowerCase()==='combo'||/(^|[,\s])combo([,\s]|$)/.test((v.tags||'').toLowerCase())||/combo|\bduo\b/i.test(v.product_title||''));
+    let s;
+    if(combo){
+      // The BUNDLE variant is the one whose VARIANT title says "Combo …" — its SKU is the real combo SKU
+      // (e.g. TE-BSSC), NOT a component like TE-FM1. All variants of a combo product share product_type=Combo,
+      // so that can't identify the bundle. Pick the cheapest "Combo …" variant (base combo); else the priciest.
+      const comboVars=usable.filter(v=>/\bcombo\b/i.test(v.variant_title||''));
+      s = comboVars.length ? comboVars.slice().sort((a,b)=>(Number(a.price)||0)-(Number(b.price)||0))[0]
+                           : usable.slice().sort((a,b)=>(Number(b.price)||0)-(Number(a.price)||0))[0];
+    } else {
+      s = usable.find(v=>/pack of\s*1\b/i.test(v.variant_title||''))||usable.find(v=>/default title/i.test(v.variant_title||''))||usable.slice().sort((a,b)=>(Number(a.price)||0)-(Number(b.price)||0))[0];   // solo → base single unit
+    }
+    const stock=usable.reduce((n,v)=>n+(Number(v.inventory_quantity)||0),0);
+    out[pid]={ title:String(s.product_title||'').replace(/^🎁\s*/,'').replace(/\s*[-–]\s*Pack of 1$/i,'').trim(), img:s.image_url, sku:s.sku||'', price:s.price, mrp:s.compare_at_price, stock, combo };
+  });
+  return out;
+}
+
 // ── Reusable product multi-select (video + influencer forms) ─────────────────
 // Mirrors the Lovable "Select products" control: searchable dropdown, checkbox rows, selected shown as chips.
-// Products are grouped by shopify_product_id (matching what Send-product + product_ids store). Returns { get }.
+// Solo + combo products, each shown with SKU + actual MRP (combos tagged). Returns { get }.
 function infMountProductPicker(mountEl, preIds){
   if(!mountEl) return { get:()=>[] };
   const selected=new Set((preIds||[]).map(String));
@@ -10217,17 +10258,17 @@ function infMountProductPicker(mountEl, preIds){
   const q=s=>mountEl.querySelector(s);
   const panel=q('[data-panel]'), listEl=q('[data-list]'), summary=q('[data-summary]'), chips=q('[data-chips]'), toggle=q('[data-toggle]'), search=q('[data-search]');
   const renderSummary=()=>{ const n=selected.size; summary.textContent=n?`${n} product${n>1?'s':''} selected`:'Select products…'; summary.className='truncate '+(n?'text-slate-700':'text-slate-400'); };
-  const renderChips=()=>{ chips.innerHTML=[...selected].map(pid=>{ const g=groups[pid]; return `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-xs font-medium">${escapeHtml(g?g.title:pid)}<button type="button" data-rm="${escapeHtml(pid)}" class="text-indigo-400 hover:text-indigo-700 leading-none">&times;</button></span>`; }).join('');
+  const renderChips=()=>{ chips.innerHTML=[...selected].map(pid=>{ const g=groups[pid]; const title=g?g.title:((_infProdNames&&_infProdNames[pid])||('Product '+String(pid))); return `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-xs font-medium">${escapeHtml(title)}<button type="button" data-rm="${escapeHtml(pid)}" class="text-indigo-400 hover:text-indigo-700 leading-none">&times;</button></span>`; }).join('');
     chips.querySelectorAll('[data-rm]').forEach(b=>b.addEventListener('click',()=>{ selected.delete(b.dataset.rm); renderSummary(); renderChips(); renderList((search.value||'').toLowerCase()); })); };
-  const renderList=(query='')=>{ const entries=Object.entries(groups).filter(([,g])=>!query||(g.title||'').toLowerCase().includes(query));
-    listEl.innerHTML=entries.length?entries.map(([pid,g])=>`<label class="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 cursor-pointer"><input type="checkbox" class="accent-indigo-600" ${selected.has(pid)?'checked':''} data-pid="${escapeHtml(pid)}">${g.img?`<img src="${escapeHtml(g.img)}" class="w-8 h-8 rounded-lg object-cover" onerror="this.remove()">`:''}<span class="text-sm text-slate-700 flex-1">${escapeHtml(g.title||pid)}</span><span class="text-xs text-slate-400">₹${Number(g.price||0)}</span></label>`).join(''):`<div class="p-4 text-center text-xs text-slate-400">No products found</div>`;
+  const renderList=(query='')=>{ const entries=Object.entries(groups).filter(([,g])=>!query||(g.title||'').toLowerCase().includes(query)||(g.sku||'').toLowerCase().includes(query));
+    listEl.innerHTML=entries.length?entries.map(([pid,g])=>`<label class="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 cursor-pointer"><input type="checkbox" class="accent-indigo-600 flex-shrink-0" ${selected.has(pid)?'checked':''} data-pid="${escapeHtml(pid)}">${g.img?`<img src="${escapeHtml(g.img)}" class="w-8 h-8 rounded-lg object-cover flex-shrink-0" onerror="this.remove()">`:''}<span class="flex-1 min-w-0"><span class="block text-sm text-slate-700 truncate">${escapeHtml(g.title||pid)}${g.combo?' <span class="align-middle text-[9px] px-1 py-0.5 rounded bg-violet-100 text-violet-700 font-bold">COMBO</span>':''}</span>${g.sku?`<span class="block text-[10px] text-slate-400">SKU ${escapeHtml(g.sku)}</span>`:''}</span><span class="text-xs text-slate-500 whitespace-nowrap text-right flex-shrink-0">${g.mrp&&Number(g.mrp)>0?`MRP ₹${Number(g.mrp).toLocaleString('en-IN')}`:g.price!=null?`₹${Number(g.price).toLocaleString('en-IN')}`:''}</span></label>`).join(''):`<div class="p-4 text-center text-xs text-slate-400">No products found</div>`;
     listEl.querySelectorAll('[data-pid]').forEach(cb=>cb.addEventListener('change',()=>{ cb.checked?selected.add(cb.dataset.pid):selected.delete(cb.dataset.pid); renderSummary(); renderChips(); })); };
   toggle.addEventListener('click',()=>{ panel.classList.toggle('hidden'); if(!panel.classList.contains('hidden')) setTimeout(()=>search.focus(),0); });
   document.addEventListener('click',e=>{ if(!mountEl.contains(e.target)) panel.classList.add('hidden'); });
   search.addEventListener('input',()=>renderList((search.value||'').toLowerCase()));
   renderSummary(); renderChips();
-  (async()=>{ try{ if(!_infProducts) _infProducts=(await infFetch('/api/inf/products')).products||[]; }catch(_){ _infProducts=_infProducts||[]; }
-    (_infProducts||[]).forEach(p=>{ groups[p.shopify_product_id]=groups[p.shopify_product_id]||{title:p.product_title,img:p.image_url,price:p.price}; });
+  (async()=>{ try{ await infLoadProducts(); }catch(_){ _infProducts=_infProducts||[]; }
+    Object.assign(groups, infProductGroups());
     renderChips(); renderList(); })();
   return { get:()=>[...selected] };
 }
@@ -10272,26 +10313,31 @@ function infVideoModal(influencerId, video, onDone){
 }
 
 // ── Send product (Shopify draft order) ───────────────────────────────────────
-let _infProducts=null;
+let _infProducts=null, _infProdNames=null;
+// Load the product catalog once (active products for the list + a title map across ALL statuses so saved
+// product_ids that are now archived/drafted/filtered still resolve to a name).
+async function infLoadProducts(){
+  if(!_infProducts){ const r=await infFetch('/api/inf/products'); _infProducts=r.products||[]; _infProdNames=r.names||{}; }
+  return _infProducts;
+}
 async function infSendProductModal(inf, video, onDone){
   if(!video) return;
   // Preselect the products chosen for this collab (video-level first, else the influencer's default set).
   const _preSel=new Set((((video.product_ids&&video.product_ids.length)?video.product_ids:inf.product_ids)||[]).map(String));
   const wrap=infModal('inf-send-modal',`${INF_MODAL_HEAD('Send product','Creates a prepaid Shopify order for @'+escapeHtml(inf.instagram_handle||''))}<div class="p-6">${brandLoader('Loading catalog…')}</div>`,'max-w-3xl');
-  try{ if(!_infProducts) _infProducts=(await infFetch('/api/inf/products')).products||[]; }
+  try{ await infLoadProducts(); }
   catch(e){ wrap.querySelector('.sup-pop').innerHTML=INF_MODAL_HEAD('Send product')+`<p class="p-6 text-sm text-rose-500">${escapeHtml(e.message)}</p>`; return; }
-  const groups={};
-  _infProducts.forEach(p=>{ (groups[p.shopify_product_id]=groups[p.shopify_product_id]||{title:p.product_title,img:p.image_url,price:p.price,stock:0}).stock+=(p.inventory_quantity||0); });
+  const groups=infProductGroups();   // single products only (no combos), each with SKU + actual MRP + stock
   const F=(id,label,val)=>`<div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">${label}</label><input id="${id}" class="filter-input w-full" value="${escapeHtml(val==null?'':String(val))}"></div>`;
   wrap.querySelector('.sup-pop').innerHTML=`${INF_MODAL_HEAD('Send product','Creates a prepaid Shopify order for @'+escapeHtml(inf.instagram_handle||''))}
     <div class="p-5 space-y-4">
       <div><input id="infsp-q" class="filter-input w-full" placeholder="Search products…">
         <div id="infsp-list" class="mt-2 max-h-56 overflow-auto rounded-xl border border-slate-100 divide-y divide-slate-50">
-          ${Object.entries(groups).map(([pid,g])=>`<label class="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 cursor-pointer infsp-item" data-t="${escapeHtml((g.title||'').toLowerCase())}">
-            <input type="checkbox" class="infsp-cb accent-indigo-600" value="${escapeHtml(pid)}" ${_preSel.has(String(pid))?'checked':''}>
-            ${g.img?`<img src="${escapeHtml(g.img)}" class="w-9 h-9 rounded-lg object-cover" onerror="this.remove()">`:''}
-            <span class="text-sm text-slate-700 flex-1">${escapeHtml(g.title||pid)}</span>
-            <span class="text-xs text-slate-400">₹${Number(g.price||0)} · ${g.stock} in stock</span></label>`).join('')}
+          ${Object.entries(groups).map(([pid,g])=>`<label class="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 cursor-pointer infsp-item" data-t="${escapeHtml(((g.title||'')+' '+(g.sku||'')).toLowerCase())}">
+            <input type="checkbox" class="infsp-cb accent-indigo-600 flex-shrink-0" value="${escapeHtml(pid)}" ${_preSel.has(String(pid))?'checked':''}>
+            ${g.img?`<img src="${escapeHtml(g.img)}" class="w-9 h-9 rounded-lg object-cover flex-shrink-0" onerror="this.remove()">`:''}
+            <span class="flex-1 min-w-0"><span class="block text-sm text-slate-700 truncate">${escapeHtml(g.title||pid)}${g.combo?' <span class="align-middle text-[9px] px-1 py-0.5 rounded bg-violet-100 text-violet-700 font-bold">COMBO</span>':''}</span>${g.sku?`<span class="block text-[10px] text-slate-400">SKU ${escapeHtml(g.sku)}</span>`:''}</span>
+            <span class="text-xs text-slate-500 whitespace-nowrap text-right flex-shrink-0">${g.mrp&&Number(g.mrp)>0?`MRP ₹${Number(g.mrp).toLocaleString('en-IN')}`:g.price!=null?`₹${Number(g.price).toLocaleString('en-IN')}`:''} · ${g.stock} in stock</span></label>`).join('')}
         </div></div>
       <div class="grid sm:grid-cols-2 gap-3">
         ${F('infsp-name','Name',inf.name)}${F('infsp-phone','Phone *',inf.phone)}
@@ -10677,6 +10723,7 @@ async function infListDetail(id){
           <p class="text-xs text-slate-400">${escapeHtml(d.list.description||'')} · ${_inflRange?`rollups for <b>${escapeHtml(_inflRange.label)}</b> (${_dmy(_inflRange.from)} – ${_dmy(_inflRange.to)})`:'all-time rollups (no date in list name)'}</p></div>
         <div class="ml-auto flex items-center gap-2">
           <select id="infl-addmem" class="filter-select w-52"><option value="">+ Add influencer…</option></select>
+          <button id="infl-export" class="filter-btn whitespace-nowrap" title="Download the members table as a spreadsheet (CSV — opens in Excel)">⬇ Excel</button>
           <button id="infl-del" class="px-3 py-2 text-sm rounded-lg bg-rose-500 text-white font-semibold hover:bg-rose-600 whitespace-nowrap">🗑 Delete list</button></div>
       </div>
       <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-5">
@@ -10692,6 +10739,7 @@ async function infListDetail(id){
         <div id="infl-table" class="overflow-x-auto"></div>
       </div>`;
     document.getElementById('infl-back').addEventListener('click',()=>{ det.classList.add('hidden'); grid.classList.remove('hidden'); infListsLoad(); });
+    document.getElementById('infl-export').addEventListener('click',inflListExportCsv);
     document.getElementById('infl-del').addEventListener('click',async()=>{
       if(!(await supConfirm({title:'Delete this list?',message:`"${d.list.name}" will be removed (influencers themselves are kept).`,confirmLabel:'Delete',danger:true}))) return;
       try{ await infFetch('/api/inf/lists/'+id,{method:'DELETE'}); _infListsCache=null; det.classList.add('hidden'); grid.classList.remove('hidden'); infListsLoad(); showNotification('List deleted'); }catch(e){ showNotification(e.message,true); } });
@@ -10706,6 +10754,26 @@ async function infListDetail(id){
     }catch(_){}
     inflRenderChips(); inflRenderTable();
   }catch(e){ det.innerHTML=`<p class="text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
+}
+// Download the campaign's member table as a spreadsheet (CSV → opens in Excel). Exports the CURRENTLY
+// filtered/sorted rows (respects the search box + status chips) with all the on-screen columns + rollup extras.
+function inflListExportCsv(){
+  const rows=inflFilteredSorted(); if(!rows.length) return showNotification('Nothing to export',true);
+  const S=INF_STATUS, yn=v=>v?'Yes':'No';
+  const cols=[
+    ['Handle',m=>'@'+(m.instagram_handle||'')],['Name',m=>m.name||''],['Niche',m=>m.niche||''],['Followers',m=>m.follower_count||''],
+    ['Status',m=>(S[m.outreach_status]?S[m.outreach_status][0]:m.outreach_status||'')],
+    ['Quoted',m=>m.quoted||0],['Final',m=>m.final||0],['GST',m=>m.gst||0],['Spend',m=>m.spend||0],['Blended CPM',m=>m.cpm!=null?m.cpm:''],
+    ['Payment',m=>m.payment||''],['Payment date',m=>m.payment_date||''],['Due date',m=>m.payment_due_date||''],
+    ['Product sent',m=>yn(m.product_sent)],['Email sent',m=>yn(m.email_sent)],['Ad run live',m=>yn(m.ad_run)],['Videos',m=>m.videos||0],
+    ['Views (range)',m=>m.views_in_range||0],['Likes',m=>m.likes||0],['Comments',m=>m.comments||0],['Shares',m=>m.shares||0],
+  ];
+  const esc=v=>{ const s=v==null?'':String(v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+  const csv='﻿'+[cols.map(c=>c[0]).join(',')].concat(rows.map(m=>cols.map(c=>esc(c[1](m))).join(','))).join('\n');
+  const name=String((_inflList&&_inflList.name)||'campaign').replace(/[^\w\-]+/g,'_');
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download=`${name}-members-${new Date().toISOString().slice(0,10)}.csv`; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  showNotification(`Exported ${rows.length} member${rows.length>1?'s':''}`);
 }
 function inflRenderChips(){
   const box=document.getElementById('infl-chips'); if(!box) return;
@@ -10737,7 +10805,7 @@ function inflRenderTable(){
     <td class="${TD} whitespace-nowrap"><a href="#" class="infl-open text-indigo-600 font-medium hover:underline" data-id="${m.id}">@${escapeHtml(m.instagram_handle)}</a></td>
     <td class="${TD} text-slate-700">${escapeHtml(m.name||'—')}</td>
     <td class="${TD} text-right tabular-nums">${m.final?infMoney(m.final):'<span class="text-slate-300">—</span>'}</td>
-    <td class="${TD}">${inflPayBadge(m.payment)}</td>
+    <td class="${TD}">${inflPayBadge(m.payment)}${m.payment_date?`<div class="text-[10px] text-emerald-600 mt-0.5 whitespace-nowrap">Paid ${_dmy(m.payment_date)}</div>`:m.payment_due_date?`<div class="text-[10px] text-slate-400 mt-0.5 whitespace-nowrap">Due ${_dmy(m.payment_due_date)}</div>`:''}</td>
     <td class="${TD} text-center">${inflBool(m.product_sent)}</td>
     <td class="${TD} text-center">${inflBool(m.email_sent)}</td>
     <td class="${TD} text-center">${m.ad_run?'<span class="text-emerald-600 font-bold whitespace-nowrap">✓ Live</span>':'<span class="text-slate-300">—</span>'}</td>
