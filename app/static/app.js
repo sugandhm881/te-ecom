@@ -10279,6 +10279,18 @@ async function infDetailModal(id){
 async function infDetailReload(wrap){
   try{ const d=await infFetch('/api/inf/influencer/'+wrap._data.influencer.id); wrap._data=d; infDetailRender(wrap); }catch(_){}
 }
+// Orders preserved from DELETED videos (influencers.orphan_orders) — still trackable even though the
+// video is gone. Shown under the video list on the Videos tab, each with its own Track button.
+function infOrphanOrdersHtml(inf){
+  const list=Array.isArray(inf&&inf.orphan_orders)?inf.orphan_orders:[];
+  if(!list.length) return '';
+  return `<div class="mt-5 pt-4 border-t border-slate-100">
+    <p class="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Orders from removed videos</p>
+    <div class="space-y-2">${list.slice().reverse().map(o=>`<div class="flex items-center justify-between gap-2 rounded-lg bg-slate-50/70 px-3 py-2">
+      <span class="text-xs text-slate-600">Prepaid order <b class="text-slate-800">${escapeHtml(String(o.order_name||('#'+o.order_id)))}</b>${o.at?` · <span class="text-slate-400">${_dmy(String(o.at).slice(0,10))}</span>`:''}</span>
+      <button class="info-track filter-btn" style="height:28px" data-oid="${escapeHtml(String(o.order_id))}">🚚 Track order</button>
+    </div>`).join('')}</div></div>`;
+}
 function infDetailRender(wrap){
   const {influencer:inf,videos,activities,lists}=wrap._data;
   const statusSel=`<select id="infd-status" class="filter-select">${Object.entries(INF_STATUS).map(([k,[l]])=>`<option value="${k}" ${inf.outreach_status===k?'selected':''}>${l}</option>`).join('')}</select>`;
@@ -10358,7 +10370,7 @@ function infDetailRender(wrap){
             <button id="infd-addvid" class="ml-auto text-sm px-3 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">+ Add video</button></div>
           <div id="infd-tabbody">
             ${_infDetTab==='videos'
-              ?(videos.length?`<div class="space-y-3">${videos.map(vidCard).join('')}</div>`:'<p class="text-sm text-slate-400 p-6 text-center">No videos yet — add the first deliverable.</p>')
+              ?((videos.length?`<div class="space-y-3">${videos.map(vidCard).join('')}</div>`:'<p class="text-sm text-slate-400 p-6 text-center">No videos yet — add the first deliverable.</p>')+infOrphanOrdersHtml(inf))
               :`<div class="flex gap-2 mb-3"><input id="infd-note" class="filter-input flex-1" placeholder="Add a note to the timeline…"><button id="infd-note-save" class="text-sm px-3 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Add</button></div>
                 <div class="space-y-2 max-h-[50vh] overflow-auto">${[...activities].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).map(a=>`<div class="rounded-lg ${a.activity_type==='note'?'bg-indigo-50/50 ring-1 ring-indigo-100':'bg-slate-50/60'} px-3 py-2">
                   <div class="flex items-center gap-2">${infActChip(a.activity_type)}<span class="text-[11px] text-slate-400">${supRelTime(a.created_at)}</span></div>
@@ -10406,6 +10418,7 @@ function infDetailRender(wrap){
   wrap.querySelectorAll('.infv-send').forEach(b=>b.addEventListener('click',()=>infSendProductModal(inf,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
   wrap.querySelectorAll('.infv-invoice').forEach(b=>b.addEventListener('click',()=>infInvoice(inf,vidById(b.dataset.vid))));
   wrap.querySelectorAll('.infv-track').forEach(b=>b.addEventListener('click',()=>infTrackModal(b.dataset.vid)));
+  wrap.querySelectorAll('.info-track').forEach(b=>b.addEventListener('click',()=>infTrackModal(null,b.dataset.oid)));
   wrap.querySelectorAll('.infv-del').forEach(b=>b.addEventListener('click',async()=>{
     if(!(await supConfirm({title:'Delete this video?',message:'The deliverable and its metrics will be removed.',confirmLabel:'Delete',danger:true}))) return;
     try{ await infFetch('/api/inf/videos/'+b.dataset.vid,{method:'DELETE'}); infDetailReload(wrap); }catch(e){ showNotification(e.message,true); } }));
@@ -10640,10 +10653,11 @@ async function infSendProductModal(inf, video, onDone){
 }
 
 // ── Order tracking (in-app courier status — no Shopify redirect) ─────────────
-async function infTrackModal(videoId){
+async function infTrackModal(videoId, orderId){
   const wrap=infModal('inf-track-modal',`${INF_MODAL_HEAD('Order tracking','Live courier status')}<div class="p-6">${brandLoader('Loading tracking…')}</div>`,'max-w-lg');
   let d;
-  try{ d=(await infFetch('/api/inf/order-tracking?videoId='+encodeURIComponent(videoId))).tracking; }
+  const qs = orderId ? ('orderId='+encodeURIComponent(orderId)) : ('videoId='+encodeURIComponent(videoId));
+  try{ d=(await infFetch('/api/inf/order-tracking?'+qs)).tracking; }
   catch(e){ wrap.querySelector('.sup-pop').innerHTML=INF_MODAL_HEAD('Order tracking')+`<p class="p-6 text-sm text-rose-500">${escapeHtml(e.message)}</p>`; return; }
   if(!d){ wrap.querySelector('.sup-pop').innerHTML=INF_MODAL_HEAD('Order tracking')+`<p class="p-6 text-sm text-slate-400">No order has been created for this deliverable yet.</p>`; return; }
   const fmt=x=>{ if(!x) return null; const t=new Date(x); if(isNaN(t)) return null; return t.toLocaleString('en-IN',{day:'2-digit',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit'}); };

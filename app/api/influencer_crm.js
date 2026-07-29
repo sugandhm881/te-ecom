@@ -256,6 +256,22 @@ router.post('/inf/videos/:id', async (req, res) => {
 });
 
 router.delete('/inf/videos/:id', async (req, res) => {
+    // If this video had a product order, PRESERVE the order reference on the influencer (orphan_orders)
+    // so it stays trackable after the video is gone — otherwise the order is orphaned in Shopify.
+    try {
+        const { data: v } = await supabase.from('influencer_videos')
+            .select('influencer_id, shopify_draft_order_id, shopify_draft_order_url, product_sent_at')
+            .eq('id', req.params.id).maybeSingle();
+        if (v && v.shopify_draft_order_id) {
+            const { data: inf } = await supabase.from('influencers').select('orphan_orders').eq('id', v.influencer_id).maybeSingle();
+            const list = Array.isArray(inf && inf.orphan_orders) ? inf.orphan_orders : [];
+            if (!list.some(o => String(o.order_id) === String(v.shopify_draft_order_id))) {
+                const { data: ord } = await supabase.from('orders').select('name').eq('id', String(v.shopify_draft_order_id)).maybeSingle();
+                list.push({ order_id: String(v.shopify_draft_order_id), order_name: (ord && ord.name) || null, order_url: v.shopify_draft_order_url || null, at: v.product_sent_at || new Date().toISOString() });
+                await supabase.from('influencers').update({ orphan_orders: list }).eq('id', v.influencer_id);
+            }
+        }
+    } catch (e) { console.error('[inf] preserve order on video delete failed:', e.message); }
     const { error } = await supabase.from('influencer_videos').delete().eq('id', req.params.id);
     if (error) return res.status(500).json({ success: false, error: error.message });
     res.json({ success: true });
@@ -605,10 +621,14 @@ router.post('/inf/send-product', async (req, res) => {
 router.get('/inf/order-tracking', async (req, res) => {
     try {
         const videoId = req.query.videoId;
-        if (!videoId) return res.status(400).json({ success: false, error: 'videoId required' });
-        const { data: vid } = await supabase.from('influencer_videos')
-            .select('shopify_draft_order_id, shopify_draft_order_url, product_sent').eq('id', videoId).maybeSingle();
-        const orderId = vid && vid.shopify_draft_order_id;
+        // Track by an explicit orderId (preserved orphan orders from deleted videos) OR by videoId.
+        let orderId = req.query.orderId ? String(req.query.orderId) : null;
+        if (!orderId) {
+            if (!videoId) return res.status(400).json({ success: false, error: 'videoId or orderId required' });
+            const { data: vid } = await supabase.from('influencer_videos')
+                .select('shopify_draft_order_id, shopify_draft_order_url, product_sent').eq('id', videoId).maybeSingle();
+            orderId = vid && vid.shopify_draft_order_id;
+        }
         if (!orderId) return res.json({ success: true, tracking: null });
 
         const { data: ord } = await supabase.from('orders')
