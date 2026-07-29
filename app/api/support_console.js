@@ -9,6 +9,7 @@ const axios = require('axios');
 const router = express.Router();
 const config = require('../../config');
 const { supabase } = require('../supabase');
+const { requirePermission } = require('../auth');
 const shopifyHold = require('./shopify_hold');
 
 const UNDELIVERED_BUCKETS = ['undelivered'];   // per the console spec: single member
@@ -190,6 +191,16 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
     const finById = {}; finRows.forEach(o => { finById[String(o.id)] = (o.financial_status || '').toLowerCase(); });
     const _fullyPrepaid = new Set(['paid', 'refunded', 'partially_refunded']);
     cand = cand.filter(c => !_fullyPrepaid.has(finById[String(c.order_id)] || ''));
+    // Backfill a missing phone from the SHIPPING ADDRESS. The `order_buckets` view's `phone` is null for some
+    // orders (it takes the order/customer phone, but COD orders often carry the number ONLY in the shipping
+    // address) — which made them show "no phone" in the Call Queue AND blocked the phone-based reason recompute
+    // (in-flight / recent-non-delivery), so a correctly-held order looked reasonless. Fill it before (4)/(5).
+    const _noPhoneIds = cand.filter(c => !c.phone).map(c => c.order_id);
+    if (_noPhoneIds.length) {
+        const shipRows = await chunkedIn('order_shipping_addresses', 'order_id, phone', 'order_id', _noPhoneIds);
+        const shipPhoneBy = {}; shipRows.forEach(s => { if (s.phone && !shipPhoneBy[String(s.order_id)]) shipPhoneBy[String(s.order_id)] = s.phone; });
+        cand.forEach(c => { if (!c.phone && shipPhoneBy[String(c.order_id)]) c.phone = shipPhoneBy[String(c.order_id)]; });
+    }
     // (4) ≥1 of the customer's last 3 PRIOR orders not delivered.
     const phones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
     const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, order_name, phone, bucket, created_at', 'phone', phones) : [];
@@ -273,6 +284,18 @@ router.post('/support/shopify-unhold', async (req, res) => {
         res.json({ success: true, status: 'released' });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
+// Cancel a held order on Shopify (restock, no customer email) + refund any online-captured amount
+// (COD fee/advance) + release the hold + log the reason & who. DESTRUCTIVE — cancels the real customer
+// order. Gated by the dedicated `support-cancel-order` capability (admins pass via '*').
+router.post('/support/cancel-order', requirePermission('support-cancel-order'), async (req, res) => {
+    try {
+        const { orderId, orderName, reason } = req.body || {};
+        if (!orderId || !orderName) return res.status(400).json({ success: false, error: 'orderId and orderName are required.' });
+        const out = await shopifyHold.cancelOrder(orderName, orderId, (req.user && req.user.sub) || 'agent', reason);
+        if (!out.ok) return res.status(502).json({ success: false, error: out.error || 'Cancel failed.' });
+        res.json({ success: true, status: 'cancelled', refunded: out.refunded || 0 });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
 
 // ── GET /support/queue?tab=repeat|und|changed ────────────────────────────────
 router.get('/support/queue', async (req, res) => {
@@ -342,7 +365,12 @@ router.get('/support/queue', async (req, res) => {
             rows = rows.filter(r => (r.reasons && r.reasons.length > 0)
                 || r.ee_hold
                 || (r.shopify_hold && (r.shopify_hold.status === 'held' || r.shopify_hold.status === 'failed'))
-                || r.note_count > 0);
+                || r.note_count > 0)
+                // …but once a hold has been RELEASED on Shopify and the order has moved forward (dispatched —
+                // fulfilled / AWB assigned) and isn't still held in EasyEcom, the call is resolved and it's
+                // shipping → drop it from the list in real-time. (Picked-up / delivered / RTO were already
+                // dropped above via !_moved; this catches the AWB-assigned-but-not-yet-scanned gap.)
+                .filter(r => !(r.shopify_hold && r.shopify_hold.status === 'released' && (r._dispatched || r.awb_number) && !r.ee_hold));
         }
         res.json({ success: true, tab, rows: rows.slice(0, 1500), lock: await lockState() });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
@@ -411,7 +439,7 @@ router.get('/support/order/:orderId', async (req, res) => {
         const onmNorm = nkn(b.order_name);
         const { data: holdRows } = await supabase.from('api_logs_ecom')
             .select('action, status_code, payload, response, created_at')
-            .in('action', ['shopify_hold', 'shopify_release'])
+            .in('action', ['shopify_hold', 'shopify_release', 'shopify_cancel'])
             .order('created_at', { ascending: false }).limit(500);
         const holdLog = (holdRows || [])
             .filter(l => String(JSON.stringify(l.payload || '')).includes(onmNorm))

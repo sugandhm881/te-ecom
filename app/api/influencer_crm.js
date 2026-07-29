@@ -574,13 +574,19 @@ router.post('/inf/send-product', async (req, res) => {
         if (!b.videoId || !b.influencerId) return res.status(400).json({ success: false, error: 'videoId and influencerId required' });
         if (!b.address1 || !b.pincode || !b.phone) return res.status(400).json({ success: false, error: 'Address line 1, pincode and phone are required.' });
         if (!Array.isArray(b.productIds) || !b.productIds.length) return res.status(400).json({ success: false, error: 'Pick at least one product.' });
-        const r = await invokeFn('create-influencer-order', {
+        const payload = {
             videoId: b.videoId, influencerId: b.influencerId,
             address1: b.address1, address2: b.address2 || '', city: b.city || '', state: b.state || '',
             pincode: b.pincode, phone: b.phone, email: b.email || undefined, name: b.name || 'Influencer',
             handle: b.handle || undefined,               // → INFLUENCER @handle company line on label/invoice
-            productIds: b.productIds.map(String),
-        }, 120000);
+        };
+        // Prefer the EXACT representative variant the picker showed (Pack-of-1 for solo / Combo Pack for combo).
+        // Without it the edge fn re-resolves each product to its FIRST in-stock variant, shipping the wrong pack
+        // size (chose BDR1 → shipped BDR4). Fall back to productIds only if no variant ids came through.
+        const variantIds = Array.isArray(b.productVariantIds) ? b.productVariantIds.filter(Boolean).map(String) : [];
+        if (variantIds.length === b.productIds.length) payload.productVariantIds = variantIds;   // 1:1 cover → use exact variants
+        else payload.productIds = b.productIds.map(String);                                       // incomplete → let the edge fn resolve
+        const r = await invokeFn('create-influencer-order', payload, 120000);
         if (r.status >= 400) return res.status(502).json({ success: false, error: (r.data && (r.data.error || r.data.details)) || `create-order returned ${r.status}` });
         // persist the shipping address back onto the influencer for next time + log
         supabase.from('influencers').update({

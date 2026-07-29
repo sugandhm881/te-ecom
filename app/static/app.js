@@ -594,6 +594,8 @@ function canView(view) { return !currentUser || currentUser.isAdmin || (currentU
 // Capability gate: send escalation/critical/claims emails. Admins always; other users only if the admin
 // granted the 'send-escalation-emails' permission on the Users page. The server enforces this too.
 function canSendEmails() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('send-escalation-emails'))); }
+// Cancel-order capability (Support Call Queue) — admin, or the 'support-cancel-order' permission. Server enforces it too.
+function canCancelOrders() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('support-cancel-order'))); }
 
 async function handleSignup() {
     const name = String((document.getElementById('signup-name') || {}).value || '').trim();
@@ -3889,11 +3891,19 @@ function supTabPaint(){ document.querySelectorAll('.sup-tab').forEach(b=>{ const
   b.classList.toggle('border-transparent',!on); b.classList.toggle('text-slate-500',!on); }); }
 function supSyncInfo(lock){ const el=document.getElementById('sup-sync-info'); if(!el||!lock) return;
   const res=lock.last_result||{}; el.textContent = lock.is_running?'Sync running…':(lock.last_finished_at?`Last sync ${new Date(lock.last_finished_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}${res.updated!=null?` · ${res.updated} updated`:''}`:''); }
-async function supLoadQueue(){
-  const c=document.getElementById('sup-queue-table'); if(c) c.innerHTML=brandLoader('Loading queue…');
-  try{ const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS()); await eeHoldRefresh(); _supQueueRows=d.rows||[]; supSyncInfo(d.lock); supQueueTable(); }
-  catch(e){ if(c) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }
+async function supLoadQueue(quiet){
+  const c=document.getElementById('sup-queue-table'); if(c && !quiet) c.innerHTML=brandLoader('Loading queue…');
+  try{ _eeHoldAt=0; const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS()); await eeHoldRefresh(); _supQueueRows=d.rows||[]; supSyncInfo(d.lock); supQueueTable(); }
+  catch(e){ if(c && !quiet) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }   // quiet poll error → keep showing current data
 }
+// Real-time-ish: quietly re-fetch the queue every 30s WHILE the support view is visible, so agents see
+// current holds without a manual refresh. Skipped when hidden or a hold/cancel dialog is open (don't disrupt).
+setInterval(()=>{
+  const c=document.getElementById('sup-queue-table');
+  if(!c || c.offsetParent===null || document.hidden) return;
+  if(document.getElementById('sup-confirm-modal')||document.getElementById('sup-cancel-modal')) return;
+  supLoadQueue(true);
+}, 30000);
 // Repeat-tab call-reason tags — shows which of the 3 reasons put this order on the call list.
 const SUP_REASON_META={
   in_flight:['🚚','In-flight','bg-sky-100 text-sky-700','Customer has another order still in transit / not yet delivered','bg-sky-50 text-sky-700'],
@@ -3976,6 +3986,7 @@ function supQueueTable(){
   c.querySelectorAll('.sup-note-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supNotesModal(b.dataset.oid,b.dataset.oname); }));
   c.querySelectorAll('.sup-hold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoHold(b.dataset.oid,b.dataset.oname,b); }));
   c.querySelectorAll('.sup-unhold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoUnhold(b.dataset.oid,b.dataset.oname,b); }));
+  c.querySelectorAll('.sup-cancel-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoCancel(b.dataset.oid,b.dataset.oname,b); }));
   c.querySelectorAll('.sup-eehold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoEeHold(b.dataset.oid,b.dataset.oname,b); }));
   c.querySelectorAll('.sup-eeunhold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoEeUnhold(b.dataset.oid,b.dataset.oname,b); }));
 }
@@ -3999,7 +4010,7 @@ function supHoldControl(r){
   if(_supTab!=='repeat') return '';
   const h=r.shopify_hold, oid=escapeHtml(r.order_id), oname=escapeHtml(r.order_name||'');
   if(h && h.status==='held'){ const why=(h.reason && h.reason!=='Repeat COD — awaiting customer confirmation')?h.reason:'';   // category captured at hold time
-    return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-50 text-rose-700 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''}${why?' — '+escapeHtml(why):''} — won't ship / import to EasyEcom until released">🔒 Shopify hold${h.by==='auto'?' · auto':''}</span> <button class="sup-unhold-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Release Shopify</button>`; }
+    return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-50 text-rose-700 whitespace-nowrap" title="Held on Shopify${h.by==='auto'?' automatically':''}${why?' — '+escapeHtml(why):''} — won't ship / import to EasyEcom until released">🔒 Shopify hold${h.by==='auto'?' · auto':''}</span> <button class="sup-unhold-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Release Shopify</button>${canCancelOrders()?` <button class="sup-cancel-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-rose-600 text-white hover:bg-rose-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Cancel this order on Shopify (restocks inventory, refunds any online-paid COD fee, no customer email)">Cancel order</button>`:''}`; }
   if(r.ee_hold) return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 whitespace-nowrap" title="On hold in EasyEcom">⏸ EasyEcom hold</span> <button class="sup-eeunhold-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}">Unhold EasyEcom</button>`;
   const rel=supReleasedChip(h);                      // history: was held, then released by a human (or auto)
   if(r.bucket !== 'order_to_dispatch') return rel;   // past pickup → call only (still surface the release history)
@@ -4020,6 +4031,47 @@ async function supDoUnhold(oid,oname,btn){
   try{ await supFetch('/api/support/shopify-unhold',{method:'POST',body:JSON.stringify({orderId:oid,orderName:oname})});
     showNotification(`${oname} released`); supLoadQueue(); }
   catch(e){ showNotification('Release failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
+}
+// Cancel a held Shopify order — pick a reason (logged), then cancel on Shopify (restock, no customer email).
+async function supDoCancel(oid,oname,btn){
+  const reason=await supCancelReason(oname);
+  if(!reason) return;
+  btn.disabled=true; const t=btn.innerHTML; btn.textContent='Cancelling…';
+  try{ const d=await supFetch('/api/support/cancel-order',{method:'POST',body:JSON.stringify({orderId:oid,orderName:oname,reason})});
+    showNotification(`${oname} cancelled on Shopify${d&&d.refunded?` · ₹${d.refunded} refunded`:''}`); _eeHoldAt=0; supLoadQueue(); }
+  catch(e){ showNotification('Cancel failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
+}
+// Reason picker for cancelling — a category dropdown + optional note. Returns the reason string, or null if dismissed.
+function supCancelReason(oname){
+  return new Promise(resolve=>{
+    document.getElementById('sup-cancel-modal')?.remove();
+    const wrap=document.createElement('div'); wrap.id='sup-cancel-modal';
+    wrap.className='fixed inset-0 z-[95] flex items-center justify-center bg-slate-900/50 backdrop-blur-[2px] p-4';
+    const opts=['Customer refused','Customer unreachable','Duplicate order','Fake / fraudulent','Other'];
+    wrap.innerHTML=`<div class="sup-pop bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+      <div class="flex items-start gap-3">
+        <span class="w-10 h-10 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center text-lg shrink-0">⚠️</span>
+        <div class="min-w-0"><h3 class="text-base font-bold text-slate-800">Cancel this order?</h3>
+          <p class="text-sm text-slate-500 mt-1">${escapeHtml(oname||'')} will be <b>cancelled on Shopify</b> — inventory restocked, any amount paid online (COD fee/advance) refunded, no email to the customer. This can't be undone.</p></div></div>
+      <label class="block text-xs font-semibold text-slate-500 mt-4 mb-1">Reason</label>
+      <select id="supcx-reason" class="filter-select w-full">${opts.map(o=>`<option value="${o}">${o}</option>`).join('')}</select>
+      <input id="supcx-note" type="text" maxlength="120" class="filter-input w-full mt-2" placeholder="Optional note (added to the reason)">
+      <div class="flex justify-end gap-2.5 mt-5">
+        <button id="supcx-no" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Keep order</button>
+        <button id="supcx-yes" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700">Cancel order</button>
+      </div></div>`;
+    document.body.appendChild(wrap);
+    const done=v=>{ wrap.remove(); document.removeEventListener('keydown',onKey); resolve(v); };
+    const onKey=e=>{ if(e.key==='Escape') done(null); };
+    document.addEventListener('keydown',onKey);
+    wrap.addEventListener('click',e=>{ if(e.target===wrap) done(null); });
+    document.getElementById('supcx-no').addEventListener('click',()=>done(null));
+    document.getElementById('supcx-yes').addEventListener('click',()=>{
+      const r=document.getElementById('supcx-reason').value, n=document.getElementById('supcx-note').value.trim();
+      done(n?`${r} — ${n}`:r);
+    });
+    setTimeout(()=>document.getElementById('supcx-reason')?.focus(),50);
+  });
 }
 // EasyEcom hold/unhold from the Repeat tab (order already imported into EasyEcom → hold it there).
 async function supDoEeHold(oid,oname,btn){
@@ -5289,7 +5341,7 @@ const PERM_GROUPS = [
   ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
   // Capabilities (not dashboard views) — granted per-user by the admin. Server enforces each one too.
-  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)']]]
+  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)']]]
 ];
 const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
 const PERM_TOTAL = PERM_CATALOG.length;
@@ -10445,7 +10497,7 @@ function infProductGroups(){
       s = usable.find(v=>/pack of\s*1\b/i.test(v.variant_title||''))||usable.find(v=>/default title/i.test(v.variant_title||''))||usable.slice().sort((a,b)=>(Number(a.price)||0)-(Number(b.price)||0))[0];   // solo → base single unit
     }
     const stock=usable.reduce((n,v)=>n+(Number(v.inventory_quantity)||0),0);
-    out[pid]={ title:String(s.product_title||'').replace(/^🎁\s*/,'').replace(/\s*[-–]\s*Pack of 1$/i,'').trim(), img:s.image_url, sku:s.sku||'', price:s.price, mrp:s.compare_at_price, stock, combo };
+    out[pid]={ title:String(s.product_title||'').replace(/^🎁\s*/,'').replace(/\s*[-–]\s*Pack of 1$/i,'').trim(), img:s.image_url, sku:s.sku||'', variantId:s.shopify_variant_id, price:s.price, mrp:s.compare_at_price, stock, combo };
   });
   return out;
 }
@@ -10568,6 +10620,9 @@ async function infSendProductModal(inf, video, onDone){
   document.getElementById('infsp-save').addEventListener('click',async()=>{
     const g=id=>document.getElementById(id).value.trim();
     const ids=[...wrap.querySelectorAll('.infsp-cb:checked')].map(c=>c.value);
+    // The EXACT representative variant each picker row showed (Pack-of-1 for solo, Combo Pack for combo) —
+    // sent so the order ships THAT variant, not the edge fn's first-in-stock guess (which shipped BDR4 for BDR1).
+    const variantIds=ids.map(pid=>groups[pid]&&groups[pid].variantId).filter(Boolean);
     const err=t=>{ const p=document.getElementById('infsp-err'); p.textContent=t; p.classList.remove('hidden'); };
     if(!ids.length) return err('Pick at least one product.');
     if(!g('infsp-addr1')||!g('infsp-pin')||!g('infsp-phone')) return err('Address line 1, pincode and phone are required.');
@@ -10577,7 +10632,7 @@ async function infSendProductModal(inf, video, onDone){
       confirmLabel:'Yes, create order'}))) return;
     const btn=document.getElementById('infsp-save'); btn.disabled=true; btn.textContent='Creating…';
     try{ const r=await infFetch('/api/inf/send-product',{method:'POST',body:JSON.stringify({
-        videoId:video.id,influencerId:inf.id,productIds:ids,name:g('infsp-name'),phone:g('infsp-phone'),handle:inf.instagram_handle||'',
+        videoId:video.id,influencerId:inf.id,productIds:ids,productVariantIds:variantIds,name:g('infsp-name'),phone:g('infsp-phone'),handle:inf.instagram_handle||'',
         address1:g('infsp-addr1'),address2:g('infsp-addr2'),city:g('infsp-city'),state:g('infsp-state'),pincode:g('infsp-pin'),email:g('infsp-email')})});
       wrap.remove(); showNotification('Prepaid order '+(r.orderName||'')+' created ✓'); if(onDone) onDone();
     }catch(e){ btn.disabled=false; btn.textContent='Create prepaid order'; err(e.message); }

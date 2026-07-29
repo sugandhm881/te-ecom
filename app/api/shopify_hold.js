@@ -131,6 +131,72 @@ async function releaseOrder(orderName, shopifyOrderId, by) {
     return { ok: false, error: out.error };
 }
 
+// ── Cancel a Shopify order (support Call Queue → held order) ──────────────────────────────────
+// Shopify's cancel `reason` is a fixed enum (customer | inventory | fraud | declined | other) — map our
+// human label onto it; the full label is stored on the mark. Restocks inventory, does NOT email the customer.
+function cancelReasonEnum(label) {
+    const l = String(label || '').toLowerCase();
+    if (l.includes('fake') || l.includes('fraud')) return 'fraud';
+    if (l.includes('refus') || l.includes('unreach') || l.includes('customer') || l.includes('duplicate')) return 'customer';
+    return 'other';
+}
+async function cancelShopifyOrder(shopifyOrderId, reasonLabel) {
+    const r = await axios.post(`${API()}/orders/${shopifyOrderId}/cancel.json`,
+        { reason: cancelReasonEnum(reasonLabel), restock: true, email: false },
+        { headers: HEADERS(), timeout: 20000, validateStatus: () => true });
+    if (r.status >= 200 && r.status < 300) return { ok: true };
+    const e = r.data && (r.data.errors || r.data.error);
+    return { ok: false, error: (typeof e === 'string' ? e : JSON.stringify(e || `HTTP ${r.status}`)) };
+}
+// Refund any amount ALREADY CAPTURED online for a COD order — e.g. a COD fee / advance paid at checkout on a
+// partially-paid order. Pure-COD held orders have nothing captured (financial_status 'pending') → returns 0.
+// (Inventory itself is released automatically when an UNFULFILLED order is cancelled, so no line-item restock here.)
+async function refundCapturedIfAny(shopifyOrderId) {
+    const og = await axios.get(`${API()}/orders/${shopifyOrderId}.json?fields=financial_status,currency`, { headers: HEADERS(), timeout: 20000, validateStatus: () => true });
+    const fin = og.data && og.data.order && og.data.order.financial_status;
+    if (!['paid', 'partially_paid', 'partially_refunded'].includes(fin)) return { refunded: 0 };   // nothing captured online
+    const tg = await axios.get(`${API()}/orders/${shopifyOrderId}/transactions.json`, { headers: HEADERS(), timeout: 20000, validateStatus: () => true });
+    const txns = (tg.data && tg.data.transactions) || [];
+    let captured = 0, refunded = 0, parent = null, gateway = null;
+    for (const t of txns) {
+        if (t.status !== 'success') continue;
+        const amt = parseFloat(t.amount || 0) || 0;
+        if (t.kind === 'sale' || t.kind === 'capture') { captured += amt; if (!parent) { parent = t.id; gateway = t.gateway; } }
+        else if (t.kind === 'refund') refunded += amt;
+    }
+    const refundable = Math.max(0, +(captured - refunded).toFixed(2));
+    if (refundable <= 0 || !parent) return { refunded: 0 };
+    const rf = await axios.post(`${API()}/orders/${shopifyOrderId}/refunds.json`, {
+        refund: {
+            note: 'Order cancelled by support — refunding the amount paid online (COD fee / advance).',
+            notify: false,
+            transactions: [{ parent_id: parent, amount: refundable.toFixed(2), kind: 'refund', gateway: gateway || undefined }],
+        },
+    }, { headers: HEADERS(), timeout: 20000, validateStatus: () => true });
+    if (rf.status >= 200 && rf.status < 300) return { refunded: refundable };
+    const e = rf.data && (rf.data.errors || rf.data.error);
+    return { refunded: 0, error: (typeof e === 'string' ? e : JSON.stringify(e || `HTTP ${rf.status}`)) };
+}
+// Orchestration: refund any online-captured amount → cancel on Shopify → clear hold marks → record a
+// `shopify_cancelled` mark (reason + who). Refund runs FIRST so a refund failure aborts before cancelling
+// (never cancel while the customer's online payment is stuck un-refunded).
+async function cancelOrder(orderName, shopifyOrderId, by, reasonLabel) {
+    const rf = await refundCapturedIfAny(shopifyOrderId);
+    if (rf.error) {
+        await logApi('shopify_cancel', 422, { order: norm(orderName), id: String(shopifyOrderId), by, reason: reasonLabel || null }, 'refund failed: ' + rf.error);
+        return { ok: false, error: 'Could not refund the amount paid online: ' + rf.error + ' — order NOT cancelled.' };
+    }
+    const refunded = rf.refunded || 0;
+    const out = await cancelShopifyOrder(shopifyOrderId, reasonLabel);
+    await logApi('shopify_cancel', out.ok ? 200 : 422, { order: norm(orderName), id: String(shopifyOrderId), by, reason: reasonLabel || null, refunded }, out.ok ? ('cancelled' + (refunded ? ` · refunded ${refunded}` : '')) : out.error);
+    if (out.ok) {
+        await clearHoldMarks(orderName, ['shopify_hold', 'shopify_hold_failed']);
+        await setMark(orderName, 'shopify_cancelled', reasonLabel || 'cancelled', by);
+        return { ok: true, refunded };
+    }
+    return { ok: false, error: out.error };
+}
+
 // Auto-hold (cron/webhook). Skips if already held OR a human already released it OR it's past pickup.
 // `reasonNote` (from reasonNoteFrom) records WHY it qualified, so the panel can show the category later.
 async function autoHoldOrder(orderName, shopifyOrderId, reasonNote) {
@@ -202,5 +268,5 @@ async function qualifiesForHold(opts) { return (await holdReasons(opts)).length 
 
 module.exports = {
     listFulfillmentOrders, holdShopifyOrder, releaseShopifyOrder,
-    getHoldStates, holdOrderManual, releaseOrder, autoHoldOrder, qualifiesForHold, holdReasons, reasonNoteFrom, HOLD_NOTE,
+    getHoldStates, holdOrderManual, releaseOrder, cancelOrder, autoHoldOrder, qualifiesForHold, holdReasons, reasonNoteFrom, HOLD_NOTE,
 };
