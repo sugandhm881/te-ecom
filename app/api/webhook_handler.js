@@ -334,7 +334,7 @@ router.post('/shopify-order', async (req, res) => {
             const shopifyHold = require('./shopify_hold');
             const reasons = await shopifyHold.holdReasons({ phone, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price, address });
             if (!reasons.length) { console.log(`[ShopifyHold] ${orderName}: not a repeat-COD candidate → no hold`); return; }
-            const r = await shopifyHold.autoHoldOrder(orderName, o.id, shopifyHold.reasonNoteFrom(reasons));
+            const r = await shopifyHold.autoHoldOrder(orderName, o.id, shopifyHold.reasonNoteFrom(reasons), o.created_at);
             console.log(`[ShopifyHold] ${orderName}: ${r.held ? 'HELD on Shopify ✓' : r.skipped ? 'skipped (' + r.skipped + ')' : 'hold FAILED (' + r.failed + ')'}`);
         } catch (e) { console.error('[ShopifyHold] webhook error:', e.message); }
     });

@@ -199,7 +199,21 @@ async function cancelOrder(orderName, shopifyOrderId, by, reasonLabel) {
 
 // Auto-hold (cron/webhook). Skips if already held OR a human already released it OR it's past pickup.
 // `reasonNote` (from reasonNoteFrom) records WHY it qualified, so the panel can show the category later.
-async function autoHoldOrder(orderName, shopifyOrderId, reasonNote) {
+async function autoHoldOrder(orderName, shopifyOrderId, reasonNote, createdAt) {
+    // GUARD — an auto-hold only makes sense for a BRAND-NEW order, UPSTREAM of the EasyEcom import.
+    // (a) AGE: a Shopify hold only keeps an order out of EasyEcom if placed before the import (~30-min
+    //     lag). Once an order is hours old it's already imported/shipping, so holding does nothing — and
+    //     a BULK re-scan of old orders would retroactively hold long-settled ones (happened 2026-07-28:
+    //     53 already-"Shipped" orders held by a one-off <100-char sweep). Skip anything not freshly placed.
+    if (createdAt) {
+        const ageMs = Date.now() - new Date(createdAt).getTime();
+        if (Number.isFinite(ageMs) && ageMs > 6 * 60 * 60 * 1000) return { skipped: 'stale' };
+    }
+    // (b) ALREADY IN EASYECOM: if EasyEcom has imported the order, a Shopify hold is a no-op (verified
+    //     2026-07-20). reference_code holds the Shopify order name (e.g. TE25-38408). Never auto-hold it.
+    const { data: ee } = await supabase.from('b2c_order_easycom')
+        .select('order_id').eq('reference_code', norm(orderName)).limit(1).maybeSingle();
+    if (ee) return { skipped: 'in-easyecom' };
     const st = (await getHoldStates([orderName]))[norm(orderName)];
     if (st && (st.status === 'held' || st.status === 'released')) return { skipped: st.status };
     const out = await holdShopifyOrder(shopifyOrderId, reasonNote);
