@@ -386,10 +386,10 @@ cron.schedule('56 8-19 * * *', async () => {
     await autoRouteHandledRejections().catch(e => console.error('[AutoRoute] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
-// EasyEcom On-Hold report — daily at 11 AM IST. Reads the synced b2c_order_easycom table
-// only (NO EasyEcom API calls) and posts on-hold orders to its Slack channel.
-cron.schedule('0 11 * * *', async () => {
-    console.log('[Hold Report] 11 AM IST — sending EasyEcom On-Hold report…');
+// On-Hold report (EasyEcom + Shopify) — twice daily at 11 AM and 6 PM IST. Reads the synced
+// b2c_order_easycom table + hold marks (NO EasyEcom API calls) and posts on-hold orders to Teams/Slack.
+cron.schedule('0 11,18 * * *', async () => {
+    console.log('[Hold Report] scheduled run (11 AM / 6 PM IST) — sending On-Hold report…');
     await sendEasyecomHoldReport().catch(e => console.error('[Hold Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
