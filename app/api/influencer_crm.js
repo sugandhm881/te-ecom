@@ -623,10 +623,12 @@ router.get('/inf/order-tracking', async (req, res) => {
         const videoId = req.query.videoId;
         // Track by an explicit orderId (preserved orphan orders from deleted videos) OR by videoId.
         let orderId = req.query.orderId ? String(req.query.orderId) : null;
+        let vid = null;   // outer scope — the response below reads vid.shopify_draft_order_url
         if (!orderId) {
             if (!videoId) return res.status(400).json({ success: false, error: 'videoId or orderId required' });
-            const { data: vid } = await supabase.from('influencer_videos')
+            const vr = await supabase.from('influencer_videos')
                 .select('shopify_draft_order_id, shopify_draft_order_url, product_sent').eq('id', videoId).maybeSingle();
+            vid = vr.data;
             orderId = vid && vid.shopify_draft_order_id;
         }
         if (!orderId) return res.json({ success: true, tracking: null });
@@ -660,11 +662,15 @@ router.get('/inf/order-tracking', async (req, res) => {
         else if (awb) status = 'In Transit';
 
         const closeAt = isRto ? (j && j.rto_at) : (j && j.delivered_at);
+        const hasAwb = !!awb;
+        // `done` reflects the STATUS, not merely whether a timestamp exists — so a Delivered/RTO order shows
+        // the final milestone completed even when the journey is missing delivered_at/rto_at (was: the badge
+        // said "Delivered" while the timeline still showed "Out for delivery" as the last completed step).
         const milestones = [
-            { key: 'ordered', label: 'Order placed', at: ord && ord.created_at },
-            { key: 'dispatched', label: 'Dispatched', at: j && j.dispatched_at },
-            { key: 'ofd', label: 'Out for delivery', at: j && j.out_for_delivery_at },
-            { key: isRto ? 'rto' : 'delivered', label: isRto ? 'Returned (RTO)' : 'Delivered', at: closeAt },
+            { key: 'ordered', label: 'Order placed', at: (ord && ord.created_at) || null, done: !!(ord && ord.created_at) },
+            { key: 'dispatched', label: 'Dispatched', at: (j && j.dispatched_at) || null, done: !!((j && j.dispatched_at) || (j && j.out_for_delivery_at) || hasAwb || isDelivered || isRto) },
+            { key: 'ofd', label: 'Out for delivery', at: (j && j.out_for_delivery_at) || null, done: !!((j && j.out_for_delivery_at) || isDelivered || isRto) },
+            { key: isRto ? 'rto' : 'delivered', label: isRto ? 'Returned (RTO)' : 'Delivered', at: closeAt || null, done: !!(isRto || isDelivered) },
         ];
 
         res.json({
@@ -677,7 +683,7 @@ router.get('/inf/order-tracking', async (req, res) => {
                 dest: [j && j.dest_city, j && j.dest_state].filter(Boolean).join(', ') || null,
                 attempts: (j && j.attempts) != null ? j.attempts : null,
                 ndr: (j && j.ndr_reasons) || null,
-                shopifyUrl: vid.shopify_draft_order_url || null,
+                shopifyUrl: (vid && vid.shopify_draft_order_url) || null,
                 milestones,
             },
         });

@@ -10666,7 +10666,7 @@ async function infTrackModal(videoId, orderId){
   const row=(label,val)=>val?`<div class="flex justify-between gap-3 py-1.5 border-b border-slate-50 last:border-0"><span class="text-xs text-slate-400">${label}</span><span class="text-xs font-semibold text-slate-700 text-right break-all">${escapeHtml(String(val))}</span></div>`:'';
   const ms=d.milestones||[];
   const timeline=ms.map((m,i)=>{
-    const done=!!m.at, at=fmt(m.at), isRto=m.key==='rto';
+    const done=(m.done!=null)?m.done:!!m.at, at=fmt(m.at), isRto=m.key==='rto';
     return `<div class="flex gap-3">
       <div class="flex flex-col items-center">
         <div class="w-3 h-3 rounded-full ${done?(isRto?'bg-rose-500':'bg-emerald-500'):'bg-slate-200'} ring-2 ${done?(isRto?'ring-rose-100':'ring-emerald-100'):'ring-slate-100'}"></div>
