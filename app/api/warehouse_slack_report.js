@@ -797,8 +797,10 @@ async function sendEasyecomHoldReport(announceEmpty = false) {
     console.log(`[Hold Report] ${orders.length} genuinely On-Hold · ${healed} stale corrected · ${candidates.length} verified`);
 
     // ── Shopify holds — active `shopify_hold` marks in the last 30 days, WITH their reason (the mark's
-    //    note, e.g. "high value (≥₹1500), short address"). Our own hold/release logic is the source of
-    //    truth (a release clears the mark), so no live Shopify call is needed. ──
+    //    note, e.g. "high value (≥₹1500), short address"). The mark is NOT always cleared when an order
+    //    moves past the hold (cancelled / released-and-shipped), so we DON'T trust the mark alone — we
+    //    cross-check the order's live state and drop any that are cancelled, fulfilled, or already
+    //    shipped (has AWB / tracking). Matches how the dashboard decides the hold chip. ──
     let shopHolds = [];
     try {
         const { data: sh } = await supabase.from('order_marks_ecom')
@@ -806,9 +808,27 @@ async function sendEasyecomHoldReport(announceEmpty = false) {
             .eq('mark_type', 'shopify_hold')
             .gte('created_at', since30)
             .order('created_at', { ascending: true });
-        shopHolds = sh || [];
+        const marks = sh || [];
+        const before = marks.length;
+        if (marks.length) {
+            const names = [...new Set(marks.map(m => m.order_name).filter(Boolean))];
+            const variants = names.flatMap(n => [n, '#' + n]);
+            const state = {};
+            for (let i = 0; i < variants.length; i += 300) {
+                const { data: ords } = await supabase.from('orders')
+                    .select('name, cancelled_at, fulfillment_status, awb_number, tracking_status')
+                    .in('name', variants.slice(i, i + 300));
+                (ords || []).forEach(o => { state[String(o.name || '').replace('#', '').trim()] = o; });
+            }
+            shopHolds = marks.filter(m => {
+                const o = state[String(m.order_name || '').replace('#', '').trim()];
+                if (!o) return true;   // order not found → keep (conservative)
+                // Still genuinely on hold = not cancelled, not fulfilled, no AWB, no tracking yet.
+                return !o.cancelled_at && o.fulfillment_status !== 'fulfilled' && !o.awb_number && !o.tracking_status;
+            });
+        }
+        console.log(`[Hold Report] Shopify holds: ${shopHolds.length} genuinely held · ${before - shopHolds.length} stale (cancelled/shipped) dropped · ${before} marks`);
     } catch (e) { console.error('[Hold Report] Shopify hold read error:', e.message); }
-    console.log(`[Hold Report] ${shopHolds.length} Shopify hold(s) in the last 30 days`);
 
     const eeCount = orders.length, shCount = shopHolds.length, total = eeCount + shCount;
     const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
