@@ -746,12 +746,14 @@ function initDpSlackTrigger(intervalMs = 30000) {
     console.log(`[DP Trigger] Listening for "${DP_TRIGGER_WORD}" in dp-to-mwh-orders…`);
 }
 
-// ─── EasyEcom On-Hold report → C0BBQNDH1CG ──────────────────────────────────
-// Pure EasyEcom. Uses the webhook-synced table only to get the CANDIDATE list (cheap), then
-// verifies each candidate's CURRENT status live with EasyEcom (1 API call each) because the
-// webhook misses some cancel/unhold updates and the table goes stale. Stale ones are corrected
-// in the table (self-healing) so the candidate list shrinks over time → few API calls per run.
-// announceEmpty posts an "all clear" when none.
+// ─── On-Hold report (EasyEcom + Shopify) → C0BBQNDH1CG / Teams ──────────────────────────────
+// TWO hold sources in one report:
+//   • EasyEcom — webhook-synced table gives the CANDIDATE list (cheap), then each is verified live
+//     with EasyEcom (1 API call each) because the webhook misses some cancel/unhold updates and the
+//     table goes stale; stale ones are self-healed so the candidate list shrinks over time.
+//   • Shopify — active `shopify_hold` marks (order_marks_ecom) shown WITH their reason (the note);
+//     our own hold/release logic is the source of truth, so no live Shopify call is needed.
+// announceEmpty posts an "all clear" when BOTH are empty.
 async function sendEasyecomHoldReport(announceEmpty = false) {
     // Rolling last-30-days window — today−30 → now.
     const now = new Date();
@@ -794,42 +796,75 @@ async function sendEasyecomHoldReport(announceEmpty = false) {
     }
     console.log(`[Hold Report] ${orders.length} genuinely On-Hold · ${healed} stale corrected · ${candidates.length} verified`);
 
-    if (!orders.length) {
+    // ── Shopify holds — active `shopify_hold` marks in the last 30 days, WITH their reason (the mark's
+    //    note, e.g. "high value (≥₹1500), short address"). Our own hold/release logic is the source of
+    //    truth (a release clears the mark), so no live Shopify call is needed. ──
+    let shopHolds = [];
+    try {
+        const { data: sh } = await supabase.from('order_marks_ecom')
+            .select('order_name, note, created_by, created_at')
+            .eq('mark_type', 'shopify_hold')
+            .gte('created_at', since30)
+            .order('created_at', { ascending: true });
+        shopHolds = sh || [];
+    } catch (e) { console.error('[Hold Report] Shopify hold read error:', e.message); }
+    console.log(`[Hold Report] ${shopHolds.length} Shopify hold(s) in the last 30 days`);
+
+    const eeCount = orders.length, shCount = shopHolds.length, total = eeCount + shCount;
+    const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    if (!total) {
         if (announceEmpty) {
             // Plain HTML twin (for the Teams thread-reply flow — "Reply with a message in a channel").
-            const clearText = `<b>⏸️ EasyEcom On-Hold Orders — Last 30 Days</b><br>`
-                + `✅ <b>All clear!</b> No orders on hold in EasyEcom in the last 30 days.<br><i>${winLabel}</i>`;
+            const clearText = `<b>⏸️ On-Hold Orders — Last 30 Days</b><br>`
+                + `✅ <b>All clear!</b> No orders on hold in EasyEcom or Shopify in the last 30 days.<br><i>${winLabel}</i>`;
             await postSlack({ blocks: [
-                { type: 'header', text: { type: 'plain_text', text: `⏸️ EasyEcom On-Hold Orders — Last 30 Days`, emoji: true } },
-                { type: 'section', text: { type: 'mrkdwn', text: `✅ *All clear!* No orders on hold in EasyEcom in the last 30 days.\n_${winLabel}_` } }
+                { type: 'header', text: { type: 'plain_text', text: `⏸️ On-Hold Orders — Last 30 Days`, emoji: true } },
+                { type: 'section', text: { type: 'mrkdwn', text: `✅ *All clear!* No orders on hold in EasyEcom or Shopify in the last 30 days.\n_${winLabel}_` } }
             ] }, HOLD_CHANNEL, { text: clearText });
         }
         return;
     }
 
-    const ids = orders.map(o => o.reference_code || o.store_order_id || o.marketplace_order_id || `#${o.order_id}`);
+    const eeIds = orders.map(o => o.reference_code || o.store_order_id || o.marketplace_order_id || `#${o.order_id}`);
     const blocks = [
-        { type: 'header', text: { type: 'plain_text', text: `⏸️ EasyEcom On-Hold Orders — ${orders.length} (Last 30 Days)`, emoji: true } },
-        { type: 'section', text: { type: 'mrkdwn', text: `*${orders.length}* order${orders.length !== 1 ? 's are' : ' is'} *On Hold* in EasyEcom _(last 30 days: ${winLabel}, oldest → newest)_.` } },
+        { type: 'header', text: { type: 'plain_text', text: `⏸️ On-Hold Orders — ${total} (Last 30 Days)`, emoji: true } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*${total}* order${total !== 1 ? 's' : ''} on hold _(last 30 days: ${winLabel})_ — *EasyEcom: ${eeCount}* · *Shopify: ${shCount}*.` } },
         { type: 'divider' }
     ];
-    const CHUNK = 60;
-    for (let i = 0; i < ids.length; i += CHUNK) {
-        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: ids.slice(i, i + CHUNK).map(x => `\`${x}\``).join('  ') } });
+    if (eeCount) {
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🟠 EasyEcom — On Hold (${eeCount})*` } });
+        const CHUNK = 60;
+        for (let i = 0; i < eeIds.length; i += CHUNK) {
+            blocks.push({ type: 'section', text: { type: 'mrkdwn', text: eeIds.slice(i, i + CHUNK).map(x => `\`${x}\``).join('  ') } });
+        }
+    }
+    if (shCount) {
+        if (eeCount) blocks.push({ type: 'divider' });
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🔵 Shopify — On Hold (${shCount})*  _(reason shown)_` } });
+        const CHUNK = 20;
+        for (let i = 0; i < shopHolds.length; i += CHUNK) {
+            blocks.push({ type: 'section', text: { type: 'mrkdwn', text: shopHolds.slice(i, i + CHUNK).map(m => `• \`${m.order_name}\`${m.note ? ` — ${m.note}` : ''}`).join('\n') } });
+        }
     }
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_Auto-report · daily 11 AM IST_' }] });
 
-    // Plain HTML twin of the card, sent alongside it so a Teams flow can post this report as a REPLY
-    // into a specific thread ("Reply with a message in a channel" can't carry an Adaptive Card, only
-    // text/HTML). Title + summary + order IDs as inline-code chips, matching the card's content.
-    const teamsText = `<b>⏸️ EasyEcom On-Hold Orders — ${orders.length} (Last 30 Days)</b><br>`
-        + `<b>${orders.length}</b> order${orders.length !== 1 ? 's are' : ' is'} <b>On Hold</b> in EasyEcom `
-        + `<i>(last 30 days: ${winLabel}, oldest → newest)</i>.<br><br>`
-        + ids.map(x => `<code>${x}</code>`).join(' ')
-        + `<br><br><i>Auto-report · daily 11 AM IST</i>`;
+    // Plain HTML twin of the card (Teams thread-reply flow — a channel reply can carry only text/HTML,
+    // not an Adaptive Card). Mirrors the card: EasyEcom IDs as chips, Shopify orders as "ID — reason".
+    let teamsText = `<b>⏸️ On-Hold Orders — ${total} (Last 30 Days)</b><br>`
+        + `<b>${total}</b> order${total !== 1 ? 's' : ''} on hold <i>(last 30 days: ${winLabel})</i> — `
+        + `<b>EasyEcom: ${eeCount}</b> · <b>Shopify: ${shCount}</b>.<br>`;
+    if (eeCount) {
+        teamsText += `<br><b>🟠 EasyEcom — On Hold (${eeCount})</b><br>` + eeIds.map(x => `<code>${x}</code>`).join(' ') + `<br>`;
+    }
+    if (shCount) {
+        teamsText += `<br><b>🔵 Shopify — On Hold (${shCount})</b> <i>(reason shown)</i><br>`
+            + shopHolds.map(m => `• <code>${esc(m.order_name)}</code>${m.note ? ` — ${esc(m.note)}` : ''}`).join('<br>') + `<br>`;
+    }
+    teamsText += `<br><i>Auto-report · daily 11 AM IST</i>`;
 
     await postSlack({ blocks }, HOLD_CHANNEL, { text: teamsText });
-    console.log('[Hold Report] Sent to channel');
+    console.log(`[Hold Report] Sent — EasyEcom: ${eeCount}, Shopify: ${shCount}`);
 }
 
 module.exports = { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom, autoRouteHandledRejections };

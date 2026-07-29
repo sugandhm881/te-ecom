@@ -14,7 +14,7 @@ const { requirePermission } = require('../auth');
 // for the additional per-dashboard view gate on the claims routes.
 const requireEmailSender = requirePermission('send-escalation-emails');
 const { getEmailConfig, sendMail, recipientsFor } = require('./email_settings');
-const { aiComplete, isConfigured: aiConfigured } = require('./ai');
+const { aiComplete, isConfigured: aiConfigured, lastAiError } = require('./ai');
 
 const pct = (n, d) => (d > 0 ? Math.round((n / d) * 1000) / 10 : 0); // 1-dp percentage
 // Calendar day in IST (en-CA → YYYY-MM-DD). Timestamps are stored as UTC instants; slicing the raw
@@ -942,6 +942,85 @@ const MAIL_TONES = {
 const OUTCOME_EN = { delivered: 'delivered', rto: 'returned to origin (RTO)', ndr_pending: 'still undelivered after failed attempt(s)', in_transit: 'in transit', lost: 'lost in transit' };
 const NO_CODES_RULE = 'Write in plain business English — NEVER use internal system codes or field values (e.g. "ndr_pending", "in_transit", "rto_no_attempt"); describe statuses naturally. Keep every order number, AWB and count EXACTLY as given.';
 
+// Escalations are NOT always about fake delivery attempts — the selected shipments could be stuck with
+// no scan/movement, or stuck on repeated failed attempts, etc. Detect the dominant issue from the DATA
+// and build the matching subject + AI instruction + template fallback, so the email always fits reality.
+const ESCALATION_KINDS = {
+    fake: {
+        subject: n => `Escalation: ${n} shipment${n !== 1 ? 's' : ''} with likely fake delivery attempts`,
+        ai: `These shipments were marked as failed/NDR ("customer unavailable" etc.) but the addresses were fine — several were delivered on the very next attempt. Ask RapidShyp to (1) investigate the delivery agents, (2) stop fake NDR markings, and (3) reattempt and confirm.`,
+        intro: n => `We've identified ${n} shipment${n !== 1 ? 's' : ''} flagged with failed/NDR delivery attempts that appear to be fake — several were delivered successfully on the very next attempt to the same address. Please investigate the delivery agents involved, stop the fake "customer unavailable" markings, and ensure prompt reattempts with confirmation.`,
+    },
+    stuck: {
+        subject: n => `Escalation: ${n} shipment${n !== 1 ? 's' : ''} stuck with no recent scan / movement`,
+        ai: `These shipments have had NO scan update or movement for several days and appear stuck in transit, with no delivery attempt recorded. Ask RapidShyp to (1) locate the shipments, (2) explain the lack of movement, and (3) resume delivery with a committed timeline.`,
+        intro: n => `We've identified ${n} shipment${n !== 1 ? 's' : ''} that have had no scan update or movement for several days and appear stuck in transit, with no delivery attempt recorded. Please locate these shipments, explain the delay, and resume delivery with a committed timeline.`,
+    },
+    ndr: {
+        subject: n => `Escalation: ${n} shipment${n !== 1 ? 's' : ''} with repeated failed delivery attempts`,
+        ai: `These shipments have repeated failed delivery attempts (NDRs) and are still undelivered. Ask RapidShyp to (1) reattempt promptly, (2) contact the customer before marking any attempt failed, and (3) confirm each attempt with proof of contact.`,
+        intro: n => `We've identified ${n} shipment${n !== 1 ? 's' : ''} with repeated failed delivery attempts (NDRs) that remain undelivered. Please reattempt promptly, contact the customer before marking any attempt failed, and confirm each attempt with proof of contact.`,
+    },
+    general: {
+        subject: n => `Escalation: ${n} problematic shipment${n !== 1 ? 's' : ''} needing urgent attention`,
+        ai: `These shipments have delivery problems (failed attempts, delays, or no movement) — see the per-order status and reasons. Ask RapidShyp to investigate each, resolve the issue, and confirm next steps with a committed delivery timeline.`,
+        intro: n => `We've identified ${n} shipment${n !== 1 ? 's' : ''} with delivery problems that need urgent attention. Please investigate each, resolve the issue, and confirm the next steps with a committed delivery timeline.`,
+    },
+};
+// Decide the escalation kind from the selected shipments. A caller can HINT 'fake_attempts' (the
+// Likely-Fake insight) — honored only if the data actually shows a fake signal (delivered-after-NDR).
+function classifyEscalation(rows, hint) {
+    let fake = 0, ndr = 0, stuck = 0;
+    for (const r of rows) {
+        const nd = r.ndr_count || 0;
+        if (r.outcome === 'delivered' && nd > 0) fake++;      // delivered on a later attempt after a "failed" one
+        else if (nd > 0) ndr++;                               // repeated failed attempts, still not delivered
+        else stuck++;                                         // no NDR + not delivered → no scan / stuck in transit
+    }
+    if (hint === 'fake_attempts' && fake > 0) return 'fake';
+    const max = Math.max(fake, ndr, stuck);
+    if (max === 0) return 'general';
+    if (fake === max) return 'fake';
+    if (stuck === max) return 'stuck';
+    if (ndr === max) return 'ndr';
+    return 'general';
+}
+// Parse the AI's {"subject","body"} reply ROBUSTLY. LLMs frequently (a) wrap it in ```json fences and
+// (b) put LITERAL newlines inside the "body" string, which makes strict JSON.parse fail — the old code
+// then dumped the raw JSON (fences and all) into the email. Strip fences, try strict parse, then fall
+// back to tolerant regex extraction (unescaping \n etc.), and only as a last resort use the plain text.
+// Escape raw control chars that appear INSIDE JSON string values (LLMs emit unescaped newlines in the
+// "body"), while leaving structural whitespace alone — so JSON.parse then succeeds.
+function sanitizeJsonStrings(s) {
+    let out = '', inStr = false, esc = false;
+    for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        if (esc) { out += c; esc = false; continue; }
+        if (c === '\\') { out += c; esc = true; continue; }
+        if (c === '"') { inStr = !inStr; out += c; continue; }
+        if (inStr && (c === '\n' || c === '\r' || c === '\t')) { out += (c === '\n' ? '\\n' : c === '\r' ? '\\r' : '\\t'); continue; }
+        out += c;
+    }
+    return out;
+}
+function parseAiEmail(draft) {
+    if (!draft) return { subject: null, body: null };
+    let s = String(draft).replace(/```json?/gi, '').replace(/```/g, '').trim();
+    // Isolate the JSON object and DROP any prose/commentary before or after it — models sometimes append
+    // notes like "*Word Count Check*: ..." which must NEVER leak into the email.
+    const a = s.indexOf('{'), b = s.lastIndexOf('}');
+    if (a !== -1 && b > a) s = s.slice(a, b + 1);
+    // Strict parse, then again with raw newlines inside strings escaped.
+    for (const cand of [s, sanitizeJsonStrings(s)]) {
+        try { const j = JSON.parse(cand); if (j && typeof j === 'object' && (j.subject != null || j.body != null)) return { subject: j.subject || null, body: j.body || null }; } catch (_) {}
+    }
+    // Regex fallback — extract ONLY the two fields from inside the object (never dump the whole response).
+    const unesc = t => t == null ? null : String(t).replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim();
+    const subjM = s.match(/"subject"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    const bodyM = s.match(/"body"\s*:\s*"([\s\S]*?)"\s*\}\s*$/);
+    return { subject: subjM ? unesc(subjM[1]) : null, body: bodyM ? unesc(bodyM[1]) : null };
+}
+
 // Compose a critical escalation email from selected shipments; AI-polishes the wording (falls back to a
 // built-in template when AI isn't configured). Returns the editable draft — NOT sent yet.
 router.post('/critical-email/compose', requireEmailSender, async (req, res) => {
@@ -949,24 +1028,45 @@ router.post('/critical-email/compose', requireEmailSender, async (req, res) => {
         const awbs = Array.isArray(req.body && req.body.awbs) ? req.body.awbs.filter(Boolean).slice(0, 60) : [];
         if (!awbs.length) return res.status(400).json({ success: false, message: 'No shipments selected — filter the table (e.g. Likely fake attempts) first.' });
         const { data } = await supabase.from('shipment_journey_ecom')
-            .select('order_name, awb, courier, outcome, ndr_count, ndr_reasons, first_edd, order_date, payment_mode, zone, dest_city, dest_state')
+            .select('order_name, awb, courier, source, outcome, ndr_count, ndr_reasons, first_edd, order_date, payment_mode, zone, dest_city, dest_state')
             .in('awb', awbs);
         const rows = data || [];
         if (!rows.length) return res.status(400).json({ success: false, message: 'Selected shipments not found.' });
+        // Route the escalation to the RIGHT courier partner by shipment source: DocPharma rows → DocPharma
+        // recipients, everything else (RapidShyp / Kwikship) → RapidShyp. CC (our team) comes from the same
+        // per-platform config. Dominant source wins when a batch is mixed.
+        const dpN = rows.filter(r => r.source === 'docpharma').length;
+        const platform = dpN > rows.length / 2 ? 'docpharma' : 'rapidshyp';
+        const rcpt = await recipientsFor(platform);
+        const toHint = (rcpt.to || []).join(', ');
         const toneLine = MAIL_TONES[req.body && req.body.tone] || MAIL_TONES.formal;
+        // Pick the narrative from the ACTUAL data (fake / stuck-no-scan / repeated-NDR / general) — not
+        // always "fake". A 'fake_attempts' hint from the Likely-Fake insight is honored only if the data agrees.
+        const kind = classifyEscalation(rows, req.body && req.body.kind);
+        const K = ESCALATION_KINDS[kind] || ESCALATION_KINDS.general;
+        const n = rows.length, plu = n !== 1 ? 's' : '';
         // Destination phrased unambiguously — "IDUKKI zone E" once made the AI write "the Idukki zone".
         const lines = rows.slice(0, 40).map(r => {
             const dest = [r.dest_city, r.dest_state].filter(Boolean).join(', ');
             return `- ${r.order_name} (AWB ${r.awb}), courier ${r.courier || 'unknown'}, status: ${OUTCOME_EN[r.outcome] || r.outcome}, failed attempts (NDRs): ${r.ndr_count || 0}${(r.ndr_reasons && r.ndr_reasons.length) ? ` ["${r.ndr_reasons.join('; ')}"]` : ''}${dest ? `, destination: ${dest}` : ''}${r.zone ? ` (delivery zone ${r.zone})` : ''}`;
         }).join('\n');
-        const sys = `You are an operations manager at an Indian D2C skincare brand (The Element) writing an escalation email to the courier partner RapidShyp. Tone: ${toneLine} Be concise, specific and action-oriented. Do NOT invent facts beyond the data given. ${NO_CODES_RULE} Respond ONLY with strict JSON {"subject":"...","body":"..."} — body is plain text with \\n line breaks, under 180 words, no markdown.`;
-        const usr = `Write an escalation email about likely FAKE delivery attempts. These ${rows.length} shipments were marked as failed/NDR ("customer unavailable" etc.) but the addresses were fine — several were delivered on the very next attempt. Ask RapidShyp to (1) investigate the delivery agents, (2) stop fake NDR markings, (3) reattempt and confirm. Reference the count, not each AWB (a table is attached).\n\nShipments:\n${lines}`;
+        // Order + AWB reference: LIST them inline for a few shipments (so they're visible in the body);
+        // for many, point to the attached table. (The full table is always attached on send either way.)
+        const FEW = 6;
+        const refText = n <= FEW
+            ? `Affected shipment${plu} (order — AWB):\n` + rows.map(r => `- ${r.order_name} — AWB ${r.awb}`).join('\n')
+            : `The ${n} affected shipments are listed in the table below.`;
+        const idRule = n <= FEW
+            ? `IMPORTANT: list each order number with its AWB in the body so they are clearly visible (a table with full details is also attached).`
+            : `Reference the count, not each AWB (a table with all details is attached).`;
+        const sys = `You are an operations manager at an Indian D2C skincare brand (The Element) writing an escalation email to the courier partner RapidShyp. Tone: ${toneLine} Be concise, specific and action-oriented. Do NOT invent facts beyond the data given — describe the problem exactly as the data shows it, do not assume fake attempts unless the data indicates it. ${NO_CODES_RULE} Respond with ONLY the raw JSON object {"subject":"...","body":"..."} and NOTHING else — no markdown, no code fences, no word-count notes or commentary before or after. Body is plain text with \\n line breaks, under 180 words.`;
+        const usr = `Write an escalation email. ${K.ai} ${idRule}\n\nShipments:\n${lines}`;
         let draft = await aiComplete([{ role: 'system', content: sys }, { role: 'user', content: usr }], { temperature: 0.4 });
-        let subject, body;
-        if (draft) { try { const j = JSON.parse(draft.replace(/```json?/gi, '').replace(/```/g, '').trim()); subject = j.subject; body = j.body; } catch (_) { body = draft; } }
-        if (!subject) subject = `Escalation: ${rows.length} shipments with likely fake delivery attempts`;
-        if (!body) body = `Hi RapidShyp team,\n\nWe've identified ${rows.length} shipments flagged with failed/NDR delivery attempts that appear to be fake — several were delivered successfully on the very next attempt to the same address. Please investigate the delivery agents involved, stop the fake "customer unavailable" markings, and ensure prompt reattempts with confirmation.\n\nThe affected shipments are listed in the table below.\n\nThank you,\nThe Element — Operations`;
-        res.json({ success: true, subject, body, count: rows.length, aiUsed: !!draft, aiAvailable: aiConfigured(), tableHtml: buildCriticalTable(rows), orders: rows.map(r => ({ order_name: r.order_name, awb: r.awb })) });
+        const p = parseAiEmail(draft);
+        let subject = p.subject, body = p.body;
+        if (!subject) subject = K.subject(n);
+        if (!body) body = `Hi RapidShyp team,\n\n${K.intro(n)}\n\n${refText}\n\nThank you,\nThe Element — Operations`;
+        res.json({ success: true, subject, body, count: rows.length, kind, platform, toHint, aiUsed: !!draft, aiAvailable: aiConfigured(), aiError: draft ? null : lastAiError(), tableHtml: buildCriticalTable(rows), orders: rows.map(r => ({ order_name: r.order_name, awb: r.awb })) });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 // Re-polish the admin's CURRENT (possibly hand-edited) draft in the chosen tone. Pure rewrite — facts,
@@ -977,12 +1077,11 @@ router.post('/critical-email/polish', requireEmailSender, async (req, res) => {
         if (!body || !String(body).trim()) return res.status(400).json({ success: false, message: 'Nothing to polish — the message is empty.' });
         if (!aiConfigured()) return res.status(400).json({ success: false, message: 'AI is not configured — set AI_API_KEY / AI_API_URL / AI_MODEL in .env.' });
         const toneLine = MAIL_TONES[tone] || MAIL_TONES.formal;
-        const sys = `You are an expert business-communication editor. Rewrite and polish the given escalation email draft from The Element (D2C skincare brand) to its courier partner. Tone: ${toneLine} Keep ALL facts intact — do not add, drop or alter order numbers, AWBs, counts or claims. ${NO_CODES_RULE} Respond ONLY with strict JSON {"subject":"...","body":"..."} — body is plain text with \\n line breaks, under 200 words, no markdown.`;
+        const sys = `You are an expert business-communication editor. Rewrite and polish the given escalation email draft from The Element (D2C skincare brand) to its courier partner. Tone: ${toneLine} Keep ALL facts intact — do not add, drop or alter order numbers, AWBs, counts or claims. ${NO_CODES_RULE} Respond with ONLY the raw JSON object {"subject":"...","body":"..."} and NOTHING else — no markdown, no code fences, no word-count notes or commentary before or after. Body is plain text with \\n line breaks, under 200 words.`;
         const usr = `Polish this draft:\n\nSubject: ${subject || '(none)'}\n\nBody:\n${body}`;
         const draft = await aiComplete([{ role: 'system', content: sys }, { role: 'user', content: usr }], { temperature: 0.4 });
-        if (!draft) return res.status(502).json({ success: false, message: 'AI polish failed — please try again.' });
-        let out = {};
-        try { out = JSON.parse(draft.replace(/```json?/gi, '').replace(/```/g, '').trim()); } catch (_) { out = { subject, body: draft }; }
+        if (!draft) { const why = lastAiError(); return res.status(502).json({ success: false, message: why ? `AI polish failed — ${why}.` : 'AI polish failed — please try again.' }); }
+        const out = parseAiEmail(draft);
         res.json({ success: true, subject: out.subject || subject, body: out.body || body });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
@@ -991,9 +1090,12 @@ router.post('/critical-email/send', requireEmailSender, async (req, res) => {
         const { subject, body, to, tableHtml } = req.body || {};
         if (!subject || !body) return res.status(400).json({ success: false, message: 'Subject and body are required.' });
         const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#0f172a;max-width:840px;white-space:pre-wrap;line-height:1.5;">${esc(body)}</div>${tableHtml || ''}`;
-        let recipient = to;
-        if (!recipient) { const cfg = await getEmailConfig(); recipient = cfg && cfg.rapidshyp; }
-        const r = await sendMail({ to: recipient || undefined, subject, html, text: body });
+        // TO = the courier partner for this shipment's source (DocPharma vs RapidShyp); CC = our team.
+        // A hand-typed recipient overrides the TO; the platform's CC (internal team) is always applied.
+        const platform = (req.body && req.body.platform) === 'docpharma' ? 'docpharma' : 'rapidshyp';
+        const rcpt = await recipientsFor(platform);
+        const toList = to ? to : (rcpt.to && rcpt.to.length ? rcpt.to : null);
+        const r = await sendMail({ to: toList || undefined, cc: rcpt.cc, subject, html, text: body });
         // Log which orders were escalated (audit + the row shows "mail sent", prevents accidental dupes).
         const orders = Array.isArray(req.body.orders) ? req.body.orders.filter(o => o && o.order_name) : [];
         if (orders.length) {

@@ -478,6 +478,12 @@
   #login-view .lv-link:hover{color:#fff}
   #login-view .lv-link:disabled{color:#5b6685;cursor:default}
   #login-view .lv-msg{margin:1rem 0 0;text-align:center;font-size:.85rem;color:#fca5a5}
+  #login-view #forgot-form > div:not(.hidden){display:flex;flex-direction:column;gap:14px}
+  /* Password strength meter (used on signup / reset / admin-reset — dark and light backgrounds) */
+  .pw-meter{display:flex;align-items:center;gap:.5rem;margin-top:2px}
+  .pw-meter .pw-bar{flex:1;height:6px;border-radius:999px;background:rgba(148,163,184,.28);overflow:hidden}
+  .pw-meter .pw-bar>span{display:block;height:100%;width:0;border-radius:999px;transition:width .25s ease,background-color .25s ease}
+  .pw-meter .pw-label{font-size:.72rem;font-weight:700;min-width:58px;text-align:right;letter-spacing:.02em}
   #login-view .lv-foot{margin:1.5rem 0 0;padding-top:1.3rem;border-top:1px solid rgba(148,163,184,.14);text-align:center;animation:lv-rise .5s ease .5s both}
   #login-view .lv-toggle{display:inline-block;padding:.55rem 1.35rem;border-radius:999px;border:1px solid rgba(129,140,248,.35);background:rgba(129,140,248,.08);color:#c7d2fe;font-weight:600;font-size:.85rem;cursor:pointer;text-decoration:none;transition:background .15s,border-color .15s,color .15s,transform .15s}
   #login-view .lv-toggle:hover{background:rgba(129,140,248,.18);border-color:rgba(129,140,248,.65);color:#fff;transform:translateY(-1px)}
@@ -497,9 +503,11 @@
         <p class="lv-tag">One Stop Solution</p>
 
         <form id="login-form" onsubmit="return false;">
-            <input type="email" id="login-email" class="lv-input" placeholder="name@company.com" autocomplete="email">
-            <input type="password" id="login-password" class="lv-input" placeholder="Password" autocomplete="current-password">
+            <input type="email" id="login-email" class="lv-input" placeholder="name@company.com" autocomplete="email" maxlength="254">
+            <input type="password" id="login-password" class="lv-input" placeholder="Password" autocomplete="current-password" maxlength="128">
+            <div id="login-pw-meter" class="pw-meter hidden"><div class="pw-bar"><span></span></div><span class="pw-label"></span></div>
             <button id="login-btn" type="submit" class="lv-btn">Continue</button>
+            <div style="text-align:right"><button type="button" id="forgot-link" class="lv-link">Forgot password?</button></div>
         </form>
 
         <form id="otp-form" class="hidden" onsubmit="return false;">
@@ -517,10 +525,29 @@
 
         <form id="signup-form" class="hidden" onsubmit="return false;">
             <input type="text" id="signup-name" class="lv-input" placeholder="Full name" autocomplete="name" maxlength="80">
-            <input type="email" id="signup-email" class="lv-input" placeholder="name@company.com" autocomplete="email">
+            <input type="email" id="signup-email" class="lv-input" placeholder="name@company.com" autocomplete="email" maxlength="254">
             <input type="tel" id="signup-mobile" inputmode="numeric" maxlength="10" class="lv-input" placeholder="10-digit mobile number" autocomplete="tel">
-            <input type="password" id="signup-password" class="lv-input" placeholder="Choose a password (min 6 characters)" autocomplete="new-password">
+            <input type="password" id="signup-password" class="lv-input" placeholder="Choose a password (min 8 characters)" autocomplete="new-password" minlength="8" maxlength="128">
+            <div id="signup-pw-meter" class="pw-meter hidden"><div class="pw-bar"><span></span></div><span class="pw-label"></span></div>
             <button id="signup-btn" type="submit" class="lv-btn">Create account</button>
+        </form>
+
+        <form id="forgot-form" class="hidden" onsubmit="return false;">
+            <div id="forgot-step-email">
+                <p class="lv-otp-cap">Enter your account email and we'll send a 6-digit reset code.</p>
+                <input type="email" id="forgot-email" class="lv-input" placeholder="name@company.com" autocomplete="email" maxlength="254">
+                <button id="forgot-send-btn" type="submit" class="lv-btn">Send reset code</button>
+            </div>
+            <div id="forgot-step-reset" class="hidden">
+                <p class="lv-otp-cap">Enter the 6-digit code sent to</p>
+                <p id="forgot-hint" class="lv-otp-hint">your email</p>
+                <input type="text" id="forgot-otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" class="lv-input text-center text-2xl tracking-[0.45em] font-semibold" placeholder="••••••">
+                <input type="password" id="forgot-new-password" class="lv-input" placeholder="New password (min 8 characters)" autocomplete="new-password" minlength="8" maxlength="128">
+                <div id="forgot-pw-meter" class="pw-meter hidden"><div class="pw-bar"><span></span></div><span class="pw-label"></span></div>
+                <button id="forgot-reset-btn" type="submit" class="lv-btn">Reset password</button>
+                <div style="text-align:center"><button type="button" id="forgot-resend" class="lv-link">Resend code</button></div>
+            </div>
+            <div><button type="button" id="forgot-back" class="lv-link">&larr; Back to sign in</button></div>
         </form>
 
         <p id="auth-msg" class="lv-msg hidden"></p>
@@ -2659,7 +2686,7 @@
     </div>
 </div>
 
-<script src="/static/app.js?v=2026-07-29-modal"></script>
+<script src="/static/app.js?v=2026-07-29-auth"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

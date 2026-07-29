@@ -17,6 +17,10 @@ async function adminName(email) {
 const MOBILE_RX = /^[6-9]\d{9}$/;                                  // Indian 10-digit mobile
 const cleanMobile = m => String(m || '').replace(/\D/g, '').slice(-10);
 const emailHint = e => { const [u, d] = String(e).split('@'); return (u || '').slice(0, 2) + '******@' + (d || ''); };
+// Input caps — reject over-long values everywhere (scrypt runs on the main thread, so a huge
+// password would block the event loop; also blunts junk input). 254 = RFC max email length.
+const MAX_PW = 128, MAX_EMAIL = 254;
+const overLong = (email, password) => (email != null && String(email).length > MAX_EMAIL) || (password != null && String(password).length > MAX_PW);
 
 // In-memory rate limit for auth endpoints — blunts brute-force / credential-stuffing.
 const _attempts = new Map(); // ip -> { count, first }
@@ -63,6 +67,8 @@ async function issueOrChallenge(res, user) {   // user = { email, role, permissi
 router.post('/login', rateLimit, async (req, res) => {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ message: 'Email and password are required!' });
+    // Reject over-long inputs BEFORE any hashing (don't feed a giant string to scrypt).
+    if (overLong(email, password)) return res.status(401).json({ message: 'Invalid credentials!' });
 
     // 1) .env bootstrap admin — always works, so the admin can never be locked out.
     if (config.APP_USER_EMAIL && config.APP_USER_PASSWORD && norm(email) === norm(config.APP_USER_EMAIL) && password === config.APP_USER_PASSWORD) {
@@ -87,6 +93,7 @@ router.post('/login', rateLimit, async (req, res) => {
 router.post('/login/verify-otp', rateLimit, async (req, res) => {
     const { otp_token, otp } = req.body || {};
     if (!otp_token || !otp) return res.status(400).json({ message: 'OTP is required.' });
+    if (!/^\d{6}$/.test(String(otp))) return res.status(400).json({ message: 'The OTP is a 6-digit number.' });
     let claims;
     try { claims = jwt.verify(otp_token, config.SECRET_KEY); } catch (_) { return res.status(401).json({ message: 'This OTP session has expired — please sign in again.' }); }
     if (claims.stage !== 'otp2fa') return res.status(401).json({ message: 'Invalid OTP session.' });
@@ -120,8 +127,10 @@ router.post('/signup', rateLimit, async (req, res) => {
     if (!email || !password) return res.status(400).json({ message: 'Email and password are required.' });
     if (!name) return res.status(400).json({ message: 'Please enter your name.' });
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ message: 'Please enter a valid email.' });
+    if (email.length > MAX_EMAIL) return res.status(400).json({ message: 'Email is too long.' });
     if (!MOBILE_RX.test(mobile)) return res.status(400).json({ message: 'A valid 10-digit mobile number is required.' });
-    if (String(password).length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' });
+    if (String(password).length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters.' });
+    if (String(password).length > MAX_PW) return res.status(400).json({ message: 'Password is too long (max 128 characters).' });
     if (config.APP_USER_EMAIL && email === norm(config.APP_USER_EMAIL)) return res.status(409).json({ message: 'This email is reserved.' });
     try {
         const { data: existing } = await supabase.from('app_users_ecom').select('id').eq('email', email).single();
@@ -132,6 +141,61 @@ router.post('/signup', rateLimit, async (req, res) => {
     });
     if (error) return res.status(500).json({ message: 'Could not create the account. Try again.' });
     return res.json({ ok: true, message: 'Account created — an admin will review and grant access.' });
+});
+
+// ── Forgot password (self-service) — step 1: email a 6-digit reset code ───────────────
+// Reuses the same OTP email infra as login 2FA. ALWAYS responds generically (never reveals
+// whether an email exists) so it can't be used to enumerate accounts.
+router.post('/forgot-password', rateLimit, async (req, res) => {
+    const email = norm(req.body && req.body.email);
+    if (!email) return res.status(400).json({ message: 'Please enter your email.' });
+    if (email.length > MAX_EMAIL) return res.status(404).json({ message: 'No account found with that email.' });
+    // The .env bootstrap admin can't self-reset — its password lives in server config, not the DB.
+    if (config.APP_USER_EMAIL && email === norm(config.APP_USER_EMAIL)) {
+        return res.status(400).json({ message: "This is the primary admin account — its password is set in server config and can't be reset here." });
+    }
+    // No email transport configured → can't send a code; tell the client to contact an admin.
+    if (!(await otpMail.configured())) {
+        return res.status(503).json({ email_unconfigured: true, message: 'Email reset is not available right now. Please ask an admin to reset your password.' });
+    }
+    // Verify the account exists (internal tool → give clear feedback rather than a generic reply).
+    let u = null;
+    try { const { data } = await supabase.from('app_users_ecom').select('email, status').eq('email', email).single(); u = data; } catch (_) {}
+    if (!u) return res.status(404).json({ message: 'No account found with that email.' });
+    if (u.status === 'pending')  return res.status(403).json({ message: 'This account is still pending admin approval.' });
+    if (u.status === 'disabled') return res.status(403).json({ message: 'This account has been disabled — please contact your admin.' });
+    // Active account → email the reset code.
+    try { await otpMail.sendOtp(u.email, { reuseIfRecent: true }); }
+    catch (e) {
+        console.error('[forgot-pw] OTP send failed for', email, '-', e.message);
+        return res.status(503).json({ message: 'Could not send the reset code right now. Please try again in a minute.' });
+    }
+    return res.json({ ok: true, message: 'A 6-digit reset code has been sent to your email.' });
+});
+
+// ── Forgot password — step 2: verify the code + set a new password ─────────────────────
+router.post('/reset-password', rateLimit, async (req, res) => {
+    const email = norm(req.body && req.body.email);
+    const otp = String((req.body && req.body.otp) || '').trim();
+    const password = (req.body && req.body.password) || '';
+    if (!email || !otp || !password) return res.status(400).json({ message: 'Email, code and a new password are required.' });
+    if (!/^\d{6}$/.test(otp)) return res.status(400).json({ message: 'The reset code is a 6-digit number.' });
+    if (String(password).length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters.' });
+    if (String(password).length > MAX_PW) return res.status(400).json({ message: 'Password is too long (max 128 characters).' });
+    if (config.APP_USER_EMAIL && email === norm(config.APP_USER_EMAIL)) {
+        return res.status(400).json({ message: "The primary admin password can't be reset here." });
+    }
+    if (!otpMail.verifyOtp(email, otp)) return res.status(401).json({ message: 'Incorrect or expired code — please try again.' });
+    try {
+        const { data: u } = await supabase.from('app_users_ecom').select('id, status').eq('email', email).single();
+        if (!u || u.status !== 'active') return res.status(400).json({ message: 'This account is not active.' });
+        const { error } = await supabase.from('app_users_ecom')
+            .update({ password_hash: hashPassword(password), updated_at: new Date().toISOString() }).eq('id', u.id);
+        if (error) return res.status(500).json({ message: 'Could not update the password. Please try again.' });
+        return res.json({ ok: true, message: 'Password updated — you can now sign in with your new password.' });
+    } catch (_) {
+        return res.status(500).json({ message: 'Could not update the password. Please try again.' });
+    }
 });
 
 // Who am I (from the token) — used by the frontend to gate the nav.

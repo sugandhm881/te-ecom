@@ -236,6 +236,7 @@ let _loginBusy = false;   // Enter fires BOTH the form submit and the keypress h
 async function handleLogin() {
     if (_loginBusy) return;
     _loginBusy = true;
+    _authMsg();                    // clear any previous error/notice
     showLoader();
     try {
         const response = await fetch('/api/login', {
@@ -250,10 +251,46 @@ async function handleLogin() {
         afterLogin(true);
     } catch (error) {
         showNotification(error.message, true);
+        _authMsg(error.message, false);   // persistent red alert on the login card
     } finally {
         _loginBusy = false;
         hideLoader();
     }
+}
+// Show / clear the shared inline message on the auth card. ok=true → green, false → red, no text → hide.
+function _authMsg(text, ok) {
+    const m = document.getElementById('auth-msg'); if (!m) return;
+    if (!text) { m.classList.add('hidden'); m.textContent = ''; m.style.color = ''; return; }
+    m.textContent = text; m.className = 'lv-msg'; m.style.color = ok ? '#86efac' : '';
+}
+// --- Password strength (shared by signup / forgot-reset / admin reset). Minimum is 8 chars;
+//     anything shorter is "Too short" (score 0, blocked). 8+ is Fair, better = Good/Strong. ---
+const PW_MIN = 8;
+function pwStrength(pw) {
+    pw = String(pw || '');
+    if (pw.length === 0)   return { score: -1, label: '',          color: '',        pct: 0 };
+    if (pw.length < PW_MIN) return { score: 0,  label: 'Too short', color: '#f43f5e', pct: 18 };
+    const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter(re => re.test(pw)).length;
+    let pts = 0;
+    if (pw.length >= 12) pts++;
+    if (pw.length >= 16) pts++;
+    if (classes >= 2) pts++;
+    if (classes >= 3) pts++;
+    const score = pts >= 3 ? 4 : pts >= 1 ? 3 : 2;   // 8+ = Fair, quality → Good, strong → Strong
+    const meta = { 2: { l: 'Fair', c: '#f59e0b', p: 58 }, 3: { l: 'Good', c: '#3b82f6', p: 80 }, 4: { l: 'Strong', c: '#10b981', p: 100 } }[score];
+    return { score, label: meta.l, color: meta.c, pct: meta.p };
+}
+function _bindPwMeter(input, meter) {
+    if (!input || !meter) return;
+    const bar = meter.querySelector('.pw-bar > span'), lab = meter.querySelector('.pw-label');
+    const upd = () => {
+        const s = pwStrength(input.value);
+        if (s.score < 0) { meter.classList.add('hidden'); return; }
+        meter.classList.remove('hidden');
+        if (bar) { bar.style.width = s.pct + '%'; bar.style.backgroundColor = s.color; }
+        if (lab) { lab.textContent = s.label; lab.style.color = s.color; }
+    };
+    input.addEventListener('input', upd); upd();
 }
 
 // --- 2FA OTP step (admin logins — OTP emailed, verified server-side) ---
@@ -314,6 +351,67 @@ async function _otpResend() {
     } catch (e) { showNotification(e.message, true); }
 }
 
+// --- Forgot / reset password (self-service via an emailed 6-digit code) ---
+let _forgotEmail = null, _forgotBusy = false;
+function _forgotShow() {
+    clearInterval(_otpTimer); _otpToken = null;
+    document.getElementById('login-form')?.classList.add('hidden');
+    document.getElementById('signup-form')?.classList.add('hidden');
+    document.getElementById('otp-form')?.classList.add('hidden');
+    document.getElementById('auth-toggle')?.classList.add('hidden');
+    document.getElementById('forgot-form')?.classList.remove('hidden');
+    document.getElementById('forgot-step-email')?.classList.remove('hidden');
+    document.getElementById('forgot-step-reset')?.classList.add('hidden');
+    _authMsg();
+    const h = document.querySelector('#login-view h1'); if (h) h.textContent = 'Reset your password';
+    const em = document.getElementById('forgot-email');
+    if (em) { em.value = (document.getElementById('login-email') || {}).value || ''; em.focus(); }
+}
+function _forgotBack() {
+    _forgotEmail = null; clearInterval(_otpTimer); _authMsg();
+    document.getElementById('forgot-form')?.classList.add('hidden');
+    document.getElementById('login-form')?.classList.remove('hidden');
+    document.getElementById('auth-toggle')?.classList.remove('hidden');
+    const h = document.querySelector('#login-view h1'); if (h) h.textContent = 'Sign in to Ecom Central';
+}
+async function handleForgotSend() {
+    if (_forgotBusy) return;
+    const email = String((document.getElementById('forgot-email') || {}).value || '').trim();
+    if (!email) return _authMsg('Please enter your email.', false);
+    _forgotBusy = true; showLoader();
+    try {
+        const r = await fetch('/api/forgot-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.message || 'Could not send the reset code');
+        _forgotEmail = email;
+        document.getElementById('forgot-step-email')?.classList.add('hidden');
+        document.getElementById('forgot-step-reset')?.classList.remove('hidden');
+        const hint = document.getElementById('forgot-hint'); if (hint) hint.textContent = email;
+        const otp = document.getElementById('forgot-otp'); if (otp) { otp.value = ''; otp.focus(); }
+        _authMsg(d.message || 'If an account exists, a code has been sent.', true);
+        _otpCountdown(30);
+    } catch (e) { _authMsg(e.message, false); }
+    finally { _forgotBusy = false; hideLoader(); }
+}
+async function handleReset() {
+    if (_forgotBusy) return;
+    const email = _forgotEmail;
+    const otp = String((document.getElementById('forgot-otp') || {}).value || '').trim();
+    const password = String((document.getElementById('forgot-new-password') || {}).value || '');
+    if (!/^\d{6}$/.test(otp)) return _authMsg('Enter the 6-digit code.', false);
+    if (password.length < PW_MIN) return _authMsg('Password must be at least 8 characters.', false);
+    _forgotBusy = true; showLoader();
+    try {
+        const r = await fetch('/api/reset-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, otp, password }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.message || 'Could not reset the password');
+        _forgotBack();
+        const le = document.getElementById('login-email'); if (le) le.value = email || '';
+        _authMsg(d.message || 'Password updated — sign in with your new password.', true);
+    } catch (e) { _authMsg(e.message, false); }
+    finally { _forgotBusy = false; hideLoader(); }
+}
+
 function _clearSession() {
     authToken = null; localStorage.removeItem('authToken');
     clearTimeout(_sessionTimer); _sessionTimer = null;
@@ -321,6 +419,7 @@ function _clearSession() {
     document.getElementById('welcome-splash-style')?.remove();
     if(loginEmailEl) loginEmailEl.value = '';
     if(loginPasswordEl) loginPasswordEl.value = '';
+    document.getElementById('login-pw-meter')?.classList.add('hidden');
     // Drop the #view hash so the NEXT sign-in lands on the home dashboard, not the page they left.
     try { history.replaceState(null, '', location.pathname + location.search); } catch (_) {}
 }
@@ -510,6 +609,10 @@ async function handleSignup() {
         if (msg) { msg.textContent = 'Enter a valid 10-digit mobile number.'; msg.className = 'text-sm text-center mt-4 text-rose-400'; }
         return;
     }
+    if (String(password).length < PW_MIN) {
+        if (msg) { msg.textContent = 'Password must be at least 8 characters.'; msg.className = 'text-sm text-center mt-4 text-rose-400'; }
+        return;
+    }
     showLoader();
     try {
         const r = await fetch('/api/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email, mobile, password }) });
@@ -524,8 +627,9 @@ function _authToggle(toSignup) {
     const lf = document.getElementById('login-form'), sf = document.getElementById('signup-form');
     const tg = document.getElementById('auth-toggle'), msg = document.getElementById('auth-msg'), h = document.querySelector('#login-view h1');
     if (!lf || !sf) return;
-    clearInterval(_otpTimer); _otpToken = null;
+    clearInterval(_otpTimer); _otpToken = null; _forgotEmail = null;
     document.getElementById('otp-form')?.classList.add('hidden');
+    document.getElementById('forgot-form')?.classList.add('hidden');
     lf.classList.toggle('hidden', toSignup); sf.classList.toggle('hidden', !toSignup);
     if (tg) tg.textContent = toSignup ? 'Already have an account? Sign in' : 'Create an account';
     if (h) h.textContent = toSignup ? 'Create your account' : 'Sign in to Ecom Central';
@@ -5306,6 +5410,7 @@ function renderUsers(users){
       <div class="flex items-center gap-2">
         ${!isAdmin?`<button data-act="toggle" class="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1.5">Manage access <svg class="dpu-chev w-3.5 h-3.5 transition-transform ${collapsed?'':'rotate-180'}" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg></button>`:''}
         ${(u.status==='active'&&!isAdmin)?'<button data-act="disable" class="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">Disable</button>':''}
+        ${!isAdmin?'<button data-act="reset-pw" class="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">Reset password</button>':''}
         ${!isAdmin?'<button data-act="delete" title="Delete user" class="text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg w-8 h-8 flex items-center justify-center"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>':''}
       </div>
     </div>`;
@@ -5348,6 +5453,7 @@ function usersListClick(e){
   if(act==='toggle'){ const sec=card.querySelector('.dpu-perms'), chev=btn.querySelector('.dpu-chev'); if(sec){ sec.classList.toggle('hidden'); if(chev) chev.classList.toggle('rotate-180', !sec.classList.contains('hidden')); } return; }
   if(act==='mobile'){ usrMobileModal(id, card.dataset.email, card.dataset.mobile||''); return; }
   if(act==='name'){ usrNameModal(id, card.dataset.email, card.dataset.name||''); return; }
+  if(act==='reset-pw'){ usrResetPwModal(id, card.dataset.email); return; }
   const perms=()=>[...card.querySelectorAll('.perm-chip.is-on')].map(c=>c.dataset.perm);
   if(act==='approve') usersUpdate(id,{status:'active',permissions:perms()},'Approved & access granted');
   else if(act==='disable') usersUpdate(id,{status:'disabled'},'Disabled');
@@ -5385,6 +5491,52 @@ function usrNameModal(id, email, current){
     }catch(e){ perr.textContent=e.message; perr.classList.remove('hidden'); }
   });
   setTimeout(()=>inp.focus(),50);
+}
+// Admin: set a new password for a user (POST /api/admin/users/:id/password). Shows the value so the
+// admin can copy + share it; the user can change it later via "Forgot password" on the login screen.
+function usrResetPwModal(id, email){
+  document.getElementById('usr-pw-modal')?.remove();
+  const wrap=document.createElement('div');
+  wrap.id='usr-pw-modal';
+  wrap.className='fixed inset-0 z-[70] bg-slate-900/40 backdrop-blur-[2px] flex items-center justify-center p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-2xl w-full max-w-md sup-pop">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+      <div><h3 class="font-bold text-slate-800">Reset password</h3><p class="text-xs text-slate-400 mt-0.5">${ecEsc(email||'')}</p></div>
+      <button data-x class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
+    <div class="p-5">
+      <label class="text-xs font-semibold text-slate-500">New password</label>
+      <div class="flex gap-2 mt-1">
+        <input id="usrpw-input" type="text" class="filter-input w-full" placeholder="At least 8 characters" autocomplete="off" minlength="8" maxlength="128">
+        <button id="usrpw-gen" type="button" class="px-3 py-2 text-xs rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 whitespace-nowrap">Generate</button>
+      </div>
+      <div id="usrpw-meter" class="pw-meter hidden mt-2"><div class="pw-bar"><span></span></div><span class="pw-label"></span></div>
+      <p class="text-[11px] text-slate-400 mt-2">Set a new password for this user and share it with them. They can change it later via “Forgot password” on the login screen.</p>
+      <p id="usrpw-err" class="text-xs text-rose-500 mt-2 hidden"></p></div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="usrpw-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Set password</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap||e.target.closest('[data-x]')) wrap.remove(); });
+  const inp=document.getElementById('usrpw-input');
+  _bindPwMeter(inp, document.getElementById('usrpw-meter'));
+  document.getElementById('usrpw-gen').addEventListener('click',()=>{ inp.value=_genPassword(); inp.dispatchEvent(new Event('input')); });
+  document.getElementById('usrpw-save').addEventListener('click', async ()=>{
+    const password=inp.value.trim();
+    const perr=document.getElementById('usrpw-err');
+    if(password.length<8){ perr.textContent='Password must be at least 8 characters.'; perr.classList.remove('hidden'); return; }
+    try{ const r=await fetch('/api/admin/users/'+id+'/password',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({password})});
+      const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed');
+      wrap.remove(); showNotification('Password reset for '+email);
+    }catch(e){ perr.textContent=e.message; perr.classList.remove('hidden'); }
+  });
+  setTimeout(()=>inp.focus(),50);
+}
+function _genPassword(){
+  const c='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  let s=''; const arr=new Uint32Array(12);
+  (window.crypto&&crypto.getRandomValues)?crypto.getRandomValues(arr):arr.forEach((_,i)=>arr[i]=Math.floor(Math.random()*4294967296));
+  for(let i=0;i<12;i++) s+=c[arr[i]%c.length];
+  return s;
 }
 // Own add-user modal (name + email + mandatory mobile + temp password) — replaces the old browser prompt().
 function usersAddPrompt(){
@@ -7939,7 +8091,7 @@ function dpCriticalModal(d){
   wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
     <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
       <div><h3 class="text-lg font-bold text-slate-800">Critical escalation email</h3>
-        <p class="text-xs text-slate-400 mt-0.5">${d.count} shipments · ${d.aiUsed?'✨ AI-polished':(d.aiAvailable?'AI unavailable — using template':'AI not configured — using template')}</p></div>
+        <p class="text-xs text-slate-400 mt-0.5">${d.count} shipments · ${d.aiUsed?'✨ AI-polished':(d.aiAvailable?('⚠️ AI unavailable'+(d.aiError?' ('+ecEsc(d.aiError)+')':'')+' — using template'):'AI not configured — using template')}</p></div>
       <button id="crit-close" class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button>
     </div>
     <div class="p-6 space-y-4 overflow-y-auto">
@@ -7959,7 +8111,10 @@ function dpCriticalModal(d){
         <button id="crit-polish" type="button" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100">✨ Polish with AI</button>
         <span class="text-[11px] text-slate-400">edit freely, pick a tone, then Polish</span>
       </div>
-      <p class="text-xs text-slate-400">A table of the ${d.count} shipments (order, AWB, courier, status, NDR reasons) is attached automatically below your message.</p>
+      <div>
+        <p class="text-xs text-slate-400 mb-1.5">This table (order, AWB, courier, status, NDR reasons) is attached automatically below your message:</p>
+        <div class="border border-slate-200 rounded-lg overflow-auto max-h-52 p-2">${d.tableHtml||'<span class="text-xs text-slate-400">No table</span>'}</div>
+      </div>
     </div>
     <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200">
       <span id="crit-status" class="text-sm mr-auto"></span>
@@ -7969,6 +8124,9 @@ function dpCriticalModal(d){
   document.body.appendChild(wrap);
   document.getElementById('crit-subject').value = d.subject||'';
   document.getElementById('crit-body').value = d.body||'';
+  // Recipient defaults to the courier partner for this shipment's source (RapidShyp / DocPharma); our team is CC'd.
+  const _toEl = document.getElementById('crit-to');
+  if (_toEl) _toEl.placeholder = (d.toHint || ((d.platform==='docpharma'?'DocPharma':'RapidShyp')+' email')) + ' — default from Settings (your team is CC’d)';
   const close=()=>wrap.remove();
   document.getElementById('crit-close').addEventListener('click', close);
   document.getElementById('crit-cancel').addEventListener('click', close);
@@ -8058,10 +8216,12 @@ async function dpSendCritical(draft){
   const body=document.getElementById('crit-body').value.trim();
   const to=document.getElementById('crit-to').value.trim();
   if(!subject||!body){ if(st){ st.textContent='Subject and message required'; st.className='text-sm text-rose-600'; } return; }
-  if(!confirm('Send this escalation email'+(to?(' to '+to):' to the RapidShyp address in Settings')+'?')) return;
+  const partner = draft.platform==='docpharma' ? 'DocPharma' : 'RapidShyp';
+  const dest = to ? (' to '+to) : (' to the '+partner+' team'+(draft.toHint?(' ('+draft.toHint+')'):'')+', CC your team');
+  if(!confirm('Send this escalation email'+dest+'?')) return;
   if(st){ st.textContent='Sending…'; st.className='text-sm text-slate-500'; }
   try{
-    const r=await fetch('/api/critical-email/send',{ method:'POST', headers:{'Content-Type':'application/json',...getAuthHeaders()}, body: JSON.stringify({ subject, body, to:to||undefined, tableHtml: draft.tableHtml, orders: draft.orders }) });
+    const r=await fetch('/api/critical-email/send',{ method:'POST', headers:{'Content-Type':'application/json',...getAuthHeaders()}, body: JSON.stringify({ subject, body, to:to||undefined, platform: draft.platform, tableHtml: draft.tableHtml, orders: draft.orders }) });
     const d=await r.json();
     if(!r.ok||!d.success) throw new Error(d.message||'Send failed');
     if(st){ st.textContent=d.message||'Sent ✓'; st.className='text-sm text-emerald-600'; }
@@ -8451,6 +8611,17 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('otp-back')?.addEventListener('click', _otpBack);
     document.getElementById('otp-resend')?.addEventListener('click', _otpResend);
     document.getElementById('auth-toggle')?.addEventListener('click', () => { const sf = document.getElementById('signup-form'); _authToggle(!!(sf && sf.classList.contains('hidden'))); });
+    document.getElementById('forgot-link')?.addEventListener('click', _forgotShow);
+    document.getElementById('forgot-back')?.addEventListener('click', _forgotBack);
+    document.getElementById('forgot-send-btn')?.addEventListener('click', handleForgotSend);
+    document.getElementById('forgot-reset-btn')?.addEventListener('click', handleReset);
+    document.getElementById('forgot-resend')?.addEventListener('click', handleForgotSend);
+    document.getElementById('forgot-email')?.addEventListener('keypress', e => { if (e.key === 'Enter') handleForgotSend(); });
+    document.getElementById('forgot-otp')?.addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6); });
+    document.getElementById('forgot-new-password')?.addEventListener('keypress', e => { if (e.key === 'Enter') handleReset(); });
+    _bindPwMeter(document.getElementById('login-password'), document.getElementById('login-pw-meter'));
+    _bindPwMeter(document.getElementById('signup-password'), document.getElementById('signup-pw-meter'));
+    _bindPwMeter(document.getElementById('forgot-new-password'), document.getElementById('forgot-pw-meter'));
     logoutBtn?.addEventListener('click', signOut);
     document.getElementById('signout-login-btn')?.addEventListener('click', showLogin);
     

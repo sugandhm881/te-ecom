@@ -58,7 +58,8 @@ router.post('/users', async (req, res) => {
 // Reset a user's password.
 router.post('/users/:id/password', async (req, res) => {
     const password = (req.body && req.body.password) || '';
-    if (String(password).length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' });
+    if (String(password).length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters.' });
+    if (String(password).length > 128) return res.status(400).json({ message: 'Password is too long (max 128 characters).' });
     const { error } = await supabase.from('app_users_ecom').update({ password_hash: hashPassword(password), updated_at: new Date().toISOString() }).eq('id', req.params.id);
     if (error) return res.status(500).json({ message: error.message });
     res.json({ success: true });

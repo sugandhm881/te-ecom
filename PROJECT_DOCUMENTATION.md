@@ -271,6 +271,8 @@ All endpoints require `Authorization: Bearer <JWT>` unless noted. Base path `/ap
 | POST | `/login` | public (rate-limited) | Issue JWT, or start 2FA (`otp_required` + `otp_token`) — all accounts |
 | POST | `/login/verify-otp` | public (rate-limited) | 2FA step 2: pre-auth token + OTP → real JWT |
 | POST | `/login/resend-otp` | public (rate-limited) | Re-email the 2FA OTP (new code, 25s throttle) |
+| POST | `/forgot-password` `{email}` | public (rate-limited) | Self-service reset step 1 — **verifies the account exists first** (internal tool → clear feedback over enumeration-hardening): `404 No account found` for unknown email, `403` for pending/disabled; only an **active** account gets a 6-digit code emailed (reuses the 2FA OTP infra). Returns `email_unconfigured` if SMTP isn't set up (client shows "contact admin"); the `.env` bootstrap admin is refused (its password lives in config) |
+| POST | `/reset-password` `{email,otp,password}` | public (rate-limited) | Self-service reset step 2 — verifies the code, sets the new `password_hash` (min 6). Admin can also reset any user via `/admin/users/:id/password`. Login errors ("Invalid credentials!", pending/disabled, rate-limit) now surface as a persistent inline alert on the login card (not just a toast). **Input caps + password policy on every auth route + input** (login/signup/forgot/reset/admin-reset): email ≤254, password **8**–128 (min bumped from 6; rejected BEFORE scrypt so a huge value can't block the event loop), OTP must match `^\d{6}$`, name ≤80, mobile = Indian 10-digit. A **live password-strength meter** (`pwStrength()` → Too short / Fair / Good / Strong) shows under every new-password field (signup, forgot-reset, admin reset). All six auth POSTs are rate-limited (10/15min per IP+account); OTP = 5 tries / 5-min TTL / 25s resend |
 | POST | `/signup` | public (rate-limited) | Create pending account (mobile mandatory) |
 | GET | `/me` | user | Current user + permissions + `name` |
 | POST | `/activity` `{event,view}` | user | Log a login/dashboard-view (email from token) for User Analytics |
@@ -298,8 +300,8 @@ All endpoints require `Authorization: Bearer <JWT>` unless noted. Base path `/ap
 | POST | `/order-marks` `{order_name, awb, mark_type}` | delivery-perf | **Toggle** a manual mark (default `likely_fake`) |
 | GET | `/order-marks?type=` | delivery-perf | List marks |
 | GET | `/likely-fake-insight` | delivery-perf | Marked-orders outcome split + delivered-conversion % |
-| POST | `/critical-email/compose` `{awbs[]}` | admin | Build an AI-polished escalation draft (template fallback) |
-| POST | `/critical-email/send` `{subject, body, to?, tableHtml, orders[]}` | admin | Send + log `critical_mail_sent` marks + record the thread for reply tracking |
+| POST | `/critical-email/compose` `{awbs[], kind?}` | admin | Build an AI-polished escalation draft (template fallback). **Context-aware (2026-07-29):** `classifyEscalation()` picks the narrative from the actual shipment data — **fake** (delivered-after-NDR), **stuck** (no scan/movement), **ndr** (repeated failed attempts), or **general** — instead of always "fake delivery"; a `fake_attempts` hint is honored only if the data shows a fake signal. Returns `kind` + `aiError` (the real reason AI fell back, e.g. "rate-limited", "empty response", "key rejected") so the UI shows WHY. Same surfaced reason on `/critical-email/polish` failures. **Robust AI-reply parsing** (`parseAiEmail`) tolerates ```` ```json ```` fences + literal newlines in the body (was dumping raw JSON into the message). **Order + AWB** are listed **inline in the body for ≤6 shipments** (else "see attached table"); the full order/AWB/status table is always attached on send AND now **previewed in the compose modal** |
+| POST | `/critical-email/send` `{subject, body, to?, platform, tableHtml, orders[]}` | admin | Send + log `critical_mail_sent` marks + record the thread for reply tracking. **Courier-aware recipients (2026-07-29):** compose derives `platform` from the shipment **source** (DocPharma rows → DocPharma team, else RapidShyp), and send routes **To = that courier partner, CC = our team** via `recipientsFor(platform)` (was always hardcoded to the single RapidShyp email). A hand-typed recipient overrides To; the platform CC (internal team) always applies |
 | POST | `/critical-email/polish` `{subject, body, tone}` | admin | AI-rewrite the (hand-edited) draft in a chosen tone: polite / direct / formal |
 | GET | `/escalation-emails?awb=\|order=` | delivery-perf or claims-sla | Mail thread(s): sent escalation + replies with `direction` (outbound/inbound) + AI score/status/suggestion |
 | GET | `/escalation-emails/recent` · POST `/escalation-emails/poll` | delivery-perf | Latest replies (order-labeled) · manual inbox poll |
@@ -395,7 +397,7 @@ All schedules run in **Asia/Kolkata** inside the server process (`server.js` unl
 | `0 20 * * *` | Full RapidShyp cache refresh **then** Warehouse Ops report (−1) → Teams |
 | `47 8-19 * * *` | DocPharma-rejected **detection** (at :47, deduped via handled-list) → Teams report + records to `dp_rejected_handled_ecom` |
 | `56 8-19 * * *` | Warehouse **auto-route** pass (at :56, 9 min after detection) — gently moves not-yet-routed rejections to Shifupro (cookie-based, ~1 order/1.5s, `routed_at` marks done). Kept separate + slow so it never bursts/crashes |
-| `0 11 * * *` | EasyEcom On-Hold report → Teams |
+| `0 11 * * *` | On-Hold report → Teams — **now covers BOTH sources**: EasyEcom holds (live-verified) **and** Shopify holds (active `shopify_hold` marks, shown **with the hold reason** from the mark's note, e.g. "high value (≥₹1500), short address"). Two labeled sections; "all clear" only when both are empty |
 | `*/2 * * * *` | **Shopify auto-hold backstop** — holds repeat COD orders (same criteria as the Call Queue Repeat tab) on Shopify before EasyEcom imports them. Backstop to the instant `orders/create` webhook. OFF unless `SHOPIFY_AUTOHOLD_ENABLED=true`; skips already-held / manually-released |
 | `*/20 * * * *` | EasyEcom panel-session **freshness watch** — warns in the server log if the extension-synced routing cookie goes stale (>45 min = extension offline). The VPS can't ping/keep it warm (WAF); the browser extension does |
 | `30 9 * * 1` | **Silent-RTO weekly claim email → RapidShyp** (Mon, last **30 days**, freight + invoice value) |
@@ -442,7 +444,7 @@ All schedules run in **Asia/Kolkata** inside the server process (`server.js` unl
 ### Teams channel reports (Adaptive Cards)
 1. **Warehouse Ops** — pending Confirmed / Ready-for-Pickup / Unfulfillable orders, grouped by category with order IDs (3×/day).
 2. **DocPharma Rejected → Warehouse Action** — orders with no RapidShyp tracking that DocPharma cancelled/rejected (hourly 8-19). **Dedup:** each reported order is written to `dp_rejected_handled_ecom` and never re-reported; if that ledger can't be read the run **aborts** (fail-safe, no re-spam).
-3. **EasyEcom On-Hold** — daily 11:00.
+3. **On-Hold (EasyEcom + Shopify)** — daily 11:00. EasyEcom holds (live-verified) + Shopify `shopify_hold` marks shown with their reason.
 4. **Amazon Review** — pending review batch with a Teams `yes`/`no` approval loop.
 
 ### Emails (via portal-configured SMTP)
@@ -544,7 +546,7 @@ Run from the repo root (they load `.env` themselves):
 | `node app/api/kwikship_sync.js sync [days] [conc]` | Sync Kwikship (GoKwik) tracking for Kwikship-allocated orders → `shipment_journey_ecom` (source=kwikship) |
 | `node app/api/warehouse_slack_report.js [offset] [dry]` | Warehouse report (add `dry` to preview without posting) |
 | `node app/api/warehouse_slack_report.js dp [dry]` | DocPharma-rejected report |
-| `node app/api/warehouse_slack_report.js hold [dry]` | EasyEcom On-Hold report |
+| `node app/api/warehouse_slack_report.js hold [dry]` | On-Hold report (EasyEcom + Shopify, with reason) |
 | `node cron_job.js` | Adset PDF email report |
 | `npm run sync` (`data_fetcher.js`) | Bulk data sync |
 | `POST /api/teams/test?target=warehouse\|dp\|hold\|amazon` | Teams webhook smoke test |
