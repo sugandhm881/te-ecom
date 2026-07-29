@@ -847,41 +847,57 @@ async function sendEasyecomHoldReport(announceEmpty = false) {
     }
 
     const eeIds = orders.map(o => o.reference_code || o.store_order_id || o.marketplace_order_id || `#${o.order_id}`);
+    // Group Shopify holds BY REASON (the mark note) — each reason becomes a heading, with its orders
+    // listed HORIZONTALLY as chips beneath it (biggest reason group first). EasyEcom holds carry no
+    // per-order reason, so they stay one group.
+    const shopGroupMap = new Map();
+    for (const m of shopHolds) {
+        const key = (m.note && String(m.note).trim()) || 'No reason recorded';
+        if (!shopGroupMap.has(key)) shopGroupMap.set(key, []);
+        shopGroupMap.get(key).push(m.order_name);
+    }
+    const shopGroups = [...shopGroupMap.entries()].sort((a, b) => b[1].length - a[1].length);
+    const CHUNK = 60;   // order-chips per section (Slack's 3000-char section limit)
+
     const blocks = [
         { type: 'header', text: { type: 'plain_text', text: `⏸️ On-Hold Orders — ${total} (Last 30 Days)`, emoji: true } },
         { type: 'section', text: { type: 'mrkdwn', text: `*${total}* order${total !== 1 ? 's' : ''} on hold _(last 30 days: ${winLabel})_ — *EasyEcom: ${eeCount}* · *Shopify: ${shCount}*.` } },
         { type: 'divider' }
     ];
     if (eeCount) {
-        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🟠 EasyEcom — On Hold (${eeCount})*` } });
-        const CHUNK = 60;
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🟠 EasyEcom hold — On Hold (${eeCount})*` } });
         for (let i = 0; i < eeIds.length; i += CHUNK) {
-            blocks.push({ type: 'section', text: { type: 'mrkdwn', text: eeIds.slice(i, i + CHUNK).map(x => `\`${x}\``).join('  ') } });
+            blocks.push({ type: 'section', text: { type: 'mrkdwn', text: eeIds.slice(i, i + CHUNK).map(x => `\`#${x}\``).join('  ') } });
         }
     }
     if (shCount) {
         if (eeCount) blocks.push({ type: 'divider' });
-        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🔵 Shopify — On Hold (${shCount})*  _(reason shown)_` } });
-        const CHUNK = 20;
-        for (let i = 0; i < shopHolds.length; i += CHUNK) {
-            blocks.push({ type: 'section', text: { type: 'mrkdwn', text: shopHolds.slice(i, i + CHUNK).map(m => `• \`${m.order_name}\`${m.note ? ` — ${m.note}` : ''}`).join('\n') } });
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🔵 Shopify — On Hold (${shCount})*  _(grouped by reason)_` } });
+        for (const [reason, names] of shopGroups) {
+            blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${reason}* · ${names.length}` } });
+            for (let i = 0; i < names.length; i += CHUNK) {
+                blocks.push({ type: 'section', text: { type: 'mrkdwn', text: names.slice(i, i + CHUNK).map(x => `\`#${x}\``).join('  ') } });
+            }
         }
     }
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_Auto-report · daily 11 AM IST_' }] });
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_Auto-report · 11 AM & 6 PM IST_' }] });
 
     // Plain HTML twin of the card (Teams thread-reply flow — a channel reply can carry only text/HTML,
-    // not an Adaptive Card). Mirrors the card: EasyEcom IDs as chips, Shopify orders as "ID — reason".
+    // not an Adaptive Card). Mirrors the card: a reason heading, then its order IDs as chips laid out
+    // horizontally on one line (they wrap into the grid seen in the channel).
     let teamsText = `<b>⏸️ On-Hold Orders — ${total} (Last 30 Days)</b><br>`
         + `<b>${total}</b> order${total !== 1 ? 's' : ''} on hold <i>(last 30 days: ${winLabel})</i> — `
         + `<b>EasyEcom: ${eeCount}</b> · <b>Shopify: ${shCount}</b>.<br>`;
     if (eeCount) {
-        teamsText += `<br><b>🟠 EasyEcom — On Hold (${eeCount})</b><br>` + eeIds.map(x => `<code>${x}</code>`).join(' ') + `<br>`;
+        teamsText += `<br><b>🟠 EasyEcom hold — On Hold (${eeCount})</b><br>` + eeIds.map(x => `<code>#${esc(x)}</code>`).join(' ') + `<br>`;
     }
     if (shCount) {
-        teamsText += `<br><b>🔵 Shopify — On Hold (${shCount})</b> <i>(reason shown)</i><br>`
-            + shopHolds.map(m => `• <code>${esc(m.order_name)}</code>${m.note ? ` — ${esc(m.note)}` : ''}`).join('<br>') + `<br>`;
+        teamsText += `<br><b>🔵 Shopify — On Hold (${shCount})</b> <i>(grouped by reason)</i><br>`;
+        for (const [reason, names] of shopGroups) {
+            teamsText += `<br><b>${esc(reason)}</b> · ${names.length}<br>` + names.map(x => `<code>#${esc(x)}</code>`).join(' ') + `<br>`;
+        }
     }
-    teamsText += `<br><i>Auto-report · daily 11 AM IST</i>`;
+    teamsText += `<br><i>Auto-report · 11 AM & 6 PM IST</i>`;
 
     await postSlack({ blocks }, HOLD_CHANNEL, { text: teamsText });
     console.log(`[Hold Report] Sent — EasyEcom: ${eeCount}, Shopify: ${shCount}`);
