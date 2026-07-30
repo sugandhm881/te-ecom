@@ -4,6 +4,20 @@ const moment = require('moment-timezone');
 const { supabase } = require('../supabase');
 const shopifyHold = require('./shopify_hold');
 
+// Paginated fetch — Supabase caps EVERY response at 1000 rows, so a bare select (or .limit(3000))
+// silently returns only the first 1000. `build(from, to)` must return the query with .range applied;
+// resolves to the same { data, error } shape as a single query so consumers don't change.
+async function fetchPaged(build, maxRows = 20000) {
+    const all = [];
+    for (let ofs = 0; ofs < maxRows; ofs += 1000) {
+        const { data, error } = await build(ofs, Math.min(ofs + 999, maxRows - 1));
+        if (error) return { data: all, error };
+        all.push(...(data || []));
+        if (!data || data.length < 1000) break;
+    }
+    return { data: all, error: null };
+}
+
 // ─────────────────────────────────────────────────────
 // NORMALIZE: Supabase Shopify order → dashboard format
 // ─────────────────────────────────────────────────────
@@ -122,31 +136,35 @@ router.get('/get-orders', async (req, res) => {
                 .order('created_at', { ascending: false })
                 .limit(TABLE_LIMIT),
 
-            // Supabase workflow caches (replaces MongoDB)
-            supabase.from('shipment_cache_ecom').select('order_id, shipment_id'),
-            supabase.from('awb_cache_ecom').select('*'),
+            // Supabase workflow caches (replaces MongoDB) — paginated: these tables grow forever and a
+            // bare select silently truncates at 1000, losing shipment/AWB enrichment for older orders.
+            fetchPaged((f, t) => supabase.from('shipment_cache_ecom').select('order_id, shipment_id').order('order_id', { ascending: true }).range(f, t)),
+            fetchPaged((f, t) => supabase.from('awb_cache_ecom').select('*').order('shipment_id', { ascending: true }).range(f, t)),   // keyed by shipment_id (no order_id column)
             // NOTE: rapidshyp_tracking_ecom is NO LONGER fetched whole here (it's 27k+ rows → ~2s).
             // It's fetched below, filtered to just the AWBs on this page. See "RapidShyp tracking".
 
             // EasyEcom rows — MAPPING ONLY (easyecomOrderId/status onto Shopify orders, for the
             // hold/unhold feature + hold-mark reconciliation). EasyEcom-only orders (Flipkart etc.)
             // are NOT listed on the Orders dashboard (removed 2026-07-17 per user).
-            supabase
+            // Paginated — the old .limit(3000) was a lie (server caps at 1000), so ~2/3 of a 30-day
+            // window lost their EasyEcom id/status → no hold controls, wrong holdable state.
+            fetchPaged((f, t) => supabase
                 .from('b2c_order_easycom')
                 .select('order_id, reference_code, store_order_id, marketplace_order_id, order_status, location, awb_number, updated_at, fetched_at')
                 .gte('order_date', since)
                 .order('order_date', { ascending: false })
-                .limit(3000),
+                .order('order_id', { ascending: true })   // unique tiebreak — stable pages on tied dates
+                .range(f, t)),
 
             // Live EasyEcom-hold marks (set/cleared by /easyecom/hold-order|unhold-order) — the
             // dashboard shows On-Hold instantly, without waiting for EasyEcom's own status to sync.
-            supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold'),
+            fetchPaged((f, t) => supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold').order('order_name', { ascending: true }).range(f, t)),
 
             // DocPharma-rejected orders (the dp-to-mwh detection) → tag + red colour on the dashboard.
-            supabase.from('dp_rejected_handled_ecom').select('order_name, routed_at'),
+            fetchPaged((f, t) => supabase.from('dp_rejected_handled_ecom').select('order_name, routed_at').order('order_name', { ascending: true }).range(f, t)),
 
             // Warehouse-routed marks (set on a successful warehouse move) → "Moved: from → to" + disable button.
-            supabase.from('order_marks_ecom').select('order_name, note, created_at').eq('mark_type', 'warehouse_routed'),
+            fetchPaged((f, t) => supabase.from('order_marks_ecom').select('order_name, note, created_at').eq('mark_type', 'warehouse_routed').order('order_name', { ascending: true }).range(f, t)),
 
             // ── Accurate KPI counts over the FULL window (cheap head-only counts; classification by the
             //    synced tracking_status, matching the dashboard's status buckets closely) ──
@@ -159,7 +177,7 @@ router.get('/get-orders', async (req, res) => {
 
             // Authoritative held-orders list (EasyEcom order_status "On Hold") — a small dedicated query
             // so it's COMPLETE (the main easyecomRows above is capped and can miss older held orders).
-            supabase.from('b2c_order_easycom').select('reference_code, store_order_id').ilike('order_status', '%hold%').gte('order_date', since).limit(1000)
+            fetchPaged((f, t) => supabase.from('b2c_order_easycom').select('reference_code, store_order_id').ilike('order_status', '%hold%').gte('order_date', since).order('order_id', { ascending: true }).range(f, t))
         ]);
         // In-transit = everything else (has tracking, moving forward, not delivered/RTO/new).
         const kTotal = cntTotal.count || 0, kDelivered = cntDelivered.count || 0, kCancelled = cntCancelled.count || 0, kRto = cntRto.count || 0, kNew = cntNew.count || 0;
@@ -446,14 +464,16 @@ router.get('/ee-hold-marks', async (req, res) => {
     // no dashboard ever shows a held order as if it's actionable.
     const sinceHold = moment().subtract(60, 'days').toISOString();
     const [markRes, shopRes, eeRes, eeIdRes] = await Promise.all([
-        supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold'),
-        supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'shopify_hold'),
-        supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status').ilike('order_status', '%hold%').gte('order_date', sinceHold).limit(2000),
+        // All four paginated — the server caps every response at 1000 rows, so the old .limit(2000)s
+        // (and bare selects) silently truncated once the tables grew past 1000 → missing HOLD chips.
+        fetchPaged((f, t) => supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold').order('order_name', { ascending: true }).range(f, t)),
+        fetchPaged((f, t) => supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'shopify_hold').order('order_name', { ascending: true }).range(f, t)),
+        fetchPaged((f, t) => supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status').ilike('order_status', '%hold%').gte('order_date', sinceHold).order('order_id', { ascending: true }).range(f, t)),
         // EasyEcom's text `order_status` is UNRELIABLE for holds — when an order is held from the panel it
         // often stays "Open"/"Shipped" while only the item is flagged, so the ilike above catches ~4 of ~65
         // real holds. The authoritative signal is `raw_data.order_status_id = 44` (On Hold) — filter on it
         // directly so panel-held orders actually surface. (Stale-cancelled id=44 rows are dropped below.)
-        supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status').filter('raw_data->>order_status_id', 'eq', '44').gte('order_date', sinceHold).limit(2000),
+        fetchPaged((f, t) => supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status').filter('raw_data->>order_status_id', 'eq', '44').gte('order_date', sinceHold).order('order_id', { ascending: true }).range(f, t)),
     ]);
     if (markRes.error) return res.status(500).json({ success: false, error: markRes.error.message });
     const nk = n => String(n || '').replace('#', '').trim();

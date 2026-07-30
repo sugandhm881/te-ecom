@@ -195,13 +195,22 @@ async function resolveRsStatuses(awbs) {
 async function syncRsCacheEasyecom(days = 30, opts = {}) {
     const force = !!opts.force; // refresh ALL non-terminal AWBs, ignoring the 3h freshness skip
     const since = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
-    const { data: orders, error } = await supabase
-        .from('b2c_order_easycom')
-        .select('awb_number')
-        .gte('order_date', since)
-        .not('awb_number', 'is', null);
-    if (error) { console.error('[RS-EC Sync] read error:', error.message); return; }
-    const awbs = [...new Set((orders || []).map(o => o.awb_number).filter(Boolean))];
+    // Paginate — Supabase caps every response at 1000 rows; a 30-day window holds ~5k orders, so a
+    // single select silently truncated to the first 1000 AWBs and the rest never got their cache refreshed.
+    const orders = [];
+    for (let ofs = 0; ; ofs += 1000) {
+        const { data, error } = await supabase
+            .from('b2c_order_easycom')
+            .select('awb_number')
+            .gte('order_date', since)
+            .not('awb_number', 'is', null)
+            .order('order_id', { ascending: true })
+            .range(ofs, ofs + 999);
+        if (error) { console.error('[RS-EC Sync] read error:', error.message); return; }
+        orders.push(...(data || []));
+        if (!data || data.length < 1000) break;
+    }
+    const awbs = [...new Set(orders.map(o => o.awb_number).filter(Boolean))];
 
     const cache = {};
     for (let i = 0; i < awbs.length; i += 200) {
@@ -441,7 +450,10 @@ async function collectPendingGroups(start, end, label = 'open orders') {
     console.log(`[WH Report] Fetching ${label} ${start} → ${end}…`);
 
     const sleep = ms => new Promise(r => setTimeout(r, ms));
-    const q = `processed_at:>='${start}' AND processed_at:<='${end}T23:59:59Z' AND status:open`;
+    // start/end arrive as DD-MM-YYYY (fmtLocal — the report DISPLAY format), but Shopify's search
+    // syntax needs ISO YYYY-MM-DD; convert here so the query is valid while every label keeps DD-MM-YYYY.
+    const toIso = s => { const m = String(s).match(/^(\d{2})-(\d{2})-(\d{4})$/); return m ? `${m[3]}-${m[2]}-${m[1]}` : s; };
+    const q = `processed_at:>='${toIso(start)}' AND processed_at:<='${toIso(end)}T23:59:59Z' AND status:open`;
     const MAX_TRIES = 6;
 
     const allOrders = [];

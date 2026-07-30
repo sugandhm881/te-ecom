@@ -170,9 +170,17 @@ async function reservedData(from, to) {
 // gets verified against real EasyEcom values. Physical = Available + Reserved + Blocked + Awaiting-putaway.
 async function bucketBalances() {
     const blocked = new Map(), awaiting = new Map();
-    const { data, error } = await supabase.from('inventory_movements_ecom')
-        .select('event_type, sku, qty, adjustment_type, old_status, new_status').limit(50000);
-    if (error) throw new Error(error.message);
+    // Paginate the ledger — the server caps every response at 1000 rows (the old .limit(50000) was
+    // returning an arbitrary 1000-row slice, corrupting the running balances logged into every count).
+    const data = [];
+    for (let from = 0; ; from += 1000) {
+        const { data: page, error } = await supabase.from('inventory_movements_ecom')
+            .select('event_type, sku, qty, adjustment_type, old_status, new_status')
+            .order('id', { ascending: true }).range(from, from + 999);
+        if (error) throw new Error(error.message);
+        data.push(...(page || []));
+        if (!page || page.length < 1000) break;
+    }
     const isBlocked = s => !!s && !/^\s*available\s*$/i.test(String(s));
     for (const r of (data || [])) {
         const q = Number(r.qty) || 0, sku = r.sku;
@@ -237,17 +245,24 @@ router.post('/inventory/count', async (req, res) => {
 // ── GET /inventory/count/log — count history + summary. Filters: sku, from, to, mismatch=1, limit. ──
 router.get('/inventory/count/log', async (req, res) => {
     try {
-        let q = supabase.from('inventory_counts_ecom')
-            .select('id, counted_at, counted_by, sku, product_name, warehouse, system_qty, physical_qty, difference, cost')
-            .eq('location_id', SHIFUPRO_LOC)
-            .order('counted_at', { ascending: false })
-            .limit(Math.min(Number(req.query.limit) || 500, 2000));
-        if (req.query.sku) q = q.ilike('sku', `%${String(req.query.sku).trim()}%`);
-        if (req.query.from) q = q.gte('counted_at', new Date(req.query.from).toISOString());
-        if (req.query.to) q = q.lte('counted_at', new Date(new Date(req.query.to).getTime() + 86399999).toISOString());
-        const { data, error } = await q;
-        if (error) throw new Error(error.message);
-        const all = data || [];
+        // Paginate to the requested limit — the server caps each response at 1000, so a limit above
+        // 1000 (up to the 2000 max) silently truncated.
+        const wanted = Math.min(Number(req.query.limit) || 500, 2000);
+        const all = [];
+        for (let from = 0; from < wanted; from += 1000) {
+            let q = supabase.from('inventory_counts_ecom')
+                .select('id, counted_at, counted_by, sku, product_name, warehouse, system_qty, physical_qty, difference, cost')
+                .eq('location_id', SHIFUPRO_LOC)
+                .order('counted_at', { ascending: false }).order('id', { ascending: true })
+                .range(from, Math.min(from + 999, wanted - 1));
+            if (req.query.sku) q = q.ilike('sku', `%${String(req.query.sku).trim()}%`);
+            if (req.query.from) q = q.gte('counted_at', new Date(req.query.from).toISOString());
+            if (req.query.to) q = q.lte('counted_at', new Date(new Date(req.query.to).getTime() + 86399999).toISOString());
+            const { data, error } = await q;
+            if (error) throw new Error(error.message);
+            all.push(...(data || []));
+            if (!data || data.length < 1000) break;
+        }
         const mism = all.filter(r => Number(r.difference) !== 0);
         const netUnits = all.reduce((s, r) => s + Number(r.difference || 0), 0);
         const valueVar = all.reduce((s, r) => s + Number(r.difference || 0) * (Number(r.cost) || 0), 0);
@@ -262,13 +277,22 @@ router.get('/inventory/count/log', async (req, res) => {
 // shortage-vs-excess split, ₹ impact at cost, coverage vs tracked SKUs, day-by-day trend, and per-counter stats.
 router.get('/inventory/count/analysis', async (req, res) => {
     try {
-        let q = supabase.from('inventory_counts_ecom')
-            .select('counted_at, counted_by, sku, product_name, system_qty, physical_qty, difference, reserved_qty, blocked_qty, awaiting_putaway_qty, cost')
-            .eq('location_id', SHIFUPRO_LOC).order('counted_at', { ascending: true }).limit(20000);
-        if (req.query.from) q = q.gte('counted_at', new Date(req.query.from).toISOString());
-        if (req.query.to) q = q.lte('counted_at', new Date(new Date(req.query.to).getTime() + 86399999).toISOString());
-        const { data, error } = await q;
-        if (error) throw new Error(error.message);
+        // Paginate — the server caps each response at 1000 rows; the old .limit(20000) silently
+        // truncated the analysis to the oldest 1000 counts.
+        const data = [];
+        for (let from = 0; ; from += 1000) {
+            let q = supabase.from('inventory_counts_ecom')
+                .select('counted_at, counted_by, sku, product_name, system_qty, physical_qty, difference, reserved_qty, blocked_qty, awaiting_putaway_qty, cost')
+                .eq('location_id', SHIFUPRO_LOC)
+                .order('counted_at', { ascending: true }).order('id', { ascending: true })
+                .range(from, from + 999);
+            if (req.query.from) q = q.gte('counted_at', new Date(req.query.from).toISOString());
+            if (req.query.to) q = q.lte('counted_at', new Date(new Date(req.query.to).getTime() + 86399999).toISOString());
+            const { data: page, error } = await q;
+            if (error) throw new Error(error.message);
+            data.push(...(page || []));
+            if (!page || page.length < 1000) break;
+        }
         const rows = (data || []).map(r => ({ at: r.counted_at, by: r.counted_by || '—', sku: r.sku, product_name: r.product_name,
             system: Number(r.system_qty) || 0, physical: Number(r.physical_qty) || 0, diff: Number(r.difference) || 0,
             reserved: r.reserved_qty == null ? null : Number(r.reserved_qty),

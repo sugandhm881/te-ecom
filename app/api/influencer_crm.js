@@ -330,6 +330,12 @@ router.post('/inf/activities', async (req, res) => {
 
 // ── Lists (campaigns) ────────────────────────────────────────────────────────
 // Auto-detect a date range from the list name — "Diwali 2025" → Oct-Nov 2025, "March 2026" → that month.
+// Last day of a month (1-based) as a plain YYYY-MM-DD string. Do NOT use
+// `new Date(year, month, 0).toISOString().slice(0,10)` — that builds LOCAL midnight of the last day, and
+// toISOString() shifts it back to UTC (−5:30 in IST), landing on the PREVIOUS day, which silently drops
+// anything on the last day of the month (e.g. a 31-Jul next-video vanished from the calendar). getDate()
+// reads the local day-of-month with no timezone conversion.
+const monthEnd = (year, month) => `${year}-${String(month).padStart(2, '0')}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`;
 const FESTIVAL_MONTHS = { diwali: [10, 11], holi: [3, 3], rakhi: [8, 8], christmas: [12, 12], valentine: [2, 2], newyear: [1, 1] };
 const MONTH_NAMES = ['january','february','march','april','may','june','july','august','september','october','november','december'];
 function detectRange(name) {
@@ -338,11 +344,11 @@ function detectRange(name) {
     if (!yearM) return null;
     const year = Number(yearM[0]);
     for (const [fest, [m1, m2]] of Object.entries(FESTIVAL_MONTHS)) {
-        if (s.includes(fest)) return { from: `${year}-${String(m1).padStart(2, '0')}-01`, to: new Date(year, m2, 0).toISOString().slice(0, 10), label: fest + ' ' + year };
+        if (s.includes(fest)) return { from: `${year}-${String(m1).padStart(2, '0')}-01`, to: monthEnd(year, m2), label: fest + ' ' + year };
     }
     for (let i = 0; i < 12; i++) {
         if (s.includes(MONTH_NAMES[i]) || s.includes(MONTH_NAMES[i].slice(0, 3))) {
-            return { from: `${year}-${String(i + 1).padStart(2, '0')}-01`, to: new Date(year, i + 1, 0).toISOString().slice(0, 10), label: MONTH_NAMES[i] + ' ' + year };
+            return { from: `${year}-${String(i + 1).padStart(2, '0')}-01`, to: monthEnd(year, i + 1), label: MONTH_NAMES[i] + ' ' + year };
         }
     }
     return null;
@@ -458,7 +464,7 @@ router.get('/inf/calendar', async (req, res) => {
         const year = Number(req.query.year), month = Number(req.query.month);   // month 1-12
         if (!year || !month) return res.status(400).json({ success: false, error: 'year & month required' });
         const from = `${year}-${String(month).padStart(2, '0')}-01`;
-        const to = new Date(year, month, 0).toISOString().slice(0, 10);
+        const to = monthEnd(year, month);   // last day as YYYY-MM-DD — see monthEnd note (no TZ shift)
         const { data: vids, error } = await supabase.from('influencer_videos')
             .select('id, influencer_id, expected_date, live_date, payment_status, video_url')
             .or(`and(expected_date.gte.${from},expected_date.lte.${to}),and(live_date.gte.${from},live_date.lte.${to})`);

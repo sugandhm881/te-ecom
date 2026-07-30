@@ -194,9 +194,11 @@ function parseDocpharmaJourney(dp) {
         // Only attach a reason on an actual NDR/RTO — DocPharma leaves a canned "reason" on in-transit rows.
         ndr_reasons: (reason && (rto || reattempts > 0)) ? [reason] : [],
         out_for_delivery_at: null,
-        delivered_at: so.delivered_at || null,
+        // Stamp +05:30 like first_edd — DocPharma sends IST wall-clock; stored raw, Postgres read them
+        // as UTC (+5.5h shift), so a 20:00 IST delivery became 01:30 next day → wrongly counted late.
+        delivered_at: parseDpDate(so.delivered_at) || null,
         rto_at: null,
-        dispatched_at: dispatched,
+        dispatched_at: parseDpDate(dispatched) || null,
         first_edd: parseDpDate(so.eta || (dp && dp.eta)),   // DocPharma promise date (Promised EDD)
         zone,
         // RTO with zero re-attempts → returned without a delivery attempt. DocPharma has no scan

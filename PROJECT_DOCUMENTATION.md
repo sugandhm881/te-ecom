@@ -551,6 +551,19 @@ Run from the repo root (they load `.env` themselves):
 | `npm run sync` (`data_fetcher.js`) | Bulk data sync |
 | `POST /api/teams/test?target=warehouse\|dp\|hold\|amazon` | Teams webhook smoke test |
 
+### Bug-sweep 2026-07-30 (Phase 1 — 21 assured fixes from a 4-agent full-codebase audit)
+
+A systematic audit (date/TZ, backend×2, frontend) found 45 bugs (21 assured / 24 probable). All 21 assured were fixed, behavior-preserving:
+
+- **Dates/TZ (IST −5:30 shifts):** ads/profitability/ad-analysis + Excel/PDF ranges sent `since` one day early via `toISOString()` on local midnight → now `_ymd()` local format (5 sites). Profitability chart parsed `DD-MM-YYYY` with `new Date()` → sales were ALWAYS ₹0 (silently caught); bucket keys were UTC-shifted and the last day's ad spend dropped → all three fixed. Orders-table sort used `new Date('DD-MM-YYYY')` (Invalid Date → arbitrary order) → sorts by the server `timestamp`. DocPharma `delivered_at`/`dispatched_at` stored IST wall-clock as UTC (+5.5h — deliveries wrongly counted late in claim emails) → now stamped `+05:30` via `parseDpDate` (delivery_journey.js; NOTE: rows written before this fix still carry the shifted values). Delivery-Perf presets / influencer overdue chips + calendar today / amzrev custom defaults / influencer `payment_date` used UTC-today (wrong before 5:30 AM IST) → `_ymd()`. Warehouse report fed display-format `DD-MM-YYYY` into the Shopify `processed_at:` search query (invalid) → converted to ISO inside `collectPendingGroups` only (labels stay DD-MM-YYYY).
+- **Supabase 1000-row cap (silent truncation):** every `.limit(>1000)` is capped server-side at 1000. Paginated with `.range()` loops: orders.js `/get-orders` b2c map (was .limit(3000) → hold controls missing on ~2/3 of orders), whole-table caches + marks, `/ee-hold-marks` (all 4 queries), support_console queue/undelivered/changed-tab bases, `findRepeatCandidates` base, inventory `bucketBalances` ledger (was corrupting reconciliation baselines), count log/analysis, warehouse `syncRsCacheEasyecom` AWB list. All pagers use a unique-column tiebreak order for gap-free pages.
+- **Cancel-refund safety (shopify_hold.js):** `refundCapturedIfAny` now FAILS CLOSED — an unreadable order/transactions GET aborts the cancel instead of treating it as "nothing captured" (never cancel with the customer's online payment stuck); refunds are posted per capture transaction (one lump against the first parent was rejected by Shopify when 2+ captures exist).
+- **Support console:** repeat/hold phone-history matching normalizes to last-10 digits (mixed `+91`/bare formats made history invisible → wrong hold decisions); order-detail Hold&Unhold log now matches `payload.order` exactly (substring match leaked TE25-3810's events into TE25-381's timeline).
+- **Auto-hold cron:** `server.js` backstop now passes `c.created_at` so the 6-hour anti-retroactive guard (see §Shopify auto-hold) actually applies on the cron path.
+- **Frontend:** fops custom-date `fmt`→`fmtL` ReferenceError (froze the Fetch button); fops enrichment badge wrote into the Shopify-cancelled column (`tds[5]`→`tds[6]`); 60s orders auto-refresh timer + filter listeners now guarded (stacked duplicates on every re-login); KPI cards now respect the Payment/Customer-type filters; Amazon-review load error toast now error-styled.
+
+Remaining known (probable, NOT yet fixed — see session notes): partial-paid orders sent to EasyEcom as full-amount COD (`easyecom.js buildOrderEntry`), RapidShyp webhook batch aborts on one malformed record, `chunkedIn` per-chunk 1000-cap, `includes('NA')` status misclassification, FB-insights >1000-ad pagination, duplicate-DP-report risk once `dp_rejected_handled_ecom` >1000 rows, and ~18 smaller items.
+
 ---
 
 ## 16. Security

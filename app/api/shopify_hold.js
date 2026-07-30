@@ -153,27 +153,46 @@ async function cancelShopifyOrder(shopifyOrderId, reasonLabel) {
 // (Inventory itself is released automatically when an UNFULFILLED order is cancelled, so no line-item restock here.)
 async function refundCapturedIfAny(shopifyOrderId) {
     const og = await axios.get(`${API()}/orders/${shopifyOrderId}.json?fields=financial_status,currency`, { headers: HEADERS(), timeout: 20000, validateStatus: () => true });
-    const fin = og.data && og.data.order && og.data.order.financial_status;
+    // FAIL CLOSED: if we can't READ the payment status (429/5xx/timeout), we must not treat it as
+    // "nothing captured" — return an error so cancelOrder aborts instead of cancelling un-refunded.
+    if (og.status !== 200 || !(og.data && og.data.order)) return { refunded: 0, error: `could not verify payment status (HTTP ${og.status})` };
+    const fin = og.data.order.financial_status;
     if (!['paid', 'partially_paid', 'partially_refunded'].includes(fin)) return { refunded: 0 };   // nothing captured online
     const tg = await axios.get(`${API()}/orders/${shopifyOrderId}/transactions.json`, { headers: HEADERS(), timeout: 20000, validateStatus: () => true });
-    const txns = (tg.data && tg.data.transactions) || [];
-    let captured = 0, refunded = 0, parent = null, gateway = null;
+    if (tg.status !== 200 || !(tg.data && tg.data.transactions)) return { refunded: 0, error: `could not read transactions (HTTP ${tg.status})` };
+    const txns = tg.data.transactions;
+    // Tally captures individually — a refund must be posted against ITS OWN parent transaction, capped at
+    // that capture's remaining amount (one lump against the first parent gets rejected by Shopify when a
+    // second capture exists, e.g. COD fee + later advance).
+    let captured = 0, refundedTotal = 0;
+    const caps = [], capById = {};
     for (const t of txns) {
         if (t.status !== 'success') continue;
         const amt = parseFloat(t.amount || 0) || 0;
-        if (t.kind === 'sale' || t.kind === 'capture') { captured += amt; if (!parent) { parent = t.id; gateway = t.gateway; } }
-        else if (t.kind === 'refund') refunded += amt;
+        if (t.kind === 'sale' || t.kind === 'capture') { captured += amt; const c = { id: t.id, amount: amt, refunded: 0, gateway: t.gateway }; caps.push(c); capById[t.id] = c; }
+        else if (t.kind === 'refund') { refundedTotal += amt; if (t.parent_id != null && capById[t.parent_id]) capById[t.parent_id].refunded += amt; }
     }
-    const refundable = Math.max(0, +(captured - refunded).toFixed(2));
-    if (refundable <= 0 || !parent) return { refunded: 0 };
+    const refundable = Math.max(0, +(captured - refundedTotal).toFixed(2));
+    if (refundable <= 0 || !caps.length) return { refunded: 0 };
+    const rtxns = [];
+    let left = refundable;   // total cap — never refund more than (captured − already refunded) overall
+    for (const c of caps) {
+        if (left <= 0) break;
+        const rem = Math.min(Math.max(0, +(c.amount - c.refunded).toFixed(2)), left);
+        if (rem <= 0) continue;
+        rtxns.push({ parent_id: c.id, amount: rem.toFixed(2), kind: 'refund', gateway: c.gateway || undefined });
+        left = +(left - rem).toFixed(2);
+    }
+    if (!rtxns.length) return { refunded: 0 };
+    const amount = +(refundable - left).toFixed(2);
     const rf = await axios.post(`${API()}/orders/${shopifyOrderId}/refunds.json`, {
         refund: {
             note: 'Order cancelled by support — refunding the amount paid online (COD fee / advance).',
             notify: false,
-            transactions: [{ parent_id: parent, amount: refundable.toFixed(2), kind: 'refund', gateway: gateway || undefined }],
+            transactions: rtxns,
         },
     }, { headers: HEADERS(), timeout: 20000, validateStatus: () => true });
-    if (rf.status >= 200 && rf.status < 300) return { refunded: refundable };
+    if (rf.status >= 200 && rf.status < 300) return { refunded: amount };
     const e = rf.data && (rf.data.errors || rf.data.error);
     return { refunded: 0, error: (typeof e === 'string' ? e : JSON.stringify(e || `HTTP ${rf.status}`)) };
 }

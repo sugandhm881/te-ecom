@@ -66,6 +66,18 @@ function rangeISO(req, defDays = 14) {
     };
 }
 const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
+// Paginated fetch — Supabase caps EVERY response at 1000 rows (a .limit(2000) still returns 1000).
+// `build(from, to)` returns the query with .range applied; rows are concatenated until a short page.
+async function fetchPaged(build, maxRows = 20000) {
+    const all = [];
+    for (let ofs = 0; ofs < maxRows; ofs += 1000) {
+        const { data, error } = await build(ofs, Math.min(ofs + 999, maxRows - 1));
+        if (error) throw new Error(error.message);
+        all.push(...(data || []));
+        if (!data || data.length < 1000) break;
+    }
+    return all;
+}
 // PostgREST URL limits: big IN() lists are chunked at 300 and fetched in parallel (console pattern).
 async function chunkedIn(table, select, col, ids, extra) {
     const parts = await Promise.all(chunk(ids, 300).map(part => {
@@ -156,12 +168,14 @@ router.get('/support/summary', async (req, res) => {
 // start auto-holding every high-value / in-flight order.
 async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false, anyReason = false }) {
     const SEL = 'order_id, order_name, phone, email, total_price, created_at, fulfillment_status, tracking_status, partner, courier, awb_number, bucket, msg91_confirmed, is_repeat_customer, dispatch_at, edd';
-    const { data, error } = await supabase.from('order_buckets').select(SEL)
+    // Paginated — the old .limit(2000) silently capped at 1000 (server max), dropping the NEWEST rows
+    // (ascending sort) once a window exceeded 1000 pre-dispatch orders.
+    let cand = await fetchPaged((f, t) => supabase.from('order_buckets').select(SEL)
         .eq('bucket', 'order_to_dispatch')                               // (2) still pre-pickup / holdable
         .gte('created_at', fromISO).lte('created_at', toISO)
-        .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(2000);
-    if (error) throw new Error(error.message);
-    let cand = data || [];
+        .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true })
+        .order('order_id', { ascending: true })   // unique tiebreak — stable pages on tied timestamps
+        .range(f, t));
     // "Dispatched" = already fulfilled / picked up / in transit. The `order_to_dispatch` bucket is keyed off
     // a Shopify-fulfillment state that lags, so a fulfilled order (AWB assigned, courier "out for pickup" /
     // "pickup scheduled", or DocPharma "in-progress") wrongly stays in the bucket even though it has already
@@ -202,13 +216,18 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
         cand.forEach(c => { if (!c.phone && shipPhoneBy[String(c.order_id)]) c.phone = shipPhoneBy[String(c.order_id)]; });
     }
     // (4) ≥1 of the customer's last 3 PRIOR orders not delivered.
+    // Phones are stored in mixed formats ('+919876543210' / '919876543210' / bare 10-digit — and the
+    // shipping-address backfill above can add spaced ones), so EXACT matching missed history entirely.
+    // Normalize to the last 10 digits: query the common stored variants, then group/look up by last-10.
+    const _p10 = p => String(p || '').replace(/\D/g, '').slice(-10);
     const phones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
-    const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, order_name, phone, bucket, created_at', 'phone', phones) : [];
+    const phoneVariants = [...new Set(phones.flatMap(p => { const t = _p10(p); return t.length === 10 ? [p, t, '91' + t, '+91' + t] : [p]; }))];
+    const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, order_name, phone, bucket, created_at', 'phone', phoneVariants) : [];
     // EasyEcom-cancelled prior orders read as active in order_buckets (Shopify lag) — treat them as cancelled
     // so a customer whose only "non-delivered" prior order was actually cancelled isn't flagged repeat-risk.
     const histCancelled = await eeCancelledSet(hist.map(h => h.order_name));
     const nkn = n => String(n || '').replace('#', '').trim();
-    const byPhone = {}; hist.forEach(h => { (byPhone[h.phone] = byPhone[h.phone] || []).push(h); });
+    const byPhone = {}; hist.forEach(h => { const k = _p10(h.phone) || h.phone; (byPhone[k] = byPhone[k] || []).push(h); });
     const TERMINAL = new Set(['delivered', 'rto', 'cancelled']);                 // final states → not "in-flight"
     const isCancelled = h => h.bucket === 'cancelled' || histCancelled.has(nkn(h.order_name));   // Shopify OR EasyEcom cancel
     // Addresses for the `short_address` reason — the current candidates + each customer's PAST DELIVERED orders
@@ -221,7 +240,7 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
     const candAddrById = {}; candAddrRows.forEach(a => { candAddrById[String(a.order_id)] = _fullA(a); });
     const histAddrNormById = {}; histAddrRows.forEach(a => { histAddrNormById[String(a.order_id)] = _normA(_fullA(a)); });
     return cand.filter(c => {
-        const all = byPhone[c.phone] || [];
+        const all = byPhone[_p10(c.phone) || c.phone] || [];
         c.orders_count = all.length;
         // Reason `recent_undelivered` — ≥1 of the customer's last 3 PRIOR orders not delivered.
         const last3Prior = all
@@ -306,11 +325,12 @@ router.get('/support/queue', async (req, res) => {
         let rows = [];
 
         if (tab === 'und') {
-            const { data, error } = await supabase.from('order_buckets').select(SEL)
+            // Paginated — .limit(2000) silently capped at 1000 (server max), dropping the newest rows.
+            rows = await fetchPaged((f, t) => supabase.from('order_buckets').select(SEL)
                 .in('bucket', UNDELIVERED_BUCKETS).gte('created_at', fromISO).lte('created_at', toISO)
-                .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true }).limit(2000);
-            if (error) throw new Error(error.message);
-            rows = data || [];
+                .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true })
+                .order('order_id', { ascending: true })
+                .range(f, t));
             // Remember every order ever seen undelivered — powers the Status-changed tab.
             if (rows.length) {
                 const now = new Date().toISOString();
@@ -319,8 +339,10 @@ router.get('/support/queue', async (req, res) => {
                 }
             }
         } else if (tab === 'changed') {
-            const { data: tracked } = await supabase.from('undelivered_tracking').select('order_id').order('last_seen_at', { ascending: false }).limit(3000);
-            const ids = (tracked || []).map(t => t.order_id);
+            // Paginated — .limit(3000) silently capped at 1000 (server max).
+            const tracked = await fetchPaged((f, t) => supabase.from('undelivered_tracking').select('order_id')
+                .order('last_seen_at', { ascending: false }).order('order_id', { ascending: true }).range(f, t), 3000);
+            const ids = tracked.map(t => t.order_id);
             const all = ids.length ? await chunkedIn('order_buckets', SEL, 'order_id', ids) : [];
             rows = all.filter(r => !UNDELIVERED_BUCKETS.includes(r.bucket))
                 .sort((a, b) => (b.msg91_confirmed === true) - (a.msg91_confirmed === true) || new Date(a.created_at) - new Date(b.created_at));
@@ -441,8 +463,10 @@ router.get('/support/order/:orderId', async (req, res) => {
             .select('action, status_code, payload, response, created_at')
             .in('action', ['shopify_hold', 'shopify_release', 'shopify_cancel'])
             .order('created_at', { ascending: false }).limit(500);
+        // Exact match on payload.order (always written by logApi) — the old JSON-substring test made
+        // TE25-3810/3811/…'s events bleed into TE25-381's timeline (prefix substring).
         const holdLog = (holdRows || [])
-            .filter(l => String(JSON.stringify(l.payload || '')).includes(onmNorm))
+            .filter(l => nkn((l.payload || {}).order) === onmNorm)
             .map(l => { const p = l.payload || {}; return { action: l.action, by: p.by || 'auto', reason: p.reason || null, ok: (l.status_code || 0) < 400, result: l.response || null, at: l.created_at }; })
             .sort((x, y) => new Date(x.at) - new Date(y.at));
         // MSG91 thread by phone (last 20).

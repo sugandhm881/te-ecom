@@ -1250,7 +1250,11 @@ function renderAllDashboard() {
         );
     }
 
-    const t = [...o].sort((a, b) => new Date(b.date) - new Date(a.date));
+    // Sort by the numeric `timestamp` the server provides — `date` is DD-MM-YYYY, which new Date()
+    // can't parse (Invalid Date → NaN comparator → arbitrary order). Fallback parses DD-MM-YYYY.
+    const _ordTs = x => (typeof x.timestamp === 'number' && x.timestamp) ? x.timestamp
+        : (() => { const p = String(x.date || '').split('-'); return p.length === 3 ? new Date(+p[2], +p[1] - 1, +p[0]).getTime() : 0; })();
+    const t = [...o].sort((a, b) => _ordTs(b) - _ordTs(a));
     
     renderDashboardFilters(); 
     renderSearchInput(); 
@@ -2312,8 +2316,10 @@ async function handleAdsetDateChange(isRankingView = false) {
     
     if (startDate && endDate) {
         showLoader();
-        const since = startDate.toISOString().split('T')[0];
-        const until = endDate.toISOString().split('T')[0];
+        // _ymd (LOCAL date) — toISOString() shifts IST-midnight back to the previous day, so every
+        // range silently included one extra earlier day (e.g. "Today" fetched yesterday+today).
+        const since = _ymd(startDate);
+        const until = _ymd(endDate);
         const dateFilterType = adsetDateFilterTypeEl ? adsetDateFilterTypeEl.value : 'order_date';
         const endpoint = `/get-adset-performance?since=${since}&until=${until}&date_filter_type=${dateFilterType}`;
 
@@ -2335,8 +2341,8 @@ async function handleProfitabilityChange() {
 
     showLoader();
     try {
-        const since = startDate.toISOString().split('T')[0];
-        const until = endDate.toISOString().split('T')[0];
+        const since = _ymd(startDate);   // local date — see handleAdsetDateChange note
+        const until = _ymd(endDate);
         let adData = [];
         try {
              adData = await fetchAdPerformanceData(since, until) || [];
@@ -2350,8 +2356,8 @@ async function handleAdAnalysisDateChange() {
     
     if (startDate && endDate) {
         showLoader();
-        const since = startDate.toISOString().split('T')[0];
-        const until = endDate.toISOString().split('T')[0];
+        const since = _ymd(startDate);   // local date — see handleAdsetDateChange note
+        const until = _ymd(endDate);
         // Reuse the Adset endpoint but for Analysis context
         const endpoint = `/get-adset-performance?since=${since}&until=${until}`;
 
@@ -2588,7 +2594,9 @@ function renderProfitabilityDashboard(adData, startDate, endDate) {
     let curr = new Date(startDate);
     let safetyCounter = 0;
     while (curr <= endDate && safetyCounter < 365) {
-        dailyStats[curr.toISOString().split('T')[0]] = { sales: 0, spend: 0 };
+        // LOCAL date key — toISOString() shifted every bucket a day back (IST −5:30), so the last
+        // day's spend found no bucket and was silently dropped, and all x-axis days were off by one.
+        dailyStats[_ymd(curr)] = { sales: 0, spend: 0 };
         curr.setDate(curr.getDate() + 1);
         safetyCounter++;
     }
@@ -2597,8 +2605,11 @@ function renderProfitabilityDashboard(adData, startDate, endDate) {
         allOrders.forEach(o => {
             if (o.status !== 'Cancelled' && o.date) {
                 try {
-                    const d = new Date(o.date).toISOString().split('T')[0];
-                    if (dailyStats[d]) dailyStats[d].sales += parseFloat(o.total || 0);
+                    // o.date is DD-MM-YYYY (server format) — new Date() can't parse it (the old code
+                    // threw Invalid Date on every order → sales were ALWAYS 0). Rearrange directly.
+                    const p = String(o.date).split('-');
+                    const d = p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : null;
+                    if (d && dailyStats[d]) dailyStats[d].sales += parseFloat(o.total || 0);
                 } catch(e) {}
             }
         });
@@ -2608,7 +2619,8 @@ function renderProfitabilityDashboard(adData, startDate, endDate) {
         adData.forEach(ad => {
             if (ad.date) {
                 try {
-                    const d = new Date(ad.date).toISOString().split('T')[0];
+                    // ad.date is already YYYY-MM-DD (IST) from the server — index directly, no Date round-trip.
+                    const d = String(ad.date).slice(0, 10);
                     if (dailyStats[d]) dailyStats[d].spend += (ad.spend || 0);
                 } catch(e) {}
             }
@@ -3134,7 +3146,9 @@ function updateDashboardKpis(o) {
     // NOTE: the STATUS filter is intentionally excluded — clicking a KPI card filters the TABLE but the
     // cards stay a stable full-range breakdown you can click between (the active one is just highlighted).
     const filtersActive = (activeSourceFilter !== 'All') || (activeCodFilter !== 'All')
-        || (activeHoldFilter !== 'All') || (activePlatformFilter !== 'All') || (typeof currentSearchTerm === 'string' && currentSearchTerm.length > 0);
+        || (activeHoldFilter !== 'All') || (activePlatformFilter !== 'All')
+        || (activePaymentFilter !== 'All') || (activeTypeFilter !== 'All')   // payment/customer-type filters narrow the table — KPIs must follow
+        || (typeof currentSearchTerm === 'string' && currentSearchTerm.length > 0);
     let k;
     if (!filtersActive && serverOrderMeta && serverOrderMeta.kpis) {
         const s = serverOrderMeta.kpis;
@@ -4730,7 +4744,10 @@ async function loadInitialData() {
     // --- Quiet auto-refresh: ONE timer (orders + COD + re-render), paused when the tab is hidden ---
     // silentRefreshOrders() already fetches COD, so the separate COD-only timer was redundant (double-fetch
     // + double re-render every minute). Collapsing to one and skipping hidden tabs removes the periodic jank.
-    setInterval(() => {
+    // GUARD: loadInitialData runs on EVERY sign-in (sign out → sign in without a page reload), so an
+    // unguarded setInterval stacked a new timer each login — polling doubled every cycle.
+    if (window._ordersRefreshTimer) clearInterval(window._ordersRefreshTimer);
+    window._ordersRefreshTimer = setInterval(() => {
         if (document.hidden) return; // don't churn CPU/network in a background tab
         // Don't re-render while the user is reading an order in the detail popup. Defer until it's closed.
         if (document.getElementById('order-detail-modal')) return;
@@ -4738,6 +4755,10 @@ async function loadInitialData() {
     }, 60000);
 }
 function initializeAllFilters() {
+    // Run-once — called from loadInitialData on EVERY sign-in; re-running re-attached 'change'
+    // listeners to the same elements, so each filter change fired multiple reloads after a re-login.
+    if (window._filtersWired) return;
+    window._filtersWired = true;
     // 1. Status Filters
     const statusOptions = ['All Statuses', 'New / Processing', 'New', 'Processing', 'Ready To Ship', 'Pickup Scheduled', 'Shipped', 'In Transit', 'Delivered', 'RTO', 'Cancelled'];
     statusFilterEl.innerHTML = statusOptions.map(s => `<option value="${s === 'All Statuses' ? 'All' : s}">${s}</option>`).join('');
@@ -4807,7 +4828,7 @@ function initializeDateFilters(d, c, s, e, p, h, t) {
 
 async function handlePdfDownload(){const[s,e]=calculateDateRange(adsetDatePreset,adsetStartDateFilterEl.value,adsetEndDateFilterEl.value);if(!adsetPerformanceData||adsetPerformanceData.length===0){showNotification("No data available to download.",true);return}
 if(!s||!e){showNotification("Please select a valid date range.",true);return}
-const since=s.toISOString().split('T')[0];const until=e.toISOString().split('T')[0];showNotification("Generating PDF report...");try{const blob=await fetchApiData(`/download-dashboard-pdf?since=${since}&until=${until}`,"Failed to generate PDF",{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(adsetPerformanceData)});const url=window.URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`adset_report_${since}_to_${until}.pdf`;document.body.appendChild(a);a.click();a.remove();window.URL.revokeObjectURL(url);showNotification("PDF download started successfully!")}catch(err){}}
+const since=_ymd(s);const until=_ymd(e);showNotification("Generating PDF report...");try{const blob=await fetchApiData(`/download-dashboard-pdf?since=${since}&until=${until}`,"Failed to generate PDF",{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(adsetPerformanceData)});const url=window.URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`adset_report_${since}_to_${until}.pdf`;document.body.appendChild(a);a.click();a.remove();window.URL.revokeObjectURL(url);showNotification("PDF download started successfully!")}catch(err){}}
 
 async function handleExcelDownload() {
     const [startDate, endDate] = calculateDateRange(adsetDatePreset, adsetStartDateFilterEl.value, adsetEndDateFilterEl.value);
@@ -4815,8 +4836,8 @@ async function handleExcelDownload() {
         showNotification("Please select a valid date range.", true);
         return;
     }
-    const since = startDate.toISOString().split('T')[0];
-    const until = endDate.toISOString().split('T')[0];
+    const since = _ymd(startDate);   // local date — toISOString shifted the window start a day early
+    const until = _ymd(endDate);
     showNotification("Generating detailed Excel report...");
     const dateFilterType = adsetDateFilterTypeEl ? adsetDateFilterTypeEl.value : 'order_date';
     const excelEndpoint = `/download-excel-report?since=${since}&until=${until}&date_filter_type=${dateFilterType}`;
@@ -4873,8 +4894,8 @@ function amzRevSetPreset(preset,btn){
     cd.classList.remove('hidden'); cd.classList.add('flex');
     if(!document.getElementById('amzrev-date-from').value){
       const t=new Date(),f=new Date(t); f.setDate(f.getDate()-6);
-      document.getElementById('amzrev-date-from').value=f.toISOString().split('T')[0];
-      document.getElementById('amzrev-date-to').value=t.toISOString().split('T')[0];
+      document.getElementById('amzrev-date-from').value=_ymd(f);   // local date — toISOString = yesterday before 5:30 AM IST
+      document.getElementById('amzrev-date-to').value=_ymd(t);
     }
     amzDateFrom=document.getElementById('amzrev-date-from').value;
     amzDateTo=document.getElementById('amzrev-date-to').value;
@@ -4963,7 +4984,7 @@ async function amzRevLoadOrders(){
     document.getElementById('amzrev-ts').textContent='Updated '+new Date().toLocaleTimeString('en-IN',{hour12:false})+' · '+amzOrders.length+' orders';
   }catch(e){
     document.getElementById('amzrev-ts').textContent='Error: '+e.message;
-    amzRevToast('Load error: '+e.message,false);
+    amzRevToast('Load error: '+e.message,true);   // isErr — this IS an error; false rendered it success-styled
   }finally{
     hideLoader();
   }
@@ -7878,14 +7899,16 @@ function dpSortVal(r,key){ switch(key){
   case 'order': return (r.order||'').toLowerCase(); case 'state': return r.state||'';
   case 'courier': return (r.courier||'').toLowerCase(); case 'zone': return r.zone||'';
   case 'type': return r.order_type||''; case 'edd': return r.edd||''; default: return ''; } }
-function dpDaysAgo(d){ const t=new Date(); t.setDate(t.getDate()-d); return t.toISOString().slice(0,10); }
+// _ymd (LOCAL date) — toISOString() is UTC: between 00:00–05:30 IST it returns YESTERDAY, which
+// shifted the whole preset window back a day (early-morning users lost the current day's data).
+function dpDaysAgo(d){ const t=new Date(); t.setDate(t.getDate()-d); return _ymd(t); }
 function dpPresetRange(preset){
-    const iso=d=>d.toISOString().slice(0,10), today=new Date();
-    if(preset==='this-week'){ const dow=(today.getDay()+6)%7; const mon=new Date(); mon.setDate(today.getDate()-dow); return { from:iso(mon), to:iso(today) }; } // Mon→today
-    const n=parseInt(preset,10)||30; const from=new Date(); from.setDate(today.getDate()-(n-1)); return { from:iso(from), to:iso(today) };
+    const today=new Date();
+    if(preset==='this-week'){ const dow=(today.getDay()+6)%7; const mon=new Date(); mon.setDate(today.getDate()-dow); return { from:_ymd(mon), to:_ymd(today) }; } // Mon→today
+    const n=parseInt(preset,10)||30; const from=new Date(); from.setDate(today.getDate()-(n-1)); return { from:_ymd(from), to:_ymd(today) };
 }
 function dpInit(){
-    if(!_dpFrom){ _dpFrom = dpDaysAgo(30); _dpTo = new Date().toISOString().slice(0,10); }
+    if(!_dpFrom){ _dpFrom = dpDaysAgo(30); _dpTo = _ymd(new Date()); }
     const fEl=document.getElementById('dp-from'), tEl=document.getElementById('dp-to');
     if(fEl) fEl.value=_dpFrom; if(tEl) tEl.value=_dpTo;
     if(!_dpWired){
@@ -8841,7 +8864,7 @@ function fopsDateRange() {
   if (preset === 'this-month')  return { start: fmtL(new Date(y, mo, 1)),   end: fmtL(new Date(y, mo+1, 0)) };
   if (preset === 'last-month')  return { start: fmtL(new Date(y, mo-1, 1)), end: fmtL(new Date(y, mo, 0)) };
   // custom — read from inputs
-  return { start: document.getElementById('fops-start')?.value || fmt(ago(29)), end: document.getElementById('fops-end')?.value || fmt(today) };
+  return { start: document.getElementById('fops-start')?.value || fmtL(ago(29)), end: document.getElementById('fops-end')?.value || fmtL(today) };   // fmtL — `fmt` doesn't exist (ReferenceError froze the Fetch button on empty custom dates)
 }
 
 function fopsOnPresetChange() {
@@ -9154,7 +9177,9 @@ function fopsUpdateRowBadge(awb, ds) {
   const btn = document.querySelector(`#fops-tbody button[data-awb="${awb}"]`);
   if (btn) {
     const tds = btn.closest('tr').querySelectorAll('td');
-    if (tds[5]) tds[5].innerHTML = `<span class="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold ${cls}">${label}</span>`;
+    // tds[6] = Delivery Status column (tds[5] is the Shopify-cancelled badge — writing there clobbered
+    // it and left the delivery column stuck on the pulsing "enriching" placeholder).
+    if (tds[6]) tds[6].innerHTML = `<span class="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold ${cls}">${label}</span>`;
   }
 }
 
@@ -10296,7 +10321,7 @@ function infDetailRender(wrap){
   const statusSel=`<select id="infd-status" class="filter-select">${Object.entries(INF_STATUS).map(([k,[l]])=>`<option value="${k}" ${inf.outreach_status===k?'selected':''}>${l}</option>`).join('')}</select>`;
   const info=(label,val)=>`<div class="flex justify-between gap-3 py-1.5 border-b border-slate-50 last:border-0"><span class="text-xs text-slate-400">${label}</span><span class="text-xs font-semibold text-slate-700 text-right break-all">${val||'—'}</span></div>`;
   const vidCard=v=>{
-    const overdue=v.expected_date&&!v.live_date&&v.expected_date<new Date().toISOString().slice(0,10);
+    const overdue=v.expected_date&&!v.live_date&&v.expected_date<_ymd(new Date());   // local today — UTC lags IST by a day before 5:30 AM
     return `<div class="rounded-xl border border-slate-100 p-4" data-vid="${v.id}">
       <div class="flex flex-wrap items-center gap-2 mb-2">
         ${v.live_date?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700">LIVE ${_dmy(v.live_date)}</span>`:overdue?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-rose-50 text-rose-600">OVERDUE — expected ${_dmy(v.expected_date)}</span>`:v.expected_date?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-50 text-amber-700">Expected ${_dmy(v.expected_date)}</span>`:'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-100 text-slate-500">Unscheduled</span>'}
@@ -10412,7 +10437,7 @@ function infDetailRender(wrap){
     try{ await infFetch('/api/inf/activities',{method:'POST',body:JSON.stringify({influencer_id:inf.id,description:t})}); infDetailReload(wrap); }catch(e){ showNotification(e.message,true); } });
   const vidById=vid=>wrap._data.videos.find(v=>String(v.id)===String(vid));
   wrap.querySelectorAll('.infv-pay').forEach(s=>s.addEventListener('change',async()=>{
-    try{ await infFetch('/api/inf/videos/'+s.dataset.vid,{method:'POST',body:JSON.stringify({payment_status:s.value,...(s.value==='paid'?{payment_date:new Date().toISOString().slice(0,10)}:{})})}); showNotification('Payment status saved'); infDetailReload(wrap); }catch(e){ showNotification(e.message,true); } }));
+    try{ await infFetch('/api/inf/videos/'+s.dataset.vid,{method:'POST',body:JSON.stringify({payment_status:s.value,...(s.value==='paid'?{payment_date:_ymd(new Date())}:{})})}); showNotification('Payment status saved'); infDetailReload(wrap); }catch(e){ showNotification(e.message,true); } }));
   wrap.querySelectorAll('.infv-pay').forEach(s=>{ try{ ecEnhanceSelect(s); }catch(_){} });   // project-standard .csel dropdown (not the native OS one)
   wrap.querySelectorAll('.infv-edit').forEach(b=>b.addEventListener('click',()=>infVideoModal(inf.id,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
   wrap.querySelectorAll('.infv-send').forEach(b=>b.addEventListener('click',()=>infSendProductModal(inf,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
@@ -11152,7 +11177,7 @@ async function infCalLoad(){
   document.getElementById('infc-label').textContent=new Date(_infcY,_infcM-1,1).toLocaleString('en-IN',{month:'long',year:'numeric'});
   g.innerHTML=brandLoader('Loading calendar…');
   try{ const d=await infFetch(`/api/inf/calendar?year=${_infcY}&month=${_infcM}`);
-    const today=new Date().toISOString().slice(0,10);
+    const today=_ymd(new Date());   // local today — UTC lags IST by a day before 5:30 AM
     const byDay={};
     (d.videos||[]).forEach(v=>{
       const day=v.live_date&&v.live_date>=d.from&&v.live_date<=d.to?v.live_date:(v.expected_date&&v.expected_date>=d.from&&v.expected_date<=d.to?v.expected_date:null);
