@@ -356,6 +356,19 @@ router.get('/support/queue', async (req, res) => {
             scanTimesByOrder(rows.map(r => r.order_id)),
         ]);
         rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; r.last_scan_at = scans[r.order_id] || null; });
+        // Payment type (COD vs Prepaid) — `order_buckets` carries no payment column, so read
+        // `orders.financial_status`. Same rule as the Orders dashboard: fully-settled = Prepaid;
+        // anything else still has money to collect on delivery = COD (incl. partially_paid).
+        if (rows.length) {
+            const finRows = await chunkedIn('orders', 'id, financial_status', 'id', rows.map(r => r.order_id));
+            const finBy = {}; finRows.forEach(o => { finBy[String(o.id)] = String(o.financial_status || '').toLowerCase(); });
+            const PREPAID = new Set(['paid', 'refunded', 'partially_refunded']);
+            rows.forEach(r => {
+                const f = finBy[String(r.order_id)];
+                r.financial_status = f || null;
+                r.payment = f ? (PREPAID.has(f) ? 'Prepaid' : 'COD') : null;   // null = unknown (order row missing)
+            });
+        }
         // Repeat tab: attach hold state + EasyEcom-import state so the panel offers the RIGHT control —
         // Shopify hold only while the order is still upstream of EasyEcom; once imported into EasyEcom the
         // Shopify hold is pointless, so offer an EasyEcom hold instead.

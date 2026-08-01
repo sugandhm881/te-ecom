@@ -34,6 +34,19 @@ async function logActivity(influencerId, type, description) {
 
 const num = v => (v === '' || v === null || v === undefined) ? null : Number(v);
 const cleanHandle = h => String(h || '').replace(/^@/, '').trim().toLowerCase();
+// Collab-product quantities: a {productId: qty} map stored in `product_qty` (jsonb) alongside `product_ids`.
+// Qty is clamped 1–100; anything unparseable or ≤0 is dropped, and a missing entry means 1 — so the map is
+// purely additive and an absent/garbage value can never change which products are selected.
+function sanitizeQtyMap(v) {
+    const out = {};
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+        for (const [k, raw] of Object.entries(v)) {
+            const n = parseInt(raw, 10);
+            if (String(k).trim() && Number.isFinite(n) && n > 0) out[String(k)] = Math.min(n, 100);
+        }
+    }
+    return out;
+}
 // Author label for activity/note descriptions — the user's real name (JWT `name` claim), not their email.
 const actorName = req => (req && req.user && (req.user.name || req.user.sub)) || 'portal';
 
@@ -107,6 +120,7 @@ router.post('/inf/influencers', async (req, res) => {
             outreach_status: STATUSES.includes(b.outreach_status) ? b.outreach_status : 'not_contacted',
             notes: b.notes || null,
             product_ids: Array.isArray(b.product_ids) ? b.product_ids : null,
+            product_qty: sanitizeQtyMap(b.product_qty),
         };
         const { data, error } = await supabase.from('influencers').insert(row).select('id').single();
         if (error) throw new Error(error.message);
@@ -143,6 +157,7 @@ router.post('/inf/influencer/:id', async (req, res) => {
          'bio', 'notes', 'engagement_quality', 'next_video_expected_date'].forEach(k => { if (b[k] !== undefined) patch[k] = b[k] || null; });
         ['follower_count', 'engagement_rate', 'quoted_price', 'final_price'].forEach(k => { if (b[k] !== undefined) patch[k] = num(b[k]); });
         if (b.product_ids !== undefined) patch.product_ids = Array.isArray(b.product_ids) ? b.product_ids : null;   // default collab products
+        if (b.product_qty !== undefined) patch.product_qty = sanitizeQtyMap(b.product_qty);                          // {productId: qty} for those products
         let statusChanged = null;
         if (b.outreach_status !== undefined) {
             if (!STATUSES.includes(b.outreach_status)) return res.status(400).json({ success: false, error: 'Invalid outreach status.' });
@@ -219,6 +234,7 @@ function videoPatch(b) {
     VIDEO_FIELDS_DATE.forEach(k => { if (b[k] !== undefined) patch[k] = b[k] || null; });
     VIDEO_FIELDS_BOOL.forEach(k => { if (b[k] !== undefined) patch[k] = !!b[k]; });
     if (b.product_ids !== undefined) patch.product_ids = Array.isArray(b.product_ids) ? b.product_ids : null;
+    if (b.product_qty !== undefined) patch.product_qty = sanitizeQtyMap(b.product_qty);
     return patch;
 }
 
@@ -608,6 +624,11 @@ router.post('/inf/send-product', async (req, res) => {
         const variantIds = Array.isArray(b.productVariantIds) ? b.productVariantIds.filter(Boolean).map(String) : [];
         if (variantIds.length === b.productIds.length) payload.productVariantIds = variantIds;   // 1:1 cover → use exact variants
         else payload.productIds = b.productIds.map(String);                                       // incomplete → let the edge fn resolve
+        // Per-product quantity, index-aligned with productIds/productVariantIds. Clamped 1–100 and padded to
+        // full length so a short/absent array can never mis-align the line items (missing → 1, the old behaviour).
+        const qClamp = v => Math.max(1, Math.min(100, parseInt(v, 10) || 1));
+        payload.quantities = b.productIds.map((_, i) => qClamp(Array.isArray(b.quantities) ? b.quantities[i] : 1));
+        const units = payload.quantities.reduce((a, c) => a + c, 0);
         const r = await invokeFn('create-influencer-order', payload, 120000);
         if (r.status >= 400) return res.status(502).json({ success: false, error: (r.data && (r.data.error || r.data.details)) || `create-order returned ${r.status}` });
         // persist the shipping address back onto the influencer for next time + log
@@ -616,7 +637,7 @@ router.post('/inf/send-product', async (req, res) => {
             pincode: b.pincode, phone: b.phone, updated_at: new Date().toISOString(),
         }).eq('id', b.influencerId).then(() => {}).catch(() => {});
         const orderName = r.data.orderName || r.data.orderId || r.data.draftOrderId;
-        await logActivity(b.influencerId, 'product_sent', `Prepaid order ${orderName} created (${b.productIds.length} item${b.productIds.length > 1 ? 's' : ''}) by ${actorName(req)}`);
+        await logActivity(b.influencerId, 'product_sent', `Prepaid order ${orderName} created (${b.productIds.length} item${b.productIds.length > 1 ? 's' : ''}${units !== b.productIds.length ? `, ${units} units` : ''}) by ${actorName(req)}`);
         res.json({ success: true, orderId: r.data.orderId || r.data.draftOrderId, orderName, orderUrl: r.data.orderUrl || r.data.draftOrderUrl });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });

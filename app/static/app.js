@@ -3778,6 +3778,16 @@ const SUP_TONE = {
 };
 const supBucketOf = id => SUP_BUCKETS.find(b => b[0] === id) || [id, id || '—', 'muted'];
 function supBadge(id){ const [,label,tone]=supBucketOf(id); return `<span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${SUP_TONE[tone][0]} whitespace-nowrap">${escapeHtml(label)}</span>`; }
+// COD / Prepaid chip (server sets r.payment from orders.financial_status). Amber = money still to collect
+// on delivery (COD — the costly ones to lose), emerald = already paid. Tooltip shows the raw Shopify status.
+function supPayChip(r){
+  if(!r||!r.payment) return '<span class="text-slate-300">—</span>';
+  const cod=r.payment==='COD';
+  const partial=String(r.financial_status||'')==='partially_paid';
+  const cls=cod?'bg-amber-50 text-amber-800 border-amber-200':'bg-emerald-50 text-emerald-700 border-emerald-200';
+  const tip=`Shopify payment status: ${r.financial_status||'unknown'}`+(partial?' — part-paid online, balance due on delivery':'');
+  return `<span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${cls} whitespace-nowrap" title="${escapeHtml(tip)}">${r.payment}${partial?' •':''}</span>`;
+}
 // ── Customer Support live-tracking modal — click an AWB → courier scan log (like Fulfillment Ops). ────
 // Reuses the read-only, cached /api/delivery-performance/shipment/:awb (RapidShyp scans + DocPharma milestones).
 let _supTrackKey=null;
@@ -3893,9 +3903,9 @@ function supQueueInit(){
   supRenderRange('sup-range-queue', supLoadQueue);
   if(!_supQueueWired){ _supQueueWired=true;
     document.querySelectorAll('.sup-tab').forEach(b=>b.addEventListener('click',()=>{ _supTab=b.dataset.tab; supTabPaint(); supLoadQueue(); }));
-    ['sup-f-notes','sup-f-age','sup-f-hold'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
+    ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
     document.getElementById('sup-f-notesearch')?.addEventListener('input', debounce(supQueueTable,250));
-    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-hold'].forEach((id,i)=>{ document.getElementById(id).value=['all','any','all'][i]; }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
+    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay'].forEach((id,i)=>{ const el=document.getElementById(id); if(el) el.value=['all','any','all','all'][i]; }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
     document.getElementById('sup-refresh')?.addEventListener('click', supRefreshTracking);
   }
   supTabPaint(); supLoadQueue();
@@ -3942,7 +3952,8 @@ function supQueueTable(){
   const fQ=(document.getElementById('sup-f-notesearch')?.value||'').trim().toLowerCase();
   const fA=document.getElementById('sup-f-age')?.value||'any';
   const fH=document.getElementById('sup-f-hold')?.value||'all';
-  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fH!=='all'||_supSort)?'':'none';
+  const fP=document.getElementById('sup-f-pay')?.value||'all';
+  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fH!=='all'||fP!=='all'||_supSort)?'':'none';
   let list=_supQueueRows.slice();
   if(fN==='with') list=list.filter(r=>r.note_count>0);
   if(fN==='none') list=list.filter(r=>!r.note_count);
@@ -3960,7 +3971,10 @@ function supQueueTable(){
   // The "Last scan" column is only meaningful for Undelivered (in-transit) orders — hidden on Repeat/Status-changed.
   const showScan=_supTab==='und';
   const showBucket=_supTab!=='repeat';   // every Repeat row is order_to_dispatch → the Bucket column is noise
-  const COLS=[{h:'Order',k:'order_name',d:1},{h:'Customer',k:null},...(showBucket?[{h:'Bucket',k:'bucket',d:1}]:[]),{h:'Age',k:'created_at',d:1},{h:'Courier',k:'courier',d:1},...(showScan?[{h:'Last scan',k:'last_scan_at',d:-1}]:[]),{h:'Actions',k:null}];
+  // Payment (COD / Prepaid) — shown on Undelivered + Status-changed. Hidden on Repeat, which is COD-only
+  // by definition (fully-prepaid orders are never repeat candidates), so the column would be noise there.
+  const showPay=_supTab!=='repeat';
+  const COLS=[{h:'Order',k:'order_name',d:1},{h:'Customer',k:null},...(showBucket?[{h:'Bucket',k:'bucket',d:1}]:[]),...(showPay?[{h:'Payment',k:'payment',d:1}]:[]),{h:'Age',k:'created_at',d:1},{h:'Courier',k:'courier',d:1},...(showScan?[{h:'Last scan',k:'last_scan_at',d:-1}]:[]),{h:'Actions',k:null}];
   const thHtml=COLS.map(col=>{ if(!col.k) return `<th class="${TH}">${col.h}</th>`;
     const on=_supSort&&_supSort.k===col.k; const car=on?(_supSort.d===1?'▲':'▼'):'<span class="text-slate-300">↕</span>';
     return `<th class="${TH} cursor-pointer select-none hover:text-indigo-600 ${on?'text-indigo-600':''}" data-sort="${col.k}" data-dir="${col.d}" title="Sort by ${col.h}">${col.h} <span class="text-[9px]">${car}</span></th>`; }).join('');
@@ -3980,6 +3994,7 @@ function supQueueTable(){
         ${_supTab==='repeat'&&r.reasons&&r.reasons.length?`<div class="flex items-center gap-1 flex-wrap mt-1">${supReasonChips(r)}</div>`:''}
       </td>
       ${showBucket?`<td class="${TD}">${supBadge(r.bucket)}</td>`:''}
+      ${showPay?`<td class="${TD}">${supPayChip(r)}</td>`:''}
       <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
       <td class="${TD}"><div>${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}</div>${r.awb_number?`<div class="text-[10px] mt-0.5">${supAwbLink(r.awb_number,r.order_name,r.courier)}</div>`:''}</td>
       ${showScan?`<td class="${TD} whitespace-nowrap">${r.last_scan_at?`<span class="text-slate-500" title="Latest AWB scan by courier: ${new Date(r.last_scan_at).toLocaleString()}">🛰 ${supRelTime(r.last_scan_at)}</span>`:'<span class="text-slate-300">—</span>'}</td>`:''}
@@ -10280,14 +10295,14 @@ function infEditModal(inf, onDone){
     <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
       <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
       <button id="infe-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Save</button></div>`);
-  const _infePP=infMountProductPicker(document.getElementById('infe-products-mount'), inf.product_ids);
+  const _infePP=infMountProductPicker(document.getElementById('infe-products-mount'), inf.product_ids, inf.product_qty);
   document.getElementById('infe-save').addEventListener('click',async()=>{
     const v=id=>document.getElementById(id).value.trim();
     try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({
         name:v('infe-name'),niche:v('infe-niche'),phone:v('infe-phone'),email:v('infe-email'),
         follower_count:v('infe-followers'),engagement_rate:v('infe-engagement'),quoted_price:v('infe-quoted'),final_price:v('infe-final'),
         address1:v('infe-address1'),address2:v('infe-address2'),city:v('infe-city'),state:v('infe-state'),pincode:v('infe-pincode'),
-        next_video_expected_date:v('infe-next'),product_ids:_infePP.get(),notes:document.getElementById('infe-notes').value.trim()})});
+        next_video_expected_date:v('infe-next'),product_ids:_infePP.get(),product_qty:_infePP.getQty(),notes:document.getElementById('infe-notes').value.trim()})});
       wrap.remove(); showNotification('Saved'); _infRows=null; if(onDone) onDone();
     }catch(e){ showNotification(e.message,true); }
   });
@@ -10543,9 +10558,13 @@ function infProductGroups(){
 // ── Reusable product multi-select (video + influencer forms) ─────────────────
 // Mirrors the Lovable "Select products" control: searchable dropdown, checkbox rows, selected shown as chips.
 // Solo + combo products, each shown with SKU + actual MRP (combos tagged). Returns { get }.
-function infMountProductPicker(mountEl, preIds){
-  if(!mountEl) return { get:()=>[] };
+// preQty = {productId: qty} map (influencers/influencer_videos.product_qty). Missing entry ⇒ qty 1.
+// Returns { get() → [productId], getQty() → {productId: qty} for the SELECTED products only }.
+function infMountProductPicker(mountEl, preIds, preQty){
+  if(!mountEl) return { get:()=>[], getQty:()=>({}) };
   const selected=new Set((preIds||[]).map(String));
+  const qtyOf=new Map(Object.entries(preQty||{}).map(([k,v])=>[String(k),Math.max(1,Math.min(100,parseInt(v,10)||1))]));
+  const qGet=pid=>qtyOf.get(String(pid))||1;
   const groups={};
   mountEl.innerHTML=`<div class="relative">
     <button type="button" data-toggle class="filter-input w-full text-left flex items-center justify-between gap-2">
@@ -10560,11 +10579,18 @@ function infMountProductPicker(mountEl, preIds){
   const q=s=>mountEl.querySelector(s);
   const panel=q('[data-panel]'), listEl=q('[data-list]'), summary=q('[data-summary]'), chips=q('[data-chips]'), toggle=q('[data-toggle]'), search=q('[data-search]');
   const renderSummary=()=>{ const n=selected.size; summary.textContent=n?`${n} product${n>1?'s':''} selected`:'Select products…'; summary.className='truncate '+(n?'text-slate-700':'text-slate-400'); };
-  const renderChips=()=>{ chips.innerHTML=[...selected].map(pid=>{ const g=groups[pid]; const title=g?g.title:((_infProdNames&&_infProdNames[pid])||('Product '+String(pid))); return `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-xs font-medium">${escapeHtml(title)}<button type="button" data-rm="${escapeHtml(pid)}" class="text-indigo-400 hover:text-indigo-700 leading-none">&times;</button></span>`; }).join('');
+  const renderChips=()=>{ chips.innerHTML=[...selected].map(pid=>{ const g=groups[pid]; const title=g?g.title:((_infProdNames&&_infProdNames[pid])||('Product '+String(pid))); const n=qGet(pid); return `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-xs font-medium">${escapeHtml(title)}${n>1?`<span class="px-1 rounded bg-indigo-200/70 text-indigo-800 font-bold">×${n}</span>`:''}<button type="button" data-rm="${escapeHtml(pid)}" class="text-indigo-400 hover:text-indigo-700 leading-none">&times;</button></span>`; }).join('');
     chips.querySelectorAll('[data-rm]').forEach(b=>b.addEventListener('click',()=>{ selected.delete(b.dataset.rm); renderSummary(); renderChips(); renderList((search.value||'').toLowerCase()); })); };
   const renderList=(query='')=>{ const entries=Object.entries(groups).filter(([,g])=>!query||(g.title||'').toLowerCase().includes(query)||(g.sku||'').toLowerCase().includes(query));
-    listEl.innerHTML=entries.length?entries.map(([pid,g])=>`<label class="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 cursor-pointer"><input type="checkbox" class="accent-indigo-600 flex-shrink-0" ${selected.has(pid)?'checked':''} data-pid="${escapeHtml(pid)}">${g.img?`<img src="${escapeHtml(g.img)}" class="w-8 h-8 rounded-lg object-cover flex-shrink-0" onerror="this.remove()">`:''}<span class="flex-1 min-w-0"><span class="block text-sm text-slate-700 truncate">${escapeHtml(g.title||pid)}${g.combo?' <span class="align-middle text-[9px] px-1 py-0.5 rounded bg-violet-100 text-violet-700 font-bold">COMBO</span>':''}</span>${g.sku?`<span class="block text-[10px] text-slate-400">SKU ${escapeHtml(g.sku)}</span>`:''}</span><span class="text-xs text-slate-500 whitespace-nowrap text-right flex-shrink-0">${g.mrp&&Number(g.mrp)>0?`MRP ₹${Number(g.mrp).toLocaleString('en-IN')}`:g.price!=null?`₹${Number(g.price).toLocaleString('en-IN')}`:''}</span></label>`).join(''):`<div class="p-4 text-center text-xs text-slate-400">No products found</div>`;
-    listEl.querySelectorAll('[data-pid]').forEach(cb=>cb.addEventListener('change',()=>{ cb.checked?selected.add(cb.dataset.pid):selected.delete(cb.dataset.pid); renderSummary(); renderChips(); })); };
+    // Qty box sits OUTSIDE the <label>: inside it, a click is forwarded to the checkbox and unticks the row.
+    listEl.innerHTML=entries.length?entries.map(([pid,g])=>`<div class="flex items-center gap-2 px-3 py-2.5 hover:bg-slate-50"><label class="flex items-center gap-3 flex-1 min-w-0 cursor-pointer"><input type="checkbox" class="accent-indigo-600 flex-shrink-0" ${selected.has(pid)?'checked':''} data-pid="${escapeHtml(pid)}">${g.img?`<img src="${escapeHtml(g.img)}" class="w-8 h-8 rounded-lg object-cover flex-shrink-0" onerror="this.remove()">`:''}<span class="flex-1 min-w-0"><span class="block text-sm text-slate-700 truncate">${escapeHtml(g.title||pid)}${g.combo?' <span class="align-middle text-[9px] px-1 py-0.5 rounded bg-violet-100 text-violet-700 font-bold">COMBO</span>':''}</span>${g.sku?`<span class="block text-[10px] text-slate-400">SKU ${escapeHtml(g.sku)}</span>`:''}</span><span class="text-xs text-slate-500 whitespace-nowrap text-right flex-shrink-0">${g.mrp&&Number(g.mrp)>0?`MRP ₹${Number(g.mrp).toLocaleString('en-IN')}`:g.price!=null?`₹${Number(g.price).toLocaleString('en-IN')}`:''}</span></label><input type="number" class="w-14 flex-shrink-0 text-center text-xs rounded-lg border border-slate-200 py-1 ${selected.has(pid)?'':'opacity-40'}" min="1" max="100" step="1" value="${qGet(pid)}" ${selected.has(pid)?'':'disabled'} data-qty="${escapeHtml(pid)}" title="Quantity" aria-label="Quantity"></div>`).join(''):`<div class="p-4 text-center text-xs text-slate-400">No products found</div>`;
+    listEl.querySelectorAll('[data-pid]').forEach(cb=>cb.addEventListener('change',()=>{
+      const pid=cb.dataset.pid, qEl=listEl.querySelector(`[data-qty="${CSS.escape(pid)}"]`);
+      if(cb.checked){ selected.add(pid); if(!qtyOf.has(pid)) qtyOf.set(pid,1); } else { selected.delete(pid); }
+      if(qEl){ qEl.disabled=!cb.checked; qEl.classList.toggle('opacity-40',!cb.checked); }
+      renderSummary(); renderChips(); }));
+    listEl.querySelectorAll('[data-qty]').forEach(qEl=>qEl.addEventListener('input',()=>{
+      qtyOf.set(qEl.dataset.qty, Math.max(1,Math.min(100,parseInt(qEl.value,10)||1))); renderChips(); })); };
   toggle.addEventListener('click',()=>{ panel.classList.toggle('hidden'); if(!panel.classList.contains('hidden')) setTimeout(()=>search.focus(),0); });
   document.addEventListener('click',e=>{ if(!mountEl.contains(e.target)) panel.classList.add('hidden'); });
   search.addEventListener('input',()=>renderList((search.value||'').toLowerCase()));
@@ -10597,14 +10623,14 @@ function infVideoModal(influencerId, video, onDone){
       <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
       <button id="infv-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">${video?'Save':'Add video'}</button></div>`);
   try{ ecEnhanceSelect(document.getElementById('infv-pay')); }catch(_){}   // project-standard .csel dropdown
-  const _vidPP=infMountProductPicker(document.getElementById('infv-products-mount'), v.product_ids);
+  const _vidPP=infMountProductPicker(document.getElementById('infv-products-mount'), v.product_ids, v.product_qty);
   document.getElementById('infv-save').addEventListener('click',async()=>{
     const g=id=>document.getElementById(id).value.trim();
     const body={ video_url:g('infv-url'),expected_date:g('infv-expected'),live_date:g('infv-live'),
       quoted_price:g('infv-quoted'),final_price:g('infv-final'),ad_code:g('infv-adcode'),language:g('infv-lang'),
       payment_due_date:g('infv-due'),payment_status:document.getElementById('infv-pay').value,
       gst_applicable:document.getElementById('infv-gst').checked,is_ad_run:document.getElementById('infv-adrun').checked,
-      product_ids:_vidPP.get(),
+      product_ids:_vidPP.get(),product_qty:_vidPP.getQty(),
       notes:document.getElementById('infv-notes').value.trim() };
     try{
       if(video) await infFetch('/api/inf/videos/'+video.id,{method:'POST',body:JSON.stringify(body)});
@@ -10625,7 +10651,11 @@ async function infLoadProducts(){
 async function infSendProductModal(inf, video, onDone){
   if(!video) return;
   // Preselect the products chosen for this collab (video-level first, else the influencer's default set).
-  const _preSel=new Set((((video.product_ids&&video.product_ids.length)?video.product_ids:inf.product_ids)||[]).map(String));
+  const _useVid=!!(video.product_ids&&video.product_ids.length);
+  const _preSel=new Set(((_useVid?video.product_ids:inf.product_ids)||[]).map(String));
+  // …and their saved quantities, from the SAME level the products came from (video overrides influencer).
+  const _preQty=new Map(Object.entries((_useVid?video.product_qty:inf.product_qty)||{}).map(([k,x])=>[String(k),Math.max(1,Math.min(100,parseInt(x,10)||1))]));
+  const _q1=pid=>_preQty.get(String(pid))||1;
   const wrap=infModal('inf-send-modal',`${INF_MODAL_HEAD('Send product','Creates a prepaid Shopify order for @'+escapeHtml(inf.instagram_handle||''))}<div class="p-6">${brandLoader('Loading catalog…')}</div>`,'max-w-3xl');
   try{ await infLoadProducts(); }
   catch(e){ wrap.querySelector('.sup-pop').innerHTML=INF_MODAL_HEAD('Send product')+`<p class="p-6 text-sm text-rose-500">${escapeHtml(e.message)}</p>`; return; }
@@ -10635,11 +10665,16 @@ async function infSendProductModal(inf, video, onDone){
     <div class="p-5 space-y-4">
       <div><input id="infsp-q" class="filter-input w-full" placeholder="Search products…">
         <div id="infsp-list" class="mt-2 max-h-56 overflow-auto rounded-xl border border-slate-100 divide-y divide-slate-50">
-          ${Object.entries(groups).map(([pid,g])=>`<label class="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 cursor-pointer infsp-item" data-t="${escapeHtml(((g.title||'')+' '+(g.sku||'')).toLowerCase())}">
-            <input type="checkbox" class="infsp-cb accent-indigo-600 flex-shrink-0" value="${escapeHtml(pid)}" ${_preSel.has(String(pid))?'checked':''}>
-            ${g.img?`<img src="${escapeHtml(g.img)}" class="w-9 h-9 rounded-lg object-cover flex-shrink-0" onerror="this.remove()">`:''}
-            <span class="flex-1 min-w-0"><span class="block text-sm text-slate-700 truncate">${escapeHtml(g.title||pid)}${g.combo?' <span class="align-middle text-[9px] px-1 py-0.5 rounded bg-violet-100 text-violet-700 font-bold">COMBO</span>':''}</span>${g.sku?`<span class="block text-[10px] text-slate-400">SKU ${escapeHtml(g.sku)}</span>`:''}</span>
-            <span class="text-xs text-slate-500 whitespace-nowrap text-right flex-shrink-0">${g.mrp&&Number(g.mrp)>0?`MRP ₹${Number(g.mrp).toLocaleString('en-IN')}`:g.price!=null?`₹${Number(g.price).toLocaleString('en-IN')}`:''} · ${g.stock} in stock</span></label>`).join('')}
+          ${Object.entries(groups).map(([pid,g])=>{const sel=_preSel.has(String(pid));return `<div class="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 infsp-item" data-t="${escapeHtml(((g.title||'')+' '+(g.sku||'')).toLowerCase())}" data-pid="${escapeHtml(pid)}" data-stock="${Number(g.stock)||0}">
+            <label class="flex items-center gap-3 flex-1 min-w-0 cursor-pointer">
+              <input type="checkbox" class="infsp-cb accent-indigo-600 flex-shrink-0" value="${escapeHtml(pid)}" ${sel?'checked':''}>
+              ${g.img?`<img src="${escapeHtml(g.img)}" class="w-9 h-9 rounded-lg object-cover flex-shrink-0" onerror="this.remove()">`:''}
+              <span class="flex-1 min-w-0"><span class="block text-sm text-slate-700 truncate">${escapeHtml(g.title||pid)}${g.combo?' <span class="align-middle text-[9px] px-1 py-0.5 rounded bg-violet-100 text-violet-700 font-bold">COMBO</span>':''}</span>${g.sku?`<span class="block text-[10px] text-slate-400">SKU ${escapeHtml(g.sku)}</span>`:''}</span>
+              <span class="text-xs text-slate-500 whitespace-nowrap text-right flex-shrink-0">${g.mrp&&Number(g.mrp)>0?`MRP ₹${Number(g.mrp).toLocaleString('en-IN')}`:g.price!=null?`₹${Number(g.price).toLocaleString('en-IN')}`:''} · ${g.stock} in stock</span>
+            </label>
+            <!-- Qty sits OUTSIDE the label: inside it, a click would be forwarded to the checkbox and toggle the row. -->
+            <input type="number" class="infsp-qty w-16 flex-shrink-0 text-center text-sm rounded-lg border border-slate-200 py-1 ${sel?'':'opacity-40'}" min="1" max="100" step="1" value="${sel?_q1(pid):1}" ${sel?'':'disabled'} title="Quantity to send" aria-label="Quantity">
+          </div>`;}).join('')}
         </div></div>
       <div class="grid sm:grid-cols-2 gap-3">
         ${F('infsp-name','Name',inf.name)}${F('infsp-phone','Phone *',inf.phone)}
@@ -10655,9 +10690,26 @@ async function infSendProductModal(inf, video, onDone){
       <button id="infsp-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Create prepaid order</button></div>`;
   document.getElementById('infsp-q').addEventListener('input',e=>{ const q=e.target.value.toLowerCase();
     wrap.querySelectorAll('.infsp-item').forEach(el=>el.style.display=el.dataset.t.includes(q)?'':'none'); });
+  // Qty is only live for a checked row; ticking a row focuses its qty so it can be typed straight away.
+  wrap.querySelectorAll('.infsp-item').forEach(row=>{
+    const cb=row.querySelector('.infsp-cb'), q=row.querySelector('.infsp-qty');
+    if(!cb||!q) return;
+    cb.addEventListener('change',()=>{ q.disabled=!cb.checked; q.classList.toggle('opacity-40',!cb.checked); if(cb.checked) q.select(); });
+    // Keep it a sane whole number, and flag (amber) when it exceeds the stock the row shows.
+    q.addEventListener('input',()=>{ const st=Number(row.dataset.stock)||0, v=parseInt(q.value,10);
+      q.classList.toggle('border-amber-400',!!(st&&v>st));
+      q.title=(st&&v>st)?`Only ${st} in stock — the order will still be created`:'Quantity to send'; });
+  });
   document.getElementById('infsp-save').addEventListener('click',async()=>{
     const g=id=>document.getElementById(id).value.trim();
-    const ids=[...wrap.querySelectorAll('.infsp-cb:checked')].map(c=>c.value);
+    // Walk the ROWS (not a checkbox selector) so each product keeps its own qty aligned by index.
+    const ids=[], quantities=[];
+    wrap.querySelectorAll('.infsp-item').forEach(row=>{
+      const cb=row.querySelector('.infsp-cb'); if(!cb||!cb.checked) return;
+      const qEl=row.querySelector('.infsp-qty');
+      ids.push(cb.value);
+      quantities.push(Math.max(1,Math.min(100,parseInt(qEl&&qEl.value,10)||1)));   // clamp 1–100
+    });
     // The EXACT representative variant each picker row showed (Pack-of-1 for solo, Combo Pack for combo) —
     // sent so the order ships THAT variant, not the edge fn's first-in-stock guess (which shipped BDR4 for BDR1).
     const variantIds=ids.map(pid=>groups[pid]&&groups[pid].variantId).filter(Boolean);
@@ -10665,12 +10717,14 @@ async function infSendProductModal(inf, video, onDone){
     if(!ids.length) return err('Pick at least one product.');
     if(!g('infsp-addr1')||!g('infsp-pin')||!g('infsp-phone')) return err('Address line 1, pincode and phone are required.');
     // Confirm before creating — this places a REAL prepaid Shopify order that will ship.
+    const units=quantities.reduce((a,b)=>a+b,0);
+    const what=`${ids.length} product${ids.length>1?'s':''}${units!==ids.length?` (${units} units)`:''}`;
     if(!(await supConfirm({title:'Create this prepaid order?',
-      message:`A real prepaid Shopify order for ${ids.length} product${ids.length>1?'s':''} will be created for ${g('infsp-name')||('@'+(inf.instagram_handle||''))} and sent to fulfilment (no COD). This can't be undone from here — you'd cancel it in Shopify.`,
+      message:`A real prepaid Shopify order for ${what} will be created for ${g('infsp-name')||('@'+(inf.instagram_handle||''))} and sent to fulfilment (no COD). This can't be undone from here — you'd cancel it in Shopify.`,
       confirmLabel:'Yes, create order'}))) return;
     const btn=document.getElementById('infsp-save'); btn.disabled=true; btn.textContent='Creating…';
     try{ const r=await infFetch('/api/inf/send-product',{method:'POST',body:JSON.stringify({
-        videoId:video.id,influencerId:inf.id,productIds:ids,productVariantIds:variantIds,name:g('infsp-name'),phone:g('infsp-phone'),handle:inf.instagram_handle||'',
+        videoId:video.id,influencerId:inf.id,productIds:ids,productVariantIds:variantIds,quantities,name:g('infsp-name'),phone:g('infsp-phone'),handle:inf.instagram_handle||'',
         address1:g('infsp-addr1'),address2:g('infsp-addr2'),city:g('infsp-city'),state:g('infsp-state'),pincode:g('infsp-pin'),email:g('infsp-email')})});
       wrap.remove(); showNotification('Prepaid order '+(r.orderName||'')+' created ✓'); if(onDone) onDone();
     }catch(e){ btn.disabled=false; btn.textContent='Create prepaid order'; err(e.message); }
