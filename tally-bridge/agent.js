@@ -128,8 +128,40 @@ async function resolveCompany() {
 // would offer stale ledgers for it, or none at all.
 async function openCompanies() {
     if (CFG.company) return [CFG.company];          // explicitly pinned: honour it
-    const r = await tally(collection('BridgeCompanies', 'Company', { methods: ['Name'] }), 20000);
+    const r = await tally(collection('BridgeCompanies', 'Company', { methods: ['Name', 'BooksFrom'] }), 20000);
     return companyNames(r.data);
+}
+
+// When each financial year is a separate company, the period to pull is the company's OWN year — not
+// the current one. Asking a 2025-26 company for 2026-04-01 onwards returns an empty day book, which
+// looks exactly like "no data" rather than "wrong dates".
+// BooksFrom is read per company; falling back to the current FY only when Tally does not report it.
+async function companyPeriods() {
+    const out = new Map();
+    try {
+        const r = await tally(collection('BridgeCompanyInfo', 'Company', { methods: ['Name', 'BooksFrom'] }), 20000);
+        const xml = String(r.data || '');
+        // Each <COMPANY NAME="..."> block carries its own <BOOKSFROM>.
+        for (const m of xml.matchAll(/<COMPANY\s+[^>]*\bNAME\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/COMPANY>/gi)) {
+            const bf = (m[2].match(/<BOOKSFROM[^>]*>(\d{8})<\/BOOKSFROM>/i) || [])[1];
+            if (m[1] && bf) out.set(m[1], bf);
+        }
+    } catch (e) { warn(`could not read BooksFrom: ${e.message}`); }
+    return out;
+}
+
+// from = the company's books-begin date; to = the earlier of its financial-year end and today, so a
+// closed year is pulled whole and the current year stops at today.
+function periodFor(booksFrom, todayIso) {
+    const today = todayIso.replace(/-/g, '');
+    if (!booksFrom) {
+        const y = Number(todayIso.slice(0, 4)), m = Number(todayIso.slice(5, 7));
+        return { from: `${m >= 4 ? y : y - 1}0401`, to: today };
+    }
+    const by = Number(booksFrom.slice(0, 4)), bm = Number(booksFrom.slice(4, 6));
+    const fyStartYear = bm >= 4 ? by : by - 1;
+    const fyEnd = `${fyStartYear + 1}0331`;
+    return { from: booksFrom, to: fyEnd < today ? fyEnd : today };
 }
 
 // ── heartbeat ────────────────────────────────────────────────────────────────────────────────────
@@ -186,7 +218,7 @@ const MASTERS = {
 
 // The agent ships RAW XML; the server parses it with app/api/tally_xml.js. Keeping the single parser
 // server-side means the agent can never drift from it.
-async function syncMastersAndBooks(company) {
+async function syncMastersAndBooks(company, booksFrom) {
     const masters = {};
     for (const [kind, spec] of Object.entries(MASTERS)) {
         const r = await tally(collection(`Bridge_${spec.type}`, spec.type, { company, methods: spec.methods }), 120000);
@@ -196,11 +228,9 @@ async function syncMastersAndBooks(company) {
     if (mr.status !== 200) warn(`masters upload → HTTP ${mr.status} ${JSON.stringify(mr.data).slice(0, 200)}`);
     else info(`masters synced: ${JSON.stringify(mr.data.counts || {})}`);
 
-    // Books: trial balance (as of today) + the day book for the current Indian financial year.
+    // Books: trial balance + day book, for THIS COMPANY'S financial year.
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    const [y, m] = [Number(today.slice(0, 4)), Number(today.slice(5, 7))];
-    const fyFrom = `${m >= 4 ? y : y - 1}0401`;
-    const toCompact = today.replace(/-/g, '');
+    const { from: fyFrom, to: toCompact } = periodFor(booksFrom, today);
 
     const tb = await tally(collection('BridgeTrialBalance', 'Ledger',
         { company, from: fyFrom, to: toCompact, methods: ['Parent', 'OpeningBalance', 'ClosingBalance'] }), 120000);
@@ -210,14 +240,15 @@ async function syncMastersAndBooks(company) {
     const payload = {
         company,
         periodFrom: `${fyFrom.slice(0, 4)}-${fyFrom.slice(4, 6)}-${fyFrom.slice(6, 8)}`,
-        periodTo: today,
+        periodTo: `${toCompact.slice(0, 4)}-${toCompact.slice(4, 6)}-${toCompact.slice(6, 8)}`,
         trialBalance: String(tb.data || ''),
         dayBook: String(db.data || ''),
     };
     const rawKb = Math.round((payload.trialBalance.length + payload.dayBook.length) / 1024);
     const br = await apiGzip('/books-xml', payload, 240000);
     if (br.status !== 200) warn(`books upload → HTTP ${br.status} ${JSON.stringify(br.data).slice(0, 200)}`);
-    else info(`books synced: ${JSON.stringify(br.data.counts || br.data)} (${rawKb}KB XML, gzipped)`);
+    else info(`books synced: ${JSON.stringify(br.data.counts || br.data)} (${rawKb}KB XML, gzipped)` +
+                    `  [${payload.periodFrom} → ${payload.periodTo}]`);
 }
 
 // ── main loop ────────────────────────────────────────────────────────────────────────────────────
@@ -242,10 +273,11 @@ async function tick() {
         const why = hb && hb.syncRequested ? 'requested by the dashboard' : `every ${CFG.syncMin}m`;
         try {
             const companies = await openCompanies();
+            const periods = await companyPeriods();
             info(`syncing masters + books for ${companies.length} company(ies) (${why})…`);
             for (const company of companies) {
                 // One failing company must not stop the others — a year with no books yet is normal.
-                try { await syncMastersAndBooks(company); }
+                try { await syncMastersAndBooks(company, periods.get(company)); }
                 catch (e) { err(`sync "${company}": ${e.message}`); }
             }
             lastSyncAt = Date.now();
