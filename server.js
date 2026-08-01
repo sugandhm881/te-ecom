@@ -297,6 +297,10 @@ cron.schedule('45 23 * * *', async () => {
 // 23:50 build the batch, validate every draft, and post the Teams approval card. NOTHING is sent to
 // Tally here — an admin's "yes" in Teams (or the dashboard) is what queues the vouchers.
 cron.schedule('50 23 * * *', async () => {
+    // Check the flag BEFORE announcing the run, like the other three. runNightly() refuses on its own
+    // too, but logging "building the nightly batch" and then silently doing nothing reads, in a log
+    // people scan at a glance, exactly like a run that worked.
+    if (String(config.TALLY_BATCH_CRON_ENABLED || '').toLowerCase() !== 'true') return;
     console.log('[TallyBatch] 23:50 IST — building the nightly Tally batch…');
     await tallyBatch.runNightly().catch(e => console.error('[TallyBatch] nightly error:', e.message));
 }, { timezone: 'Asia/Kolkata' });

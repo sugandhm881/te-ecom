@@ -11352,7 +11352,10 @@ const FIN_TYPES = [
 const FIN_BANKISH = ['Bank Accounts', 'Cash-in-Hand', 'Bank OD A/c', 'Bank OCC A/c'];
 const FIN_PARTYISH = ['Sundry Creditors', 'Sundry Debtors'];
 
-const _fin = { status: null, ledgers: [], byName: new Map(), vt: 'Payment', rows: [], wired: false, loaded: false, mode: 'manual' };
+const _fin = { status: null, ledgers: [], byName: new Map(), vt: 'Payment', rows: [], wired: false,
+               loaded: false, mode: 'manual',
+               // which books this entry is for, and every set of books to choose from
+               company: null, companies: [] };
 const _finReg = { rows: [], wired: false, sel: new Set(), limit: 1000, pushing: false };
 
 // Post-to-Tally is a separate right from drafting (server enforces it too — see _VIEW_PERMS).
@@ -11398,7 +11401,19 @@ async function finLoadLedgers() {
     const body = document.getElementById('fin-entry-body');
     if (body) body.innerHTML = brandLoader('Loading ledgers from Tally…');
     try {
-        const d = await supFetch('/api/tally/masters?kind=ledger');
+        // Learn the companies once, then always load ledgers SCOPED to one of them. Unscoped returns
+        // every company's chart of accounts mixed together, which let you pick a ledger belonging to
+        // the other financial year — the server then rejects the voucher, after you have typed it.
+        if (!_fin.companies.length) {
+            try {
+                const c = await supFetch('/api/tally/companies');
+                _fin.companies = c.companies || [];
+                if (!_fin.company) _fin.company = c.current || _fin.companies[0] || null;
+            } catch (_) { /* fall through to whatever the status chip reported */ }
+        }
+        if (!_fin.company) _fin.company = (_fin.status && _fin.status.company) || null;
+        const d = await supFetch('/api/tally/masters?kind=ledger'
+            + (_fin.company ? '&company=' + encodeURIComponent(_fin.company) : ''));
         _fin.ledgers = d.rows || [];
         _fin.byName = new Map(_fin.ledgers.map(l => [l.name, l]));
         _fin.loaded = true;
@@ -11477,6 +11492,12 @@ function finRenderEntry() {
           </div>
           <p class="text-xs text-slate-500 mb-4">${escapeHtml(hint)}</p>
 
+          ${_fin.companies.length > 1 ? `<label class="block mb-4">
+            <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Company (which books this goes into)</span>
+            <select id="fin-company" class="filter-select w-full mt-1">${_fin.companies.map(c =>
+              `<option value="${escapeHtml(c)}"${c === _fin.company ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('')}</select>
+          </label>` : ''}
+
           <div class="grid sm:grid-cols-3 gap-3 mb-4">
             <label class="block"><span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Date</span>
               <input id="fin-date" type="date" value="${finToday()}" max="${finToday()}" class="filter-input w-full mt-1"></label>
@@ -11529,6 +11550,13 @@ function finRenderEntry() {
       </div>`;
 
     finEntryWireTabs();
+    document.getElementById('fin-company')?.addEventListener('change', (e) => {
+        _fin.company = e.target.value;
+        // The rows hold ledger NAMES from the previous company; keeping them would silently carry a
+        // ledger that does not exist in the books now selected.
+        _fin.rows = []; finSeedRows();
+        finLoadLedgers();
+    });
     body.querySelectorAll('.fin-vt').forEach(b => b.addEventListener('click', () => {
         if (_fin.vt === b.dataset.vt) return;
         _fin.vt = b.dataset.vt; finSeedRows(); finRenderEntry();
@@ -11627,6 +11655,9 @@ function finRecalc() {
 // The payload shape the API expects. party_ledger is inferred, not typed twice.
 function finPayload() {
     return {
+        // Explicit, so the server never has to guess from TALLY_COMPANY — which on live is only a
+        // fallback and may point at the other financial year.
+        company: _fin.company || undefined,
         voucher_type: _fin.vt,
         voucher_date: (document.getElementById('fin-date') || {}).value || finToday(),
         party_ledger: finInferParty(),
@@ -11649,7 +11680,7 @@ async function finSubmit(alsoPost) {
     if (alsoPost) {
         const ok = await supConfirm({
             title: optional ? 'Post as an Optional voucher?' : 'Post this voucher to Tally?',
-            message: `${_fin.vt} · ${finMoney(total)} · ${payload.voucher_date} → ${(_fin.status && _fin.status.company) || 'Tally'}. ` + (optional
+            message: `${_fin.vt} · ${finMoney(total)} · ${payload.voucher_date} → ${_fin.company || (_fin.status && _fin.status.company) || 'Tally'}. ` + (optional
                 ? 'It will appear in the Day Book but will NOT affect the P&L, balance sheet, ledger balances or GST returns until someone marks it regular in Tally.'
                 : 'This posts into the live books and cannot be undone from here — it would have to be deleted inside Tally.'),
             confirmLabel: optional ? 'Post as Optional' : 'Post to Tally',
@@ -12236,6 +12267,9 @@ async function finVoucherDrawer(id) {
 // renders a single signed balance (used for opening/closing/running rows).
 
 const _fb = { tab: 'tb', tb: null, vch: null, meta: null, fy: null, wired: false,
+              // the two financial years are separate COMPANIES here, so this — not the FY dropdown —
+              // is what switches between them
+              company: null, companies: [],
               tbQ: '', tbGroup: '', tbSort: 'amount', vQ: '', vType: '', vFrom: '', vTo: '', led: null };
 
 // A signed Tally balance → "₹1,234.00 Dr" / "Cr". Zero has no side.
@@ -12247,6 +12281,10 @@ function finBooksInit() {
         document.getElementById('fin-books-refresh')?.addEventListener('click', fbRefresh);
         document.getElementById('fin-books-dl')?.addEventListener('click', fbDownloadCurrent);
         document.getElementById('fin-books-fy')?.addEventListener('change', e => {
+            // The same dropdown holds COMPANIES when there is more than one set of books. This handler
+            // predates that and reads the value as an FY key, so it must stand aside — otherwise both
+            // handlers fire and race, one reloading meta while the other reloads the old report.
+            if (e.target.dataset.mode === 'company') return;
             _fb.fy = (_fb.meta.financialYears || []).find(f => f.key === e.target.value) || _fb.fy;
             _fb.tb = null; _fb.vch = null; _fb.vFrom = ''; _fb.vTo = '';   // FY change invalidates both reports
             finBooksRoute();
@@ -12256,16 +12294,59 @@ function finBooksInit() {
 }
 
 // Company period + FY list must land before either report, since they define the date scope.
+// Appended to every books request. Kept as one helper so a new report cannot silently fall back to
+// TALLY_COMPANY and quietly show the wrong year's figures.
+const fbCo = () => (_fb.company ? 'company=' + encodeURIComponent(_fb.company) : '');
+const fbUrl = (path, qs) => path + '?' + [fbCo(), qs].filter(Boolean).join('&');
+
 async function finBooksLoadMeta() {
     const body = document.getElementById('fin-books-body');
-    if (body) body.innerHTML = brandLoader('Connecting to Tally…');
+    if (body) {
+        body.innerHTML = brandLoader('Connecting to Tally…');
+        // The loader has just replaced the shell, so it must be rebuilt. Without this the flag still
+        // says "built", finBooksShell() does nothing, and the screen stays on the spinner for ever.
+        delete body.dataset.built;
+    }
     try {
-        _fb.meta = await supFetch('/api/tally/books/meta');
+        if (!_fb.companies.length) {
+            try {
+                const c = await supFetch('/api/tally/companies');
+                _fb.companies = c.companies || [];
+                if (!_fb.company) _fb.company = c.current || _fb.companies[0] || null;
+            } catch (_) { /* one company, or Tally unreachable — the meta call still works */ }
+        }
+        _fb.meta = await supFetch(fbUrl('/api/tally/books/meta'));
+
+        // ONE dropdown. Each year is its own company, so the year IS the company — offering both a
+        // company picker and a year picker asked the same question twice, and choosing a year the
+        // selected company has no books for showed an empty report with no explanation.
         const fys = _fb.meta.financialYears || [];
-        _fb.fy = fys.find(f => f.current) || fys[0] || null;
+        // The year this company's books actually start in — not "the current year", which for a
+        // closed company is a range it holds nothing for.
+        const bf = _fb.meta.booksFrom || '';
+        const ownKey = bf ? `${Number(bf.slice(0, 4)) - (Number(bf.slice(5, 7)) < 4 ? 1 : 0)}` : null;
+        _fb.fy = (ownKey && fys.find(f => f.from.slice(0, 4) === ownKey)) || fys.find(f => f.current) || fys[0] || null;
+
         const sel = document.getElementById('fin-books-fy');
-        if (sel) sel.innerHTML = fys.map(f =>
-            `<option value="${escapeHtml(f.key)}"${_fb.fy && f.key === _fb.fy.key ? ' selected' : ''}>${escapeHtml(f.label)}${f.current ? ' (current)' : ''}</option>`).join('');
+        if (sel) {
+            if (_fb.companies.length > 1) {
+                sel.dataset.mode = 'company';
+                sel.innerHTML = _fb.companies.map(c =>
+                    `<option value="${escapeHtml(c)}"${c === _fb.company ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('');
+                if (!sel.dataset.wired) {
+                    sel.dataset.wired = '1';
+                    sel.addEventListener('change', () => {
+                        _fb.company = sel.value;
+                        _fb.tb = null; _fb.vch = null; _fb.fy = null;   // the old company's figures must not linger
+                        finBooksLoadMeta();
+                    });
+                }
+            } else {
+                sel.dataset.mode = 'fy';
+                sel.innerHTML = fys.map(f =>
+                    `<option value="${escapeHtml(f.key)}"${_fb.fy && f.key === _fb.fy.key ? ' selected' : ''}>${escapeHtml(f.label)}${f.current ? ' (current)' : ''}</option>`).join('');
+            }
+        }
         finBooksShell();
     } catch (e) { fbError(e, body); }
 }
@@ -12390,7 +12471,7 @@ async function fbRefresh() {
         // The agent polls every ~5s and uploads masters then books, so this normally lands in <15s.
         for (let i = 0; i < 20; i++) {
             await new Promise(r => setTimeout(r, 3000));
-            const probe = await supFetch('/api/tally/books/trial-balance?_=' + Date.now());
+            const probe = await supFetch(fbUrl('/api/tally/books/trial-balance', '_=' + Date.now()));
             if (probe.syncedAt && new Date(probe.syncedAt).getTime() > before) {
                 _fb.tb = null; _fb.vch = null;
                 await reload();
@@ -12412,7 +12493,7 @@ async function finBooksLoadTB(force) {
     const p = new URLSearchParams();
     if (_fb.fy) { p.set('from', _fb.fy.from); p.set('to', _fb.fy.toEffective); }
     if (force) p.set('_', String(Date.now()));
-    try { _fb.tb = await supFetch('/api/tally/books/trial-balance?' + p); finBooksRenderTB(); }
+    try { _fb.tb = await supFetch(fbUrl('/api/tally/books/trial-balance', String(p))); finBooksRenderTB(); }
     catch (e) { fbError(e); }
 }
 
@@ -12515,7 +12596,7 @@ async function finBooksLoadVch(force) {
     p.set('to', _fb.vTo || (_fb.fy ? _fb.fy.toEffective : ''));
     if (force) p.set('_', String(Date.now()));
     try {
-        _fb.vch = await supFetch('/api/tally/books/vouchers?' + p);
+        _fb.vch = await supFetch(fbUrl('/api/tally/books/vouchers', String(p)));
         _fb.vFrom = _fb.vch.from; _fb.vTo = _fb.vch.to;
         finBooksRenderVch();
     } catch (e) { fbError(e); }
@@ -12665,7 +12746,7 @@ async function fbLedgerModal(name) {
     const p = new URLSearchParams({ name });
     if (_fb.fy) { p.set('from', _fb.fy.from); p.set('to', _fb.fy.toEffective); }
     let s;
-    try { s = await supFetch('/api/tally/books/ledger?' + p); }
+    try { s = await supFetch(fbUrl('/api/tally/books/ledger', String(p))); }
     catch (e) { fbError(e, body); head.querySelector('p').textContent = 'Could not load'; return; }
     _fb.led = s;
 

@@ -180,6 +180,27 @@ router.get('/tally/status', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// ── GET /tally/companies — every set of books the dashboard can act on ───────────────────────────
+// Direct mode can ask Tally outright. Bridge mode cannot (the VPS never reaches Tally), so it falls
+// back to the DISTINCT companies already mirrored in tally_masters_ecom — which is how both financial
+// years stay selectable on live even though only one can be "current".
+router.get('/tally/companies', async (req, res) => {
+    try {
+        let names = [], source = 'tally';
+        try { names = await openCompanies(); } catch (_) { names = []; }
+        if (!names.length) {
+            source = 'mirror';
+            const { data } = await supabase.from('tally_masters_ecom')
+                .select('company').eq('kind', 'ledger').limit(5000);
+            names = [...new Set((data || []).map(r => r.company).filter(Boolean))].sort();
+        }
+        let current = null;
+        try { current = await resolveCompany(); } catch (_) { /* ambiguous or unknown — the UI asks */ }
+        if (current && !names.includes(current)) names.unshift(current);
+        res.json({ success: true, companies: names, current, source });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 // ── GET /tally/masters?kind=ledger&q=hdfc — picker data, served from the mirror (never live). ─────
 router.get('/tally/masters', async (req, res) => {
     try {
@@ -279,7 +300,11 @@ const bookErr = (res, e) => res.status(e.cacheMiss ? 503 : 502).json({ success: 
 router.get('/tally/books/meta', async (req, res) => {
     try {
         const today = istToday();
-        const company = config.TALLY_COMPANY || (MODE() === 'direct' ? await resolveCompany() : null);
+        // An explicit ?company= wins. Pinning to TALLY_COMPANY made these reports unable to show the
+        // OTHER financial year at all — the two years are separate companies here, so a date filter
+        // can never reach across them.
+        const company = String(req.query.company || '')
+            || config.TALLY_COMPANY || (MODE() === 'direct' ? await resolveCompany() : null);
         const b = await booksData('meta', company, null, null);
         const info = b.data || {};
         res.json({ success: true, source: b.source, syncedAt: b.syncedAt,
@@ -297,7 +322,11 @@ router.get('/tally/books/ledger', async (req, res) => {
     try {
         const name = String(req.query.name || '').trim();
         if (!name) return res.status(400).json({ success: false, error: 'name (ledger) is required' });
-        const company = config.TALLY_COMPANY || (MODE() === 'direct' ? await resolveCompany() : null);
+        // An explicit ?company= wins. Pinning to TALLY_COMPANY made these reports unable to show the
+        // OTHER financial year at all — the two years are separate companies here, so a date filter
+        // can never reach across them.
+        const company = String(req.query.company || '')
+            || config.TALLY_COMPANY || (MODE() === 'direct' ? await resolveCompany() : null);
         const today = istToday();
         const from = String(req.query.from || `${Number(today.slice(0, 4)) - (Number(today.slice(5, 7)) < 4 ? 1 : 0)}-04-01`);
         const to = String(req.query.to || today);
@@ -322,7 +351,11 @@ router.get('/tally/books/ledger', async (req, res) => {
 // ── GET /tally/books/trial-balance — every ledger with its closing balance, grouped ──────────────
 router.get('/tally/books/trial-balance', async (req, res) => {
     try {
-        const company = config.TALLY_COMPANY || (MODE() === 'direct' ? await resolveCompany() : null);
+        // An explicit ?company= wins. Pinning to TALLY_COMPANY made these reports unable to show the
+        // OTHER financial year at all — the two years are separate companies here, so a date filter
+        // can never reach across them.
+        const company = String(req.query.company || '')
+            || config.TALLY_COMPANY || (MODE() === 'direct' ? await resolveCompany() : null);
         const to = req.query.to ? String(req.query.to) : null;
         const from = req.query.from ? String(req.query.from) : null;
         const b = await booksData('trial_balance', company, from, to);
@@ -344,7 +377,11 @@ router.get('/tally/books/trial-balance', async (req, res) => {
 // ── GET /tally/books/vouchers?from=&to= — the Day Book: vouchers already entered in Tally ────────
 router.get('/tally/books/vouchers', async (req, res) => {
     try {
-        const company = config.TALLY_COMPANY || (MODE() === 'direct' ? await resolveCompany() : null);
+        // An explicit ?company= wins. Pinning to TALLY_COMPANY made these reports unable to show the
+        // OTHER financial year at all — the two years are separate companies here, so a date filter
+        // can never reach across them.
+        const company = String(req.query.company || '')
+            || config.TALLY_COMPANY || (MODE() === 'direct' ? await resolveCompany() : null);
         // Default to the current Indian financial year (1 Apr → today, IST).
         const today = istToday();
         const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
@@ -667,6 +704,69 @@ router.delete('/tally/ledgers', requireAdminPush, async (req, res) => {
         console.log(`[Tally] deleted ledger(s) in "${company}": ${names.join(', ')} by ${(req.user || {}).sub}`);
         res.json({ success: true, deleted: names.filter(n => !left.includes(n)), notDeleted: left, raw: parsed.raw ? undefined : undefined });
     } catch (e) { console.error('[Tally] delete ledgers:', e.message); res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── POST /tally/ledgers/clone — copy ledger DEFINITIONS from one company to another ──────────────
+// Not the same as creating a ledger by name and group. A GST ledger carries a tax type, a duty head
+// and a rate; without those Tally files it under Duties & Taxes, adds it up in the trial balance, and
+// leaves GSTR-1/3B EMPTY — a failure that hides itself. So the source definition is read from Tally
+// and replayed field for field.
+//
+// Copies MASTERS ONLY. No balance, no transaction, no opening figure crosses between the companies.
+router.post('/tally/ledgers/clone', requireAdminPush, async (req, res) => {
+    try {
+        if (!POST_ENABLED())
+            return res.status(403).json({ success: false, error: 'Writing to Tally is disabled (TALLY_POST_ENABLED is not true).' });
+        if (MODE() !== 'direct')
+            return res.status(501).json({ success: false, error: 'Cloning ledgers currently needs TALLY_MODE=direct.' });
+
+        const from = String(req.body.fromCompany || '').trim();
+        const to = String(req.body.toCompany || '').trim() || await resolveCompany();
+        const names = [...new Set((Array.isArray(req.body.names) ? req.body.names : [])
+            .map(n => String(n || '').trim()).filter(Boolean))];
+        if (!from || !to) return res.status(400).json({ success: false, error: 'Both a source and a target company are needed.' });
+        if (from === to) return res.status(400).json({ success: false, error: 'Source and target are the same company.' });
+        if (!names.length) return res.status(400).json({ success: false, error: 'No ledger named.' });
+
+        // Skip anything already there; re-creating would make Tally reject the whole message.
+        const existing = await knownLedgerSet(to);
+        const todo = names.filter(n => !existing.has(n));
+        const skipped = names.filter(n => existing.has(n));
+        if (!todo.length) return res.json({ success: true, created: 0, skipped, message: 'All of them already exist.' });
+
+        const dump = await tallyPost(T.buildAllMastersExport(from), 180000);
+        const defs = [], missing = [];
+        for (const n of todo) {
+            const d = T.parseLedgerDefinition(dump, n);
+            if (d) defs.push(d); else missing.push(n);
+        }
+        if (!defs.length) return res.status(404).json({ success: false, error: `Not found in "${from}": ${missing.join(', ')}` });
+
+        // Their groups must exist in the target, or Tally silently reparents to Primary.
+        // The dump is XML-escaped, so PARENT arrives as "Duties &amp; Taxes" while the mirror holds
+        // "Duties & Taxes" — comparing them raw rejects every GST ledger. Decode for the COMPARISON
+        // only; the stored value stays escaped because it is re-emitted into XML verbatim.
+        const unesc = (v) => String(v).replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+                                      .replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+        const groups = new Set((await loadMasters('group', to)).map(g => g.name));
+        const inGroup = (d) => groups.has(unesc(d.fields.PARENT));
+        const badGroup = defs.filter(d => !inGroup(d))
+            .map(d => `${d.name} → group "${unesc(d.fields.PARENT)}" does not exist in ${to}`);
+        const ok = defs.filter(inGroup);
+        if (!ok.length) return res.status(400).json({ success: false, error: badGroup[0], errors: badGroup });
+
+        const parsed = T.parseImportResponse(await tallyPost(T.buildLedgerCloneXml({ company: to, ledgers: ok }), 120000));
+        if (!parsed.ok) return res.status(422).json({ success: false, error: parsed.error, skipped, errors: badGroup });
+
+        const fresh = T.parseMasters(await tallyPost(T.buildMastersRequest('ledger', to)), 'ledger');
+        await saveMasters('ledger', fresh, to);
+        const landed = ok.filter(d => fresh.some(l => l.name === d.name)).map(d => d.name);
+
+        console.log(`[Tally] cloned ${landed.length} ledger(s) "${from}" -> "${to}" by ${(req.user || {}).sub}`);
+        res.json({ success: true, created: landed.length, ledgers: landed,
+                   fields: ok.map(d => ({ name: d.name, ...d.fields })),
+                   skipped, missing, errors: badGroup });
+    } catch (e) { console.error('[Tally] clone ledgers:', e.message); res.status(500).json({ success: false, error: e.message }); }
 });
 
 // ── POST /tally/ledgers/propose — suggest a group for names that have no ledger yet ───────────────

@@ -117,11 +117,19 @@ let cachedCompany = null;
 async function resolveCompany() {
     if (CFG.company) return CFG.company;
     if (cachedCompany) return cachedCompany;
-    const r = await tally(collection('BridgeCompanies', 'Company', { methods: ['Name'] }), 20000);
-    const names = companyNames(r.data);
+    const names = await openCompanies();
     if (!names.length) throw new Error('Tally reports no open company');
     cachedCompany = names[0];
     return cachedCompany;
+}
+
+// Every company Tally currently has open. With two financial years loaded, mirroring only the first
+// leaves the other year's chart of accounts frozen at whatever was last synced — so the dashboard
+// would offer stale ledgers for it, or none at all.
+async function openCompanies() {
+    if (CFG.company) return [CFG.company];          // explicitly pinned: honour it
+    const r = await tally(collection('BridgeCompanies', 'Company', { methods: ['Name'] }), 20000);
+    return companyNames(r.data);
 }
 
 // ── heartbeat ────────────────────────────────────────────────────────────────────────────────────
@@ -233,9 +241,13 @@ async function tick() {
         syncing = true;
         const why = hb && hb.syncRequested ? 'requested by the dashboard' : `every ${CFG.syncMin}m`;
         try {
-            const company = await resolveCompany();
-            info(`syncing masters + books (${why})…`);
-            await syncMastersAndBooks(company);
+            const companies = await openCompanies();
+            info(`syncing masters + books for ${companies.length} company(ies) (${why})…`);
+            for (const company of companies) {
+                // One failing company must not stop the others — a year with no books yet is normal.
+                try { await syncMastersAndBooks(company); }
+                catch (e) { err(`sync "${company}": ${e.message}`); }
+            }
             lastSyncAt = Date.now();
         } catch (e) { err('sync: ' + e.message); }
         finally { syncing = false; }

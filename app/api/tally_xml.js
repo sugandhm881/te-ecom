@@ -675,6 +675,91 @@ function buildLedgerRegroupXml({ company, ledgers }) {
 </ENVELOPE>`;
 }
 
+// Tally's own full-fidelity master dump. A Collection with named methods only returns the fields you
+// name; this returns everything a master holds, which is what copying one faithfully requires.
+//   TALLYREQUEST=Export + TYPE=Data + ID="List of Accounts"
+// NOTE: TYPE=Collection with that ID is NOT valid — Tally raises "Collection:List of Accounts could
+// not find description" and pops a modal on the operator's screen.
+function buildAllMastersExport(company) {
+    if (!company) throw new Error('Company is required to export masters');
+    return `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Data</TYPE>` +
+           `<ID>List of Accounts</ID></HEADER><BODY><DESC><STATICVARIABLES>` +
+           `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` +
+           `<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>` +
+           `</STATICVARIABLES></DESC></BODY></ENVELOPE>`;
+}
+
+// The fields that decide how a ledger BEHAVES. Everything else in a dump is identity or audit trail
+// (GUID, ALTERID, ENTEREDBY) and must not be copied — Tally assigns those itself, and carrying them
+// across would make the new ledger claim to be the old one.
+const CLONE_FIELDS = [
+    'PARENT', 'TAXTYPE', 'GSTDUTYHEAD', 'GSTAPPLICABLE', 'GSTTYPEOFSUPPLY', 'APPROPRIATEFOR',
+    'EXCISELEDGERCLASSIFICATION', 'RATEOFTAXCALCULATION', 'ISBILLWISEON', 'ISCOSTCENTRESON',
+    'AFFECTSSTOCK', 'ISGSTAPPLICABLE', 'ISDEEMEDPOSITIVE', 'LEDGERPHONE', 'ROUNDTYPE',
+];
+
+// Pull one ledger's definition out of a full export, keeping only the fields above.
+// The <NAME> element is deliberately NOT read from the block: a ledger dump also contains a nested
+// "Primary Mobile No." NAME inside its contact details, and a naive read picks that up.
+function parseLedgerDefinition(xml, name) {
+    const safe = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = String(xml || '').match(new RegExp(`<LEDGER NAME="${safe}"[^>]*>([\\s\\S]*?)</LEDGER>`, 'i'));
+    if (!m) return null;
+    const block = m[1];
+    const out = { name, fields: {} };
+    for (const f of CLONE_FIELDS) {
+        // Only top-level tags — a nested list entry of the same name would otherwise win.
+        const t = block.match(new RegExp(`<${f}(?:\\s+TYPE="[^"]*")?>([\\s\\S]*?)</${f}>`, 'i'));
+        if (t) {
+            const v = t[1].trim();
+            if (v !== '') out.fields[f] = v;
+        }
+    }
+    return out.fields.PARENT ? out : null;
+}
+
+// Re-emit those definitions as a create for a DIFFERENT company. Values are written back exactly as
+// Tally gave them, including its \x04-prefixed enum values (&#4; Applicable) — rewriting those to
+// something "cleaner" makes Tally silently treat the field as unset.
+function buildLedgerCloneXml({ company, ledgers }) {
+    if (!company) throw new Error('Company is required to create ledgers');
+    const list = (ledgers || []).filter(l => l && l.name && l.fields && l.fields.PARENT);
+    if (!list.length) throw new Error('No ledger definitions to create');
+    const seen = new Set();
+    const body = list.map(l => {
+        const key = String(l.name).trim().toUpperCase();
+        if (seen.has(key)) return '';
+        seen.add(key);
+        const fields = Object.entries(l.fields)
+            .map(([k, v]) => `\n      <${k}>${v}</${k}>`).join('');
+        return `
+     <LEDGER NAME="${esc(l.name)}" ACTION="Create">
+      <NAME>${esc(l.name)}</NAME>${fields}
+      <OPENINGBALANCE>0</OPENINGBALANCE>
+     </LEDGER>`;
+    }).join('');
+
+    return `<ENVELOPE>
+ <HEADER>
+  <TALLYREQUEST>Import Data</TALLYREQUEST>
+ </HEADER>
+ <BODY>
+  <IMPORTDATA>
+   <REQUESTDESC>
+    <REPORTNAME>All Masters</REPORTNAME>
+    <STATICVARIABLES>
+     <SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>
+    </STATICVARIABLES>
+   </REQUESTDESC>
+   <REQUESTDATA>
+    <TALLYMESSAGE xmlns:UDF="TallyUDF">${body}
+    </TALLYMESSAGE>
+   </REQUESTDATA>
+  </IMPORTDATA>
+ </BODY>
+</ENVELOPE>`;
+}
+
 // Create GROUP masters. Needed because a company's chart of accounts includes groups the accountant
 // invented (INFLUENCER MARKETING EXPENSES, SALARY) — a ledger cannot be filed under one of those in a
 // second company until the group itself exists there.
@@ -848,6 +933,9 @@ const refMarker = (id) => 'ECOM-' + String(id).replace(/-/g, '').slice(0, 8).toU
 
 module.exports = {
     buildGroupCreateXml,
+    buildAllMastersExport,
+    parseLedgerDefinition,
+    buildLedgerCloneXml,
     buildLedgerRegroupXml,
     buildLedgerDeleteXml,
     esc, unesc, tallyDate, tallyDateToIso, toPaise, fmtAmount,
