@@ -789,6 +789,27 @@
                 </div>
             </div>
 
+            <div class="nav-group">
+                <div class="nav-section-header flex items-center justify-between px-3 py-2 mt-2" data-target="finance-menu">
+                    <span>Finance</span>
+                    <svg class="arrow-icon w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+                <div id="finance-menu" class="nav-content collapsed space-y-1">
+                    <a href="#" id="nav-finance-entry" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m-6 4h6m-6 4h3M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Data Entry</span>
+                    </a>
+                    <a href="#" id="nav-finance-books" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                        <span class="ml-3 text-sm font-medium">Tally Books</span>
+                    </a>
+                    <a href="#" id="nav-finance-register" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h10M4 18h7"/></svg>
+                        <span class="ml-3 text-sm font-medium">Voucher Register</span>
+                    </a>
+                </div>
+            </div>
+
             <div class="nav-category mt-6 px-3 text-xs font-bold text-slate-500 uppercase tracking-widest">System</div>
             <a href="#" id="nav-reports" class="sidebar-link flex items-center px-3 py-2 mt-2">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-6h13M9 7h13M5 7h.01M5 17h.01M5 12h.01"/></svg>
@@ -2488,6 +2509,73 @@
                 </div>
             </header>
             <div class="p-8 space-y-5" id="ica-body"></div>
+        </div>
+
+        <!-- ═══════════ Finance → Data Entry (compose accounting vouchers, push to Tally Prime) ═══════════ -->
+        <div id="finance-entry-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Data Entry</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Compose an accounting voucher and post it to Tally — ledgers are read live from your Tally company</p></div>
+                <div class="flex items-center gap-2">
+                    <span id="fin-conn" class="text-xs font-semibold px-3 py-1.5 rounded-full bg-slate-100 text-slate-500">Checking Tally…</span>
+                    <button id="fin-sync-masters" class="filter-btn">↻ Sync ledgers</button>
+                </div>
+            </header>
+            <div class="p-8" id="fin-entry-body"></div>
+        </div>
+
+        <!-- ═══════════ Finance → Voucher Register (audit trail of every voucher + its Tally reply) ═══════════ -->
+        <div id="finance-register-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Voucher Register</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Every voucher drafted here, its status in Tally, and the exact XML exchanged</p></div>
+                <div class="flex flex-wrap items-center gap-2">
+                    <input id="fin-reg-search" type="search" placeholder="Party, narration, reference…" class="filter-input">
+                    <select id="fin-reg-status" class="filter-select">
+                        <option value="">All statuses</option>
+                        <option value="draft">Draft</option>
+                        <option value="queued,posting">In flight</option>
+                        <option value="posted">Posted</option>
+                        <option value="failed">Failed</option>
+                        <option value="cancelled">Cancelled</option>
+                    </select>
+                    <input id="fin-reg-from" type="date" class="filter-input">
+                    <span class="text-slate-400 text-sm">→</span>
+                    <input id="fin-reg-to" type="date" class="filter-input">
+                    <!-- Oldest transaction first by default: the order the money moved, and the order
+                         books are read and checked. Sorting by when a row was ENTERED is meaningless
+                         after a bank import, where hundreds of rows share one timestamp. -->
+                    <select id="fin-reg-sort" class="filter-select">
+                        <option value="date_asc">Date ↑ oldest first</option>
+                        <option value="date_desc">Date ↓ newest first</option>
+                        <option value="amount_desc">Amount ↓ largest first</option>
+                        <option value="amount_asc">Amount ↑ smallest first</option>
+                        <option value="entered_desc">Recently entered</option>
+                    </select>
+                    <button id="fin-reg-refresh" class="filter-btn">↻ Refresh</button>
+                </div>
+            </header>
+            <!-- Month buttons: posting a year in one go gives one enormous confirm dialog and no natural
+                 place to check the work. A month is a reviewable unit. -->
+            <!-- pt-5, not pt-6: tailwind.css is pre-compiled and has no .pt-6 rule, so that class
+                 would have done nothing at all. -->
+            <div id="fin-reg-months" class="px-8 pt-5"></div>
+            <div class="p-8 space-y-5" id="fin-reg-body"></div>
+        </div>
+
+        <!-- ═══════════ Finance → Tally Books (READ-ONLY view of what is already in Tally) ═══════════ -->
+        <div id="finance-books-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Tally Books</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">Read-only view of the accounts already entered in Tally — trial balance &amp; day book</p></div>
+                <div class="flex items-center gap-2">
+                    <span id="fin-books-meta" class="text-xs text-slate-400"></span>
+                    <select id="fin-books-fy" class="filter-select"></select>
+                    <button id="fin-books-dl" class="filter-btn">⬇ Download</button>
+                    <button id="fin-books-refresh" class="filter-btn">↻ Refresh</button>
+                </div>
+            </header>
+            <div class="p-8" id="fin-books-body"></div>
         </div>
 
         <!-- ═══════════ Influencer Marketing CRM (port of the standalone Influencer CRM) ═══════════ -->

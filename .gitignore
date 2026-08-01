@@ -16,3 +16,12 @@ amazon_cache_date.txt
 
 # Stray local zips (browser-extension bundles, backups) — never commit
 *.zip
+
+# Tally bridge agent secrets + its rotating log (runtime, never commit)
+tally-bridge/.env
+tally-bridge/agent.log*
+
+# Bank statements — real financial data, never commit
+*Account Statement*.xlsx
+*Account Statement*.xls
+*Account Statement*.csv

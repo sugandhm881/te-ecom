@@ -17,6 +17,15 @@ const CORS_ALLOW = (process.env.CORS_ORIGINS || config.DASHBOARD_URL || '')
     .split(',').map(s => s.trim()).filter(Boolean)
     .concat(['http://localhost:5002', 'http://127.0.0.1:5002']);
 app.use(cors({ origin: (origin, cb) => cb(null, !origin || CORS_ALLOW.includes(origin)), credentials: true }));
+// The Tally bridge agent uploads RAW Tally XML for the books, and the day book alone is ~5MB of XML for
+// a financial year (it is gzipped in transit, but body-parser applies its limit AFTER inflation). Give
+// that one route its own generous cap rather than raising the global 5mb — a global bump would widen the
+// DoS surface on every endpoint. Registered BEFORE the global parser so it wins for this path;
+// body-parser then marks the body parsed and the global parser no-ops.
+app.use('/api/tally/bridge/books-xml', express.json({ limit: '64mb' }));
+app.use('/api/tally/bridge/masters-xml', express.json({ limit: '16mb' }));
+app.use('/api/tally/bank/parse', express.json({ limit: '32mb' }));   // statement upload (base64 in JSON)
+
 // Capture the raw body (used by the Shopify webhook HMAC check); does not change JSON parsing.
 // limit 5mb (default 100kb was too tight): the Ad-Set PDF/Excel download POSTs the full computed report JSON
 // (~100kb+ once all orders are counted, grows with the date range) — a 100kb cap threw PayloadTooLargeError.
@@ -108,7 +117,10 @@ app.use('/api/admin', require('./app/api/user_activity').adminRouter);  // admin
 
 // --- Require a valid JWT for ALL data APIs below. Public: login/signup (handled above) + external webhooks. ---
 const { tokenRequired: _apiAuth, requirePermission } = require('./app/auth');
-const PUBLIC_API = [/^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/];
+// /tally/bridge/* is the Tally bridge agent — a headless script on the finance PC, so it holds no JWT.
+// It authenticates with a constant-time X-Bridge-Key compare inside app/api/tally.js (which refuses
+// every request outright when TALLY_BRIDGE_KEY is unset).
+const PUBLIC_API = [/^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/, /^\/tally\/bridge\//];
 app.use('/api', (req, res, next) => {
     if (req.method === 'OPTIONS') return next();
     if (PUBLIC_API.some(rx => rx.test(req.path))) return next();
@@ -145,6 +157,22 @@ const _VIEW_PERMS = [
     [/^\/inventory\/count\/analysis/i, ['inventory-count-analysis', 'inventory']],
     [/^\/inventory\/count/i, ['inventory-count', 'inventory']],
     [/^\/inventory\//i, 'inventory'],
+    // Finance → Tally. Drafting and POSTING are deliberately separate rights: a junior can compose and
+    // preview a voucher, but only someone holding finance-post-tally can send it into the books. The
+    // post rule must precede the general one.
+    // The general rule EXCLUDES /tally/bridge/* : being in PUBLIC_API only skips the JWT gate, not this
+    // one, so without the lookahead the key-authenticated bridge agent (which carries no JWT, hence no
+    // permissions) would match here and get a flat 403.
+    // Batch approve/reject/build are admin-only, enforced inside tally_batch.js (a role check, which
+    // _VIEW_PERMS cannot express). Listing batches is open to any finance user.
+    [/^\/tally\/bank\//i, ['finance-entry']],   // bank import lives in Data Entry
+    [/^\/tally\/batches/i, ['finance-entry', 'finance-register', 'finance-books']],
+    [/^\/tally\/vouchers\/post-bulk/i, 'finance-post-tally'],   // admin-only is enforced inside tally.js too
+    [/^\/tally\/vouchers\/[^/]+\/post/i, 'finance-post-tally'],
+    // Read-only view of Tally's existing books — its own perm, so someone can be given visibility
+    // into the accounts without any ability to draft or post. Must precede the general rule.
+    [/^\/tally\/books\//i, ['finance-books', 'finance-entry', 'finance-register']],
+    [/^\/tally\/(?!bridge\/)/i, ['finance-entry', 'finance-register', 'finance-books']],
 ];
 app.use('/api', (req, res, next) => {
     const perms = (req.user && req.user.permissions) || [];
@@ -244,6 +272,9 @@ app.use('/api', require('./app/api/support_console'));        // Customer Suppor
 app.use('/api', require('./app/api/user_activity').router);   // activity logging (POST /activity — any signed-in user)
 app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
 app.use('/api', require('./app/api/inventory').router);       // Inventory Analytics (daily snapshot dashboard + Teams report)
+app.use('/api', require('./app/api/tally').router);           // Finance → Data Entry → Tally Prime (voucher queue + bridge)
+app.use('/api', require('./app/api/tally_batch').router);     // Finance → nightly batch push + Teams approval
+app.use('/api', require('./app/api/tally_bank').router);      // Finance → bank statement upload, ledger suggestion, draft creation
 app.use('/api', docpharmaReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
 app.use('/api', docpharmaLedgerRoutes);
@@ -251,6 +282,38 @@ app.use('/api', docpharmaOverviewRoutes);
 app.use('/api', docpharmaInventoryRoutes);
 initAutoReviewCron();
 initFbaLocationCron();
+
+// ── Finance → nightly Tally push ────────────────────────────────────────────────────────────────
+// 23:45 warm the ledger masters so the 23:50 validation reflects Tally as it is right now (a ledger
+// renamed during the day must not let a push silently create it afresh under Suspense).
+const tallyBatch = require('./app/api/tally_batch');
+cron.schedule('45 23 * * *', async () => {
+    if (String(config.TALLY_BATCH_CRON_ENABLED || '').toLowerCase() !== 'true') return;
+    console.log('[TallyBatch] 23:45 IST — refreshing Tally masters ahead of the nightly push…');
+    try { await require('./app/api/tally').syncMastersDirect(); }
+    catch (_) { /* bridge mode: runNightly() asks the agent and waits, so this is just a fast path */ }
+}, { timezone: 'Asia/Kolkata' });
+
+// 23:50 build the batch, validate every draft, and post the Teams approval card. NOTHING is sent to
+// Tally here — an admin's "yes" in Teams (or the dashboard) is what queues the vouchers.
+cron.schedule('50 23 * * *', async () => {
+    console.log('[TallyBatch] 23:50 IST — building the nightly Tally batch…');
+    await tallyBatch.runNightly().catch(e => console.error('[TallyBatch] nightly error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// Watcher — every 2 min, report a batch to Teams once all of its vouchers are terminal. A cron rather
+// than a hook inside /bridge/ack: if the agent dies mid-batch, this still notices and reports.
+cron.schedule('*/2 * * * *', async () => {
+    if (String(config.TALLY_BATCH_CRON_ENABLED || '').toLowerCase() !== 'true') return;
+    await tallyBatch.checkOpenBatches().catch(e => console.error('[TallyBatch] watcher error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// Hourly — expire batches nobody approved; their vouchers return to draft for the next run, so nothing
+// is lost and nothing is ever double-posted.
+cron.schedule('5 * * * *', async () => {
+    if (String(config.TALLY_BATCH_CRON_ENABLED || '').toLowerCase() !== 'true') return;
+    await tallyBatch.expireStaleBatches().catch(e => console.error('[TallyBatch] expiry error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
 
 // Delivery-journey gap-fill — every 6h, refresh non-final shipments (webhooks handle real-time;
 // this catches any misses). Skips shipments already delivered/RTO (is_final) → minimal API.

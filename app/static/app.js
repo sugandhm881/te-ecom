@@ -983,6 +983,21 @@ function navigate(view) {
             activeViewElement = document.getElementById('inventory-count-analysis-view');
             if (typeof initCountAnalysis === 'function') initCountAnalysis();
             break;
+        case 'finance-entry':
+            activeLinkElement = document.getElementById('nav-finance-entry');
+            activeViewElement = document.getElementById('finance-entry-view');
+            if (typeof finEntryInit === 'function') finEntryInit();
+            break;
+        case 'finance-register':
+            activeLinkElement = document.getElementById('nav-finance-register');
+            activeViewElement = document.getElementById('finance-register-view');
+            if (typeof finRegisterInit === 'function') finRegisterInit();
+            break;
+        case 'finance-books':
+            activeLinkElement = document.getElementById('nav-finance-books');
+            activeViewElement = document.getElementById('finance-books-view');
+            if (typeof finBooksInit === 'function') finBooksInit();
+            break;
         case 'users':
             activeLinkElement = document.getElementById('nav-users');
             activeViewElement = document.getElementById('users-view');
@@ -3961,6 +3976,7 @@ function supQueueTable(){
   if(fA!=='any') list=list.filter(r=>{ const dAge=(Date.now()-new Date(r.created_at))/86400000;
     return fA==='lt1'?dAge<1:fA==='1-3'?(dAge>=1&&dAge<3):fA==='3-7'?(dAge>=3&&dAge<7):dAge>=7; });
   if(fH!=='all'){ const isHeld=r=>(r.shopify_hold&&r.shopify_hold.status==='held')||r.ee_hold; list=list.filter(r=>fH==='held'?isHeld(r):!isHeld(r)); }
+  if(fP!=='all') list=list.filter(r=>String(r.payment||'').toLowerCase()===fP);
   if(_supSort&&_supSort.k) list.sort(_supSortCmp(_supSort.k,_supSort.d));   // else keep the server order (confirmed → oldest)
   const cnt=document.getElementById('sup-queue-count'); if(cnt) cnt.textContent=`${list.length} shown`;
   document.querySelector(`.sup-tab[data-tab="${_supTab}"] .sup-tab-count`).textContent=`(${list.length})`;
@@ -4645,7 +4661,8 @@ const NAV_HREF = {
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-support-blacklist': 'support-blacklist', 'nav-support-voice': 'support-voice',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
-    'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions'
+    'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions',
+    'nav-finance-entry': 'finance-entry', 'nav-finance-register': 'finance-register', 'nav-finance-books': 'finance-books'
 };
 const VALID_VIEWS = new Set(Object.values(NAV_HREF));
 function viewFromHash() { const v = (location.hash || '').replace(/^#/, ''); return VALID_VIEWS.has(v) ? v : null; }
@@ -5364,6 +5381,8 @@ document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e
 document.getElementById('nav-amazon-fba')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-fba'); });
 document.getElementById('nav-inventory-count')?.addEventListener('click', (e) => { e.preventDefault(); navigate('inventory-count'); });
 document.getElementById('nav-inventory-count-analysis')?.addEventListener('click', (e) => { e.preventDefault(); navigate('inventory-count-analysis'); });
+['finance-entry', 'finance-register', 'finance-books'].forEach(v =>
+    document.getElementById('nav-' + v)?.addEventListener('click', (e) => { e.preventDefault(); navigate(v); }));
 document.getElementById('nav-users')?.addEventListener('click', (e) => { e.preventDefault(); navigate('users'); });
 document.getElementById('nav-user-analytics')?.addEventListener('click', (e) => { e.preventDefault(); navigate('user-analytics'); });
 
@@ -5375,9 +5394,10 @@ const PERM_GROUPS = [
   ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['support-blacklist','Blacklist Numbers'],['support-voice','Voice Agent (beta)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
   ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)']]],
+  ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
   // Capabilities (not dashboard views) — granted per-user by the admin. Server enforces each one too.
-  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)']]]
+  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)']]]
 ];
 const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
 const PERM_TOTAL = PERM_CATALOG.length;
@@ -10598,7 +10618,8 @@ function infMountProductPicker(mountEl, preIds, preQty){
   (async()=>{ try{ await infLoadProducts(); }catch(_){ _infProducts=_infProducts||[]; }
     Object.assign(groups, infProductGroups());
     renderChips(); renderList(); })();
-  return { get:()=>[...selected] };
+  // getQty returns qty ONLY for still-selected products, so unticking a row drops its quantity too.
+  return { get:()=>[...selected], getQty:()=>{ const o={}; selected.forEach(pid=>{ const n=qGet(pid); if(n>1) o[String(pid)]=n; }); return o; } };
 }
 
 // ── Video add/edit modal ─────────────────────────────────────────────────────
@@ -11313,3 +11334,2041 @@ async function infMentionsLoad(){
   }catch(e){ c.innerHTML=`<p class="text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
 }
 // ═══════════════ End Influencer Marketing CRM ═══════════════
+// ═══════════════ FINANCE → DATA ENTRY + VOUCHER REGISTER (Tally Prime) ═══════════════
+// Composes accounting vouchers and hands them to /api/tally/*. The ledger list is a mirror of the real
+// Tally chart of accounts (tally_masters_ecom), so a ledger that doesn't exist in Tally cannot be picked
+// — which is what stops Tally silently auto-creating it under Suspense.
+// The server re-validates everything sent from here; these checks exist to make the form pleasant, not
+// to be the last line of defence.
+
+// Only the accounting voucher types are exposed for now. Sales / Purchase / Credit Note / Debit Note
+// need the GST-split helper before they're safe to hand to a non-accountant, so they come later.
+const FIN_TYPES = [
+    ['Payment', 'Money going out — the party or expense is debited, your bank/cash is credited.'],
+    ['Receipt', 'Money coming in — your bank/cash is debited, the customer or income ledger is credited.'],
+    ['Contra',  'Bank ↔ cash movement only — e.g. cash deposited into HDFC BANK.'],
+    ['Journal', 'Free-form adjustment — you enter both sides yourself.'],
+];
+const FIN_BANKISH = ['Bank Accounts', 'Cash-in-Hand', 'Bank OD A/c', 'Bank OCC A/c'];
+const FIN_PARTYISH = ['Sundry Creditors', 'Sundry Debtors'];
+
+const _fin = { status: null, ledgers: [], byName: new Map(), vt: 'Payment', rows: [], wired: false, loaded: false, mode: 'manual' };
+const _finReg = { rows: [], wired: false, sel: new Set(), limit: 1000, pushing: false };
+
+// Post-to-Tally is a separate right from drafting (server enforces it too — see _VIEW_PERMS).
+// Pushing to Tally is ADMIN-ONLY by instruction. A non-admin drafts; their entries reach Tally via the
+// nightly batch once an admin approves it. The server enforces this independently of the UI.
+function canPostTally() { return !!(currentUser && currentUser.isAdmin); }
+const finToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });   // IST, never toISOString()
+const finMoney = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const finPaise = (n) => Math.round((Number(n) || 0) * 100);   // integer paise — float rupees don't compare cleanly
+
+// ── Data Entry ───────────────────────────────────────────────────────────────────────────────────
+function finEntryInit() {
+    if (!_fin.wired) {
+        _fin.wired = true;
+        document.getElementById('fin-sync-masters')?.addEventListener('click', finSyncMasters);
+    }
+    finLoadStatus();
+    if (!_fin.loaded) finLoadLedgers(); else finRenderEntry();
+}
+
+async function finLoadStatus() {
+    const chip = document.getElementById('fin-conn');
+    try {
+        const d = await supFetch('/api/tally/status');
+        _fin.status = d;
+        if (!chip) return;
+        const label = d.mode === 'direct' ? 'Tally' : 'Bridge';
+        const synced = d.bridge && d.bridge.mastersSyncedAt
+            ? ' · ledgers ' + new Date(d.bridge.mastersSyncedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '';
+        chip.className = 'text-xs font-semibold px-3 py-1.5 rounded-full ' + (d.reachable
+            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+            : 'bg-amber-50 text-amber-700 border border-amber-200');
+        chip.textContent = d.reachable
+            ? `${label} connected · ${d.company || '—'}${synced}`
+            : `${label} offline — ${d.probeError || 'not reachable'}`;
+        chip.title = d.reachable ? '' : (d.probeError || '');
+    } catch (e) {
+        if (chip) { chip.className = 'text-xs font-semibold px-3 py-1.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200'; chip.textContent = 'Status unavailable'; chip.title = e.message; }
+    }
+}
+
+async function finLoadLedgers() {
+    const body = document.getElementById('fin-entry-body');
+    if (body) body.innerHTML = brandLoader('Loading ledgers from Tally…');
+    try {
+        const d = await supFetch('/api/tally/masters?kind=ledger');
+        _fin.ledgers = d.rows || [];
+        _fin.byName = new Map(_fin.ledgers.map(l => [l.name, l]));
+        _fin.loaded = true;
+        finRenderEntry();
+    } catch (e) {
+        if (body) body.innerHTML = `<div class="card p-8 text-center"><p class="text-sm text-rose-600 font-semibold">${escapeHtml(e.message)}</p>
+          <p class="text-xs text-slate-500 mt-2">Open Tally with the company loaded, then press “Sync ledgers”.</p></div>`;
+    }
+}
+
+async function finSyncMasters() {
+    const b = document.getElementById('fin-sync-masters');
+    if (b) { b.disabled = true; b.textContent = 'Syncing…'; }
+    try {
+        const d = await supFetch('/api/tally/masters/sync', { method: 'POST' });
+        showNotification(d.queued ? d.message : `Synced ${(d.counts && d.counts.ledger) || 0} ledgers from Tally`);
+        await finLoadLedgers(); await finLoadStatus();
+    } catch (e) { showNotification(e.message, true); }
+    finally { if (b) { b.disabled = false; b.textContent = '↻ Sync ledgers'; } }
+}
+
+// Ledger <select> grouped by its Tally group, so "HDFC BANK" reads as Bank Accounts → HDFC BANK.
+function finLedgerOptions(selected, onlyGroups) {
+    const pool = onlyGroups ? _fin.ledgers.filter(l => onlyGroups.includes(l.parent)) : _fin.ledgers;
+    const groups = new Map();
+    pool.forEach(l => { const g = l.parent || 'Other'; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(l); });
+    return '<option value="">— select ledger —</option>' + [...groups.keys()].sort().map(g =>
+        `<optgroup label="${escapeHtml(g)}">${groups.get(g).map(l =>
+            `<option value="${escapeHtml(l.name)}"${l.name === selected ? ' selected' : ''}>${escapeHtml(l.name)}</option>`).join('')}</optgroup>`).join('');
+}
+
+// Seed the two sides with the right Dr/Cr for the chosen voucher type, so the common case is one
+// ledger pick plus one amount.
+function finSeedRows() {
+    const bank = _fin.ledgers.find(l => l.name === 'HDFC BANK') || _fin.ledgers.find(l => FIN_BANKISH.includes(l.parent));
+    const b = bank ? bank.name : '';
+    if (_fin.vt === 'Payment') _fin.rows = [{ ledger: '', dr_cr: 'DR', amount: '', bill_ref: '' }, { ledger: b, dr_cr: 'CR', amount: '', bill_ref: '' }];
+    else if (_fin.vt === 'Receipt') _fin.rows = [{ ledger: b, dr_cr: 'DR', amount: '', bill_ref: '' }, { ledger: '', dr_cr: 'CR', amount: '', bill_ref: '' }];
+    else _fin.rows = [{ ledger: '', dr_cr: 'DR', amount: '', bill_ref: '' }, { ledger: '', dr_cr: 'CR', amount: '', bill_ref: '' }];
+}
+
+// Tally's PARTYLEDGERNAME — inferred from whichever row sits under Sundry Creditors/Debtors rather than
+// asked for twice. Returns null when there's no party (Contra, most Journals).
+function finInferParty() {
+    for (const r of _fin.rows) { const l = _fin.byName.get(r.ledger); if (l && FIN_PARTYISH.includes(l.parent)) return l.name; }
+    return null;
+}
+
+// Shared by the manual form and the bank import so the two feel like one screen.
+function finEntryTabs() {
+    const tab = (k, label) => `<button class="fin-mode px-3.5 py-1.5 text-sm rounded-lg font-semibold ${
+        _fin.mode === k ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}" data-m="${k}">${label}</button>`;
+    return `<div class="flex flex-wrap gap-1.5 mb-5">${tab('manual', 'Manual entry')}${tab('bank', 'Bank statement')}</div>`;
+}
+function finEntryWireTabs() {
+    document.querySelectorAll('#fin-entry-body .fin-mode').forEach(b => b.addEventListener('click', () => {
+        if (_fin.mode === b.dataset.m) return;
+        _fin.mode = b.dataset.m;
+        if (_fin.mode === 'bank') finBankInit(); else finRenderEntry();
+    }));
+}
+
+function finRenderEntry() {
+    const body = document.getElementById('fin-entry-body');
+    if (!body) return;
+    if (!_fin.rows.length) finSeedRows();
+    const hint = (FIN_TYPES.find(t => t[0] === _fin.vt) || [])[1] || '';
+    const postable = canPostTally() && _fin.status && _fin.status.postEnabled;
+
+    if (_fin.mode === 'bank') return finBankInit();
+    body.innerHTML = finEntryTabs() + `
+      <div class="grid xl:grid-cols-3 gap-5 items-start">
+        <div class="xl:col-span-2 card p-5">
+          <div class="flex flex-wrap gap-1.5 mb-4">
+            ${FIN_TYPES.map(([t]) => `<button class="fin-vt px-3 py-1.5 text-sm rounded-lg font-semibold ${t === _fin.vt ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'}" data-vt="${t}">${t}</button>`).join('')}
+          </div>
+          <p class="text-xs text-slate-500 mb-4">${escapeHtml(hint)}</p>
+
+          <div class="grid sm:grid-cols-3 gap-3 mb-4">
+            <label class="block"><span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Date</span>
+              <input id="fin-date" type="date" value="${finToday()}" max="${finToday()}" class="filter-input w-full mt-1"></label>
+            <label class="block"><span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Reference <span class="font-normal normal-case">(optional)</span></span>
+              <input id="fin-ref" type="text" placeholder="Invoice / UTR no." class="filter-input w-full mt-1"></label>
+            <div><span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Party</span>
+              <p id="fin-party" class="text-sm font-semibold text-slate-700 mt-2 truncate">—</p></div>
+          </div>
+
+          <div class="overflow-x-auto border border-slate-200 rounded-xl">
+            <table class="w-full text-sm">
+              <thead><tr class="bg-slate-50/60">
+                <th class="px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Ledger</th>
+                <th class="px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider w-24">Dr / Cr</th>
+                <th class="px-3 py-2 text-right text-[11px] font-semibold text-slate-400 uppercase tracking-wider w-40">Amount</th>
+                <th class="px-3 py-2 w-10"></th>
+              </tr></thead>
+              <tbody id="fin-rows"></tbody>
+            </table>
+          </div>
+          <button id="fin-add-row" class="mt-3 text-xs font-semibold text-indigo-600 hover:text-indigo-800">+ Add another ledger</button>
+
+          <label class="block mt-4"><span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Narration</span>
+            <textarea id="fin-narr" rows="2" placeholder="What is this entry for?" class="filter-input w-full mt-1 resize-y"></textarea></label>
+        </div>
+
+        <div class="card p-5 xl:sticky xl:top-24">
+          <p class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-3">Balance</p>
+          <div class="space-y-1.5 text-sm">
+            <div class="flex justify-between"><span class="text-slate-500">Total debit</span><span id="fin-dr" class="font-semibold text-slate-800">₹0.00</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">Total credit</span><span id="fin-cr" class="font-semibold text-slate-800">₹0.00</span></div>
+            <div class="flex justify-between pt-2 border-t border-slate-200"><span class="font-semibold text-slate-600">Difference</span><span id="fin-diff" class="font-bold">₹0.00</span></div>
+          </div>
+          <p id="fin-warn" class="text-xs mt-3 text-slate-400">A voucher can only be saved when debit and credit match exactly.</p>
+          <label class="flex items-start gap-2 mt-4 p-2.5 rounded-lg bg-slate-50 border border-slate-200 cursor-pointer">
+            <input id="fin-optional" type="checkbox" class="mt-0.5">
+            <span class="text-xs text-slate-600"><b>Post as Optional</b> — Tally records it in the Day Book but leaves the
+              P&amp;L, balance sheet, ledger balances and GST returns untouched until someone marks it regular in Tally.
+              Use this to rehearse against real books.</span></label>
+          <div class="mt-5 space-y-2">
+            <button id="fin-save" class="w-full py-2.5 rounded-xl bg-slate-800 text-white text-sm font-semibold hover:bg-slate-900 disabled:opacity-40 disabled:cursor-not-allowed">Save draft</button>
+            <button id="fin-post" class="w-full py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              ${postable ? '' : 'disabled'} title="${postable ? '' : (!canPostTally() ? 'You do not have permission to post to Tally' : 'Posting to Tally is currently disabled on the server')}">Save &amp; post to Tally</button>
+            <button id="fin-preview" class="w-full py-2 rounded-xl border border-slate-300 text-slate-600 text-sm font-semibold hover:bg-slate-50">Preview XML</button>
+          </div>
+          ${postable ? '' : `<p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">${
+              !canPostTally() ? 'You can draft vouchers. Only an admin pushes to Tally — your drafts go up in the 11:50 PM batch once an admin approves it.'
+                              : 'Posting is switched off on the server (TALLY_POST_ENABLED). Drafts are still saved.'}</p>`}
+        </div>
+      </div>`;
+
+    finEntryWireTabs();
+    body.querySelectorAll('.fin-vt').forEach(b => b.addEventListener('click', () => {
+        if (_fin.vt === b.dataset.vt) return;
+        _fin.vt = b.dataset.vt; finSeedRows(); finRenderEntry();
+    }));
+    document.getElementById('fin-add-row')?.addEventListener('click', () => {
+        _fin.rows.push({ ledger: '', dr_cr: 'DR', amount: '', bill_ref: '' }); finRenderRows(); finRecalc();
+    });
+    document.getElementById('fin-save')?.addEventListener('click', () => finSubmit(false));
+    document.getElementById('fin-post')?.addEventListener('click', () => finSubmit(true));
+    document.getElementById('fin-preview')?.addEventListener('click', finPreviewXml);
+    finRenderRows(); finRecalc();
+}
+
+// Rebuilt only on add/remove/type change — editing an amount must not re-render, or the field loses focus.
+function finRenderRows() {
+    const tb = document.getElementById('fin-rows');
+    if (!tb) return;
+    // Contra is bank/cash on both sides; for the others any ledger is fair game.
+    const limit = _fin.vt === 'Contra' ? FIN_BANKISH : null;
+    tb.innerHTML = _fin.rows.map((r, i) => {
+        const led = _fin.byName.get(r.ledger);
+        return `<tr class="border-t border-slate-100">
+          <td class="px-3 py-2">
+            <select class="fin-led filter-select w-full" data-i="${i}">${finLedgerOptions(r.ledger, limit)}</select>
+            <input class="fin-bill filter-input w-full mt-1.5 text-xs ${led && led.is_billwise ? '' : 'hidden'}" data-i="${i}"
+              type="text" placeholder="Bill reference (settles the invoice)" value="${escapeHtml(r.bill_ref || '')}">
+          </td>
+          <td class="px-3 py-2"><select class="fin-dc filter-select w-full" data-i="${i}">
+            <option value="DR"${r.dr_cr === 'DR' ? ' selected' : ''}>Dr</option>
+            <option value="CR"${r.dr_cr === 'CR' ? ' selected' : ''}>Cr</option></select></td>
+          <td class="px-3 py-2"><input class="fin-amt filter-input w-full text-right" data-i="${i}" type="number" step="0.01" min="0" placeholder="0.00" value="${r.amount === '' ? '' : escapeHtml(String(r.amount))}"></td>
+          <td class="px-3 py-2 text-center">${_fin.rows.length > 2
+            ? `<button class="fin-del text-slate-300 hover:text-rose-500 font-bold" data-i="${i}" title="Remove row">×</button>` : ''}</td>
+        </tr>`;
+    }).join('');
+
+    tb.querySelectorAll('.fin-led').forEach(s => s.addEventListener('change', () => {
+        const i = +s.dataset.i;
+        _fin.rows[i].ledger = s.value;
+        // Bill reference only makes sense on a bill-wise ledger; hide (and clear) it otherwise.
+        const led = _fin.byName.get(s.value);
+        const bill = tb.querySelector(`.fin-bill[data-i="${i}"]`);
+        if (bill) { const show = !!(led && led.is_billwise); bill.classList.toggle('hidden', !show); if (!show) { bill.value = ''; _fin.rows[i].bill_ref = ''; } }
+        finRecalc();
+    }));
+    tb.querySelectorAll('.fin-dc').forEach(s => s.addEventListener('change', () => { _fin.rows[+s.dataset.i].dr_cr = s.value; finRecalc(); }));
+    tb.querySelectorAll('.fin-bill').forEach(x => x.addEventListener('input', () => { _fin.rows[+x.dataset.i].bill_ref = x.value; }));
+    tb.querySelectorAll('.fin-amt').forEach(x => x.addEventListener('input', () => {
+        const i = +x.dataset.i;
+        _fin.rows[i].amount = x.value;
+        // A two-line voucher always has one amount on each side — mirror it so the commonest entry
+        // can't be saved a paisa out.
+        if (_fin.rows.length === 2) {
+            const j = i === 0 ? 1 : 0;
+            _fin.rows[j].amount = x.value;
+            const other = tb.querySelector(`.fin-amt[data-i="${j}"]`);
+            if (other && document.activeElement !== other) other.value = x.value;
+        }
+        finRecalc();
+    }));
+    tb.querySelectorAll('.fin-del').forEach(b => b.addEventListener('click', () => { _fin.rows.splice(+b.dataset.i, 1); finRenderRows(); finRecalc(); }));
+}
+
+// Live Dr/Cr/difference. Save stays disabled until the two sides agree to the paisa.
+function finRecalc() {
+    let dr = 0, cr = 0;
+    _fin.rows.forEach(r => { const p = finPaise(r.amount); if (r.dr_cr === 'DR') dr += p; else cr += p; });
+    const diff = dr - cr;
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    set('fin-dr', finMoney(dr / 100)); set('fin-cr', finMoney(cr / 100)); set('fin-diff', finMoney(Math.abs(diff) / 100));
+    const d = document.getElementById('fin-diff');
+    if (d) d.className = 'font-bold ' + (diff === 0 ? 'text-emerald-600' : 'text-rose-600');
+
+    const named = _fin.rows.filter(r => r.ledger);
+    const filled = _fin.rows.filter(r => r.ledger && finPaise(r.amount) > 0);
+    const started = _fin.rows.filter(r => r.ledger || finPaise(r.amount) > 0);
+    const dupe = new Set(named.map(r => r.ledger)).size !== named.length;
+    let problem = null;
+    if (filled.length < 2) problem = 'Fill in at least two ledger rows.';
+    else if (filled.length !== started.length) problem = 'Every row needs both a ledger and an amount.';
+    else if (diff !== 0) problem = `Debit and credit differ by ${finMoney(Math.abs(diff) / 100)} — the voucher will not balance.`;
+    else if (dupe) problem = 'The same ledger appears twice — Tally would net them into one line.';
+
+    const w = document.getElementById('fin-warn');
+    if (w) { w.textContent = problem || 'Balanced and ready.'; w.className = 'text-xs mt-3 ' + (problem ? 'text-rose-600' : 'text-emerald-600'); }
+    const party = finInferParty();
+    const pe = document.getElementById('fin-party'); if (pe) pe.textContent = party || '—';
+    ['fin-save', 'fin-post'].forEach(id => {
+        const b = document.getElementById(id); if (!b) return;
+        const blockedByPerm = id === 'fin-post' && !(canPostTally() && _fin.status && _fin.status.postEnabled);
+        b.disabled = !!problem || blockedByPerm;
+    });
+    return !problem;
+}
+
+// The payload shape the API expects. party_ledger is inferred, not typed twice.
+function finPayload() {
+    return {
+        voucher_type: _fin.vt,
+        voucher_date: (document.getElementById('fin-date') || {}).value || finToday(),
+        party_ledger: finInferParty(),
+        reference: ((document.getElementById('fin-ref') || {}).value || '').trim() || null,
+        narration: ((document.getElementById('fin-narr') || {}).value || '').trim(),
+        entries: _fin.rows.filter(r => r.ledger && finPaise(r.amount) > 0).map(r => ({
+            ledger: r.ledger, dr_cr: r.dr_cr, amount: Number(r.amount),
+            ...(r.bill_ref ? { bill_ref: r.bill_ref } : {}),
+        })),
+    };
+}
+
+const finOptional = () => !!(document.getElementById('fin-optional') || {}).checked;
+
+async function finSubmit(alsoPost) {
+    if (!finRecalc()) { showNotification('Fix the highlighted problem first.', true); return; }
+    const payload = finPayload();
+    const total = payload.entries.filter(e => e.dr_cr === 'DR').reduce((s, e) => s + e.amount, 0);
+    const optional = finOptional();
+    if (alsoPost) {
+        const ok = await supConfirm({
+            title: optional ? 'Post as an Optional voucher?' : 'Post this voucher to Tally?',
+            message: `${_fin.vt} · ${finMoney(total)} · ${payload.voucher_date} → ${(_fin.status && _fin.status.company) || 'Tally'}. ` + (optional
+                ? 'It will appear in the Day Book but will NOT affect the P&L, balance sheet, ledger balances or GST returns until someone marks it regular in Tally.'
+                : 'This posts into the live books and cannot be undone from here — it would have to be deleted inside Tally.'),
+            confirmLabel: optional ? 'Post as Optional' : 'Post to Tally',
+            danger: !optional,
+        });
+        if (!ok) return;
+    }
+    const save = document.getElementById('fin-save'), post = document.getElementById('fin-post');
+    [save, post].forEach(b => { if (b) b.disabled = true; });
+    try {
+        const d = await supFetch('/api/tally/vouchers', { method: 'POST', body: JSON.stringify(payload) });
+        if (!alsoPost) {
+            showNotification('Draft saved — find it in the Voucher Register.');
+            finSeedRows(); finRenderEntry(); return;
+        }
+        const p = await supFetch(`/api/tally/vouchers/${d.row.id}/post`, { method: 'POST', body: JSON.stringify({ optional }) });
+        showNotification(p.queued ? p.message
+            : `${optional ? 'Posted as OPTIONAL (books unaffected)' : 'Posted to Tally'}${p.row && p.row.tally_voucher_number ? ' — voucher ' + p.row.tally_voucher_number : ''}`);
+        finSeedRows(); finRenderEntry();
+    } catch (e) {
+        // A draft that saved but failed to post stays in the register as `failed` with Tally's own
+        // message, so nothing is silently lost.
+        showNotification(e.message, true);
+    } finally { finRecalc(); }
+}
+
+async function finPreviewXml() {
+    if (!finRecalc()) { showNotification('Fix the highlighted problem first.', true); return; }
+    try {
+        const d = await supFetch('/api/tally/vouchers/preview-xml', { method: 'POST', body: JSON.stringify({ ...finPayload(), optional: finOptional() }) });
+        finXmlModal('XML that will be sent to Tally' + (finOptional() ? ' (Optional — books unaffected)' : ''), d.xml);
+    } catch (e) { showNotification(e.message, true); }
+}
+
+function finXmlModal(title, xml) {
+    document.getElementById('fin-xml-modal')?.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'fin-xml-modal';
+    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-3xl flex flex-col max-h-[85vh]">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+        <h3 class="text-lg font-bold text-slate-800">${escapeHtml(title)}</h3>
+        <button class="fin-x text-slate-400 hover:text-slate-700 text-2xl leading-none">&times;</button></div>
+      <pre class="px-6 py-4 overflow-auto text-[11px] leading-relaxed font-mono text-slate-700 whitespace-pre">${escapeHtml(xml || '(empty)')}</pre>
+      <div class="px-6 py-3 border-t border-slate-200 flex justify-end gap-2">
+        <button class="fin-copy text-sm px-4 py-2 rounded-lg border border-slate-300 font-semibold text-slate-600 hover:bg-slate-50">Copy</button>
+        <button class="fin-x text-sm px-4 py-2 rounded-lg bg-slate-800 text-white font-semibold">Close</button></div></div>`;
+    wrap.addEventListener('click', e => { if (e.target === wrap) wrap.remove(); });
+    wrap.querySelectorAll('.fin-x').forEach(b => b.addEventListener('click', () => wrap.remove()));
+    wrap.querySelector('.fin-copy')?.addEventListener('click', () => {
+        navigator.clipboard?.writeText(xml || '').then(() => showNotification('XML copied')).catch(() => {});
+    });
+    document.body.appendChild(wrap);
+}
+
+// Re-book a draft against a different ledger, without going back to the bank-statement screen.
+// Only the counter-ledger and the narration change: the bank side, the amount and the date are the
+// statement's own facts and are rebuilt untouched.
+async function finRemapWire(wrap, r) {
+    const inp = wrap.querySelector('#fin-remap');
+    const btn = wrap.querySelector('#fin-remap-save');
+    const note = wrap.querySelector('#fin-remap-note');
+    const nar = wrap.querySelector('#fin-renarrate');
+    if (!inp || !btn) return;
+
+    // The picker reads _fb2.ledgers. In the register that list may be empty, or loaded for a different
+    // company, so fetch this voucher's own company before the field can be used.
+    // Tracked separately from _fb2.company — that one drives the bank tab's company dropdown and is
+    // the company an import posts INTO, so opening a drawer must never quietly change it.
+    if (!_fb2.ledgers.length || _fb2.ledgerCompany !== r.company) {
+        inp.disabled = true;
+        try {
+            const d = await supFetch('/api/tally/masters?kind=ledger&company=' + encodeURIComponent(r.company || ''));
+            _fb2.ledgers = d.rows || [];
+            _fb2.byName = new Map(_fb2.ledgers.map(l => [l.name, l]));
+            _fb2.ledgerCompany = r.company;
+        } catch (e) { if (note) note.textContent = 'Could not load the ledger list: ' + e.message; }
+        inp.disabled = false;
+    }
+
+    const dirty = () => (inp.value.trim() && inp.value.trim() !== r.party_ledger)
+                     || (nar && nar.value.trim() !== (r.narration || ''));
+    const refresh = () => { btn.disabled = !dirty(); };
+    inp.addEventListener('focus', () => fb2PickOpen(inp));
+    inp.addEventListener('input', () => { fb2PickOpen(inp); refresh(); });
+    inp.addEventListener('keydown', fb2PickKey);
+    inp.addEventListener('change', refresh);
+    nar?.addEventListener('input', refresh);
+
+    btn.addEventListener('click', async () => {
+        const ledger = inp.value.trim();
+        if (!ledger) return;
+        // A ledger Tally doesn't have would be auto-created under Suspense at posting time, so refuse
+        // here rather than let that happen quietly.
+        if (!_fb2.byName.has(ledger)) {
+            showNotification(`"${ledger}" is not a ledger in ${r.company}. Create it first.`, true);
+            return;
+        }
+        btn.disabled = true; btn.textContent = 'Saving…';
+        // Swap ONLY the line that currently names the party. Identifying the bank side by a /BANK|CASH/
+        // guess would rename every line the moment that guess failed, putting both sides of the voucher
+        // on one ledger.
+        if (!(r.entries || []).some(e => e.ledger === r.party_ledger)) {
+            showNotification('This entry does not have a line for its own party ledger — edit it in Data Entry instead.', true);
+            btn.disabled = false; btn.textContent = 'Save';
+            return;
+        }
+        const entries = (r.entries || []).map(e => e.ledger === r.party_ledger ? { ...e, ledger } : e);
+        try {
+            await supFetch('/api/tally/vouchers/' + r.id, { method: 'PUT', body: JSON.stringify({
+                company: r.company, voucher_type: r.voucher_type, voucher_date: r.voucher_date,
+                party_ledger: ledger, reference: r.reference || '',
+                narration: nar ? nar.value.trim() : r.narration, entries,
+            }) });
+            showNotification(`Re-booked to ${ledger}`);
+            wrap.remove();
+            finRegisterLoad();
+        } catch (e) {
+            showNotification(e.message, true);
+            btn.disabled = false; btn.textContent = 'Save';
+        }
+    });
+}
+
+// ── Voucher Register ─────────────────────────────────────────────────────────────────────────────
+function finRegisterInit() {
+    if (!_finReg.wired) {
+        _finReg.wired = true;
+        document.getElementById('fin-reg-refresh')?.addEventListener('click', finRegisterLoad);
+        document.getElementById('fin-reg-status')?.addEventListener('change', finRegisterLoad);
+        document.getElementById('fin-reg-from')?.addEventListener('change', () => { _finReg.sel.clear(); finRegisterLoad(); });
+        document.getElementById('fin-reg-to')?.addEventListener('change', () => { _finReg.sel.clear(); finRegisterLoad(); });
+        // Re-sorting drops the selection on purpose. The list is capped, so a different order can return
+        // a different set of rows — and a tick that survives into a batch the operator can no longer see
+        // is exactly how the wrong voucher gets posted.
+        document.getElementById('fin-reg-sort')?.addEventListener('change', () => { _finReg.sel.clear(); finRegisterLoad(); });
+        let t; document.getElementById('fin-reg-search')?.addEventListener('input', () => { clearTimeout(t); t = setTimeout(finRegisterLoad, 350); });
+    }
+    finRegisterLoad();
+}
+
+// -- Push batches (nightly 11:50 PM run + Teams approval) ---------------------------------------
+const _finB = { rows: [] };
+async function finBatchesLoad() {
+    const box = document.getElementById('fin-batches');
+    if (!box) return;
+    try {
+        const d = await supFetch('/api/tally/batches?limit=20');
+        _finB.rows = d.rows || [];
+        finBatchesRender(!!d.canApprove);
+    } catch (e) { box.innerHTML = ''; }
+}
+
+const FINB_PILL = {
+    awaiting_approval: ['bg-amber-50 text-amber-800 border border-amber-200', 'Awaiting approval'],
+    approved: ['bg-sky-50 text-sky-700', 'Approved'], pushing: ['bg-sky-50 text-sky-700', 'Pushing...'],
+    done: ['bg-emerald-50 text-emerald-700', 'Done'], failed: ['bg-rose-50 text-rose-700', 'Failed'],
+    rejected: ['bg-slate-100 text-slate-500', 'Rejected'], expired: ['bg-slate-100 text-slate-400', 'Expired'],
+    empty: ['bg-slate-100 text-slate-400', 'Nothing to push'],
+};
+
+function finBatchesRender(canApprove) {
+    const box = document.getElementById('fin-batches');
+    if (!box) return;
+    const rows = _finB.rows;
+    if (!rows.length) { box.innerHTML = ''; return; }
+    const pending = rows.find(b => b.status === 'awaiting_approval');
+    const pill = (st) => FINB_PILL[st] || ['bg-slate-100 text-slate-600', st];
+
+    box.innerHTML = `
+      ${pending ? `<div class="card p-5 mb-5 border-l-4 border-amber-400">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p class="text-[11px] font-bold text-amber-700 uppercase tracking-wide">Awaiting approval</p>
+            <h3 class="text-lg font-bold text-slate-800 mt-0.5">${escapeHtml(pending.ref)} &middot; ${pending.voucher_count} voucher${pending.voucher_count === 1 ? '' : 's'} &middot; ${finMoney(pending.total_amount)}</h3>
+            <p class="text-xs text-slate-500 mt-1">${escapeHtml(pending.company || '')}${pending.blocked_count ? ` &middot; <span class="text-rose-600 font-semibold">${pending.blocked_count} blocked</span>` : ''}${pending.expires_at ? ' &middot; expires ' + new Date(pending.expires_at).toLocaleString('en-IN') : ''}</p>
+            <p class="text-xs text-slate-400 mt-1">Nothing has been sent to Tally yet. Approve here, or reply <b>yes</b> in the Teams finance channel.</p>
+          </div>
+          ${canApprove ? `<div class="flex gap-2 shrink-0">
+            <button id="finb-reject" class="text-sm px-4 py-2 rounded-lg border border-rose-200 text-rose-700 font-semibold hover:bg-rose-50">Reject</button>
+            <button id="finb-approve" class="text-sm px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Approve &amp; push</button>
+          </div>` : '<p class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 shrink-0">Only an admin can approve.</p>'}
+        </div>
+        ${pending.blocked_count && pending.blocked ? `<div class="mt-3 pt-3 border-t border-slate-200">
+          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-1.5">Blocked &mdash; staying as drafts</p>
+          ${(pending.blocked || []).slice(0, 6).map(b => `<p class="text-xs text-slate-600">&middot; ${escapeHtml(finDMY(b.date))} <b>${escapeHtml(b.type)}</b> ${finMoney(b.amount)} &mdash; <span class="text-rose-600">${escapeHtml(b.error || '')}</span></p>`).join('')}
+        </div>` : ''}
+      </div>` : ''}
+      <details class="card p-4 mb-5"${pending ? '' : ' open'}>
+        <summary class="text-xs font-bold text-slate-400 uppercase tracking-wide cursor-pointer">Push history (${rows.length})</summary>
+        <div class="overflow-x-auto mt-3"><table class="w-full text-sm">
+          <tbody>${rows.map(b => { const p2 = pill(b.status); return `<tr class="border-b border-slate-100 last:border-0">
+            <td class="px-2 py-2 font-mono text-xs">${escapeHtml(b.ref)}</td>
+            <td class="px-2 py-2"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${p2[0]}">${p2[1]}</span></td>
+            <td class="px-2 py-2 text-right font-semibold">${finMoney(b.total_amount)}</td>
+            <td class="px-2 py-2 text-xs text-slate-500">${b.posted_count || 0} posted${b.failed_count ? ` &middot; <span class="text-rose-600">${b.failed_count} failed</span>` : ''}${b.blocked_count ? ` &middot; ${b.blocked_count} blocked` : ''}</td>
+            <td class="px-2 py-2 text-xs text-slate-400">${escapeHtml(b.approved_by || b.rejected_by || '—')}${b.approval_source ? ' &middot; ' + escapeHtml(b.approval_source) : ''}</td>
+            <td class="px-2 py-2 text-xs text-slate-400 whitespace-nowrap">${new Date(b.created_at).toLocaleString('en-IN')}</td>
+            ${b.error ? `<td class="px-2 py-2 text-xs text-rose-500 max-w-[220px] truncate" title="${escapeHtml(b.error)}">${escapeHtml(b.error)}</td>` : '<td></td>'}
+          </tr>`; }).join('')}</tbody></table></div>
+      </details>`;
+
+    document.getElementById('finb-approve')?.addEventListener('click', async () => {
+        if (!(await supConfirm({ title: 'Approve and push to Tally?',
+            message: `${pending.ref}: ${pending.voucher_count} voucher(s), ${finMoney(pending.total_amount)} will be posted into ${pending.company}. This cannot be undone from here.`,
+            confirmLabel: 'Approve & push', danger: true }))) return;
+        try { const d = await supFetch(`/api/tally/batches/${pending.id}/approve`, { method: 'POST' });
+              showNotification(`Approved - ${d.queued} voucher(s) queued for Tally`); finRegisterLoad(); }
+        catch (e) { showNotification(e.message, true); }
+    });
+    document.getElementById('finb-reject')?.addEventListener('click', async () => {
+        if (!(await supConfirm({ title: 'Reject this batch?', message: 'All its vouchers go back to draft. Nothing is sent to Tally.', confirmLabel: 'Reject', danger: true }))) return;
+        try { await supFetch(`/api/tally/batches/${pending.id}/reject`, { method: 'POST' });
+              showNotification('Batch rejected - vouchers returned to draft'); finRegisterLoad(); }
+        catch (e) { showNotification(e.message, true); }
+    });
+}
+
+// ── Admin delete of a dashboard entry ────────────────────────────────────────────────────────────
+// Deliberately separate from "Cancel": Cancel is a soft status change that leaves the row in the
+// register, this removes it. It never touches Tally — a voucher already in Tally has to be removed
+// inside Tally (Alt+D), and the dialog says so rather than leaving the two silently out of step.
+// A reason is required for a posted voucher (real accounting history) and optional otherwise.
+function finDeletePrompt(v) {
+    return new Promise(resolve => {
+        const posted = v.status === 'posted';
+        document.getElementById('fin-del-modal')?.remove();
+        const wrap = document.createElement('div');
+        wrap.id = 'fin-del-modal';
+        wrap.className = 'fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/50 p-4';
+        wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-md flex flex-col">
+          <div class="px-6 py-4 border-b border-slate-200">
+            <h3 class="text-lg font-bold text-slate-800">Delete this entry?</h3>
+            <p class="text-xs text-slate-500 mt-1">${escapeHtml(v.voucher_type)} · ${finMoney(v.total_amount)} · ${escapeHtml(finDMY(v.voucher_date))}${v.party_ledger ? ' · ' + escapeHtml(v.party_ledger) : ''}</p>
+          </div>
+          <div class="px-6 py-4 space-y-3">
+            ${posted ? `<div class="text-xs bg-amber-50 border border-amber-200 text-amber-900 rounded-lg px-3 py-2">
+              <b>This voucher was posted to Tally</b>${v.tally_voucher_number || v.tally_masterid ? ` (Tally id ${escapeHtml(v.tally_voucher_number || v.tally_masterid)})` : ''}.
+              Deleting here removes only <b>our record</b> — it stays in Tally. Delete it in Tally with <b>Alt+D</b> if you mean to reverse it.</div>`
+            : '<p class="text-xs text-slate-500">The entry is removed from the register. A full snapshot — including who entered it — is kept in the deletion log.</p>'}
+            <label class="block"><span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Reason${posted ? ' (required)' : ' (optional)'}</span>
+              <textarea id="fin-del-reason" rows="2" class="filter-input w-full mt-1 resize-y" placeholder="Why is this being deleted?"></textarea></label>
+            <p id="fin-del-err" class="text-xs text-rose-600 hidden"></p>
+          </div>
+          <div class="px-6 py-3 border-t border-slate-200 flex justify-end gap-2">
+            <button class="fin-del-x text-sm px-4 py-2 rounded-lg border border-slate-300 font-semibold text-slate-600 hover:bg-slate-50">Keep it</button>
+            <button id="fin-del-go" class="text-sm px-4 py-2 rounded-lg bg-rose-600 text-white font-semibold hover:bg-rose-700">Delete entry</button>
+          </div></div>`;
+        const close = (val) => { wrap.remove(); resolve(val); };
+        wrap.addEventListener('click', e => { if (e.target === wrap) close(null); });
+        wrap.querySelectorAll('.fin-del-x').forEach(b => b.addEventListener('click', () => close(null)));
+        wrap.querySelector('#fin-del-go').addEventListener('click', () => {
+            const reason = (document.getElementById('fin-del-reason') || {}).value || '';
+            if (posted && !reason.trim()) {
+                const e = document.getElementById('fin-del-err');
+                e.textContent = 'A reason is required when deleting a voucher that reached Tally.';
+                e.classList.remove('hidden');
+                return;
+            }
+            close({ reason: reason.trim() });
+        });
+        document.body.appendChild(wrap);
+        setTimeout(() => document.getElementById('fin-del-reason')?.focus(), 50);
+    });
+}
+
+// ── Deletion log ─────────────────────────────────────────────────────────────────────────────────
+async function finDeletionsLoad() {
+    const box = document.getElementById('fin-deletions');
+    if (!box) return;
+    try {
+        const d = await supFetch('/api/tally/deletions?limit=100');
+        const rows = d.rows || [];
+        if (!rows.length) { box.innerHTML = ''; return; }
+        const TD = 'px-2 py-2 text-xs text-slate-600 border-b border-slate-100';
+        box.innerHTML = `<details class="card p-4 mb-5">
+          <summary class="text-xs font-bold text-slate-400 uppercase tracking-wide cursor-pointer">Deleted entries (${rows.length})</summary>
+          <p class="text-[11px] text-slate-400 mt-2">Entries removed from the dashboard. Deleting here never removed anything from Tally.</p>
+          <div class="overflow-x-auto mt-2"><table class="w-full">
+            <tbody>${rows.map(r => `<tr>
+              <td class="${TD} whitespace-nowrap">${escapeHtml(finDMY(r.voucher_date))}</td>
+              <td class="${TD} font-semibold text-slate-700">${escapeHtml(r.voucher_type || '—')}</td>
+              <td class="${TD} max-w-[200px] truncate" title="${escapeHtml(r.party_ledger || '')}">${escapeHtml(r.party_ledger || '—')}</td>
+              <td class="${TD} text-right font-semibold">${finMoney(r.total_amount)}</td>
+              <td class="${TD}">was <b>${escapeHtml(r.prior_status || '?')}</b>${r.was_posted ? ` <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800">still in Tally${r.tally_voucher_number || r.tally_masterid ? ' #' + escapeHtml(r.tally_voucher_number || r.tally_masterid) : ''}</span>` : ''}</td>
+              <td class="${TD}">entered by ${escapeHtml(r.entered_by || '—')}</td>
+              <td class="${TD}">deleted by <b>${escapeHtml(r.deleted_by || '—')}</b><br><span class="text-slate-400">${new Date(r.deleted_at).toLocaleString('en-IN')}</span></td>
+              <td class="${TD} max-w-[220px]">${escapeHtml(r.reason || '—')}</td>
+            </tr>`).join('')}</tbody></table></div>
+        </details>`;
+    } catch (e) { box.innerHTML = ''; }
+}
+
+async function finRegisterLoad() {
+    const body = document.getElementById('fin-reg-body');
+    if (body) body.innerHTML = brandLoader('Loading vouchers…');
+    const p = new URLSearchParams();
+    const g = id => (document.getElementById(id) || {}).value || '';
+    if (g('fin-reg-status')) p.set('status', g('fin-reg-status'));
+    if (g('fin-reg-from')) p.set('from', g('fin-reg-from'));
+    if (g('fin-reg-to')) p.set('to', g('fin-reg-to'));
+    if (g('fin-reg-search')) p.set('q', g('fin-reg-search'));
+    if (g('fin-reg-sort')) p.set('sort', g('fin-reg-sort'));
+    try {
+        p.set('limit', String(_finReg.limit));
+        const d = await supFetch('/api/tally/vouchers?' + p.toString());
+        _finReg.rows = d.rows || [];
+        // Learn which months exist from the FIRST, unfiltered load — once a month is selected the reply
+        // only covers that month, and rebuilding the bar from it would leave a single button.
+        if (!_finReg.months && !g('fin-reg-from') && !g('fin-reg-to'))
+            _finReg.months = [...new Set(_finReg.rows.map(r => String(r.voucher_date).slice(0, 7)))].sort();
+        finMonthBar();
+        finRegisterRender();
+        finBatchesLoad();
+        finDeletionsLoad();
+    } catch (e) { if (body) body.innerHTML = `<div class="card p-8 text-center text-sm text-rose-600">${escapeHtml(e.message)}</div>`; }
+}
+
+const FIN_MONTH = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const finMonthLabel = (ym) => `${FIN_MONTH[Number(ym.slice(5, 7)) - 1]} ${ym.slice(2, 4)}`;
+const finMonthEnd = (ym) => {
+    const y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7));
+    return `${ym}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;   // day 0 of next month = last of this
+};
+
+// One click per month, so a year is worked through in reviewable pieces rather than one 800-voucher push.
+function finMonthBar() {
+    const host = document.getElementById('fin-reg-months');
+    if (!host) return;
+    const months = _finReg.months || [];
+    if (!months.length) { host.innerHTML = ''; return; }
+    const from = (document.getElementById('fin-reg-from') || {}).value || '';
+    const active = from ? from.slice(0, 7) : '';
+    const btn = (key, label, on) => `<button class="fin-mth px-3 py-1.5 rounded-lg text-xs font-semibold ${
+        on ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-600'}" data-m="${key}">${label}</button>`;
+    host.innerHTML = `<div class="flex flex-wrap items-center gap-2">
+        <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mr-1">Post month by month</span>
+        ${btn('', 'All', !active)}${months.map(m => btn(m, finMonthLabel(m), m === active)).join('')}</div>`;
+
+    host.querySelectorAll('.fin-mth').forEach(b => b.addEventListener('click', () => {
+        const m = b.dataset.m;
+        const f = document.getElementById('fin-reg-from'), t = document.getElementById('fin-reg-to');
+        if (f) f.value = m ? `${m}-01` : '';
+        if (t) t.value = m ? finMonthEnd(m) : '';
+        _finReg.sel.clear();          // the ticks belonged to the previous month's list
+        finRegisterLoad();
+    }));
+}
+
+const FIN_PILL = {
+    draft:     ['bg-slate-100 text-slate-600', 'Draft'],
+    awaiting_approval: ['bg-amber-50 text-amber-800', 'Awaiting approval'],
+    queued:    ['bg-sky-50 text-sky-700', 'Queued'],
+    posting:   ['bg-sky-50 text-sky-700', 'Posting…'],
+    posted:    ['bg-emerald-50 text-emerald-700', 'Posted'],
+    failed:    ['bg-rose-50 text-rose-700', 'Failed'],
+    cancelled: ['bg-slate-100 text-slate-400', 'Cancelled'],
+};
+
+// DD-MM-YYYY for display; voucher_date arrives as YYYY-MM-DD from Postgres.
+const finDMY = (d) => String(d || '').split('-').reverse().join('-') || '—';
+
+function finRegisterRender() {
+    const body = document.getElementById('fin-reg-body');
+    if (!body) return;
+    const rows = _finReg.rows;
+    if (!rows.length) { body.innerHTML = '<div id="fin-batches"></div><div id="fin-deletions"></div><div class="card p-10 text-center text-sm text-slate-400">No vouchers yet — create one in Data Entry.</div>'; finBatchesLoad(); finDeletionsLoad(); return; }
+    const TH = 'px-4 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+    const TD = 'px-4 py-3 text-sm text-slate-700 border-b border-slate-100 align-middle';
+    const counts = rows.reduce((a, r) => (a[r.status] = (a[r.status] || 0) + 1, a), {});
+
+    body.innerHTML = `
+      <div id="fin-batches"></div>
+      <div id="fin-deletions"></div>
+      <div class="flex flex-wrap gap-2 text-xs">${Object.keys(FIN_PILL).filter(s => counts[s]).map(s =>
+        `<span class="px-3 py-1.5 rounded-full font-semibold ${FIN_PILL[s][0]}">${FIN_PILL[s][1]}: ${counts[s]}</span>`).join('')}</div>
+      ${rows.length >= _finReg.limit ? `<div class="card p-3 border-l-4 border-amber-400 text-xs text-amber-900 bg-amber-50">
+        <b>Showing the first ${rows.length} only.</b> There are more vouchers than fit in one page, so the counts above and
+        "select all" cover what is listed here &mdash; not everything. Narrow it with a date range, status or search.</div>` : ''}
+      <div id="fin-pushbar"></div>
+      <div class="card overflow-x-auto"><table class="w-full">
+        <thead><tr><th class="${TH}"><input type="checkbox" id="fin-selall" title="Select every postable row shown"></th>${
+          ['Date', 'Type', 'Party', 'Narration', 'Amount', 'Status', 'Tally vch', 'By', ''].map(h => `<th class="${TH}">${h}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(r => {
+            const pill = FIN_PILL[r.status] || ['bg-slate-100 text-slate-600', r.status];
+            const postable = ['draft', 'failed'].includes(r.status);
+            return `<tr class="hover:bg-slate-50${_finReg.sel.has(r.id) ? ' bg-indigo-50/40' : ''}">
+              <td class="${TD}">${postable ? `<input type="checkbox" class="fin-pick" data-id="${r.id}"${_finReg.sel.has(r.id) ? ' checked' : ''}>` : ''}</td>
+              <td class="${TD} whitespace-nowrap">${escapeHtml(finDMY(r.voucher_date))}</td>
+              <td class="${TD} font-semibold">${escapeHtml(r.voucher_type)}</td>
+              <td class="${TD} max-w-[220px] truncate" title="${escapeHtml(r.party_ledger || '')}">${escapeHtml(r.party_ledger || '—')}</td>
+              <td class="${TD} max-w-[260px] truncate text-slate-500" title="${escapeHtml(r.narration || '')}">${escapeHtml(r.narration || '—')}</td>
+              <td class="${TD} text-right font-semibold whitespace-nowrap">${finMoney(r.total_amount)}</td>
+              <td class="${TD}"><span class="px-2.5 py-1 rounded-full text-[11px] font-semibold ${pill[0]}">${pill[1]}</span>
+                ${r.status === 'failed' && r.error ? `<span class="block text-[11px] text-rose-500 mt-1 max-w-[240px] truncate" title="${escapeHtml(r.error)}">${escapeHtml(r.error)}</span>` : ''}</td>
+              <td class="${TD} font-mono text-xs">${escapeHtml(r.tally_voucher_number || r.tally_masterid || '—')}</td>
+              <td class="${TD} text-xs text-slate-500">${escapeHtml(r.created_by || '—')}</td>
+              <td class="${TD} text-right"><button class="fin-open text-xs px-3 py-1.5 rounded-lg border border-slate-300 font-semibold text-slate-600 hover:bg-slate-50" data-id="${r.id}">Open</button></td>
+            </tr>`;
+        }).join('')}</tbody></table></div>`;
+    body.querySelectorAll('.fin-open').forEach(b => b.addEventListener('click', () => finVoucherDrawer(b.dataset.id)));
+    body.querySelectorAll('.fin-pick').forEach(c => c.addEventListener('change', () => {
+        if (c.checked) _finReg.sel.add(c.dataset.id); else _finReg.sel.delete(c.dataset.id);
+        finPushBar();
+        c.closest('tr').classList.toggle('bg-indigo-50/40', c.checked);
+    }));
+    document.getElementById('fin-selall')?.addEventListener('change', (e) => {
+        const postable = rows.filter(r => ['draft', 'failed'].includes(r.status));
+        if (e.target.checked) postable.forEach(r => _finReg.sel.add(r.id)); else _finReg.sel.clear();
+        finRegisterRender();
+    });
+    finPushBar();
+}
+
+// Selection bar: how many are picked, what they are worth, and the button that posts them.
+// Only shown to an admin, because only an admin can post (the server enforces it regardless).
+function finPushBar() {
+    const host = document.getElementById('fin-pushbar');
+    if (!host) return;
+    const picked = _finReg.rows.filter(r => _finReg.sel.has(r.id));
+    if (!picked.length) { host.innerHTML = ''; return; }
+    const total = picked.reduce((a, r) => a + Number(r.total_amount || 0), 0);
+    const companies = [...new Set(picked.map(r => r.company).filter(Boolean))];
+    host.innerHTML = `<div class="card p-4 mb-4 border-l-4 border-indigo-500 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p class="text-sm font-bold text-slate-800">${picked.length} voucher(s) selected &middot; ${finMoney(total)}</p>
+          <p class="text-xs text-slate-500 mt-0.5">into ${companies.map(escapeHtml).join(', ')}${
+            companies.length > 1 ? ' <span class="text-rose-600 font-semibold">&mdash; more than one company, check this is intended</span>' : ''}</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="fin-clearsel" class="filter-btn">Clear</button>
+          ${canPostTally() ? `<button id="fin-pushsel" class="px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-40">Post ${picked.length} to Tally</button>`
+            : '<span class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">Only an admin can post</span>'}
+        </div></div>`;
+    document.getElementById('fin-clearsel')?.addEventListener('click', () => { _finReg.sel.clear(); finRegisterRender(); });
+    document.getElementById('fin-pushsel')?.addEventListener('click', () => finPushSelected(picked));
+}
+
+// Posts in small chunks so progress is honest and one bad voucher can't run away with hundreds more.
+// The server posts each voucher individually and stops the chunk on the first failure.
+async function finPushSelected(picked) {
+    if (_finReg.pushing) return;
+    const total = picked.reduce((a, r) => a + Number(r.total_amount || 0), 0);
+    if (!(await supConfirm({
+        title: `Post ${picked.length} voucher(s) to Tally?`,
+        message: `${finMoney(total)} will be written into your books. This cannot be undone from here — a wrong voucher has to be deleted inside Tally. Posting stops automatically if one fails.`,
+        confirmLabel: `Post ${picked.length}`, danger: true,
+    }))) return;
+
+    _finReg.pushing = true;
+    const btn = document.getElementById('fin-pushsel');
+    const ids = picked.map(r => r.id);
+    let posted = 0, failed = 0, stopped = false;
+    const failures = [];
+    try {
+        for (let i = 0; i < ids.length; i += 25) {
+            const chunk = ids.slice(i, i + 25);
+            const r = await supFetch('/api/tally/vouchers/post-bulk', { method: 'POST', body: JSON.stringify({ ids: chunk }) });
+            posted += r.posted; failed += r.failed;
+            (r.results || []).filter(x => !x.ok).forEach(x => failures.push(x));
+            if (btn) btn.textContent = `Posting… ${posted + failed}/${ids.length}`;
+            if (r.failed > 0) { stopped = true; break; }   // server stopped this chunk; don't push more
+        }
+    } catch (e) { showNotification(e.message, true); }
+    finally {
+        _finReg.pushing = false;
+        _finReg.sel.clear();
+        if (stopped) {
+            const first = failures[0];
+            showNotification(`Stopped after ${posted} posted — ${first ? first.error : 'a voucher failed'}`, true);
+            console.warn('[bulk post] failures:', failures);
+        } else if (failed) showNotification(`${posted} posted, ${failed} failed`, true);
+        else showNotification(`${posted} voucher(s) posted to Tally`);
+        finRegisterLoad();
+    }
+}
+
+// Full detail + the exact XML exchanged with Tally — this is what an auditor asks for.
+async function finVoucherDrawer(id) {
+    let r;
+    try { r = (await supFetch('/api/tally/vouchers/' + id)).row; }
+    catch (e) { showNotification(e.message, true); return; }
+
+    const pill = FIN_PILL[r.status] || ['bg-slate-100 text-slate-600', r.status];
+    const canRetry = ['draft', 'failed'].includes(r.status) && canPostTally();
+    // The Optional flag isn't a column — it lives in the XML that was actually sent, which is the
+    // audit record. Read it back from there so the badge and any retry stay faithful to the original.
+    const wasOptional = /<ISOPTIONAL>Yes<\/ISOPTIONAL>/i.test(r.request_xml || '');
+    document.getElementById('fin-drawer')?.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'fin-drawer';
+    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-2xl flex flex-col max-h-[88vh]">
+      <div class="flex items-start justify-between px-6 py-4 border-b border-slate-200">
+        <div><h3 class="text-lg font-bold text-slate-800">${escapeHtml(r.voucher_type)} · ${finMoney(r.total_amount)}</h3>
+          <p class="text-xs text-slate-500 mt-0.5">${escapeHtml(finDMY(r.voucher_date))} · ${escapeHtml(r.company || '')}${r.reference ? ' · ref ' + escapeHtml(r.reference) : ''}</p></div>
+        <div class="flex items-center gap-3"><span class="px-2.5 py-1 rounded-full text-[11px] font-semibold ${pill[0]}">${pill[1]}</span>
+          <button class="fin-x text-slate-400 hover:text-slate-700 text-2xl leading-none">&times;</button></div></div>
+      <div class="px-6 py-4 overflow-auto space-y-4">
+        ${wasOptional ? '<div class="text-xs bg-sky-50 border border-sky-200 text-sky-800 rounded-lg px-3 py-2"><b>Optional voucher</b> — sits in Tally\'s Day Book only; the P&amp;L, balance sheet, ledger balances and GST returns are unaffected until someone marks it regular in Tally.</div>' : ''}
+        ${r.error ? `<div class="text-sm bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2"><b>Tally said:</b> ${escapeHtml(r.error)}</div>` : ''}
+        <div><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-2">Ledger entries</p>
+          <table class="w-full text-sm border border-slate-200 rounded-lg overflow-hidden">
+            <tbody>${(r.entries || []).map(e => `<tr class="border-b border-slate-100 last:border-0">
+              <td class="px-3 py-2">${escapeHtml(e.ledger)}${e.bill_ref ? `<span class="block text-[11px] text-slate-400">bill: ${escapeHtml(e.bill_ref)}</span>` : ''}</td>
+              <td class="px-3 py-2 w-16 font-semibold ${e.dr_cr === 'DR' ? 'text-slate-700' : 'text-slate-500'}">${e.dr_cr}</td>
+              <td class="px-3 py-2 w-32 text-right font-semibold">${finMoney(e.amount)}</td></tr>`).join('')}</tbody></table></div>
+        ${['draft', 'failed'].includes(r.status) ? `<div>
+          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-2">Book against</p>
+          <div class="flex flex-wrap items-center gap-2">
+            <!-- min-width inline: tailwind.css is pre-compiled and has no min-w-[220px] rule -->
+            <input id="fin-remap" class="fb2-led filter-input flex-1 text-sm" style="min-width:220px" data-pickmode="plain"
+                   autocomplete="off" role="combobox" aria-expanded="false"
+                   value="${escapeHtml(r.party_ledger || '')}" placeholder="type to search…">
+            <button id="fin-remap-save" class="text-sm px-4 py-2 rounded-lg bg-slate-800 text-white font-semibold" disabled>Save</button>
+          </div>
+          <p id="fin-remap-note" class="text-[11px] text-slate-400 mt-1">Changing this re-books the whole entry &mdash; the amount and date stay as they are.</p>
+        </div>` : ''}
+        ${r.narration ? `<div><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-1">Narration</p>
+          ${['draft', 'failed'].includes(r.status)
+            ? `<input id="fin-renarrate" class="filter-input w-full text-sm" value="${escapeHtml(r.narration)}">`
+            : `<p class="text-sm text-slate-600">${escapeHtml(r.narration)}</p>`}</div>` : ''}
+        <div class="text-xs text-slate-400">Drafted by ${escapeHtml(r.created_by || '—')} on ${new Date(r.created_at).toLocaleString('en-IN')}${
+          r.posted_at ? ` · posted ${new Date(r.posted_at).toLocaleString('en-IN')} by ${escapeHtml(r.posted_by || '—')}` : ''}${
+          r.attempts ? ` · ${r.attempts} attempt(s)` : ''}</div>
+      </div>
+      <div class="px-6 py-3 border-t border-slate-200 flex flex-wrap justify-end gap-2">
+        ${r.request_xml ? '<button class="fin-req text-sm px-4 py-2 rounded-lg border border-slate-300 font-semibold text-slate-600 hover:bg-slate-50">Request XML</button>' : ''}
+        ${r.response_xml ? '<button class="fin-res text-sm px-4 py-2 rounded-lg border border-slate-300 font-semibold text-slate-600 hover:bg-slate-50">Tally reply</button>' : ''}
+        ${['draft', 'failed'].includes(r.status) ? '<button class="fin-cancel text-sm px-4 py-2 rounded-lg border border-rose-200 text-rose-700 font-semibold hover:bg-rose-50">Cancel</button>' : ''}
+        ${(currentUser && currentUser.isAdmin) && !['queued', 'posting', 'awaiting_approval'].includes(r.status)
+            ? '<button class="fin-delete text-sm px-4 py-2 rounded-lg bg-rose-600 text-white font-semibold hover:bg-rose-700">Delete entry</button>' : ''}
+        ${canRetry ? `<button class="fin-retry text-sm px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">${r.status === 'failed' ? 'Retry post' : 'Post to Tally'}</button>` : ''}
+        <button class="fin-x text-sm px-4 py-2 rounded-lg bg-slate-800 text-white font-semibold">Close</button></div></div>`;
+
+    const shut = () => { fb2PickClose(); wrap.remove(); };   // the ledger list outlives the drawer otherwise
+    wrap.addEventListener('click', e => { if (e.target === wrap) shut(); });
+    wrap.querySelectorAll('.fin-x').forEach(b => b.addEventListener('click', shut));
+    finRemapWire(wrap, r);
+    wrap.querySelector('.fin-req')?.addEventListener('click', () => finXmlModal('Request sent to Tally', r.request_xml));
+    wrap.querySelector('.fin-res')?.addEventListener('click', () => finXmlModal('Reply from Tally', r.response_xml));
+    wrap.querySelector('.fin-cancel')?.addEventListener('click', async () => {
+        if (!(await supConfirm({ title: 'Cancel this voucher?', message: 'It stays in the register for audit but will never be posted.', confirmLabel: 'Cancel voucher', danger: true }))) return;
+        try { await supFetch('/api/tally/vouchers/' + id, { method: 'DELETE' }); showNotification('Voucher cancelled'); wrap.remove(); finRegisterLoad(); }
+        catch (e) { showNotification(e.message, true); }
+    });
+    wrap.querySelector('.fin-delete')?.addEventListener('click', async () => {
+        const choice = await finDeletePrompt(r);
+        if (!choice) return;
+        try {
+            const d = await supFetch('/api/tally/vouchers/' + id + '/hard', {
+                method: 'DELETE', body: JSON.stringify({ reason: choice.reason }) });
+            showNotification(d.note || 'Entry deleted');
+            wrap.remove(); finRegisterLoad();
+        } catch (e) { showNotification(e.message, true); }
+    });
+    wrap.querySelector('.fin-retry')?.addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true; btn.textContent = 'Posting…';
+        try {
+            const d = await supFetch(`/api/tally/vouchers/${id}/post`, { method: 'POST', body: JSON.stringify({ optional: wasOptional }) });
+            showNotification(d.queued ? d.message : (wasOptional ? 'Posted as OPTIONAL (books unaffected)' : 'Posted to Tally'));
+            wrap.remove(); finRegisterLoad();
+        } catch (e) {
+            // A "needs confirm" error means an earlier attempt timed out and the voucher may ALREADY be
+            // in Tally — the operator must check before we risk creating a duplicate.
+            showNotification(e.message, true);
+            btn.disabled = false; btn.textContent = 'Retry post';
+        }
+    });
+    document.body.appendChild(wrap);
+}
+// ═══════════════ End Finance → Data Entry ═══════════════
+
+// ═══════════════ FINANCE → TALLY BOOKS (read-only view of what is already in Tally) ═══════════════
+// Pulls live from Tally via /api/tally/books/*. Nothing here can write — those endpoints only ever
+// issue Export/Collection requests.
+//
+// Three reports, mirroring Tally's own: Trial Balance, Day Book, and (drilled into from either) a
+// Ledger statement with a running balance. A financial-year picker scopes all of them; the FY list
+// comes from the company's own BooksFrom so it can never offer a year the books don't cover.
+//
+// Sign convention: in Tally's XML a NEGATIVE balance is a DEBIT. The server splits every figure into
+// dr/cr before it reaches this file, so nothing here reasons about signs — except `fbSide()`, which
+// renders a single signed balance (used for opening/closing/running rows).
+
+const _fb = { tab: 'tb', tb: null, vch: null, meta: null, fy: null, wired: false,
+              tbQ: '', tbGroup: '', tbSort: 'amount', vQ: '', vType: '', vFrom: '', vTo: '', led: null };
+
+// A signed Tally balance → "₹1,234.00 Dr" / "Cr". Zero has no side.
+const fbSide = (n) => !n ? '—' : finMoney(Math.abs(n)) + (n < 0 ? ' Dr' : ' Cr');
+
+function finBooksInit() {
+    if (!_fb.wired) {
+        _fb.wired = true;
+        document.getElementById('fin-books-refresh')?.addEventListener('click', fbRefresh);
+        document.getElementById('fin-books-dl')?.addEventListener('click', fbDownloadCurrent);
+        document.getElementById('fin-books-fy')?.addEventListener('change', e => {
+            _fb.fy = (_fb.meta.financialYears || []).find(f => f.key === e.target.value) || _fb.fy;
+            _fb.tb = null; _fb.vch = null; _fb.vFrom = ''; _fb.vTo = '';   // FY change invalidates both reports
+            finBooksRoute();
+        });
+    }
+    if (!_fb.meta) finBooksLoadMeta(); else finBooksShell();
+}
+
+// Company period + FY list must land before either report, since they define the date scope.
+async function finBooksLoadMeta() {
+    const body = document.getElementById('fin-books-body');
+    if (body) body.innerHTML = brandLoader('Connecting to Tally…');
+    try {
+        _fb.meta = await supFetch('/api/tally/books/meta');
+        const fys = _fb.meta.financialYears || [];
+        _fb.fy = fys.find(f => f.current) || fys[0] || null;
+        const sel = document.getElementById('fin-books-fy');
+        if (sel) sel.innerHTML = fys.map(f =>
+            `<option value="${escapeHtml(f.key)}"${_fb.fy && f.key === _fb.fy.key ? ' selected' : ''}>${escapeHtml(f.label)}${f.current ? ' (current)' : ''}</option>`).join('');
+        finBooksShell();
+    } catch (e) { fbError(e, body); }
+}
+
+// Renders the tab strip + a content div ONCE; only the content div re-renders afterwards, or typing in
+// a filter box would rebuild the input and lose focus on every keystroke.
+function finBooksShell() {
+    const body = document.getElementById('fin-books-body');
+    if (!body) return;
+    if (body.dataset.built !== '1') {
+        body.innerHTML = `
+          <div class="flex flex-wrap gap-1.5 mb-5">
+            <button class="fb-tab px-3.5 py-1.5 text-sm rounded-lg font-semibold" data-tab="tb">Trial Balance</button>
+            <button class="fb-tab px-3.5 py-1.5 text-sm rounded-lg font-semibold" data-tab="vch">Day Book</button>
+          </div>
+          <div id="fb-content"></div>`;
+        body.dataset.built = '1';
+        body.querySelectorAll('.fb-tab').forEach(b => b.addEventListener('click', () => {
+            if (_fb.tab === b.dataset.tab) return;
+            _fb.tab = b.dataset.tab; finBooksShellTabs(); finBooksRoute();
+        }));
+    }
+    finBooksShellTabs();
+    finBooksRoute();
+}
+
+function finBooksShellTabs() {
+    document.querySelectorAll('#fin-books-body .fb-tab').forEach(b =>
+        b.className = 'fb-tab px-3.5 py-1.5 text-sm rounded-lg font-semibold ' +
+            (b.dataset.tab === _fb.tab ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'));
+}
+
+function finBooksRoute() {
+    if (_fb.tab === 'tb') { if (_fb.tb) finBooksRenderTB(); else finBooksLoadTB(); }
+    else { if (_fb.vch) finBooksRenderVch(); else finBooksLoadVch(); }
+}
+
+const fbMeta = (txt) => { const m = document.getElementById('fin-books-meta'); if (m) m.textContent = txt || ''; };
+
+// How old the figures are. In bridge mode these come from the agent's last upload, NOT from Tally right
+// now — so if someone deletes a voucher in Tally the dashboard keeps showing it until the next sync.
+// Saying "live" when it isn't would be worse than useless on an accounting screen.
+const fbAgeMin = (d) => (d && d.syncedAt) ? Math.round((Date.now() - new Date(d.syncedAt).getTime()) / 60000) : null;
+function fbFreshness(d) {
+    if (!d || d.source !== 'cache') return 'live from Tally';
+    const min = fbAgeMin(d);
+    if (min === null) return 'cached';
+    return 'as of ' + new Date(d.syncedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) +
+           (min >= 1 ? ` (${min} min ago)` : ' (just now)');
+}
+// The agent syncs every 15 min, so ~20 min without one means it is probably not running.
+const fbStale = (d) => d && d.source === 'cache' && fbAgeMin(d) !== null && fbAgeMin(d) >= 20;
+function fbStaleBanner(d) {
+    if (!fbStale(d)) return '';
+    return `<div class="card p-3 mb-4 border-l-4 border-amber-400 text-xs text-amber-900 bg-amber-50/50">
+      <b>These figures are ${fbAgeMin(d)} minutes old.</b> They come from the bridge agent's last upload, not from Tally right now —
+      anything entered or deleted in Tally since then is not reflected here. Press <b>Refresh</b> to pull a fresh copy
+      (the agent must be running on the Tally PC).</div>`;
+}
+
+// A 501 here means bridge mode — the server can't read Tally directly. Say so, rather than render an
+// empty statement that reads as "no data".
+function fbError(e, target) {
+    const c = target || document.getElementById('fb-content');
+    if (c) c.innerHTML = `<div class="card p-8 text-center">
+        <p class="text-sm text-rose-600 font-semibold">${escapeHtml(e.message)}</p>
+        <p class="text-xs text-slate-500 mt-2">Tally must be open with the company loaded, and this server must be able to reach it.</p></div>`;
+}
+
+// ── CSV download (same shape as the CRM's export: BOM + RFC-4180 quoting + Blob) ──────────────────
+function fbCsv(filename, cols, rows) {
+    if (!rows.length) return showNotification('Nothing to export', true);
+    const q = v => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const csv = '﻿' + [cols.map(c => q(c[0])).join(',')]
+        .concat(rows.map(r => cols.map(c => q(c[1](r))).join(','))).join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    showNotification(`Exported ${rows.length} row${rows.length > 1 ? 's' : ''}`);
+}
+const fbSlug = (s) => String(s || 'tally').replace(/[^\w\-]+/g, '_').slice(0, 40);
+
+// The header Download button exports whichever report is on screen.
+function fbDownloadCurrent() {
+    const co = fbSlug((_fb.meta && _fb.meta.company) || 'tally');
+    const fy = _fb.fy ? _fb.fy.key : '';
+    if (_fb.tab === 'tb') {
+        if (!_fb.tb) return showNotification('Nothing to export yet', true);
+        fbCsv(`${co}-trial-balance-${fy}.csv`, [
+            ['Ledger', r => r.name], ['Group', r => r.parent || ''],
+            ['Opening', r => r.opening ? Math.abs(r.opening).toFixed(2) : ''],
+            ['Opening Dr/Cr', r => r.opening ? (r.opening < 0 ? 'Dr' : 'Cr') : ''],
+            ['Debit', r => r.dr ? r.dr.toFixed(2) : ''], ['Credit', r => r.cr ? r.cr.toFixed(2) : ''],
+        ], fbTbRows());
+    } else {
+        if (!_fb.vch) return showNotification('Nothing to export yet', true);
+        fbCsv(`${co}-day-book-${fy}.csv`, [
+            ['Date', r => finDMY(r.date)], ['Type', r => r.type], ['Voucher No', r => r.number || ''],
+            ['Party', r => r.party || ''], ['Narration', r => r.narration || ''], ['Reference', r => r.reference || ''],
+            ['Amount', r => r.amount.toFixed(2)],
+            ['Optional', r => r.optional ? 'Yes' : ''], ['Cancelled', r => r.cancelled ? 'Yes' : ''],
+            ['Ledger entries', r => r.entries.map(e => `${e.ledger} ${e.dr_cr} ${e.amount.toFixed(2)}`).join(' | ')],
+        ], fbVchRows());
+    }
+}
+
+// In bridge mode the server cannot read Tally, so re-fetching would just return the same cached rows.
+// Ask the AGENT for a fresh pull and wait for the upload to land — otherwise "Refresh" is a lie.
+async function fbRefresh() {
+    const btn = document.getElementById('fin-books-refresh');
+    const src = (_fb.tab === 'tb' ? _fb.tb : _fb.vch);
+    const reload = () => { if (_fb.tab === 'tb') { _fb.tb = null; return finBooksLoadTB(true); } _fb.vch = null; return finBooksLoadVch(true); };
+
+    if (!src || src.source !== 'cache') { await reload(); return; }   // direct mode — a re-read IS fresh
+
+    const before = src.syncedAt ? new Date(src.syncedAt).getTime() : 0;
+    if (btn) { btn.disabled = true; btn.textContent = 'Asking Tally…'; }
+    try {
+        await supFetch('/api/tally/masters/sync', { method: 'POST' });   // sets sync_requested for the agent
+        // The agent polls every ~5s and uploads masters then books, so this normally lands in <15s.
+        for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 3000));
+            const probe = await supFetch('/api/tally/books/trial-balance?_=' + Date.now());
+            if (probe.syncedAt && new Date(probe.syncedAt).getTime() > before) {
+                _fb.tb = null; _fb.vch = null;
+                await reload();
+                showNotification('Refreshed from Tally');
+                return;
+            }
+            if (btn) btn.textContent = `Asking Tally… ${(i + 1) * 3}s`;
+        }
+        showNotification('The bridge agent did not respond — is it running on the Tally PC? Showing the last synced copy.', true);
+        await reload();
+    } catch (e) { showNotification(e.message, true); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; } }
+}
+
+// ── Trial Balance ────────────────────────────────────────────────────────────────────────────────
+async function finBooksLoadTB(force) {
+    const c = document.getElementById('fb-content');
+    if (c) c.innerHTML = brandLoader('Reading the trial balance from Tally…');
+    const p = new URLSearchParams();
+    if (_fb.fy) { p.set('from', _fb.fy.from); p.set('to', _fb.fy.toEffective); }
+    if (force) p.set('_', String(Date.now()));
+    try { _fb.tb = await supFetch('/api/tally/books/trial-balance?' + p); finBooksRenderTB(); }
+    catch (e) { fbError(e); }
+}
+
+// Shared by the table and the CSV export so they can never disagree.
+function fbTbRows() {
+    const q = _fb.tbQ.toLowerCase();
+    let rows = (_fb.tb.rows || []).filter(r => !r.derived);
+    if (_fb.tbGroup) rows = rows.filter(r => (r.parent || '') === _fb.tbGroup);
+    if (q) rows = rows.filter(r => r.name.toLowerCase().includes(q) || String(r.parent || '').toLowerCase().includes(q));
+    return rows.slice().sort(_fb.tbSort === 'name'
+        ? (a, b) => a.name.localeCompare(b.name)
+        : (a, b) => Math.abs(b.closing) - Math.abs(a.closing));
+}
+
+const FB_TH = 'px-4 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+const FB_TD = 'px-4 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
+
+function finBooksRenderTB() {
+    const c = document.getElementById('fb-content');
+    if (!c) return;
+    const d = _fb.tb, t = d.totals;
+    fbMeta(`${(_fb.meta && _fb.meta.company) || ''} · ${fbFreshness(d)}`);
+    const rows = fbTbRows();
+    const kpi = (label, value, sub, tone) => `<div class="card p-4">
+        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">${label}</p>
+        <p class="text-xl font-bold ${tone || 'text-slate-800'} mt-1">${value}</p>
+        ${sub ? `<p class="text-[11px] text-slate-400 mt-0.5">${sub}</p>` : ''}</div>`;
+
+    c.innerHTML = `
+      ${fbStaleBanner(d)}
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+        ${kpi('Total debit', finMoney(t.dr), `${d.rows.filter(r => !r.derived && r.dr > 0).length} ledgers`)}
+        ${kpi('Total credit', finMoney(t.cr), `${d.rows.filter(r => !r.derived && r.cr > 0).length} ledgers`)}
+        ${kpi(t.balanced ? 'Balanced' : 'Out of balance', t.balanced ? '✓ Dr = Cr' : finMoney(t.diff),
+              t.balanced ? 'Debits equal credits' : 'Debits and credits differ', t.balanced ? 'text-emerald-600' : 'text-rose-600')}
+        ${kpi('Period', _fb.fy ? _fb.fy.label : '—', _fb.fy ? `${finDMY(_fb.fy.from)} → ${finDMY(_fb.fy.toEffective)}` : '')}
+      </div>
+
+      ${t.openingDiff.present || t.derivedExcluded.length ? `<div class="card p-4 mb-5 text-xs text-slate-600 space-y-1.5">
+        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-1">Reconciling items</p>
+        ${t.openingDiff.present ? `<p>· <b>Difference in opening balances</b> ${finMoney(t.openingDiff.amount)} on the
+            ${t.openingDiff.side === 'CR' ? 'credit' : 'debit'} side — an opening balance was entered without a matching
+            contra, so Tally carries the difference. It is included above (it is what makes the totals balance).</p>` : ''}
+        ${t.derivedExcluded.map(x => `<p>· <b>${escapeHtml(x.name)}</b> ${x.dr ? 'Dr ' + finMoney(x.dr) : 'Cr ' + finMoney(x.cr)}
+            is <b>excluded</b> — Tally derives it from the period's income and expenses rather than from vouchers, so
+            counting it alongside those ledgers would double-count the same money.</p>`).join('')}
+      </div>` : ''}
+
+      <div class="card overflow-x-auto mb-5">
+        <table class="w-full"><thead><tr>
+          <th class="${FB_TH}">Group</th><th class="${FB_TH} text-right">Debit</th><th class="${FB_TH} text-right">Credit</th><th class="${FB_TH} text-right">Ledgers</th>
+        </tr></thead><tbody>${d.groups.map(g => `<tr class="hover:bg-slate-50 cursor-pointer fb-grp" data-g="${escapeHtml(g.group)}">
+          <td class="${FB_TD} font-semibold">${escapeHtml(g.group)}${_fb.tbGroup === g.group ? ' <span class="text-[10px] text-indigo-600">(filtered)</span>' : ''}</td>
+          <td class="${FB_TD} text-right">${g.dr ? finMoney(g.dr) : '—'}</td>
+          <td class="${FB_TD} text-right">${g.cr ? finMoney(g.cr) : '—'}</td>
+          <td class="${FB_TD} text-right text-slate-400">${g.count}</td></tr>`).join('')}</tbody></table>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2 mb-3">
+        <input id="fb-tb-q" type="search" placeholder="Search ledger or group…" class="filter-input" value="${escapeHtml(_fb.tbQ)}">
+        <select id="fb-tb-sort" class="filter-select">
+          <option value="amount"${_fb.tbSort === 'amount' ? ' selected' : ''}>Sort: largest balance</option>
+          <option value="name"${_fb.tbSort === 'name' ? ' selected' : ''}>Sort: ledger name</option>
+        </select>
+        ${_fb.tbGroup ? `<button id="fb-tb-clear" class="filter-btn">Clear group: ${escapeHtml(_fb.tbGroup)} ✕</button>` : ''}
+        <span class="text-xs text-slate-400">${rows.length} of ${d.rows.filter(r => !r.derived).length} ledgers · click a row for its statement</span>
+      </div>
+
+      <div class="card overflow-x-auto">
+        <table class="w-full"><thead><tr>
+          <th class="${FB_TH}">Ledger</th><th class="${FB_TH}">Group</th>
+          <th class="${FB_TH} text-right">Opening</th><th class="${FB_TH} text-right">Debit</th><th class="${FB_TH} text-right">Credit</th><th class="${FB_TH}"></th>
+        </tr></thead><tbody>${rows.length ? rows.map(r => `<tr class="hover:bg-indigo-50/40 cursor-pointer fb-led" data-n="${escapeHtml(r.name)}">
+            <td class="${FB_TD} font-medium">${escapeHtml(r.name)}</td>
+            <td class="${FB_TD} text-xs text-slate-500">${escapeHtml(r.parent || '—')}</td>
+            <td class="${FB_TD} text-right text-xs text-slate-400">${fbSide(r.opening)}</td>
+            <td class="${FB_TD} text-right font-semibold">${r.dr ? finMoney(r.dr) : '—'}</td>
+            <td class="${FB_TD} text-right font-semibold">${r.cr ? finMoney(r.cr) : '—'}</td>
+            <td class="${FB_TD} text-right text-indigo-600 text-xs font-semibold">View →</td></tr>`).join('')
+          : `<tr><td colspan="6" class="p-10 text-center text-sm text-slate-400">No ledger matches that search.</td></tr>`}
+        </tbody></table>
+      </div>`;
+
+    let tmr;
+    document.getElementById('fb-tb-q')?.addEventListener('input', e => {
+        _fb.tbQ = e.target.value; clearTimeout(tmr); tmr = setTimeout(finBooksRenderTB, 250); });
+    document.getElementById('fb-tb-sort')?.addEventListener('change', e => { _fb.tbSort = e.target.value; finBooksRenderTB(); });
+    document.getElementById('fb-tb-clear')?.addEventListener('click', () => { _fb.tbGroup = ''; finBooksRenderTB(); });
+    c.querySelectorAll('.fb-grp').forEach(tr => tr.addEventListener('click', () => {
+        _fb.tbGroup = _fb.tbGroup === tr.dataset.g ? '' : tr.dataset.g; finBooksRenderTB(); }));
+    c.querySelectorAll('.fb-led').forEach(tr => tr.addEventListener('click', () => fbLedgerModal(tr.dataset.n)));
+}
+
+// ── Day Book ─────────────────────────────────────────────────────────────────────────────────────
+async function finBooksLoadVch(force) {
+    const c = document.getElementById('fb-content');
+    if (c) c.innerHTML = brandLoader('Reading the day book from Tally…');
+    const p = new URLSearchParams();
+    p.set('from', _fb.vFrom || (_fb.fy ? _fb.fy.from : ''));
+    p.set('to', _fb.vTo || (_fb.fy ? _fb.fy.toEffective : ''));
+    if (force) p.set('_', String(Date.now()));
+    try {
+        _fb.vch = await supFetch('/api/tally/books/vouchers?' + p);
+        _fb.vFrom = _fb.vch.from; _fb.vTo = _fb.vch.to;
+        finBooksRenderVch();
+    } catch (e) { fbError(e); }
+}
+
+function fbVchRows() {
+    const q = _fb.vQ.toLowerCase();
+    let rows = _fb.vch.rows || [];
+    if (_fb.vType) rows = rows.filter(r => r.type === _fb.vType);
+    if (q) rows = rows.filter(r => [r.party, r.narration, r.reference, r.number]
+        .some(f => String(f || '').toLowerCase().includes(q)));
+    return rows;
+}
+
+function finBooksRenderVch() {
+    const c = document.getElementById('fb-content');
+    if (!c) return;
+    const d = _fb.vch;
+    fbMeta(`${(_fb.meta && _fb.meta.company) || ''} · ${fbFreshness(d)}`);
+    const rows = fbVchRows();
+    const shown = rows.reduce((s, r) => s + r.amount, 0);
+
+    c.innerHTML = `
+      ${fbStaleBanner(d)}
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+        <div class="card p-4"><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Vouchers</p>
+          <p class="text-xl font-bold text-slate-800 mt-1">${rows.length}</p>
+          <p class="text-[11px] text-slate-400 mt-0.5">of ${d.totalCount} in range</p></div>
+        <div class="card p-4"><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Total value</p>
+          <p class="text-xl font-bold text-slate-800 mt-1">${finMoney(shown)}</p>
+          <p class="text-[11px] text-slate-400 mt-0.5">sum of debits</p></div>
+        <div class="card p-4"><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Period</p>
+          <p class="text-sm font-bold text-slate-800 mt-2">${escapeHtml(finDMY(d.from))} → ${escapeHtml(finDMY(d.to))}</p>
+          <p class="text-[11px] text-slate-400 mt-0.5">${_fb.fy ? escapeHtml(_fb.fy.label) : ''}</p></div>
+        <div class="card p-4"><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Optional / cancelled</p>
+          <p class="text-xl font-bold text-slate-800 mt-1">${d.rows.filter(r => r.optional).length} / ${d.rows.filter(r => r.cancelled).length}</p>
+          <p class="text-[11px] text-slate-400 mt-0.5">excluded from the books</p></div>
+      </div>
+
+      <div class="flex flex-wrap gap-2 mb-4">
+        ${d.byType.map(x => `<button class="fb-type px-3 py-1.5 rounded-full text-xs font-semibold ${
+            _fb.vType === x.type ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}"
+            data-t="${escapeHtml(x.type)}">${escapeHtml(x.type)} ${x.count} · ${finMoney(x.total)}</button>`).join('')}
+        ${_fb.vType ? '<button class="fb-type px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-800 text-white" data-t="">Clear ✕</button>' : ''}
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2 mb-3">
+        <input id="fb-v-from" type="date" class="filter-input" value="${escapeHtml(d.from || '')}">
+        <span class="text-slate-400 text-sm">→</span>
+        <input id="fb-v-to" type="date" class="filter-input" value="${escapeHtml(d.to || '')}">
+        <button id="fb-v-apply" class="filter-btn">Apply</button>
+        <input id="fb-v-q" type="search" placeholder="Party, narration, reference…" class="filter-input" value="${escapeHtml(_fb.vQ)}">
+      </div>
+
+      <div class="card overflow-x-auto">
+        <table class="w-full"><thead><tr>
+          <th class="${FB_TH}">Date</th><th class="${FB_TH}">Type</th><th class="${FB_TH}">No.</th>
+          <th class="${FB_TH}">Party</th><th class="${FB_TH}">Narration</th>
+          <th class="${FB_TH} text-right">Amount</th><th class="${FB_TH}"></th>
+        </tr></thead><tbody>${rows.length ? rows.map((r, i) => `<tr class="hover:bg-slate-50">
+            <td class="${FB_TD} whitespace-nowrap">${escapeHtml(finDMY(r.date))}</td>
+            <td class="${FB_TD} font-semibold">${escapeHtml(r.type)}
+              ${r.optional ? '<span class="ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-50 text-sky-700">OPT</span>' : ''}
+              ${r.cancelled ? '<span class="ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-50 text-rose-700">CANC</span>' : ''}</td>
+            <td class="${FB_TD} font-mono text-xs">${escapeHtml(r.number || '—')}</td>
+            <td class="${FB_TD} max-w-[220px] truncate" title="${escapeHtml(r.party || '')}">${escapeHtml(r.party || '—')}</td>
+            <td class="${FB_TD} max-w-[280px] truncate text-slate-500" title="${escapeHtml(r.narration || '')}">${escapeHtml(r.narration || '—')}</td>
+            <td class="${FB_TD} text-right font-semibold whitespace-nowrap">${finMoney(r.amount)}</td>
+            <td class="${FB_TD} text-right"><button class="fb-open text-xs px-2.5 py-1 rounded-lg border border-slate-300 font-semibold text-slate-600 hover:bg-slate-50" data-i="${i}">View</button></td>
+          </tr>`).join('') : `<tr><td colspan="7" class="p-10 text-center text-sm text-slate-400">No voucher matches these filters.</td></tr>`}
+        </tbody></table>
+      </div>
+      ${d.rows.length >= 1000 ? '<p class="text-xs text-amber-700 mt-3">Showing the first 1000 vouchers for this range — narrow the dates to see the rest.</p>' : ''}`;
+
+    c.querySelectorAll('.fb-type').forEach(b => b.addEventListener('click', () => { _fb.vType = b.dataset.t; finBooksRenderVch(); }));
+    let tmr;
+    document.getElementById('fb-v-q')?.addEventListener('input', e => { _fb.vQ = e.target.value; clearTimeout(tmr); tmr = setTimeout(finBooksRenderVch, 250); });
+    document.getElementById('fb-v-apply')?.addEventListener('click', () => {
+        _fb.vFrom = (document.getElementById('fb-v-from') || {}).value || '';
+        _fb.vTo = (document.getElementById('fb-v-to') || {}).value || '';
+        _fb.vch = null; finBooksLoadVch();
+    });
+    c.querySelectorAll('.fb-open').forEach(b => b.addEventListener('click', () => fbVoucherModal(rows[+b.dataset.i])));
+}
+
+// ── Voucher drill-down: the voucher's own ledger lines, straight from Tally ───────────────────────
+function fbVoucherModal(v) {
+    if (!v) return;
+    document.getElementById('fb-vch-modal')?.remove();
+    const dr = v.entries.filter(e => e.dr_cr === 'DR').reduce((s, e) => s + e.amount, 0);
+    const cr = v.entries.filter(e => e.dr_cr === 'CR').reduce((s, e) => s + e.amount, 0);
+    const wrap = document.createElement('div');
+    wrap.id = 'fb-vch-modal';
+    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-2xl flex flex-col max-h-[85vh]">
+      <div class="flex items-start justify-between px-6 py-4 border-b border-slate-200">
+        <div><h3 class="text-lg font-bold text-slate-800">${escapeHtml(v.type)} #${escapeHtml(v.number || '—')} · ${finMoney(v.amount)}</h3>
+          <p class="text-xs text-slate-500 mt-0.5">${escapeHtml(finDMY(v.date))}${v.party ? ' · ' + escapeHtml(v.party) : ''}${v.reference ? ' · ref ' + escapeHtml(v.reference) : ''}</p></div>
+        <button class="fb-x text-slate-400 hover:text-slate-700 text-2xl leading-none">&times;</button></div>
+      <div class="px-6 py-4 overflow-auto space-y-4">
+        ${v.optional ? '<div class="text-xs bg-sky-50 border border-sky-200 text-sky-800 rounded-lg px-3 py-2"><b>Optional voucher</b> — recorded in the Day Book only; it does not affect the books.</div>' : ''}
+        ${v.cancelled ? '<div class="text-xs bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2"><b>Cancelled voucher.</b></div>' : ''}
+        <table class="w-full text-sm border border-slate-200 rounded-lg overflow-hidden">
+          <tbody>${v.entries.map(e => `<tr class="border-b border-slate-100 last:border-0">
+            <td class="px-3 py-2">${escapeHtml(e.ledger)}</td>
+            <td class="px-3 py-2 w-16 font-semibold ${e.dr_cr === 'DR' ? 'text-slate-700' : 'text-slate-500'}">${e.dr_cr}</td>
+            <td class="px-3 py-2 w-32 text-right font-semibold">${finMoney(e.amount)}</td></tr>`).join('')
+            || '<tr><td class="px-3 py-4 text-center text-slate-400 text-sm">Tally returned no ledger lines for this voucher.</td></tr>'}
+          </tbody>
+          ${v.entries.length ? `<tfoot><tr class="bg-slate-50 font-bold">
+            <td class="px-3 py-2 text-xs uppercase tracking-wide text-slate-400">Total</td>
+            <td class="px-3 py-2 text-xs">Dr ${finMoney(dr)}</td>
+            <td class="px-3 py-2 text-right text-xs">Cr ${finMoney(cr)}</td></tr></tfoot>` : ''}
+        </table>
+        ${v.narration ? `<div><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-1">Narration</p>
+          <p class="text-sm text-slate-600">${escapeHtml(v.narration)}</p></div>` : ''}
+        <p class="text-[11px] text-slate-400">Tally id ${escapeHtml(v.masterId || '—')}${v.alterId ? ' · alter ' + escapeHtml(v.alterId) : ''}</p>
+      </div>
+      <div class="px-6 py-3 border-t border-slate-200 flex justify-end">
+        <button class="fb-x text-sm px-4 py-2 rounded-lg bg-slate-800 text-white font-semibold">Close</button></div></div>`;
+    wrap.addEventListener('click', e => { if (e.target === wrap) wrap.remove(); });
+    wrap.querySelectorAll('.fb-x').forEach(b => b.addEventListener('click', () => wrap.remove()));
+    document.body.appendChild(wrap);
+}
+
+// ── Ledger statement (Tally's "Ledger Vouchers") ─────────────────────────────────────────────────
+async function fbLedgerModal(name) {
+    document.getElementById('fb-led-modal')?.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'fb-led-modal';
+    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-5xl flex flex-col max-h-[90vh]">
+      <div id="fb-led-head" class="px-6 py-4 border-b border-slate-200"></div>
+      <div id="fb-led-body" class="px-6 py-4 overflow-auto flex-1"></div>
+      <div class="px-6 py-3 border-t border-slate-200 flex justify-end gap-2">
+        <button id="fb-led-dl" class="text-sm px-4 py-2 rounded-lg border border-slate-300 font-semibold text-slate-600 hover:bg-slate-50">⬇ Download CSV</button>
+        <button class="fb-x text-sm px-4 py-2 rounded-lg bg-slate-800 text-white font-semibold">Close</button></div></div>`;
+    wrap.addEventListener('click', e => { if (e.target === wrap) wrap.remove(); });
+    wrap.querySelectorAll('.fb-x').forEach(b => b.addEventListener('click', () => wrap.remove()));
+    document.body.appendChild(wrap);
+
+    const head = wrap.querySelector('#fb-led-head'), body = wrap.querySelector('#fb-led-body');
+    head.innerHTML = `<h3 class="text-lg font-bold text-slate-800">${escapeHtml(name)}</h3>
+      <p class="text-xs text-slate-500 mt-0.5">Loading statement…</p>`;
+    body.innerHTML = brandLoader('Reading the ledger from Tally…');
+
+    const p = new URLSearchParams({ name });
+    if (_fb.fy) { p.set('from', _fb.fy.from); p.set('to', _fb.fy.toEffective); }
+    let s;
+    try { s = await supFetch('/api/tally/books/ledger?' + p); }
+    catch (e) { fbError(e, body); head.querySelector('p').textContent = 'Could not load'; return; }
+    _fb.led = s;
+
+    head.innerHTML = `<div class="flex items-start justify-between gap-4">
+        <div><h3 class="text-lg font-bold text-slate-800">${escapeHtml(s.ledger)}</h3>
+          <p class="text-xs text-slate-500 mt-0.5">${escapeHtml(s.group || '')} · ${escapeHtml(finDMY(s.from))} → ${escapeHtml(finDMY(s.to))} · ${s.count} entries</p></div>
+        <div class="text-right shrink-0">
+          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Closing</p>
+          <p class="text-lg font-bold text-slate-800">${fbSide(s.closing)}</p></div>
+      </div>`;
+
+    body.innerHTML = `
+      ${s.reconciled ? '' : `<div class="text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded-lg px-3 py-2 mb-4">
+        This statement is <b>incomplete</b>: the running balance ends at ${fbSide(s.closing)} but Tally reports
+        ${fbSide(s.tallyClosing)} — a gap of ${finMoney(s.drift)}. Some vouchers fall outside the selected period.</div>`}
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        <div class="card p-3"><p class="text-[10px] font-bold text-slate-400 uppercase tracking-wide">Opening</p>
+          <p class="text-sm font-bold text-slate-800 mt-1">${fbSide(s.opening)}</p></div>
+        <div class="card p-3"><p class="text-[10px] font-bold text-slate-400 uppercase tracking-wide">Total debit</p>
+          <p class="text-sm font-bold text-slate-800 mt-1">${finMoney(s.drTotal)}</p></div>
+        <div class="card p-3"><p class="text-[10px] font-bold text-slate-400 uppercase tracking-wide">Total credit</p>
+          <p class="text-sm font-bold text-slate-800 mt-1">${finMoney(s.crTotal)}</p></div>
+        <div class="card p-3"><p class="text-[10px] font-bold text-slate-400 uppercase tracking-wide">Closing</p>
+          <p class="text-sm font-bold text-slate-800 mt-1">${fbSide(s.closing)}</p></div>
+      </div>
+      <div class="overflow-x-auto border border-slate-200 rounded-xl">
+        <table class="w-full"><thead><tr>
+          <th class="${FB_TH}">Date</th><th class="${FB_TH}">Particulars</th><th class="${FB_TH}">Type</th><th class="${FB_TH}">No.</th>
+          <th class="${FB_TH} text-right">Debit</th><th class="${FB_TH} text-right">Credit</th><th class="${FB_TH} text-right">Balance</th>
+        </tr></thead><tbody>
+          <tr class="bg-slate-50"><td class="${FB_TD} text-xs text-slate-500" colspan="6">Opening balance</td>
+            <td class="${FB_TD} text-right font-semibold text-xs">${fbSide(s.opening)}</td></tr>
+          ${s.rows.map(r => `<tr class="hover:bg-slate-50${r.optional ? ' opacity-60' : ''}">
+            <td class="${FB_TD} whitespace-nowrap text-xs">${escapeHtml(finDMY(r.date))}</td>
+            <td class="${FB_TD} max-w-[300px] truncate" title="${escapeHtml(r.against.join(', '))}">${escapeHtml(r.against.join(', ') || '—')}
+              ${r.narration ? `<span class="block text-[11px] text-slate-400 truncate" title="${escapeHtml(r.narration)}">${escapeHtml(r.narration)}</span>` : ''}</td>
+            <td class="${FB_TD} text-xs">${escapeHtml(r.type)}${r.optional ? ' <span class="px-1 rounded text-[9px] font-bold bg-sky-50 text-sky-700">OPT</span>' : ''}</td>
+            <td class="${FB_TD} font-mono text-xs">${escapeHtml(r.number || '—')}</td>
+            <td class="${FB_TD} text-right font-semibold">${r.dr ? finMoney(r.dr) : ''}</td>
+            <td class="${FB_TD} text-right font-semibold">${r.cr ? finMoney(r.cr) : ''}</td>
+            <td class="${FB_TD} text-right text-xs text-slate-500">${fbSide(r.balance)}</td></tr>`).join('')}
+          <tr class="bg-slate-50 font-bold"><td class="${FB_TD} text-xs uppercase tracking-wide text-slate-400" colspan="4">Closing</td>
+            <td class="${FB_TD} text-right">${finMoney(s.drTotal)}</td>
+            <td class="${FB_TD} text-right">${finMoney(s.crTotal)}</td>
+            <td class="${FB_TD} text-right">${fbSide(s.closing)}</td></tr>
+        </tbody></table>
+      </div>`;
+
+    wrap.querySelector('#fb-led-dl')?.addEventListener('click', () => fbCsv(
+        `${fbSlug(s.ledger)}-statement-${_fb.fy ? _fb.fy.key : ''}.csv`, [
+            ['Date', r => finDMY(r.date)], ['Particulars', r => r.against.join(' / ')],
+            ['Type', r => r.type], ['Voucher No', r => r.number || ''], ['Narration', r => r.narration || ''],
+            ['Debit', r => r.dr ? r.dr.toFixed(2) : ''], ['Credit', r => r.cr ? r.cr.toFixed(2) : ''],
+            ['Balance', r => Math.abs(r.balance).toFixed(2)], ['Balance Dr/Cr', r => r.balance < 0 ? 'Dr' : 'Cr'],
+            ['Optional', r => r.optional ? 'Yes' : ''],
+        ], s.rows));
+}
+// ═══════════════ End Finance → Tally Books ═══════════════
+
+// ═══════════════ FINANCE → DATA ENTRY → BANK STATEMENT IMPORT ═══════════════
+// Upload a bank statement, review the ledger the matcher proposes for each line, fix what it got wrong
+// or couldn't guess, then create DRAFT vouchers. Nothing here reaches Tally — drafts still go through
+// the usual approval.
+//
+// Performance note: a year's statement is ~1000 rows. A <select> of 90 ledgers per row would mean tens
+// of thousands of <option> elements, so every row uses a text input bound to ONE shared <datalist>.
+// Same type-ahead, ~90 option elements total instead of 90,000.
+
+// The bank import keeps its OWN ledger list, because it may target a DIFFERENT company from the one
+// pinned by TALLY_COMPANY (which is what _fin.ledgers holds). Suggesting a ledger from the wrong
+// company's chart of accounts would be worse than useless — it would name accounts that don't exist
+// in the books being written to.
+const _fb2 = { data: null, filter: 'attention', page: 0, edits: {}, busy: false,
+               company: null, companies: [], ledgers: [], byName: new Map(), loadingLedgers: false,
+               // which company `ledgers` was loaded for — the register drawer reuses this list
+               ledgerCompany: null };
+const FB2_PAGE = 120;
+
+function finBankInit() {
+    const body = document.getElementById('fin-entry-body');
+    if (!body) return;
+    _fb2.data = null; _fb2.edits = {}; _fb2.page = 0;
+    finBankRenderUpload();
+}
+
+// ── upload screen ────────────────────────────────────────────────────────────────────────────────
+function finBankRenderUpload() {
+    const body = document.getElementById('fin-entry-body');
+    if (!body) return;
+    const co = (_fin.status && _fin.status.company) || '';
+    body.innerHTML = finEntryTabs() + `
+      <div id="fb2-pending" class="max-w-3xl"></div>
+      <div class="card p-6 max-w-3xl">
+        <p class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-3">Upload a bank statement</p>
+        <div class="grid sm:grid-cols-2 gap-3 mb-4">
+          <label class="block"><span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Company (books to import into)</span>
+            <select id="fb2-company" class="filter-select w-full mt-1"></select></label>
+          <label class="block"><span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Bank ledger</span>
+            <select id="fb2-bank" class="filter-select w-full mt-1"></select></label>
+        </div>
+        <p id="fb2-conote" class="mb-3"></p>
+        <div id="fb2-drop" class="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 transition-colors">
+          <p class="text-sm font-semibold text-slate-700">Drop the statement here, or click to choose</p>
+          <p class="text-xs text-slate-400 mt-1">.xlsx or .csv &middot; the header row is found automatically</p>
+          <input id="fb2-file" type="file" accept=".xlsx,.csv,.xls" class="hidden">
+        </div>
+        <p class="text-[11px] text-slate-400 mt-3">Old <b>.xls</b> files aren't readable — open in Excel and <b>Save As</b> → .xlsx first.
+          Nothing is sent to Tally at this stage: you review every line, then it becomes drafts.</p>
+        <div id="fb2-status" class="mt-4"></div>
+      </div>`;
+    finEntryWireTabs();
+
+    // Company + bank pickers, from the ledgers already mirrored.
+    const cSel = document.getElementById('fb2-company');
+    // From Tally's actually-open companies. Deriving this from _fin.ledgers only ever showed the one
+    // company TALLY_COMPANY pins, hiding the very books you came here to import into.
+    const open = (_fin.status && _fin.status.openCompanies) || [];
+    _fb2.companies = open.length ? open
+        : [...new Set(_fin.ledgers.map(l => l.company).filter(Boolean))].concat(co ? [co] : []).filter((v, i, a) => a.indexOf(v) === i);
+    cSel.innerHTML = _fb2.companies.map(c => `<option value="${escapeHtml(c)}"${c === (_fb2.company || co) ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('')
+        || `<option value="">${escapeHtml(co || 'no company')}</option>`;
+    _fb2.company = cSel.value;
+    const fillBanks = () => {
+        const bSel = document.getElementById('fb2-bank');
+        if (!bSel) return;
+        const banks = _fb2.ledgers.filter(l => FIN_BANKISH.includes(l.parent));
+        bSel.innerHTML = banks.length
+            ? banks.map(b => `<option value="${escapeHtml(b.name)}"${b.name === 'HDFC BANK' ? ' selected' : ''}>${escapeHtml(b.name)}</option>`).join('')
+            : `<option value="">no bank ledger in this company</option>`;
+        const note = document.getElementById('fb2-conote');
+        if (note) note.innerHTML = `<span class="text-xs ${_fb2.ledgers.length < 5 ? 'text-amber-700' : 'text-slate-400'}">${
+            _fb2.ledgers.length} ledger(s) in these books${_fb2.ledgers.length < 5 ? ' — new company, most will need creating' : ''}</span>`;
+    };
+    // Reload the chart of accounts whenever the target company changes.
+    const loadCoLedgers = async () => {
+        _fb2.loadingLedgers = true; fillBanks();
+        try {
+            const d = await supFetch('/api/tally/masters?kind=ledger&company=' + encodeURIComponent(_fb2.company || ''));
+            _fb2.ledgers = d.rows || [];
+            _fb2.ledgerCompany = _fb2.company;   // so the register drawer can reuse this list
+        } catch (e) { _fb2.ledgers = []; _fb2.ledgerCompany = null; showNotification(e.message, true); }
+        _fb2.byName = new Map(_fb2.ledgers.map(l => [l.name, l]));
+        _fb2.loadingLedgers = false;
+        fillBanks();
+    };
+    loadCoLedgers();
+    cSel.addEventListener('change', () => { _fb2.company = cSel.value; loadCoLedgers(); finPendingBanner(); });
+    finPendingBanner();
+
+    const drop = document.getElementById('fb2-drop'), input = document.getElementById('fb2-file');
+    drop.addEventListener('click', () => input.click());
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('border-indigo-500', 'bg-indigo-50/50'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('border-indigo-500', 'bg-indigo-50/50'));
+    drop.addEventListener('drop', e => {
+        e.preventDefault(); drop.classList.remove('border-indigo-500', 'bg-indigo-50/50');
+        if (e.dataTransfer.files && e.dataTransfer.files[0]) finBankUpload(e.dataTransfer.files[0]);
+    });
+    input.addEventListener('change', () => { if (input.files && input.files[0]) finBankUpload(input.files[0]); });
+}
+
+function finBankUpload(file) {
+    const status = document.getElementById('fb2-status');
+    if (status) status.innerHTML = brandLoaderSm('Reading ' + escapeHtml(file.name) + '…');
+    const reader = new FileReader();
+    reader.onerror = () => { if (status) status.innerHTML = `<p class="text-sm text-rose-600">Could not read that file.</p>`; };
+    reader.onload = async () => {
+        try {
+            const d = await supFetch('/api/tally/bank/parse', { method: 'POST', body: JSON.stringify({
+                filename: file.name, contentBase64: String(reader.result).split(',')[1] || '',
+                bankLedger: (document.getElementById('fb2-bank') || {}).value || 'HDFC BANK',
+                company: _fb2.company || undefined,
+            }) });
+            _fb2.data = d; _fb2.edits = {}; _fb2.page = 0;
+            _fb2.filter = d.summary.unmatched || d.summary.unsure ? 'attention' : 'ready';
+            finBankRenderReview();
+        } catch (e) {
+            if (status) status.innerHTML = `<div class="text-sm bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2">${escapeHtml(e.message)}</div>`;
+        }
+    };
+    reader.readAsDataURL(file);
+}
+
+// Rows from an earlier upload that were never booked are kept server-side, so mapping can be picked
+// up later without hunting down the spreadsheet and uploading it again.
+async function finPendingBanner() {
+    const host = document.getElementById('fb2-pending');
+    if (!host) return;
+    const co = _fb2.company || '';
+    host.innerHTML = '';
+    let d;
+    try { d = await supFetch('/api/tally/bank/pending/count?company=' + encodeURIComponent(co)); }
+    catch (_) { return; }                                  // a missing count is not worth an error banner
+    if (document.getElementById('fb2-pending') !== host) return;   // the screen moved on while we waited
+    if (!d || !d.count) return;
+    host.innerHTML = `<div class="card p-4 mb-4 border-l-4 border-indigo-500 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p class="text-sm font-bold text-slate-800">${d.count} row(s) from an earlier upload are still waiting to be mapped</p>
+          <p class="text-xs text-slate-500 mt-0.5">Carry on from where you stopped — no need to upload the statement again.</p>
+        </div>
+        <button id="fb2-resume" class="px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700">Continue mapping</button>
+      </div>`;
+    document.getElementById('fb2-resume')?.addEventListener('click', finBankLoadPending);
+}
+
+async function finBankLoadPending() {
+    const btn = document.getElementById('fb2-resume');
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+    try {
+        const d = await supFetch('/api/tally/bank/pending?company=' + encodeURIComponent(_fb2.company || ''));
+        if (!d.rows || !d.rows.length) { showNotification('Nothing is waiting to be mapped.'); return finBankRenderUpload(); }
+        _fb2.data = d; _fb2.edits = {}; _fb2.page = 0;
+        _fb2.filter = d.summary.unmatched || d.summary.unsure ? 'attention' : 'ready';
+        finBankRenderReview();
+    } catch (e) {
+        showNotification(e.message, true);
+        if (btn) { btn.disabled = false; btn.textContent = 'Continue mapping'; }
+    }
+}
+
+// ── review screen ────────────────────────────────────────────────────────────────────────────────
+// Anything under 80% must not reach a draft on its own. Such a row is still shown with its
+// suggestion and reasoning — it is simply left BLANK, so it counts as unmapped until a person picks
+// the ledger. Pre-filling it would mean a 60% guess becoming a voucher because nobody looked, which
+// is the one failure mode this whole screen exists to avoid. (The server enforces this too.)
+const FB2_CONFIDENT = 0.8;
+const fb2Suggested = (r) => (r.suggestion && r.suggestion.confidence >= FB2_CONFIDENT) ? r.suggestion.ledger : '';
+const fb2Row = (r, i) => ({ ...r, _i: i, ledger: _fb2.edits[i] !== undefined ? _fb2.edits[i] : fb2Suggested(r) });
+
+function fb2Rows() {
+    const rows = (_fb2.data.rows || []).map(fb2Row);
+    switch (_fb2.filter) {
+        case 'attention': return rows.filter(r => !r.already && !r.beforeBooks && (!r.suggestion || r.suggestion.confidence < 0.8));
+        case 'ready':     return rows.filter(r => !r.already && !r.beforeBooks && r.ledger);
+        case 'blocked':   return rows.filter(r => r.beforeBooks);
+        case 'done':      return rows.filter(r => r.already);
+        default:          return rows;
+    }
+}
+
+function finBankRenderReview() {
+    const body = document.getElementById('fin-entry-body');
+    if (!body || !_fb2.data) return;
+    const d = _fb2.data, s = d.summary;
+    const all = (d.rows || []).map(fb2Row);
+    const importable = all.filter(r => !r.already && !r.beforeBooks && r.ledger);
+    const missingLedgers = [...new Set(importable.map(r => r.ledger).filter(l => l && !_fb2.byName.has(l)))];
+
+    const chip = (key, label, n, tone) => `<button class="fb2-filter px-3 py-1.5 rounded-full text-xs font-semibold ${
+        _fb2.filter === key ? 'bg-indigo-600 text-white' : (tone || 'bg-slate-100 text-slate-600 hover:bg-slate-200')}" data-f="${key}">${label} ${n}</button>`;
+
+    body.innerHTML = finEntryTabs() + `
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div>
+          <p class="text-sm font-bold text-slate-800">${escapeHtml(d.filename || 'statement')}</p>
+          <p class="text-xs text-slate-500">${s.total} rows &middot; ${escapeHtml(finDMY(s.dateFrom))} → ${escapeHtml(finDMY(s.dateTo))}
+            &middot; out ${finMoney(s.totalOut)} / in ${finMoney(s.totalIn)} &middot; into <b>${escapeHtml(d.company || '')}</b></p>
+        </div>
+        <button id="fb2-restart" class="filter-btn">${d.pending ? 'Upload a statement' : 'Upload a different file'}</button>
+      </div>
+
+      ${d.pending ? `<div class="card p-3 mb-4 border-l-4 border-indigo-400 text-xs text-indigo-900 bg-indigo-50/50">
+        <b>These are saved rows from an earlier upload, not a fresh file.</b> Anything already booked has been removed from the list,
+        so the running balance is not checked here &mdash; it only reconciles against a whole statement.</div>`
+        : d.balanceCheck && !d.balanceCheck.ok ? `<div class="card p-3 mb-4 border-l-4 border-rose-400 text-xs text-rose-800 bg-rose-50/50">
+        <b>The running balance doesn't reconcile on ${d.balanceCheck.broken} row(s).</b> The file may be partial or edited —
+        check it before importing${d.balanceCheck.firstBreak ? `, starting near ${escapeHtml(finDMY(d.balanceCheck.firstBreak.date))}` : ''}.</div>`
+        : `<div class="card p-3 mb-4 border-l-4 border-emerald-400 text-xs text-emerald-800 bg-emerald-50/50">
+        <b>Running balance reconciles on every row</b> — nothing was missed or double-read in the parse.</div>`}
+
+      ${s.beforeBooksFrom ? `<div class="card p-3 mb-4 border-l-4 border-amber-400 text-xs text-amber-900 bg-amber-50/50">
+        <b>${s.beforeBooksFrom} row(s) are dated before this company's books begin (${escapeHtml(finDMY(d.booksFrom))}).</b>
+        Tally rejects those, so they can't be imported. Widen "Books beginning from" in Tally, or pick the company whose books cover them.</div>` : ''}
+
+      <div class="flex flex-wrap gap-2 mb-4">
+        ${chip('attention', 'Needs a look', s.unsure + s.unmatched, 'bg-amber-100 text-amber-800 hover:bg-amber-200')}
+        ${chip('ready', 'Ready', importable.length, 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200')}
+        ${chip('all', 'All', s.total)}
+        ${s.alreadyImported ? chip('done', 'Already imported', s.alreadyImported) : ''}
+        ${s.beforeBooksFrom ? chip('blocked', 'Out of period', s.beforeBooksFrom) : ''}
+      </div>
+
+      ${missingLedgers.length ? `<div class="card p-4 mb-4 border-l-4 border-sky-400">
+        <p class="text-sm font-semibold text-slate-800">${missingLedgers.length} ledger(s) don't exist in this company yet</p>
+        <p class="text-xs text-slate-500 mt-1">They must be created before those rows can be booked — otherwise Tally would invent them under Suspense.</p>
+        <p class="text-xs text-slate-600 mt-2">${missingLedgers.slice(0, 8).map(escapeHtml).join(' &middot; ')}${missingLedgers.length > 8 ? ` &middot; +${missingLedgers.length - 8} more` : ''}</p>
+        <button id="fb2-mkledgers" class="mt-3 text-sm px-4 py-2 rounded-lg bg-sky-600 text-white font-semibold hover:bg-sky-700">Review &amp; create these ledgers</button>
+      </div>` : ''}
+
+      <div id="fb2-table"></div>
+
+      <div class="card p-4 mt-4 flex flex-wrap items-center justify-between gap-3 sticky bottom-0">
+        <div class="text-sm">
+          <b>${importable.length}</b> row(s) ready &middot; ${finMoney(importable.reduce((a, r) => a + r.amount, 0))}
+          ${missingLedgers.length ? `<span class="text-sky-700"> &middot; ${missingLedgers.length} ledger(s) to create first</span>` : ''}
+        </div>
+        <button id="fb2-import" class="px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          ${importable.length && !missingLedgers.length ? '' : 'disabled'}>Create ${importable.length} draft voucher(s)</button>
+      </div>
+
+`;
+
+    finEntryWireTabs();
+    body.querySelectorAll('.fb2-filter').forEach(b => b.addEventListener('click', () => { _fb2.filter = b.dataset.f; _fb2.page = 0; finBankRenderReview(); }));
+    document.getElementById('fb2-restart')?.addEventListener('click', finBankRenderUpload);
+    document.getElementById('fb2-import')?.addEventListener('click', () => finBankImport(importable));
+    document.getElementById('fb2-mkledgers')?.addEventListener('click', () => finBankLedgerModal(missingLedgers));
+    fb2RenderTable();
+}
+
+function fb2RenderTable() {
+    const host = document.getElementById('fb2-table');
+    if (!host) return;
+    const rows = fb2Rows();
+    const page = rows.slice(0, (_fb2.page + 1) * FB2_PAGE);
+    const TH = 'px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+    const TD = 'px-3 py-2 text-sm text-slate-700 border-b border-slate-100 align-top';
+
+    host.innerHTML = `<div class="card overflow-x-auto"><table class="w-full">
+        <thead><tr>
+          <th class="${TH}">Date</th><th class="${TH}">Narration</th>
+          <th class="${TH} text-right">Amount</th><th class="${TH}">Type</th>
+          <th class="${TH}">Book against</th><th class="${TH}">Why</th>
+        </tr></thead><tbody>${page.length ? page.map(r => {
+          const c = r.suggestion ? r.suggestion.confidence : 0;
+          const tone = r.already ? 'opacity-50' : r.beforeBooks ? 'opacity-60 bg-amber-50/40' : '';
+          const badge = r.already ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-600">IMPORTED</span>'
+            : r.beforeBooks ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800">OUT OF PERIOD</span>'
+            : c >= 0.8 ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-700">${Math.round(c * 100)}%</span>`
+            : c > 0 ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800">${Math.round(c * 100)}%</span>`
+            : '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-700">NO MATCH</span>';
+          const missing = r.ledger && !_fb2.byName.has(r.ledger);
+          return `<tr class="${tone}">
+            <td class="${TD} whitespace-nowrap text-xs">${escapeHtml(finDMY(r.date))}</td>
+            <td class="${TD} max-w-[300px]"><span class="block truncate" title="${escapeHtml(r.narration)}">${escapeHtml(r.narration)}</span>
+              ${r.reference ? `<span class="block text-[10px] text-slate-400 truncate">${escapeHtml(r.reference)}</span>` : ''}</td>
+            <td class="${TD} text-right font-semibold whitespace-nowrap">${finMoney(r.amount)}</td>
+            <td class="${TD} text-xs">${r.voucherType === 'Payment' ? '<span class="text-rose-600">Payment</span>' : '<span class="text-emerald-700">Receipt</span>'}</td>
+            <td class="${TD}">
+              <input class="fb2-led filter-input w-full text-sm ${missing ? 'border-sky-400' : ''}" data-i="${r._i}"
+                autocomplete="off" role="combobox" aria-expanded="false" aria-autocomplete="list"
+                data-party="${escapeHtml((r.partyGuesses || []).join('|'))}"
+                data-weak="${r.suggestion && r.suggestion.confidence < FB2_CONFIDENT ? escapeHtml(r.suggestion.ledger) : ''}"
+                data-weakpct="${r.suggestion ? Math.round(r.suggestion.confidence * 100) : ''}"
+                value="${escapeHtml(r.ledger || '')}" placeholder="type to search…" ${r.already || r.beforeBooks ? 'disabled' : ''}>
+              ${missing ? '<span class="block text-[10px] text-sky-700 mt-0.5">will be created</span>' : ''}</td>
+            <td class="${TD} text-[11px] text-slate-500 max-w-[240px]">${badge}
+              ${r.suggestion ? `<span class="block mt-0.5">${escapeHtml(r.suggestion.reason)}</span>` : ''}</td>
+          </tr>`;
+        }).join('') : `<tr><td colspan="6" class="p-10 text-center text-sm text-slate-400">Nothing in this view.</td></tr>`}
+      </tbody></table></div>
+      ${rows.length > page.length ? `<button id="fb2-more" class="mt-3 text-sm font-semibold text-indigo-600 hover:text-indigo-800">
+        Show more (${page.length} of ${rows.length})</button>` : ''}`;
+
+    host.querySelectorAll('.fb2-led').forEach(inp => {
+        inp.addEventListener('change', () => {
+            _fb2.edits[+inp.dataset.i] = inp.value.trim();
+            finBankRenderReview();   // totals + the "ledgers to create" panel depend on this
+        });
+        inp.addEventListener('focus', () => fb2PickOpen(inp));
+        inp.addEventListener('input', () => fb2PickOpen(inp));
+        inp.addEventListener('keydown', fb2PickKey);
+    });
+    document.getElementById('fb2-more')?.addEventListener('click', () => { _fb2.page++; fb2RenderTable(); });
+}
+
+// ── ledger picker ────────────────────────────────────────────────────────────────────────────────
+// Hand-drawn rather than a native <datalist>. The browser draws a datalist popup itself, which means
+// it ignores the page entirely: it follows the OS colour scheme (a black panel over our light UI on a
+// dark-mode machine), sizes itself to the longest ledger name, and lists every ledger at once — on a
+// 28-ledger company that filled the whole viewport. None of it is styleable.
+//
+// One panel is shared by every row: there can be 120 inputs on screen and 120 panels would be wasteful
+// and would fight each other for z-index.
+const _fb2pick = { input: null, items: [], active: -1, el: null };
+
+function fb2PickEl() {
+    if (_fb2pick.el && document.body.contains(_fb2pick.el)) return _fb2pick.el;
+    const el = document.createElement('div');
+    el.id = 'fb2-pick';
+    el.className = 'fixed hidden bg-white border border-slate-200 rounded-xl shadow-xl overflow-auto';
+    // z-index INLINE, not as a Tailwind class — an arbitrary z-[N] that isn't already in the compiled
+    // CSS silently does nothing, which is exactly how the notifications popup once ended up behind a
+    // modal (see the note above buildNotifPopup).
+    //
+    // 200 puts it above EVERY dialog here (the drawer is z-80, other modals z-85/z-95). It was 80,
+    // level with the voucher drawer, so with equal z-index DOM order decided — and the drawer, being
+    // appended later, covered the list the drawer itself had opened.
+    el.style.zIndex = '200';
+    // mousedown, not click: clicking blurs the input first, and a blur handler would close the panel
+    // before the click ever landed.
+    el.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const row = e.target.closest('[data-pick]');
+        if (row) fb2PickChoose(Number(row.dataset.pick));
+    });
+    // Hover moves the same selection the arrow keys move — one highlight, never two.
+    el.addEventListener('mousemove', (e) => {
+        const row = e.target.closest('[data-pick]');
+        if (!row) return;
+        const i = Number(row.dataset.pick);
+        if (i === _fb2pick.active) return;
+        _fb2pick.active = i;
+        fb2PickPaint();
+    });
+    document.body.appendChild(el);
+    _fb2pick.el = el;
+    return el;
+}
+
+function fb2PickOpen(inp) {
+    const all = _fb2.ledgers || [];
+    const typed = String(inp.value || '').trim();
+    // A row that already has a ledger would otherwise filter down to that one ledger the moment it is
+    // focused — useless, since the reason to click it is to change it. An exact match means "show me
+    // everything, with this one highlighted".
+    const exact = all.some(l => l.name.toLowerCase() === typed.toLowerCase());
+    const q = exact ? '' : typed.toLowerCase();
+    // Names that START with what was typed rank first — typing "AMA" should not put a ledger that
+    // merely contains it above AMAZON.
+    const hits = all.filter(l => !q || l.name.toLowerCase().includes(q) || String(l.parent || '').toLowerCase().includes(q));
+    hits.sort((a, b) => {
+        const sa = a.name.toLowerCase().startsWith(q) ? 0 : 1, sb = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+        return sa - sb || a.name.localeCompare(b.name);
+    });
+    // Nothing matching is the NORMAL case on a fresh set of books — 185 of these 199 rows have no
+    // ledger yet. So the picker offers to create one rather than dead-ending: the typed text, and the
+    // payee read out of the narration, both as one-click "create this ledger" entries.
+    const known = (n) => all.some(l => l.name.toLowerCase() === n.toLowerCase());
+    const news = [];
+    // The below-80% suggestion, offered explicitly rather than pre-filled: one click to accept, but it
+    // has to be a click. Kept at the top while the field is still empty, since it is the likely answer.
+    const weak = String(inp.dataset.weak || '').trim();
+    if (weak && !typed) news.push({ isWeak: true, name: weak, pct: inp.dataset.weakpct });
+
+    if (typed && !known(typed)) news.push({ isNew: true, name: typed });
+    String(inp.dataset.party || '').split('|').map(x => x.trim()).filter(Boolean).forEach(party => {
+        if (known(party)) return;
+        if (news.some(x => x.name.toLowerCase() === party.toLowerCase())) return;
+        news.push({ isNew: true, name: party });
+    });
+
+    const matches = hits.slice(0, 60);           // enough to scroll through, not enough to hurt
+    // At the top when there is nothing to choose from, or when the field is still empty and we have a
+    // name from the narration to offer — those are the moments creating one IS the answer. Otherwise
+    // below the matches, so it never gets in the way of picking an existing ledger.
+    _fb2pick.input = inp;
+    _fb2pick.items = (!matches.length || (!typed && news.length)) ? news.concat(matches) : matches.concat(news);
+
+    // Never leave a "create" entry pre-selected unless it is the only option — Enter should not invent
+    // a ledger the operator never looked at.
+    const at = exact ? _fb2pick.items.findIndex(l => !l.isNew && !l.isWeak && l.name.toLowerCase() === typed.toLowerCase())
+                     : _fb2pick.items.findIndex(l => !l.isNew && !l.isWeak);
+    _fb2pick.active = _fb2pick.items.length ? (at >= 0 ? at : 0) : -1;
+    fb2PickRender();
+    if (_fb2pick.active > 0)
+        _fb2pick.el.querySelector(`[data-pick="${_fb2pick.active}"]`)?.scrollIntoView({ block: 'nearest' });
+}
+
+function fb2PickRender() {
+    const el = fb2PickEl(), inp = _fb2pick.input;
+    if (!inp) return fb2PickClose();
+    const typed = String(inp.value || '').trim();
+    // Tailwind here is PRE-COMPILED (app/static/tailwind.css, no build script), so only classes already
+    // in that file work. `hover:bg-slate-50` / `hover:bg-indigo-50` / `last:border-0` are not in it —
+    // the highlight is therefore driven from JS, which is better behaviour anyway: the mouse moves the
+    // same selection the arrow keys do, instead of two independent highlights fighting each other.
+    const n = _fb2pick.items.length;
+    const rows = _fb2pick.items.map((l, i) => l.isWeak
+        ? `<div data-pick="${i}" class="px-3 py-2 cursor-pointer bg-amber-50 ${i < n - 1 ? 'border-b border-slate-100' : ''}">
+             <p class="text-sm font-semibold text-amber-900 truncate">Suggested &middot; ${escapeHtml(String(l.pct))}% &mdash; ${escapeHtml(l.name)}</p>
+             <p class="text-xs text-amber-800 truncate">Too unsure to fill in for you &mdash; accept it only if it looks right</p></div>`
+        : l.isNew
+        ? `<div data-pick="${i}" class="px-3 py-2 cursor-pointer bg-sky-50 ${i < n - 1 ? 'border-b border-slate-100' : ''}">
+             <p class="text-sm font-semibold text-sky-800 truncate">+ Create ledger "${escapeHtml(l.name)}"</p>
+             <p class="text-xs text-sky-700 truncate">You pick its group next &mdash; it is made in Tally, not guessed</p></div>`
+        : `<div data-pick="${i}" class="px-3 py-2 cursor-pointer ${
+             i < n - 1 ? 'border-b border-slate-100 ' : ''}${i === _fb2pick.active ? 'bg-indigo-50' : ''}">
+             <p class="text-sm font-semibold ${i === _fb2pick.active ? 'text-indigo-700' : 'text-slate-800'} truncate">${escapeHtml(l.name)}</p>
+             <p class="text-xs text-slate-400 truncate">${escapeHtml(l.parent || '')}</p></div>`).join('');
+
+    // A typed name that matches nothing is not an error — it is how a new ledger gets created. Say so
+    // here, rather than leaving an empty box that reads as "no such thing".
+    const none = !n ? `<div class="px-3 py-3 text-xs text-slate-500">
+        ${typed ? `No ledger matches <b>${escapeHtml(typed)}</b>.` : 'No ledgers in these books yet — type a name to create one.'}</div>` : '';
+    el.innerHTML = rows + none;
+    el.classList.remove('hidden');
+    inp.setAttribute('aria-expanded', 'true');
+    fb2PickPlace();
+    // Again next frame: the first call measures a list the browser has not laid out yet, so a flip
+    // decision made on offsetHeight can be wrong by the height of the whole panel.
+    requestAnimationFrame(fb2PickPlace);
+}
+
+// Repaint just the highlight. Re-rendering the whole list on every mousemove would rebuild 60 nodes
+// under the cursor, which drops the panel's own hit-testing.
+function fb2PickPaint() {
+    if (!_fb2pick.el) return;
+    _fb2pick.el.querySelectorAll('[data-pick]').forEach(row => {
+        const i = Number(row.dataset.pick);
+        const it = _fb2pick.items[i] || {};
+        if (it.isNew || it.isWeak) return;            // these keep their own sky / amber styling
+        const on = i === _fb2pick.active;
+        row.classList.toggle('bg-indigo-50', on);
+        const name = row.firstElementChild;
+        if (name) { name.classList.toggle('text-indigo-700', on); name.classList.toggle('text-slate-800', !on); }
+    });
+}
+
+const FB2_PICK_MAX = 300, FB2_PICK_MIN = 140, FB2_GAP = 8;
+
+function fb2PickPlace() {
+    const el = _fb2pick.el, inp = _fb2pick.input;
+    if (!el || !inp || el.classList.contains('hidden')) return;
+    // The field can vanish under us — the drawer is closed, or the bank table re-renders. The panel
+    // lives on <body>, so without this it would hang there pointing at nothing.
+    if (!document.body.contains(inp)) return fb2PickClose();
+    const r = inp.getBoundingClientRect();
+    const w = Math.max(r.width, 300);
+    el.style.width = w + 'px';
+    el.style.left = Math.max(FB2_GAP, Math.min(r.left, window.innerWidth - w - FB2_GAP)) + 'px';
+
+    // Go wherever there is more room, and take only the space that is actually there. The old version
+    // fixed max-height at 300px and only flipped when the whole 300 fitted, so a field low on the
+    // screen got a list running off the bottom edge with most of it unreachable.
+    const roomBelow = window.innerHeight - r.bottom - FB2_GAP * 2;
+    const roomAbove = r.top - FB2_GAP * 2;
+    const above = roomBelow < FB2_PICK_MIN && roomAbove > roomBelow;
+    const room = Math.max(FB2_PICK_MIN, Math.min(FB2_PICK_MAX, above ? roomAbove : roomBelow));
+    el.style.maxHeight = room + 'px';
+    el.style.top = (above ? Math.max(FB2_GAP, r.top - el.offsetHeight - 4) : r.bottom + 4) + 'px';
+}
+
+function fb2PickClose() {
+    if (_fb2pick.el) _fb2pick.el.classList.add('hidden');
+    if (_fb2pick.input) _fb2pick.input.setAttribute('aria-expanded', 'false');
+    _fb2pick.input = null; _fb2pick.items = []; _fb2pick.active = -1;
+}
+
+function fb2PickChoose(i) {
+    const l = _fb2pick.items[i], inp = _fb2pick.input;
+    if (!l || !inp) return;
+    inp.value = l.name;
+    const isNew = !!l.isNew;   // isWeak just fills the field — the ledger already exists
+
+    // Used in two places now. In the bank-import table the choice feeds _fb2.edits and re-renders the
+    // review screen; anywhere else (the Voucher Register drawer) it is just a value, and the caller
+    // listens for `change`.
+    if (inp.dataset.pickmode === 'plain') {
+        fb2PickClose();
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+        return;
+    }
+    _fb2.edits[+inp.dataset.i] = l.name;
+    fb2PickClose();
+    finBankRenderReview();     // the totals and the "ledgers to create" panel depend on this
+    // Straight into the group picker: a ledger with no group chosen is exactly the mistake this whole
+    // feature exists to prevent (Tally would file it under Suspense). The modal proposes a group from
+    // how the same name is filed in the other company, and creates it in Tally on confirm.
+    if (isNew) finBankLedgerModal([l.name]);
+}
+
+function fb2PickKey(e) {
+    if (!_fb2pick.input || _fb2pick.input !== e.target) return;
+    const open = _fb2pick.el && !_fb2pick.el.classList.contains('hidden');
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        if (!open) return fb2PickOpen(e.target);
+        e.preventDefault();
+        const n = _fb2pick.items.length;
+        if (!n) return;
+        _fb2pick.active = (_fb2pick.active + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+        fb2PickPaint();   // not a re-render: that would reset the panel's scroll on every keypress
+        _fb2pick.el.querySelector(`[data-pick="${_fb2pick.active}"]`)?.scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+        if (open && _fb2pick.active >= 0) { e.preventDefault(); fb2PickChoose(_fb2pick.active); }
+    } else if (e.key === 'Escape') {
+        if (open) { e.stopPropagation(); fb2PickClose(); }
+    } else if (e.key === 'Tab') {
+        fb2PickClose();
+    }
+}
+
+document.addEventListener('mousedown', (e) => {
+    if (_fb2pick.input && !e.target.closest('#fb2-pick') && !e.target.classList.contains('fb2-led')) fb2PickClose();
+});
+// The panel is position:fixed, so it has to follow its input when anything scrolls — capture catches
+// scrolling inside the table wrapper as well as the page.
+window.addEventListener('scroll', fb2PickPlace, true);
+window.addEventListener('resize', fb2PickPlace);
+
+// ── create the ledgers a fresh company doesn't have yet ──────────────────────────────────────────
+async function finBankLedgerModal(names) {
+    document.getElementById('fb2-led-modal')?.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'fb2-led-modal';
+    wrap.className = 'fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-3xl flex flex-col max-h-[88vh]">
+      <div class="px-6 py-4 border-b border-slate-200">
+        <h3 class="text-lg font-bold text-slate-800">Create ${names.length} ledger(s)</h3>
+        <p class="text-xs text-slate-500 mt-0.5">in <b>${escapeHtml(_fb2.data.company || '')}</b> — the group is suggested from how the same name is filed in your other company. Nothing is copied between them.</p></div>
+      <div id="fb2-led-body" class="px-6 py-4 overflow-auto flex-1"></div>
+      <div class="px-6 py-3 border-t border-slate-200 flex justify-end gap-2">
+        <button class="fb2-x text-sm px-4 py-2 rounded-lg border border-slate-300 font-semibold text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button id="fb2-led-go" class="text-sm px-4 py-2 rounded-lg bg-sky-600 text-white font-semibold hover:bg-sky-700">Create in Tally</button></div></div>`;
+    wrap.addEventListener('click', e => { if (e.target === wrap) wrap.remove(); });
+    wrap.querySelectorAll('.fb2-x').forEach(b => b.addEventListener('click', () => wrap.remove()));
+    document.body.appendChild(wrap);
+
+    const bodyEl = wrap.querySelector('#fb2-led-body');
+    bodyEl.innerHTML = brandLoaderSm('Working out the right group for each…');
+    let prop;
+    try { prop = await supFetch('/api/tally/ledgers/propose', { method: 'POST', body: JSON.stringify({ company: _fb2.data.company, names }) }); }
+    catch (e) { bodyEl.innerHTML = `<p class="text-sm text-rose-600">${escapeHtml(e.message)}</p>`; return; }
+
+    const groups = prop.availableGroups || [];
+    // Groups the accountant uses in the other company that do not exist here yet.
+    const newGroups = [];
+    (prop.proposals || []).forEach(p => {
+        if (!p.needsGroupCreating) return;
+        if (newGroups.some(g => g.name === p.group)) return;
+        newGroups.push({ name: p.group, parent: p.groupParent });
+    });
+
+    bodyEl.innerHTML = `<table class="w-full text-sm"><thead><tr>
+        <th class="text-left text-[11px] font-semibold text-slate-400 uppercase pb-2">Ledger</th>
+        <th class="text-left text-[11px] font-semibold text-slate-400 uppercase pb-2">Group</th>
+        <th class="text-left text-[11px] font-semibold text-slate-400 uppercase pb-2">Bill-wise</th>
+        <th class="text-left text-[11px] font-semibold text-slate-400 uppercase pb-2">Why</th></tr></thead>
+      <tbody>${(prop.proposals || []).map((p, i) => `<tr class="border-t border-slate-100">
+        <td class="py-2 pr-3 font-medium">${escapeHtml(p.name)}</td>
+        <td class="py-2 pr-3"><select class="fb2-grp filter-select" data-i="${i}">${
+          (p.needsGroupCreating ? `<option value="${escapeHtml(p.group)}" selected>${escapeHtml(p.group)} — will be created</option>` : '') +
+          groups.map(g => `<option value="${escapeHtml(g)}"${!p.needsGroupCreating && g === p.group ? ' selected' : ''}>${escapeHtml(g)}</option>`).join('')}</select></td>
+        <td class="py-2 pr-3"><input type="checkbox" class="fb2-bw" data-i="${i}"${p.isBillwise ? ' checked' : ''}></td>
+        <td class="py-2 text-[11px] ${p.confidence ? 'text-slate-500' : 'text-amber-700'}">${escapeHtml(p.reason)}</td>
+      </tr>`).join('')}</tbody></table>
+      ${newGroups.length ? `<div class="mt-3 p-3 rounded-lg bg-sky-50 border border-sky-200 text-xs text-sky-800">
+        <b>${newGroups.length} new group(s) will be created first:</b>
+        ${newGroups.map(g => `${escapeHtml(g.name)} <span class="text-sky-700">(under ${escapeHtml(g.parent)})</span>`).join(' &middot; ')}
+        <span class="block mt-1 text-sky-800">These are the groups your other company already uses. A ledger filed under
+        Sundry Creditors instead would sit on the balance sheet and never reach the P&amp;L.</span></div>` : ''}
+      ${prop.alreadyExist && prop.alreadyExist.length ? `<p class="text-xs text-slate-400 mt-3">${prop.alreadyExist.length} already exist and will be skipped.</p>` : ''}`;
+
+    wrap.querySelector('#fb2-led-go').addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true; btn.textContent = 'Creating…';
+        const ledgers = (prop.proposals || []).map((p, i) => ({
+            name: p.name,
+            parent: (bodyEl.querySelector(`.fb2-grp[data-i="${i}"]`) || {}).value || p.group,
+            isBillwise: !!(bodyEl.querySelector(`.fb2-bw[data-i="${i}"]`) || {}).checked,
+        }));
+        try {
+            // Only the groups still actually chosen after any edits in the dropdowns.
+            const wantGroups = newGroups.filter(g => ledgers.some(l => l.parent === g.name));
+            const r = await supFetch('/api/tally/ledgers', { method: 'POST',
+                body: JSON.stringify({ company: _fb2.data.company, ledgers, groups: wantGroups }) });
+            showNotification(`Created ${r.created} ledger(s)${(r.groupsCreated || []).length ? ` and ${r.groupsCreated.length} group(s)` : ''} in Tally`);
+            if (r.errors && r.errors.length) showNotification(r.errors[0], true);
+            wrap.remove();
+            // Refresh the TARGET company's ledgers so those rows stop showing "will be created".
+            try {
+                const dd = await supFetch('/api/tally/masters?kind=ledger&company=' + encodeURIComponent(_fb2.data.company || ''));
+                _fb2.ledgers = dd.rows || [];
+                _fb2.byName = new Map(_fb2.ledgers.map(l => [l.name, l]));
+            } catch (_) {}
+            finBankRenderReview();
+        } catch (e) { showNotification(e.message, true); btn.disabled = false; btn.textContent = 'Create in Tally'; }
+    });
+}
+
+// ── import ───────────────────────────────────────────────────────────────────────────────────────
+async function finBankImport(rows) {
+    if (_fb2.busy) return;
+    const total = rows.reduce((a, r) => a + r.amount, 0);
+    if (!(await supConfirm({
+        title: `Create ${rows.length} draft voucher(s)?`,
+        message: `${finMoney(total)} into ${_fb2.data.company}. They are saved as DRAFTS — nothing reaches Tally until they are approved.`,
+        confirmLabel: 'Create drafts',
+    }))) return;
+
+    _fb2.busy = true;
+    const btn = document.getElementById('fb2-import');
+    if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+    try {
+        // Chunked: a year's statement is ~1000 rows and one giant request would risk a timeout.
+        let created = 0, dupes = 0, failed = 0, firstErrors = [];
+        for (let i = 0; i < rows.length; i += 100) {
+            const slice = rows.slice(i, i + 100).map(r => ({
+                date: r.date, narration: r.narration, reference: r.reference,
+                withdrawal: r.withdrawal, deposit: r.deposit, balance: r.balance, ledger: r.ledger,
+                // A ledger this operator picked or typed, rather than one filled in from a confident
+                // suggestion. The server needs it to tell an accepted weak match from an unlooked-at one.
+                confirmed: _fb2.edits[r._i] !== undefined,
+            }));
+            const r = await supFetch('/api/tally/bank/import', { method: 'POST', body: JSON.stringify({
+                filename: _fb2.data.filename, bankLedger: _fb2.data.bankLedger, company: _fb2.data.company, rows: slice }) });
+            created += r.created; dupes += r.duplicates; failed += r.failed;
+            if (r.failures && r.failures.length && firstErrors.length < 5) firstErrors.push(...r.failures.slice(0, 5 - firstErrors.length));
+            if (btn) btn.textContent = `Creating… ${Math.min(i + 100, rows.length)}/${rows.length}`;
+        }
+        showNotification(`${created} draft(s) created${dupes ? `, ${dupes} already imported` : ''}${failed ? `, ${failed} failed` : ''}`, failed > 0);
+        if (firstErrors.length) console.warn('[bank import] failures:', firstErrors);
+        // Straight back to what is still unmapped — that is nearly always the next thing to do.
+        if (_fb2.data && _fb2.data.pending) finBankLoadPending(); else finBankRenderUpload();
+    } catch (e) { showNotification(e.message, true); }
+    finally { _fb2.busy = false; if (btn) { btn.disabled = false; btn.textContent = 'Create draft voucher(s)'; } }
+}
+// ═══════════════ End Bank Statement import ═══════════════

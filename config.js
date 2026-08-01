@@ -91,6 +91,41 @@ module.exports = {
     SUPABASE_URL: process.env.SUPABASE_URL,
     SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY,
 
+    // --- Tally Prime (Finance → Data Entry) ---
+    // Tally's XML gateway only ever listens on localhost:9000 of the finance PC, so the LIVE server
+    // (VPS) can never reach it: there, TALLY_MODE=bridge parks vouchers in tally_vouchers_ecom and the
+    // agent in tally-bridge/ (running beside Tally) pulls + posts them. On a machine that IS running
+    // Tally, TALLY_MODE=direct posts synchronously through the identical code path.
+    // TALLY_COMPANY may be left blank — direct mode then asks Tally which company is open.
+    TALLY_MODE: process.env.TALLY_MODE || 'direct',
+    TALLY_URL: process.env.TALLY_URL || 'http://localhost:9000',
+    TALLY_COMPANY: process.env.TALLY_COMPANY || '',
+    // Shared secret for the bridge agent's /api/tally/bridge/* calls (it holds no JWT). Unset = the
+    // bridge endpoints refuse every request, rather than accepting anonymous vouchers.
+    TALLY_BRIDGE_KEY: _envFile.TALLY_BRIDGE_KEY || process.env.TALLY_BRIDGE_KEY,
+    // Master kill switch. While this is not 'true' vouchers can be drafted, validated and previewed,
+    // but NOTHING is sent to Tally. Keep it false until the write path is proven on a test company.
+    TALLY_POST_ENABLED: process.env.TALLY_POST_ENABLED || 'false',
+    // Nightly batch push (23:50 IST): collect the day's drafts, validate against Tally's live masters,
+    // then ask for approval in Teams. Only an ADMIN can approve; approving is what queues the vouchers.
+    TALLY_BATCH_CRON_ENABLED: process.env.TALLY_BATCH_CRON_ENABLED || 'false',
+    // 'false' pushes straight away at 23:50 with no human in the loop — not recommended for books.
+    TALLY_BATCH_REQUIRE_APPROVAL: process.env.TALLY_BATCH_REQUIRE_APPROVAL || 'true',
+    TALLY_BATCH_TTL_HOURS: process.env.TALLY_BATCH_TTL_HOURS || '24',
+    // Ceiling on one batch. A bulk import can leave hundreds of drafts, and a single Teams card listing
+    // 500 vouchers is unreadable and unapprovable — the rest simply roll into the next run.
+    TALLY_BATCH_MAX: process.env.TALLY_BATCH_MAX || '250',
+    // Post a "nothing to send" card on quiet nights. Off by default so the channel stays useful.
+    TALLY_NOTIFY_EMPTY: process.env.TALLY_NOTIFY_EMPTY || 'false',
+    // Teams finance channel: outbound Workflow webhook + the channel id the listener watches for
+    // yes/no. Only admins should be members of that channel — it is the approval boundary.
+    TEAMS_WEBHOOK_FINANCE: process.env.TEAMS_WEBHOOK_FINANCE,
+    TEAMS_CHANNEL_FINANCE: process.env.TEAMS_CHANNEL_FINANCE,
+    // Optional second webhook for the RESULT / exception cards, so routine confirmations can live in a
+    // general ops channel while the APPROVAL request stays in the admin-only channel above. Falls back
+    // to TEAMS_WEBHOOK_FINANCE when unset.
+    TEAMS_WEBHOOK_FINANCE_RESULT: process.env.TEAMS_WEBHOOK_FINANCE_RESULT,
+
     // --- Amazon Auto Review ---
     SLACK_BOT_TOKEN:   process.env.SLACK_BOT_TOKEN,
     SLACK_CHANNEL_ID:  process.env.SLACK_CHANNEL_ID || 'C0BDDKPE3PS',

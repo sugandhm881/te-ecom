@@ -401,4 +401,11 @@ async function cancelPendingReview() {
     return { ok: true };
 }
 
-module.exports = { router, initAutoReviewCron, runAutoReviewCheck, approvePendingReview, cancelPendingReview };
+// Read-only: is a review batch actually waiting for a yes/no right now? Needed because the Teams
+// listener may watch a channel shared with the Tally approval, where a bare "yes" has to be routed to
+// whichever flow is genuinely pending. Probing via approvePendingReview() would SEND the requests.
+function hasPendingReview() {
+    return !!(pendingRun && Date.now() <= pendingRun.expiry);
+}
+
+module.exports = { router, initAutoReviewCron, runAutoReviewCheck, approvePendingReview, cancelPendingReview, hasPendingReview };
