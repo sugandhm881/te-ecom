@@ -120,7 +120,8 @@ const RAPIDSHYP_TRACK_URL = 'https://api.rapidshyp.com/rapidshyp/apis/v1/track_o
 
 // order name → { awbByName, cancelled }. Pulls the EasyEcom AWB (the fallback key for the RapidShyp
 // lookup — Shopify often has no tracking number) and the order_status in ONE query. `cancelled` is a
-// set of orders EasyEcom marks Cancelled, used only to drop dead orders (not for shipment status).
+// set of orders EasyEcom marks Cancelled, used only to drop dead orders (not for shipment status —
+// EasyEcom's order_status lags and is not trusted for movement; the couriers are the source of truth).
 async function fetchEasyecomInfoByName(names) {
     const awbByName = {};
     const cancelled = new Set();
@@ -138,6 +139,42 @@ async function fetchEasyecomInfoByName(names) {
         });
     }
     return { awbByName, cancelled };
+}
+
+// COURIER movement, straight from the carriers — RapidShyp + DocPharma + Kwikship all write
+// `shipment_journey_ecom` (one row per AWB, tagged `source`). This is the courier-agnostic "has it
+// left?" signal: the old code asked ONLY RapidShyp, so a parcel shipped on DocPharma/Kwikship (or any
+// non-RapidShyp AWB) had no record → read as "not moved" → it fell through to Shopify's
+// displayStatus=CONFIRMED and sat in the pending report forever.
+// MOVED = a real movement EVENT: a pickup/OFD/delivery/RTO timestamp, or a terminal journey.
+// Deliberately NOT "a journey row exists" — a label can be generated (row created, outcome
+// 'in_transit') while the parcel is still on our shelf; those must stay in Ready-for-Pickup.
+// Matched on BOTH awb and order_name, since the journey may be keyed by either.
+async function fetchCourierMoved(names, awbs) {
+    const moved = new Set();          // normalised order names the courier already has
+    const movedAwbs = new Set();
+    const SEL = 'awb, order_name, source, outcome, dispatched_at, out_for_delivery_at, delivered_at, rto_at, is_final';
+    const hasMovedRow = j => !!(j.dispatched_at || j.out_for_delivery_at || j.delivered_at || j.rto_at || j.is_final);
+    const take = rows => (rows || []).forEach(j => {
+        if (!hasMovedRow(j)) return;
+        if (j.order_name) moved.add(normName(j.order_name));
+        if (j.awb) movedAwbs.add(String(j.awb));
+    });
+    const cleanNames = [...new Set(names.map(normName).filter(Boolean))];
+    for (let i = 0; i < cleanNames.length; i += 200) {
+        const { data, error } = await supabase.from('shipment_journey_ecom').select(SEL)
+            .in('order_name', cleanNames.slice(i, i + 200));
+        if (error) { console.warn(`[WH Report] journey lookup (by order) failed: ${error.message}`); break; }
+        take(data);
+    }
+    const cleanAwbs = [...new Set(awbs.filter(Boolean).map(String))];
+    for (let i = 0; i < cleanAwbs.length; i += 200) {
+        const { data, error } = await supabase.from('shipment_journey_ecom').select(SEL)
+            .in('awb', cleanAwbs.slice(i, i + 200));
+        if (error) { console.warn(`[WH Report] journey lookup (by awb) failed: ${error.message}`); break; }
+        take(data);
+    }
+    return { moved, movedAwbs };
 }
 
 // Live RapidShyp status for one AWB; refreshes the cache. Retries on transient errors/timeouts/
@@ -522,12 +559,18 @@ async function collectPendingGroups(start, end, label = 'open orders') {
     // Phase 1 — from the DB CACHE: drop dead orders (EasyEcom-cancelled) and shipments the cache
     // already knows have moved/delivered (the bulk — no live call). What remains = candidates.
     const cacheStatus = await resolveRsStatuses(Object.values(awbByName));
-    let movedSkipped = 0, cancelledSkipped = 0;
+    // Courier truth for ALL carriers (RapidShyp + DocPharma + Kwikship) from shipment_journey_ecom.
+    const { moved: jMoved, movedAwbs: jMovedAwbs } = await fetchCourierMoved(allOrders.map(o => o.name), Object.values(awbByName));
+    let movedSkipped = 0, cancelledSkipped = 0, courierMovedSkipped = 0;
     const candidates = [];
     allOrders.forEach(order => {
         const nm = normName(order.name);
         if (ecCancelled.has(nm)) { cancelledSkipped++; return; }
         const awb = awbByName[nm];
+        // A carrier has physically moved it — covers DocPharma/Kwikship/any non-RapidShyp AWB that the
+        // RapidShyp lookup below can never resolve. Checked first so those orders also skip the live
+        // verify (which would 400 on an AWB RapidShyp never issued).
+        if (jMoved.has(nm) || (awb && jMovedAwbs.has(String(awb)))) { courierMovedSkipped++; return; }
         const rs = awb ? cacheStatus[awb] : null;
         if (rs && rsHasMoved(rs)) { movedSkipped++; return; } // cache says gone → drop, no live needed
         candidates.push(order);
@@ -573,7 +616,7 @@ async function collectPendingGroups(start, end, label = 'open orders') {
     });
 
     const total = Object.values(groups).flat().length;
-    console.log(`[WH Report] READY=${(groups.READY_FOR_PICKUP||[]).length} CONFIRMED=${(groups.CONFIRMED||[]).length} UNFULFILLABLE=${(groups.UNFULFILLABLE||[]).length} REALLOC=${(groups.REALLOCATION_REQUIRED||[]).length} TOTAL=${total} (dropped ${movedSkipped} moved · ${cancelledSkipped} cancelled)`);
+    console.log(`[WH Report] READY=${(groups.READY_FOR_PICKUP||[]).length} CONFIRMED=${(groups.CONFIRMED||[]).length} UNFULFILLABLE=${(groups.UNFULFILLABLE||[]).length} REALLOC=${(groups.REALLOCATION_REQUIRED||[]).length} TOTAL=${total} (dropped ${courierMovedSkipped} courier-moved · ${movedSkipped} RS-moved · ${cancelledSkipped} cancelled)`);
     return { groups, rsMap, awbByName, start, end };
 }
 
