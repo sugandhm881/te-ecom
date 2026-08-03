@@ -46,8 +46,17 @@ async function fetchRsTrackingByAwbs(awbs, columns = 'awb, raw_status, updated_a
     return batches.flat();
 }
 
+// AWBs RapidShyp itself has rejected as unknown (HTTP 400) — i.e. shipments booked with ANOTHER carrier
+// (Delhivery direct, GoKwik/Kwikship, DocPharma). Remembered for the life of the process so we stop
+// re-asking about them every sync. Deliberately keyed on RapidShyp's OWN verdict rather than the courier
+// name: 13 of 181 GoKwik AWBs and 28 non-RapidShyp-journey AWBs ARE tracked by RapidShyp, so filtering by
+// aggregator/courier would have wrongly skipped real shipments and lost their tracking.
+const notRapidshypAwbs = new Set();
+
 async function enrichAWBsBackground(awbs) {
+    let skipped = 0;
     for (const awb of awbs) {
+        if (notRapidshypAwbs.has(awb)) { skipped++; continue; }   // already told us it isn't theirs
         try {
             const res = await axios.post(RS_URL, { awb }, { headers: RS_HDR(), timeout: 8000 });
             if (res.data.success && res.data.records && res.data.records.length) {
@@ -63,11 +72,22 @@ async function enrichAWBsBackground(awbs) {
                 }
             }
         } catch (e) {
-            console.error(`[RS Sync] ${awb} failed:`, e.message);
+            // 400 = RapidShyp doesn't know this AWB → it was booked with another carrier. That's a normal
+            // fact about a multi-courier catalogue, NOT a failure: nothing was ever going to be written for
+            // it, so the data is identical either way. Logged at warn (never console.error) so it stops
+            // raising cron-failure alerts, and remembered so later runs skip it entirely.
+            const status = e && e.response && e.response.status;
+            if (status === 400) {
+                notRapidshypAwbs.add(awb);
+                console.warn(`[RS Sync] ${awb} — not a RapidShyp shipment (400); skipping from now on`);
+            } else {
+                console.error(`[RS Sync] ${awb} failed:`, e.message);   // real failure (5xx/timeout/auth)
+            }
         }
         await new Promise(r => setTimeout(r, 1000)); // 1 req/sec to avoid overload
     }
-    console.log(`[RS Sync] Background sync done for ${awbs.length} AWBs`);
+    console.log(`[RS Sync] Background sync done for ${awbs.length} AWBs`
+        + (skipped ? ` (skipped ${skipped} known non-RapidShyp)` : ''));
 }
 
 const OPS_FULFILLMENT_FILTER = '(fulfillment_status:shipped OR fulfillment_status:partial OR fulfillment_status:scheduled OR fulfillment_status:on_hold OR fulfillment_status:request_declined)';

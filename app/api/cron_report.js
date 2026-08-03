@@ -66,9 +66,23 @@ const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g,
 async function runCron(name, fn) {
     const s = stat(name);
     const t0 = Date.now();
+    // Only attribute a console.error line to THIS job when the line's own [Tag] matches the job name
+    // (job names are derived from that same tag, e.g. "ShopifyHold (*/2 * * * *)" ← "[ShopifyHold]").
+    // Without this, a long-running job absorbs the error output of anything overlapping it: ShopifyHold
+    // runs ~43s and was reported as failed because of "[RS Sync] … 400" lines that were never its own.
+    // Lines from another job, or with no tag, are ignored here — that job reports its own. A THROWN
+    // error is always attributed regardless of logging, so a genuine crash can never be missed.
+    const jobTag = String(name).split('(')[0].trim();
+    const tagRe = jobTag ? new RegExp('^\\s*\\[' + jobTag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[\\]\\[]') : null;
     const swallowed = [];
     const origErr = console.error;
-    console.error = (...args) => { try { swallowed.push(args.map(a => (a && a.message) ? a.message : String(a)).join(' ')); } catch (_) {} origErr.apply(console, args); };
+    console.error = (...args) => {
+        try {
+            const line = args.map(a => (a && a.message) ? a.message : String(a)).join(' ');
+            if (!tagRe || tagRe.test(line)) swallowed.push(line);
+        } catch (_) {}
+        origErr.apply(console, args);
+    };
     let thrown = null;
     try { await fn(); }
     catch (e) { thrown = e; }
