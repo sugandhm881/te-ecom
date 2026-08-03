@@ -23,6 +23,11 @@ const { postTeams, buildCard } = require('./teams');
 const MODE = () => String(process.env.CRON_REPORT_MODE || 'digest').toLowerCase();
 const HOOK = () => config.TEAMS_WEBHOOK_CRON || process.env.TEAMS_WEBHOOK_CRON || null;
 const istNow = () => new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
+// Jobs whose SUCCESS card is suppressed under MODE=all (failures always post). Comma-separated
+// substrings of the job name, case-insensitive — e.g. CRON_REPORT_SKIP="TallyBatch,EE Session".
+const isMuted = name => String(process.env.CRON_REPORT_SKIP || '')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+    .some(s => String(name).toLowerCase().includes(s));
 
 // name → { runs, ok, failed, lastAt, lastMs, lastError }
 const stats = new Map();
@@ -77,7 +82,11 @@ async function runCron(name, fn) {
         if (MODE() !== 'off') await postFailure(name, ms, reason);
     } else {
         s.ok++;
-        if (MODE() === 'all') await postSuccess(name, ms);
+        // MODE=all → a card for EVERY run, in real time. CRON_REPORT_SKIP mutes the SUCCESS card for
+        // named jobs (comma-separated, matched case-insensitively as a substring of the job name) — use
+        // it for the high-frequency watchdogs (`*/2`, `*/10`, `*/20`) that otherwise drown the channel.
+        // FAILURES are never muted: a job in the skip list still posts a card the moment it fails.
+        if (MODE() === 'all' && !isMuted(name)) await postSuccess(name, ms);
     }
     return { ok: !reason, ms, reason };
 }
