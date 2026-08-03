@@ -13,6 +13,8 @@ const { requirePermission } = require('../auth');
 const shopifyHold = require('./shopify_hold');
 
 const UNDELIVERED_BUCKETS = ['undelivered'];   // per the console spec: single member
+const HIGH_VALUE_MIN = 1500;   // ₹ — high-value hold threshold, and the bar a PAST DELIVERED order must
+                               // clear to earn the trust exception. Keep in sync with shopify_hold.js.
 const CALL_OUTCOMES = ['no_answer', 'customer_will_accept', 'refused', 'reschedule', 'wrong_number', 'delivered_confirmed', 'other'];
 const PREPAID_STATUSES = ['paid', 'partially_paid', 'refunded', 'partially_refunded'];
 
@@ -222,7 +224,14 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
     const _p10 = p => String(p || '').replace(/\D/g, '').slice(-10);
     const phones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
     const phoneVariants = [...new Set(phones.flatMap(p => { const t = _p10(p); return t.length === 10 ? [p, t, '91' + t, '+91' + t] : [p]; }))];
-    const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, order_name, phone, bucket, created_at', 'phone', phoneVariants) : [];
+    const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, order_name, phone, bucket, created_at, total_price', 'phone', phoneVariants) : [];
+    // COMPLETE-history high-value deliveries, asked separately (delivered + ≥₹1500 only, so the result
+    // set is tiny). Not filtered out of `hist`: that batch is shared with the last-3 logic and each
+    // chunk's response is capped at 1000 rows, which could silently hide an older proving delivery.
+    const hvRows = phones.length ? await chunkedIn('order_buckets', 'phone, created_at', 'phone', phoneVariants,
+        q => q.eq('bucket', 'delivered').gte('total_price', HIGH_VALUE_MIN)) : [];
+    const hvByPhone = {};   // last-10 phone → EARLIEST delivered ≥₹1500 order date
+    hvRows.forEach(h => { const k = _p10(h.phone) || h.phone; if (!hvByPhone[k] || new Date(h.created_at) < new Date(hvByPhone[k])) hvByPhone[k] = h.created_at; });
     // EasyEcom-cancelled prior orders read as active in order_buckets (Shopify lag) — treat them as cancelled
     // so a customer whose only "non-delivered" prior order was actually cancelled isn't flagged repeat-risk.
     const histCancelled = await eeCancelledSet(hist.map(h => h.order_name));
@@ -259,7 +268,12 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
         // holds the latest even for a customer who has a past delivery.
         const rInflight = all.some(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at) && !TERMINAL.has(h.bucket) && !isCancelled(h));
         // Reason `high_value` — this order is ₹1500 and above.
-        const rValue    = Number(c.total_price || 0) >= 1500;
+        // TRUST EXCEPTION (2026-08-01): skip when the customer has EVER TAKEN DELIVERY of a ≥₹1500 order.
+        // NO last-3 window and no time limit — their COMPLETE history counts (a proven high-value
+        // acceptor makes the value alone a non-signal). Mirrors holdReasons() in shopify_hold.js.
+        const hvAt = hvByPhone[_p10(c.phone) || c.phone];
+        const deliveredHighValue = !!(hvAt && new Date(hvAt) < new Date(c.created_at));
+        const rValue    = Number(c.total_price || 0) >= HIGH_VALUE_MIN && !deliveredHighValue;
         // Reason `short_address` — terse/incomplete address (<100 chars), unless a PAST DELIVERED order for this
         // customer used the same address (proven deliverable).
         const cAddr = candAddrById[String(c.order_id)] || '';

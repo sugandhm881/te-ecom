@@ -20,7 +20,10 @@ if ($Uninstall) {
 }
 
 if (-not (Test-Path $Agent)) { throw "agent.js not found next to this script ($Agent)" }
-if (-not (Test-Path (Join-Path $Here '.env'))) { throw "No .env in $Here — copy .env.example to .env and fill it in first." }
+# Keep this file pure ASCII. Windows PowerShell 5.1 reads a .ps1 as ANSI unless it has a BOM, so a
+# UTF-8 em dash decodes as a smart closing quote and terminates the string early - which breaks the
+# parse of the whole file, several lines away from the actual character.
+if (-not (Test-Path (Join-Path $Here '.env'))) { throw "No .env in $Here - copy .env.example to .env and fill it in first." }
 
 $node = (Get-Command node -ErrorAction SilentlyContinue)
 if (-not $node) { throw 'node is not on PATH. Install Node.js, or hard-code its full path below.' }

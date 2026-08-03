@@ -252,6 +252,8 @@ async function autoHoldOrder(orderName, shopifyOrderId, reasonNote, createdAt) {
 // Queue Repeat logic. Returned (not just a boolean) so the auto-holder can RECORD *why* it held — the panel then
 // shows the category even later, when the live-recomputed reason has changed (e.g. a prior order that was
 // 'undelivered' at hold time finalised to RTO and now hits the reliability exception, leaving no live reason).
+const HIGH_VALUE_MIN = 1500;   // ₹ — the high-value hold threshold; also the bar a PAST DELIVERED order
+                               // must clear to earn the trust exception. Keep in sync with support_console.js.
 const REASON_LABEL = { high_value: 'high value (≥₹1500)', recent_undelivered: 'no delivery in last 3', in_flight: 'another live order', short_address: 'short address (<60 chars)' };
 // Normalise an address for same-address comparison (case/space/punctuation-insensitive).
 const _normAddr = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -265,21 +267,50 @@ async function holdReasons({ phone, financialStatus, createdAt, shopifyOrderId, 
     if (['paid', 'refunded', 'partially_refunded'].includes(fin)) return [];
     const isPartialPaid = fin === 'partially_paid';
     const reasons = [];
-    if (Number(totalPrice || 0) >= 1500) reasons.push('high_value');                          // high value ≥₹1500 — COD AND partial-paid
-    if (!isPartialPaid) {                                                                      // history + address reasons are COD-only
-        const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
-        let deliveredIds = [];   // this phone's PAST delivered order ids (for the short-address trust exception)
+    // ── Customer history by phone. Fetched for EVERY payment type now (not just COD) because the
+    //    high-value rule below needs it too. Ordered newest-first so the 50-row cap keeps the RECENT
+    //    orders rather than an arbitrary slice.
+    const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
+    let others = [], deliveredIds = [];
+    if (last10.length === 10) {
+        const { data } = await supabase.from('order_buckets')
+            .select('order_id, bucket, created_at, total_price')
+            .ilike('phone', `%${last10}`)
+            .order('created_at', { ascending: false })
+            .limit(50);
+        others = (data || []).filter(h => String(h.order_id) !== String(shopifyOrderId));
+        deliveredIds = others.filter(h => h.bucket === 'delivered').map(h => h.order_id);   // for the short-address trust exception
+    }
+    const before = new Date(createdAt || Date.now());
+    const prior = others.filter(h => new Date(h.created_at) < before);
+    // reason: HIGH VALUE (≥₹1500) — applies to COD AND partial-paid.
+    // TRUST EXCEPTION (2026-08-01): skip when this customer has EVER TAKEN DELIVERY of a ≥₹1500 order.
+    // NO last-3 window and NO time limit — the customer's COMPLETE order history counts, because once
+    // someone has accepted a high-value COD parcel the value alone stops being a risk signal.
+    // Asked as its own targeted existence query (not filtered from the 50-row recent-history window
+    // above), so a customer with >50 orders can't have their proving delivery fall outside it.
+    if (Number(totalPrice || 0) >= HIGH_VALUE_MIN) {
+        let deliveredHighValue = false;
         if (last10.length === 10) {
-            const before = new Date(createdAt || Date.now());
-            const { data } = await supabase.from('order_buckets').select('order_id, bucket, created_at').ilike('phone', `%${last10}`).limit(50);
-            const others = (data || []).filter(h => String(h.order_id) !== String(shopifyOrderId));
-            const last3Prior = others.filter(h => new Date(h.created_at) < before).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
+            const { data: hv } = await supabase.from('order_buckets')
+                .select('order_id')
+                .ilike('phone', `%${last10}`)
+                .eq('bucket', 'delivered')
+                .gte('total_price', HIGH_VALUE_MIN)
+                .lt('created_at', before.toISOString())
+                .limit(1);
+            deliveredHighValue = !!(hv && hv.length);
+        }
+        if (!deliveredHighValue) reasons.push('high_value');
+    }
+    if (!isPartialPaid) {                                                                      // history + address reasons are COD-only
+        {
+            const last3Prior = prior.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
             // RULE: if ANY ONE of the last 3 prior orders was DELIVERED, the customer is trusted → skip the history reasons.
             const dCount    = last3Prior.filter(h => h.bucket === 'delivered').length;
             const reliable  = dCount >= 1;
             if (!reliable && last3Prior.some(h => !['delivered', 'cancelled'].includes(h.bucket))) reasons.push('recent_undelivered');   // reason #2 — skipped when any of last 3 delivered
-            if (others.some(h => new Date(h.created_at) < before && !['delivered', 'rto', 'cancelled'].includes(h.bucket))) reasons.push('in_flight');   // reason #1 — an OLDER live order still open → THIS order is the repeat
-            deliveredIds = others.filter(h => h.bucket === 'delivered').map(h => h.order_id);
+            if (prior.some(h => !['delivered', 'rto', 'cancelled'].includes(h.bucket))) reasons.push('in_flight');   // reason #1 — an OLDER live order still open → THIS order is the repeat
         }
         // reason: SHORT ADDRESS (<60 chars) — terse/incomplete addresses are RTO-prone. Trust exception: skip if a
         // PAST DELIVERED order for this customer used the SAME address (that exact address is proven to deliver).

@@ -173,14 +173,14 @@ async function heartbeat() {
     try { company = await resolveCompany(); reachable = true; }
     catch (e) { note = 'Tally unreachable: ' + e.message; }
     const r = await api('post', '/heartbeat', { version: VERSION, tallyReachable: reachable, company, note });
-    if (r.status !== 200) { warn(`heartbeat → HTTP ${r.status} ${JSON.stringify(r.data).slice(0, 160)}`); return null; }
+    if (r.status !== 200) { warn(`heartbeat -> HTTP ${r.status} ${JSON.stringify(r.data).slice(0, 160)}`); return null; }
     return r.data;   // { ok, syncRequested, postEnabled }
 }
 
 // ── push queued vouchers ─────────────────────────────────────────────────────────────────────────
 async function drainQueue() {
     const r = await api('get', `/pull?limit=${CFG.pullLimit}`);
-    if (r.status !== 200) { warn(`pull → HTTP ${r.status}`); return 0; }
+    if (r.status !== 200) { warn(`pull -> HTTP ${r.status}`); return 0; }
     const list = (r.data && r.data.vouchers) || [];
     if (!list.length) return 0;
     info(`pulled ${list.length} voucher(s) to post`);
@@ -195,7 +195,7 @@ async function drainQueue() {
             if (resp.status >= 400) throw new Error(`Tally HTTP ${resp.status}`);
             // The SERVER decides ok/failed from this raw body — the agent must not interpret it.
             const ack = await api('post', '/ack', { id: v.id, responseXml: String(resp.data || '') });
-            info(`voucher ${v.id} → ${(ack.data && ack.data.status) || 'ack HTTP ' + ack.status}` +
+            info(`voucher ${v.id} -> ${(ack.data && ack.data.status) || 'ack HTTP ' + ack.status}` +
                  (ack.data && ack.data.error ? ` (${ack.data.error})` : ''));
         } catch (e) {
             // Outcome genuinely unknown: Tally may or may not have applied it. Say so — the server then
@@ -225,7 +225,7 @@ async function syncMastersAndBooks(company, booksFrom) {
         masters[kind] = String(r.data || '');
     }
     const mr = await apiGzip('/masters-xml', { company, masters }, 120000);
-    if (mr.status !== 200) warn(`masters upload → HTTP ${mr.status} ${JSON.stringify(mr.data).slice(0, 200)}`);
+    if (mr.status !== 200) warn(`masters upload -> HTTP ${mr.status} ${JSON.stringify(mr.data).slice(0, 200)}`);
     else info(`masters synced: ${JSON.stringify(mr.data.counts || {})}`);
 
     // Books: trial balance + day book, for THIS COMPANY'S financial year.
@@ -246,9 +246,9 @@ async function syncMastersAndBooks(company, booksFrom) {
     };
     const rawKb = Math.round((payload.trialBalance.length + payload.dayBook.length) / 1024);
     const br = await apiGzip('/books-xml', payload, 240000);
-    if (br.status !== 200) warn(`books upload → HTTP ${br.status} ${JSON.stringify(br.data).slice(0, 200)}`);
+    if (br.status !== 200) warn(`books upload -> HTTP ${br.status} ${JSON.stringify(br.data).slice(0, 200)}`);
     else info(`books synced: ${JSON.stringify(br.data.counts || br.data)} (${rawKb}KB XML, gzipped)` +
-                    `  [${payload.periodFrom} → ${payload.periodTo}]`);
+                    `  [${payload.periodFrom} -> ${payload.periodTo}]`);
 }
 
 // ── main loop ────────────────────────────────────────────────────────────────────────────────────
@@ -264,7 +264,7 @@ async function tick() {
     if (hb && hb.postEnabled) {
         try { await drainQueue(); } catch (e) { err('queue drain: ' + e.message); }
     } else if (hb) {
-        dbg('posting disabled server-side — not pulling the queue');
+        dbg('posting disabled server-side - not pulling the queue');
     }
 
     const dueBySchedule = Date.now() - lastSyncAt > CFG.syncMin * 60 * 1000;
@@ -274,7 +274,7 @@ async function tick() {
         try {
             const companies = await openCompanies();
             const periods = await companyPeriods();
-            info(`syncing masters + books for ${companies.length} company(ies) (${why})…`);
+            info(`syncing masters + books for ${companies.length} company(ies) (${why})...`);
             for (const company of companies) {
                 // One failing company must not stop the others — a year with no books yet is normal.
                 try { await syncMastersAndBooks(company, periods.get(company)); }
@@ -291,7 +291,7 @@ async function main() {
     info(`  dashboard : ${CFG.dashboard}`);
     info(`  tally     : ${CFG.tally}`);
     info(`  company   : ${CFG.company || '(whichever Tally has open)'}`);
-    info(`  poll ${CFG.pollMs}ms · sync every ${CFG.syncMin}m · log ${CFG.logFile}`);
+    info(`  poll ${CFG.pollMs}ms | sync every ${CFG.syncMin}m | log ${CFG.logFile}`);
 
     while (!stopping) {
         await tick();
@@ -302,7 +302,7 @@ async function main() {
     info('stopped');
 }
 
-['SIGINT', 'SIGTERM'].forEach(sig => process.on(sig, () => { info(`${sig} — shutting down`); stopping = true; setTimeout(() => process.exit(0), 500); }));
+['SIGINT', 'SIGTERM'].forEach(sig => process.on(sig, () => { info(`${sig} - shutting down`); stopping = true; setTimeout(() => process.exit(0), 500); }));
 process.on('unhandledRejection', e => err('unhandledRejection: ' + (e && e.message)));
 
 main().catch(e => { err('fatal: ' + e.message); process.exit(1); });

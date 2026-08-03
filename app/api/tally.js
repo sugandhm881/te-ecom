@@ -242,17 +242,13 @@ async function booksCached(key, ttl, producer) {
 // In bridge mode the server cannot read Tally, so the books come from tally_books_cache_ecom — uploaded
 // by the agent every ~15 min. Callers get `syncedAt` so the UI can stamp "as of" rather than imply the
 // figures are live. Returns null when the agent has never uploaded (a real "not available yet").
-async function readBooksCache(kind, company, from, to) {
+async function readBooksCache(kind, company) {
+    // One row per company per kind — the newest upload. The period it actually covers is returned
+    // alongside so the page stamps what it is showing rather than assuming it got what it asked for.
     let q = supabase.from('tally_books_cache_ecom').select('payload, synced_at, period_from, period_to')
         .eq('kind', kind).order('synced_at', { ascending: false }).limit(1);
     if (company) q = q.eq('company', company);
-    // Prefer an exact period match; otherwise fall back to the newest upload for this kind so the page
-    // still shows something (clearly stamped with the period it actually covers).
-    const exact = from && to
-        ? await supabase.from('tally_books_cache_ecom').select('payload, synced_at, period_from, period_to')
-            .eq('kind', kind).eq('company', company).eq('period_from', from).eq('period_to', to).maybeSingle()
-        : { data: null };
-    const row = (exact && exact.data) || (await q).data?.[0] || null;
+    const row = (await q).data?.[0] || null;
     if (!row) return null;
     return { payload: row.payload, syncedAt: row.synced_at, periodFrom: row.period_from, periodTo: row.period_to };
 }
@@ -286,7 +282,7 @@ async function booksData(kind, company, from, to) {
         });
         return { data: out.data, source: 'live', syncedAt: null, cachedAt: out.cachedAt };
     }
-    const cached = await readBooksCache(kind, company, from, to);
+    const cached = await readBooksCache(kind, company);
     if (!cached) { const e = new Error(CACHE_MISS); e.cacheMiss = true; throw e; }
     return { data: cached.payload, source: 'cache', syncedAt: cached.syncedAt,
              periodFrom: cached.periodFrom, periodTo: cached.periodTo, cachedAt: null };
@@ -1247,6 +1243,15 @@ router.post('/tally/bridge/books-xml', bridgeAuth, async (req, res) => {
                 company, kind, period_from: from, period_to: to, payload, synced_at: now,
             }, { onConflict: 'company,kind,period_from,period_to' });
             if (error) throw new Error(`${kind}: ${error.message}`);
+            // This is a cache of the LATEST books per company, not a history, but the unique key
+            // includes the period — so rows pile up forever in two ways: `meta` carries NULL periods
+            // and a unique index treats NULLs as distinct, so ON CONFLICT never matches it; and the
+            // current year's period_to is today, so each new day writes a fresh multi-MB day_book
+            // instead of replacing yesterday's. Prune AFTER the write, never before, so a concurrent
+            // reader always sees one row rather than a momentary gap.
+            const { error: pruneErr } = await supabase.from('tally_books_cache_ecom').delete()
+                .eq('company', company).eq('kind', kind).lt('synced_at', now);
+            if (pruneErr) console.warn(`[Tally] books-cache prune ${kind}: ${pruneErr.message}`);
         };
         if (typeof trialBalance === 'string' && trialBalance.trim()) {
             const rows = T.parseTrialBalance(trialBalance);

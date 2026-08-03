@@ -72,6 +72,11 @@ CREATE TABLE IF NOT EXISTS tally_books_cache_ecom (
     synced_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (company, kind, period_from, period_to)
 );
+-- Only ever ONE row per (company, kind) is kept — the newest. The unique key includes the period, so
+-- it cannot enforce that on its own: `meta` has NULL periods (and a unique index treats NULLs as
+-- distinct, so ON CONFLICT never matches), and the current year's period_to is today, which moves
+-- daily. Both would insert rather than replace, accumulating multi-MB payloads forever. The upload
+-- route prunes older rows for the same (company, kind) immediately after each write.
 
 -- ── RLS: service-role only, same as every other tally_* table ───────────────────────────────────
 ALTER TABLE tally_push_batches_ecom ENABLE ROW LEVEL SECURITY;

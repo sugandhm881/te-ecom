@@ -134,7 +134,7 @@ async function postTeams(webhookUrl, payload, opts = {}) {
     } catch (e) { console.error('[Teams] error', e.message); return false; }
 }
 
-const TARGETS = { warehouse: 'TEAMS_WEBHOOK_WAREHOUSE', dp: 'TEAMS_WEBHOOK_DP', hold: 'TEAMS_WEBHOOK_HOLD', amazon: 'TEAMS_WEBHOOK_AMAZON' };
+const TARGETS = { warehouse: 'TEAMS_WEBHOOK_WAREHOUSE', dp: 'TEAMS_WEBHOOK_DP', hold: 'TEAMS_WEBHOOK_HOLD', amazon: 'TEAMS_WEBHOOK_AMAZON', cron: 'TEAMS_WEBHOOK_CRON' };
 
 // POST /api/teams/test?target=warehouse|dp|hold|amazon — verify a channel's webhook is wired up.
 router.post('/teams/test', async (req, res) => {

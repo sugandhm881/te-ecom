@@ -108,6 +108,13 @@ const { ingestRecentDocpharmaOrders } = require('./app/api/docpharma_portal');
 const { backfillJourneys, syncChargesBatch } = require('./app/api/delivery_journey');
 const { syncKwikship } = require('./app/api/kwikship_sync');
 const cron = require('node-cron');
+// Every scheduled job goes through the reporter → the Teams "Cron Response" channel. Failures post a
+// card with the reason (including errors a job caught itself and only console.error'd); successes are
+// rolled into the periodic digest. Reporting NEVER throws, so it can't take a cron down. See
+// app/api/cron_report.js for the modes (CRON_REPORT_MODE=digest|all|failures|off).
+const { runCron, sendCronDigest } = require('./app/api/cron_report');
+const cronJob = (name, expr, fn, opts = { timezone: 'Asia/Kolkata' }) =>
+    cron.schedule(expr, () => runCron(name, fn), opts);
 
 // --- Register Routes ---
 app.use('/api', authRoutes);
@@ -287,7 +294,7 @@ initFbaLocationCron();
 // 23:45 warm the ledger masters so the 23:50 validation reflects Tally as it is right now (a ledger
 // renamed during the day must not let a push silently create it afresh under Suspense).
 const tallyBatch = require('./app/api/tally_batch');
-cron.schedule('45 23 * * *', async () => {
+cronJob('TallyBatch (45 23 * * *)', '45 23 * * *', async () => {
     if (String(config.TALLY_BATCH_CRON_ENABLED || '').toLowerCase() !== 'true') return;
     console.log('[TallyBatch] 23:45 IST — refreshing Tally masters ahead of the nightly push…');
     try { await require('./app/api/tally').syncMastersDirect(); }
@@ -296,7 +303,7 @@ cron.schedule('45 23 * * *', async () => {
 
 // 23:50 build the batch, validate every draft, and post the Teams approval card. NOTHING is sent to
 // Tally here — an admin's "yes" in Teams (or the dashboard) is what queues the vouchers.
-cron.schedule('50 23 * * *', async () => {
+cronJob('TallyBatch (50 23 * * *)', '50 23 * * *', async () => {
     // Check the flag BEFORE announcing the run, like the other three. runNightly() refuses on its own
     // too, but logging "building the nightly batch" and then silently doing nothing reads, in a log
     // people scan at a glance, exactly like a run that worked.
@@ -307,28 +314,28 @@ cron.schedule('50 23 * * *', async () => {
 
 // Watcher — every 2 min, report a batch to Teams once all of its vouchers are terminal. A cron rather
 // than a hook inside /bridge/ack: if the agent dies mid-batch, this still notices and reports.
-cron.schedule('*/2 * * * *', async () => {
+cronJob('TallyBatch (*/2 * * * *)', '*/2 * * * *', async () => {
     if (String(config.TALLY_BATCH_CRON_ENABLED || '').toLowerCase() !== 'true') return;
     await tallyBatch.checkOpenBatches().catch(e => console.error('[TallyBatch] watcher error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // Hourly — expire batches nobody approved; their vouchers return to draft for the next run, so nothing
 // is lost and nothing is ever double-posted.
-cron.schedule('5 * * * *', async () => {
+cronJob('TallyBatch (5 * * * *)', '5 * * * *', async () => {
     if (String(config.TALLY_BATCH_CRON_ENABLED || '').toLowerCase() !== 'true') return;
     await tallyBatch.expireStaleBatches().catch(e => console.error('[TallyBatch] expiry error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // Delivery-journey gap-fill — every 6h, refresh non-final shipments (webhooks handle real-time;
 // this catches any misses). Skips shipments already delivered/RTO (is_final) → minimal API.
-cron.schedule('45 */6 * * *', async () => {
+cronJob('Journey (45 */6 * * *)', '45 */6 * * *', async () => {
     console.log('[Journey] 6-hr gap-fill — refreshing non-final shipment journeys…');
     await backfillJourneys(30).catch(e => console.error('[Journey] gap-fill error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // Escalation reply poll — every 10 min, read the mail inbox (IMAP) for replies to sent critical
 // emails, save them and AI-score resolution. No-op when no escalations were sent recently.
-cron.schedule('*/10 * * * *', async () => {
+cronJob('EscMail (*/10 * * * *)', '*/10 * * * *', async () => {
     const { pollEscalationReplies } = require('./app/api/email_replies');
     await pollEscalationReplies().catch(e => console.error('[EscMail] cron error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
@@ -336,7 +343,7 @@ cron.schedule('*/10 * * * *', async () => {
 // RapidShyp charges sync — nightly at 3:15 AM IST. Fetches freight (final_freights) + invoice value
 // via the shipment_details API for FINAL shipments that haven't been priced yet, and backfills the
 // promise EDD when missing. Drains the backlog in nightly batches and prices each new delivered/RTO.
-cron.schedule('15 3 * * *', async () => {
+cronJob('Charges (15 3 * * *)', '15 3 * * *', async () => {
     console.log('[Charges] 3:15 AM IST — syncing RapidShyp freight/value for newly-final shipments…');
     const r = await syncChargesBatch(2500).catch(e => { console.error('[Charges] nightly error:', e.message); return null; });
     if (r) console.log(`[Charges] nightly done — processed ${r.processed}, updated ${r.updated}`);
@@ -345,7 +352,7 @@ cron.schedule('15 3 * * *', async () => {
 // Daily inventory report → Microsoft Teams @ 06:30 IST. First re-syncs live from EasyEcom (rebuilds the
 // snapshot) so the morning report reflects CURRENT stock, then posts the DOI image. (The Supabase pg_cron
 // 'snapshot-inventory-daily-ist' @ 00:00 IST still keeps the dashboard fresh overnight.)
-cron.schedule('30 6 * * *', async () => {
+cronJob('Inventory (30 6 * * *)', '30 6 * * *', async () => {
     const inv = require('./app/api/inventory');
     console.log('[Inventory] 06:30 IST — syncing from EasyEcom then posting daily report to Teams…');
     await inv.refreshSnapshot().catch(e => console.error('[Inventory] EasyEcom sync error (posting last snapshot):', e.message));
@@ -355,7 +362,7 @@ cron.schedule('30 6 * * *', async () => {
 // DocPharma portal INGESTION — DocPharma doesn't webhook us (webhook_url is null), so every 3h we pull
 // their latest orders from the partner portal (auto-login) → upsert docpharma_orders + fetch timelines.
 // This is what actually captures NEW DocPharma orders. Also runs ~40s after startup.
-cron.schedule('40 */3 * * *', async () => {
+cronJob('DP portal (40 */3 * * *)', '40 */3 * * *', async () => {
     console.log('[DP portal] 3-hr ingest — pulling DocPharma latest orders…');
     await ingestRecentDocpharmaOrders().catch(e => console.error('[DP portal] ingest error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
@@ -365,7 +372,7 @@ setTimeout(() => { ingestRecentDocpharmaOrders().catch(e => console.error('[DP p
 // journeys ONLY for Kwikship-allocated orders (raw_data.courier_aggregator_name = 'GoKwik Outbound') that
 // aren't already final — one Kwikship API call per non-final shipment, zero wasted calls. Writes into the
 // shared shipment_journey_ecom with source='kwikship'.
-cron.schedule('0 2 * * *', async () => {
+cronJob('Kwikship (0 2 * * *)', '0 2 * * *', async () => {
     console.log('[Kwikship] 2:00 AM IST — syncing tracking for Kwikship-allocated orders…');
     try { const r = await syncKwikship({ days: 30 }); console.log('[Kwikship]', r.skipped ? `skipped (${r.reason})` : `updated ${r.updated}/${r.processed} (of ${r.total} Kwikship orders)`); }
     catch (e) { console.error('[Kwikship] cron error:', e.message); }
@@ -373,7 +380,7 @@ cron.schedule('0 2 * * *', async () => {
 
 // New/Repeat classification — re-tag journey rows from Shopify's "Repeat" order tag. Pure SQL (0 API),
 // via the refresh_journey_order_type() DB function. Daily at 2:30 AM IST + once shortly after startup.
-cron.schedule('30 2 * * *', async () => {
+cronJob('OrderType (30 2 * * *)', '30 2 * * *', async () => {
     console.log('[OrderType] Daily refresh — tagging journeys new/repeat from Shopify tags…');
     const { error } = await supabase.rpc('refresh_journey_order_type');
     if (error) console.error('[OrderType] refresh error:', error.message);
@@ -393,7 +400,7 @@ setTimeout(() => {
 }, 60000);
 
 // RS Sync — every 2 hours: last 7 days orders (skips 4 PM slot — MTD runs then)
-cron.schedule('0 */2 * * *', async () => {
+cronJob('RS Sync (0 */2 * * *)', '0 */2 * * *', async () => {
     const istHour = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false });
     if (String(istHour) === '16') { console.log('[RS Sync] 2-hr skipping 4 PM slot — MTD cron will handle it'); return; }
     console.log('[RS Sync] 2-hr trigger — syncing last 7 days…');
@@ -401,7 +408,7 @@ cron.schedule('0 */2 * * *', async () => {
 }, { timezone: 'Asia/Kolkata' });
 
 // RS Sync — daily at 4 PM IST: full MTD sweep
-cron.schedule('0 16 * * *', async () => {
+cronJob('RS Sync (0 16 * * *)', '0 16 * * *', async () => {
     console.log('[RS Sync] Daily 4 PM IST — syncing MTD…');
     await syncMTD().catch(e => console.error('[RS Sync] daily error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
@@ -415,17 +422,17 @@ cron.schedule('0 16 * * *', async () => {
 
 // Warehouse Ops Slack report — Confirmed + Ready for Pickup + Unfulfillable, last 30 days, old→new.
 // 8:30 AM IST → −2 window; 5:30 PM and 8:00 PM IST → −1 window (posted twice in the evening).
-cron.schedule('30 8 * * *', async () => {
+cronJob('WH Report (30 8 * * *)', '30 8 * * *', async () => {
     console.log('[WH Report] 8:30 AM IST — sending warehouse ops report (last 30d, −2)…');
     await sendWarehouseOpsReport(2).catch(e => console.error('[WH Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
-cron.schedule('30 17 * * *', async () => {
+cronJob('WH Report (30 17 * * *)', '30 17 * * *', async () => {
     console.log('[WH Report] 5:30 PM IST — sending warehouse ops report (last 30d, −1)…');
     await sendWarehouseOpsReport(1).catch(e => console.error('[WH Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
-cron.schedule('0 20 * * *', async () => {
+cronJob('WH Report (0 20 * * *)', '0 20 * * *', async () => {
     // 8 PM is the day's final warehouse report — refresh the RapidShyp cache for ALL recent EasyEcom
     // AWBs FIRST so every order's status is latest, then build the report (which also live-verifies
     // its final pending set). Forced refresh (maxAgeHours 0) so nothing is skipped as "fresh".
@@ -438,7 +445,7 @@ cron.schedule('0 20 * * *', async () => {
 // 8 AM–7 PM IST (08:47 … 19:47). Detects + reports rejections and records them; the warehouse move
 // is done by a SEPARATE, gentler auto-route pass 9 min later (:56) so the two never pile up in one
 // heavy run. The Slack "rejected" word + CLI `dp` still trigger detection on demand.
-cron.schedule('47 8-19 * * *', async () => {
+cronJob('DP Report (47 8-19 * * *)', '47 8-19 * * *', async () => {
     const hr = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false });
     console.log(`[DP Report] ${hr}:47 IST — detecting DocPharma-rejected (last 30 days)…`);
     await sendDocpharmaRejectedReport().catch(e => console.error('[DP Report] Error:', e.message));
@@ -447,7 +454,7 @@ cron.schedule('47 8-19 * * *', async () => {
 // Warehouse AUTO-ROUTE pass — runs at :56 past each hour (08:56 … 19:56), 9 min after detection.
 // Gently moves the just-detected, not-yet-routed rejections to Shifupro (MWH) via the panel-session
 // cookie, paced ~1 order/sec. Kept separate + slow on purpose so it never bursts and crashes.
-cron.schedule('56 8-19 * * *', async () => {
+cronJob('AutoRoute (56 8-19 * * *)', '56 8-19 * * *', async () => {
     const hr = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false });
     console.log(`[AutoRoute] ${hr}:56 IST — routing rejected orders → Shifupro…`);
     await autoRouteHandledRejections().catch(e => console.error('[AutoRoute] Error:', e.message));
@@ -455,7 +462,7 @@ cron.schedule('56 8-19 * * *', async () => {
 
 // On-Hold report (EasyEcom + Shopify) — twice daily at 11 AM and 6 PM IST. Reads the synced
 // b2c_order_easycom table + hold marks (NO EasyEcom API calls) and posts on-hold orders to Teams/Slack.
-cron.schedule('0 11,18 * * *', async () => {
+cronJob('Hold Report (0 11,18 * * *)', '0 11,18 * * *', async () => {
     console.log('[Hold Report] scheduled run (11 AM / 6 PM IST) — sending On-Hold report…');
     await sendEasyecomHoldReport().catch(e => console.error('[Hold Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
@@ -465,7 +472,7 @@ cron.schedule('0 11,18 * * *', async () => {
 // keeps the warehouse-routing cookie fresh by re-pushing it every ~20 min. This just watches that the
 // cookie stays fresh and warns (server log) if it goes stale — i.e. the extension is offline.
 // No-op when no session is saved.
-cron.schedule('*/20 * * * *', async () => {
+cronJob('EE Session (*/20 * * * *)', '*/20 * * * *', async () => {
     try { const s = await require('./app/api/easyecom').pingPanelSession(); if (s === 'stale') console.warn('[EE Session] keep-alive: panel cookie STALE — the browser sync extension may be offline (re-paste, or restart it).'); }
     catch (e) { console.error('[EE Session] keep-alive error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
@@ -474,7 +481,7 @@ cron.schedule('*/20 * * * *', async () => {
 // "Repeat" tab) on Shopify BEFORE EasyEcom imports them, so they can be phone-confirmed before shipping.
 // The orders/create webhook does this instantly; this cron catches anything the webhook missed. Skips
 // orders already held or manually released. OFF unless SHOPIFY_AUTOHOLD_ENABLED=true.
-cron.schedule('*/2 * * * *', async () => {
+cronJob('ShopifyHold (*/2 * * * *)', '*/2 * * * *', async () => {
     if (String(process.env.SHOPIFY_AUTOHOLD_ENABLED || '').toLowerCase() !== 'true') return;
     try {
         const { findRepeatCandidates } = require('./app/api/support_console');
@@ -495,7 +502,7 @@ cron.schedule('*/2 * * * *', async () => {
 // Silent-RTO claim mail → RapidShyp — weekly, Monday 9:30 AM IST, last 30 days ending yesterday.
 // Lists shipments RTO'd with no delivery attempt + their forward/RTO freight (disputable). No-op if
 // there are none or the RapidShyp recipient isn't set in Settings.
-cron.schedule('30 9 * * 1', async () => {
+cronJob('Silent-RTO (30 9 * * 1)', '30 9 * * 1', async () => {
     console.log('[Silent-RTO] Mon 9:30 AM IST — sending weekly silent-RTO claim report to RapidShyp…');
     try { const r = await deliveryReportsRoutes.sendSilentRtoReport({ days: 30 }); console.log('[Silent-RTO]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[Silent-RTO] error:', e.message); }
@@ -503,7 +510,7 @@ cron.schedule('30 9 * * 1', async () => {
 
 // Late-delivery report (promise date exceeded, delivered only) — ONCE EVERY 15 DAYS (1st & 16th) at 9:45 AM
 // IST, last 30 days ending yesterday. Sent to the configured internal recipients.
-cron.schedule('45 9 1,16 * *', async () => {
+cronJob('Late-Del (45 9 1,16 * *)', '45 9 1,16 * *', async () => {
     console.log('[Late-Del] 9:45 AM IST (1st/16th) — sending fortnightly late-delivery report…');
     try { const r = await deliveryReportsRoutes.sendLateDeliveriesReport({ days: 30 }); console.log('[Late-Del]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[Late-Del] error:', e.message); }
@@ -512,7 +519,7 @@ cron.schedule('45 9 1,16 * *', async () => {
 // First-OFD-late report (first delivery attempt after the promised EDD — a courier SLA breach) — DAILY at
 // 9:30 AM IST, terminal-stage date in the last 30 days ending yesterday. Sends SEPARATE emails per platform
 // (RapidShyp rows → RapidShyp recipients, DocPharma rows → DocPharma recipients). No-op if empty.
-cron.schedule('30 9 * * *', async () => {
+cronJob('First-OFD (30 9 * * *)', '30 9 * * *', async () => {
     console.log('[First-OFD] 9:30 AM IST — sending daily first-OFD-late report…');
     try { const r = await deliveryReportsRoutes.sendFirstOfdReport({ days: 30 }); console.log('[First-OFD]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[First-OFD] error:', e.message); }
@@ -520,7 +527,7 @@ cron.schedule('30 9 * * *', async () => {
 
 // In-transit-overdue report (still in transit past the promised EDD) — DAILY at 9:35 AM IST, last 30 days
 // ending yesterday. SEPARATE emails per platform (RapidShyp / DocPharma). No-op if empty / recipient unset.
-cron.schedule('35 9 * * *', async () => {
+cronJob('Intransit-Late (35 9 * * *)', '35 9 * * *', async () => {
     console.log('[Intransit-Late] 9:35 AM IST — sending daily in-transit-overdue report…');
     try { const r = await deliveryReportsRoutes.sendIntransitLateReport({ days: 30 }); console.log('[Intransit-Late]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[Intransit-Late] error:', e.message); }
@@ -529,11 +536,20 @@ cron.schedule('35 9 * * *', async () => {
 // RapidShyp cache sync for EasyEcom-shipped orders — every 3 hours + once at startup. Keeps the
 // rapidshyp_tracking_ecom cache fresh so the warehouse report & ops dashboard read status from the
 // DB (the report only live-verifies its final pending set at post time, not every order).
-cron.schedule('20 */3 * * *', async () => {
+cronJob('RS-EC Sync (20 */3 * * *)', '20 */3 * * *', async () => {
     console.log('[RS-EC Sync] 3-hr trigger — refreshing RapidShyp cache for EasyEcom orders…');
     await syncRsCacheEasyecom().catch(e => console.error('[RS-EC Sync] error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 setTimeout(() => { syncRsCacheEasyecom().catch(e => console.error('[RS-EC Sync] startup error:', e.message)); }, 15000);
+
+// ── Cron digest → Teams "Cron Response" ────────────────────────────────────────────────────────
+// One roll-up of every job that ran since the last digest (runs · ok · failed + the last error), so
+// successes are visible without a card per run. FAILURES don't wait for this — each posts instantly.
+// Default 09:00 IST daily; override with CRON_DIGEST_SCHEDULE (e.g. '0 * * * *' for hourly).
+cron.schedule(process.env.CRON_DIGEST_SCHEDULE || '0 9 * * *', async () => {
+    const r = await sendCronDigest().catch(e => { console.error('[CronReport] digest error:', e.message); return null; });
+    if (r && r.sent) console.log(`[CronReport] digest sent — ${r.jobs} jobs, ${r.runs} runs, ${r.failed} failed`);
+}, { timezone: 'Asia/Kolkata' });
 
 // Slack trigger — typing "rejected" in #dp-to-mwh-orders runs the MTD DocPharma report.
 initDpSlackTrigger();

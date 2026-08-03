@@ -141,6 +141,9 @@ module.exports = {
     TEAMS_WEBHOOK_WAREHOUSE_HOLD: process.env.TEAMS_WEBHOOK_WAREHOUSE_HOLD,
     TEAMS_WEBHOOK_AMAZON:    process.env.TEAMS_WEBHOOK_AMAZON,
     TEAMS_WEBHOOK_INVENTORY: process.env.TEAMS_WEBHOOK_INVENTORY,   // daily inventory snapshot report (falls back to _WAREHOUSE)
+    // "Cron Response" channel — every scheduled job reports here. A failure posts immediately with its
+    // reason; successes roll into the periodic digest. Unset = reporting silently off (crons unaffected).
+    TEAMS_WEBHOOK_CRON:      process.env.TEAMS_WEBHOOK_CRON,
     // --- Teams keyword listener (Graph delegated) ---
     TEAMS_TENANT_ID:     process.env.TEAMS_TENANT_ID,
     TEAMS_CLIENT_ID:     process.env.TEAMS_CLIENT_ID,
