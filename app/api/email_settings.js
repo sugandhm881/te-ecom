@@ -136,4 +136,150 @@ router.post('/email-settings/test', async (req, res) => {
     }
 });
 
-module.exports = { router, getEmailConfig, sendMail, recipientsFor };
+
+// ── Per-user sending mailboxes (app_user_smtp_ecom) ───────────────────────────────────────────────
+// The shared config above is the BRAND mailbox used by the automated reports. Person-to-person mail —
+// influencer outreach — must instead leave from the address of whoever is logged in, so replies land in
+// that person's inbox and the influencer sees a human, not a reports alias.
+//
+// A mapping is REQUIRED for that: we deliberately do NOT silently fall back to the shared mailbox,
+// because sending "from" someone who has no credentials either fails SPF/DMARC at the provider or
+// quietly misattributes the mail. No mapping → a clear error naming the fix.
+
+// Resolve one user's sending mailbox. Returns null when unmapped or deactivated.
+async function getUserMailbox(userEmail) {
+    const key = String(userEmail || '').trim().toLowerCase();
+    if (!key) return null;
+    let s = null;
+    try { const { data } = await supabase.from('app_user_smtp_ecom').select('*').eq('user_email', key).maybeSingle(); s = data; } catch (_) { s = null; }
+    if (!s || s.active === false) return null;
+    const pass = decrypt(s.smtp_password_enc);
+    if (!pass) return null;                       // mapped but no usable password — treat as unmapped
+    const from_email = (s.from_email || key).trim();
+    return {
+        user_email: key,
+        from_name: (s.from_name || '').trim() || null,
+        from_email,
+        host: (s.smtp_host || config.EMAIL_HOST || 'smtp.gmail.com').trim(),
+        port: parseInt(s.smtp_port || config.EMAIL_PORT || 587, 10),
+        // Most providers require the authenticated user to equal the From address.
+        user: (s.smtp_user || from_email).trim(),
+        pass,
+    };
+}
+
+// Send AS a specific portal user. opts: { to, cc, subject, html, text, replyTo }.
+// Throws a user-facing error when the sender has no mailbox mapped.
+async function sendMailAs(userEmail, opts = {}) {
+    const mb = await getUserMailbox(userEmail);
+    if (!mb) {
+        const err = new Error(`No sending mailbox is mapped for ${userEmail || 'your account'}. Ask an admin to add one under Settings → Email & Reports → Sending mailboxes.`);
+        err.code = 'NO_USER_MAILBOX';
+        throw err;
+    }
+    const to = Array.isArray(opts.to) ? opts.to : splitList(opts.to);
+    if (!to.length) throw new Error('No recipient.');
+    const cc = Array.isArray(opts.cc) ? opts.cc : splitList(opts.cc);
+    const transporter = nodemailer.createTransport({
+        host: mb.host, port: mb.port, secure: mb.port === 465,
+        auth: { user: mb.user, pass: mb.pass },
+    });
+    const from = mb.from_name ? `"${mb.from_name.replace(/"/g, '')}" <${mb.from_email}>` : mb.from_email;
+    const info = await transporter.sendMail({
+        from, to, cc: cc.length ? cc : undefined,
+        replyTo: opts.replyTo || mb.from_email,
+        subject: opts.subject || '(no subject)',
+        text: opts.text || undefined, html: opts.html || undefined,
+    });
+    return { ok: true, messageId: info.messageId, to, cc, from: mb.from_email, fromName: mb.from_name };
+}
+
+// ── Admin: list / upsert / delete per-user mailboxes ──────────────────────────────────────────────
+// Every portal user is returned, mapped or not, so the admin sees who still needs one. Passwords are
+// never returned — only whether one is stored.
+router.get('/user-mailboxes', async (req, res) => {
+    try {
+        const [{ data: users }, { data: boxes }] = await Promise.all([
+            supabase.from('app_users_ecom').select('email, name, role, status').order('email'),
+            supabase.from('app_user_smtp_ecom').select('user_email, from_name, from_email, smtp_host, smtp_port, smtp_user, smtp_password_enc, active, updated_by, updated_at'),
+        ]);
+        const by = {};
+        (boxes || []).forEach(b => { by[b.user_email] = b; });
+        const rows = (users || []).map(u => {
+            const key = String(u.email || '').toLowerCase();
+            const b = by[key];
+            return {
+                user_email: key, name: u.name || '', role: u.role || '', status: u.status || '',
+                mapped: !!b,
+                from_name: b ? (b.from_name || '') : '',
+                from_email: b ? (b.from_email || '') : '',
+                smtp_host: b ? (b.smtp_host || '') : '',
+                smtp_port: b ? (b.smtp_port || '') : '',
+                smtp_user: b ? (b.smtp_user || '') : '',
+                password_set: !!(b && b.smtp_password_enc),
+                active: b ? b.active !== false : false,
+                updated_by: b ? (b.updated_by || null) : null,
+                updated_at: b ? (b.updated_at || null) : null,
+            };
+        });
+        // A mailbox whose portal user was deleted still needs to be visible so it can be cleaned up.
+        const known = new Set(rows.map(r => r.user_email));
+        (boxes || []).filter(b => !known.has(b.user_email)).forEach(b => rows.push({
+            user_email: b.user_email, name: '(no portal user)', role: '', status: 'orphan', mapped: true,
+            from_name: b.from_name || '', from_email: b.from_email || '', smtp_host: b.smtp_host || '',
+            smtp_port: b.smtp_port || '', smtp_user: b.smtp_user || '', password_set: !!b.smtp_password_enc,
+            active: b.active !== false, updated_by: b.updated_by || null, updated_at: b.updated_at || null,
+        }));
+        res.json({ success: true, mailboxes: rows });
+    } catch (e) { res.status(500).json({ message: e.message }); }
+});
+
+router.post('/user-mailboxes', async (req, res) => {
+    const b = req.body || {};
+    const key = String(b.user_email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(key)) return res.status(400).json({ message: 'A valid portal user email is required.' });
+    const from_email = String(b.from_email || key).trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(from_email)) return res.status(400).json({ message: 'A valid From address is required.' });
+    const patch = {
+        user_email: key,
+        from_name: (b.from_name || '').trim() || null,
+        from_email,
+        smtp_host: (b.smtp_host || '').trim() || null,
+        smtp_port: b.smtp_port ? parseInt(b.smtp_port, 10) || null : null,
+        smtp_user: (b.smtp_user || from_email).trim() || null,
+        active: b.active !== false,
+        updated_by: req.user.sub,
+        updated_at: new Date().toISOString(),
+    };
+    // Blank password on an edit = keep the stored one (same rule as the shared settings form).
+    if (typeof b.smtp_password === 'string' && b.smtp_password.trim() !== '') patch.smtp_password_enc = encrypt(b.smtp_password.trim());
+    const { error } = await supabase.from('app_user_smtp_ecom').upsert(patch, { onConflict: 'user_email' });
+    if (error) return res.status(500).json({ message: error.message });
+    // A mapping with no password can never send — say so now rather than at send time.
+    const { data: after } = await supabase.from('app_user_smtp_ecom').select('smtp_password_enc').eq('user_email', key).maybeSingle();
+    res.json({ success: true, password_set: !!(after && after.smtp_password_enc) });
+});
+
+router.delete('/user-mailboxes/:email', async (req, res) => {
+    const key = String(req.params.email || '').trim().toLowerCase();
+    const { error } = await supabase.from('app_user_smtp_ecom').delete().eq('user_email', key);
+    if (error) return res.status(500).json({ message: error.message });
+    res.json({ success: true });
+});
+
+// Verify one user's mailbox end-to-end by sending them a test email from their OWN address.
+router.post('/user-mailboxes/test', async (req, res) => {
+    const key = String((req.body && req.body.user_email) || '').trim().toLowerCase();
+    const to = (req.body && req.body.to) || key;
+    try {
+        const r = await sendMailAs(key, {
+            to,
+            subject: 'Ecom Central — sending mailbox test ✓',
+            text: `This test was sent from ${key}'s mapped mailbox. If you received it, outreach email will send from this address.`,
+            html: `<p>This test was sent from <b>${key}</b>'s mapped mailbox. If you received it, outreach email will send from this address.</p>`,
+        });
+        res.json({ success: true, message: `Sent to ${r.to.join(', ')} from ${r.from}` });
+    } catch (e) { res.status(e.code === 'NO_USER_MAILBOX' ? 400 : 500).json({ message: e.message }); }
+});
+
+module.exports = { router, getEmailConfig, sendMail, sendMailAs, getUserMailbox, recipientsFor };

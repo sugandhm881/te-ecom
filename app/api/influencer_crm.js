@@ -14,6 +14,8 @@ const axios = require('axios');
 const router = express.Router();
 const config = require('../../config');
 const { supabase } = require('../supabase');
+const { sendMailAs, sendMail, getUserMailbox, getEmailConfig } = require('./email_settings');
+const { aiComplete, isConfigured: aiConfigured, lastAiError: aiLastError } = require('./ai');
 
 // Invoke a deployed Supabase edge function with the service-role key (passes verify_jwt).
 async function invokeFn(slug, payload, timeout = 180000) {
@@ -140,9 +142,14 @@ router.get('/inf/influencer/:id', async (req, res) => {
             supabase.from('influencer_list_members').select('list_id, influencer_lists(id, name)').eq('influencer_id', id),
         ]);
         if (inf.error || !inf.data) return res.status(404).json({ success: false, error: 'Influencer not found' });
+        // Outreach-email state, so the detail panel can show the same ✓ / Send Email control as the
+        // campaign list (same rule: partnered AND never emailed).
+        const emailed = await emailedIds([Number(id)]);
+        const email_sent = emailed.has(Number(id));
         res.json({
             success: true, influencer: inf.data, videos: vids.data || [], activities: acts.data || [],
             lists: (memb.data || []).map(m => m.influencer_lists).filter(Boolean),
+            email_sent, can_email: inf.data.outreach_status === 'partnered' && !email_sent,
         });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -411,9 +418,10 @@ router.get('/inf/lists/:id', async (req, res) => {
         const ids = (memb || []).map(m => m.influencer_id);
         let members = [], totals = { quoted: 0, final: 0, gst: 0, spend: 0, views: 0 };
         if (ids.length) {
-            const [infs, vids] = await Promise.all([
-                supabase.from('influencers').select('id, instagram_handle, name, follower_count, niche, outreach_status, profile_image_url').in('id', ids),
-                supabase.from('influencer_videos').select('influencer_id, views, likes, comments, shares, live_date, quoted_price, final_price, gst_applicable, payment_status, product_sent, email_sent, is_ad_run, payment_due_date, payment_date').in('influencer_id', ids),
+            const [infs, vids, emailed] = await Promise.all([
+                supabase.from('influencers').select('id, instagram_handle, name, follower_count, niche, outreach_status, profile_image_url, email').in('id', ids),
+                supabase.from('influencer_videos').select('id, created_at, influencer_id, views, likes, comments, shares, live_date, expected_date, quoted_price, final_price, gst_applicable, payment_status, product_sent, email_sent, is_ad_run, payment_due_date, payment_date').in('influencer_id', ids),
+                emailedIds(ids),   // sent-log ∪ legacy per-video flag — see the outreach-email section below
             ]);
             const vidsBy = {};
             (vids.data || []).forEach(v => { (vidsBy[v.influencer_id] = vidsBy[v.influencer_id] || []).push(v); });
@@ -426,26 +434,36 @@ router.get('/inf/lists/:id', async (req, res) => {
                 const finalP = all.reduce((s, v) => s + (Number(v.final_price) || Number(v.quoted_price) || 0), 0);
                 const gst = all.reduce((s, v) => s + (v.gst_applicable ? 0.18 * (Number(v.final_price) || Number(v.quoted_price) || 0) : 0), 0);
                 const spend = finalP + gst;
-                // Per-influencer workflow aggregates for the member table (image-one layout): payment = paid if
-                // every deliverable is paid, partial if some, else the raw status; booleans = "any deliverable".
-                const paidN = all.filter(v => String(v.payment_status || '').toLowerCase() === 'paid').length;
-                const payment = !all.length ? null
-                    : paidN === all.length ? 'paid'
-                    : paidN > 0 ? 'partial'
-                    : (all.find(v => v.payment_status) ? String(all[0].payment_status).toLowerCase() : 'unpaid');
-                // Representative dates: latest actual payment date (paid videos), and the earliest still-unpaid due date.
-                const _paidDates = all.map(v => v.payment_date).filter(Boolean).sort();
-                const _dueDates = all.filter(v => String(v.payment_status || '').toLowerCase() !== 'paid').map(v => v.payment_due_date).filter(Boolean).sort();
+                // PAYMENT = the LATEST deliverable's own status, not an all-videos roll-up. An influencer paid
+                // for January and unpaid for July is UNPAID; the old roll-up reported that as "partial", which
+                // both hid the outstanding amount and collided with 'partial' — a real per-video status a single
+                // video can hold. It also read `all[0]` while the `.find()` had matched a different video, and
+                // `all` comes back in no guaranteed order, so the fallback status was effectively arbitrary.
+                // Recency: live_date → expected_date → created_at, id as the final tiebreak.
+                const _recency = v => v.live_date || v.expected_date || String(v.created_at || '').slice(0, 10) || '';
+                const latest = all.length
+                    ? all.slice().sort((a, b) => (_recency(a) < _recency(b) ? -1 : _recency(a) > _recency(b) ? 1 : (a.id || 0) - (b.id || 0))).pop()
+                    : null;
+                const payment = latest ? String(latest.payment_status || 'pending').toLowerCase() : null;
+                const _latestPaid = payment === 'paid';
+                // Booleans stay "any deliverable" — product/email/ad are one-off milestones, not per-video money.
                 totals.quoted += quoted; totals.final += finalP; totals.gst += gst; totals.spend += spend; totals.views += views;
                 return {
                     ...i, videos: all.length, views_in_range: views, quoted, final: finalP,
                     gst: Math.round(gst), spend: Math.round(spend), cpm: views > 0 ? Math.round((spend / views) * 1000) : null,
                     likes: sum(inRange, 'likes'), comments: sum(inRange, 'comments'), shares: sum(inRange, 'shares'),
                     final_price: finalP, payment,
-                    payment_date: _paidDates.length ? _paidDates[_paidDates.length - 1] : null,
-                    payment_due_date: _dueDates.length ? _dueDates[0] : null,
+                    // Dates come from that SAME video, so the badge and the date underneath can't disagree.
+                    payment_date: _latestPaid ? (latest.payment_date || null) : null,
+                    payment_due_date: !_latestPaid && latest ? (latest.payment_due_date || null) : null,
                     product_sent: all.some(v => v.product_sent === true),
-                    email_sent: all.some(v => v.email_sent === true),
+                    // Emailed = ever, by anyone: our send log OR the legacy per-video flag. Once true the UI
+                    // shows a tick and never offers Send again, whatever the status becomes later.
+                    email_sent: emailed.has(i.id),
+                    // `can_email` drives the button: partnered AND never emailed. The send endpoint re-checks
+                    // both, so this is a UI hint, not the guard.
+                    can_email: i.outreach_status === 'partnered' && !emailed.has(i.id),
+                    email: i.email || null,
                     ad_run: all.some(v => v.is_ad_run === true),
                 };
             }).sort((a, b) => (b.views_in_range - a.views_in_range));
@@ -717,4 +735,428 @@ router.get('/inf/order-tracking', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Collaboration outreach email — draft → (optional AI polish) → send → ✓
+//
+// Gating rule (product decision, 2026-08-04): the Send Email button appears ONLY while the influencer
+// is `partnered`, and NEVER again once an email has gone out — regardless of what the status later
+// becomes. That is enforced HERE, not only in the UI, so a stale tab or a hand-made request can't
+// double-send. `emailedIds()` is the single source of truth for "already emailed" and is shared by the
+// list endpoint that renders the tick.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+// Who is allowed to send outreach, and from which mailbox. ONE definition, used by the draft endpoint
+// (to show it up front and disable the button) and by the send endpoint (to enforce it).
+//
+//   mode 'user'   — the logged-in user has their own mapped mailbox: sends as themselves, so the
+//                   influencer's reply lands in their inbox. This is the normal path.
+//   mode 'master' — an ADMIN with no personal mailbox: falls back to the shared brand mailbox. Not a
+//                   silent fallback — it is admin-only, and the compose panel names the exact address.
+//   otherwise     — refused. A non-admin without a mapping cannot send at all.
+//
+// Reading a thread is deliberately NOT gated this way: any user with influencer access can open the
+// thread and read the replies. Only SENDING is restricted.
+async function outreachSender(req) {
+    const email = (req.user && req.user.sub) || '';
+    const isMaster = !!(req.user && (req.user.role === 'admin' || (Array.isArray(req.user.permissions) && req.user.permissions.includes('*'))));
+    const mb = await getUserMailbox(email);
+    if (mb) return { canSend: true, mode: 'user', from: mb.from_email, fromName: mb.from_name, isMaster };
+    if (isMaster) {
+        const cfg = await getEmailConfig();
+        if (cfg && cfg.from) return { canSend: true, mode: 'master', from: cfg.from, fromName: null, isMaster };
+        return { canSend: false, isMaster, reason: 'No mailbox is mapped for your account and the shared brand mailbox is not configured — set SMTP under Settings → Email & Reports.' };
+    }
+    return {
+        canSend: false, isMaster,
+        reason: `No sending mailbox is mapped for ${email || 'your account'}. Ask an admin to add one under Settings → Email & Reports → Sending mailboxes.`,
+    };
+}
+
+// Which of these influencers have already been emailed? Union of the new send log and the LEGACY
+// influencer_videos.email_sent flag — the old standalone CRM wrote 188 of those and they must keep
+// their tick. Returns a Set of influencer_id.
+async function emailedIds(ids) {
+    const out = new Set();
+    if (!ids || !ids.length) return out;
+    const [logged, legacy] = await Promise.all([
+        supabase.from('influencer_emails_ecom').select('influencer_id').in('influencer_id', ids),
+        supabase.from('influencer_videos').select('influencer_id').in('influencer_id', ids).eq('email_sent', true),
+    ]);
+    (logged.data || []).forEach(r => out.add(r.influencer_id));
+    (legacy.data || []).forEach(r => out.add(r.influencer_id));
+    return out;
+}
+
+// Fixed by the brand — every outreach email carries this exact subject line.
+const OUTREACH_SUBJECT = 'Collaboration opportunity with theelement.skin';
+const inr = n => (n == null || n === '' || !Number.isFinite(Number(n))) ? null : '₹' + Number(n).toLocaleString('en-IN');
+
+// The house collaboration pitch. Variables are filled from the influencer's saved profile and their
+// latest deliverable; anything genuinely unknown becomes a VISIBLE blank (₹______) rather than an
+// invented number — a made-up fee in an outbound email is far worse than an obvious gap to fill in.
+function collabEmailTemplate({ name, price, sender }) {
+    const fee = price ? inr(price) : '₹______';
+    return `Hi ${name},
+
+I hope you're doing well!
+
+I'm ${sender}, from theelement.skin, a brand rooted in purity, efficacy, and clean skincare. We've been following your inspiring work on Instagram and are genuinely impressed by your creativity, authenticity, and the strong connection you have with your community.
+
+We believe your style and values align beautifully with ours, and we'd love to explore a collaboration with you for an upcoming video on your Instagram channel.
+
+Here's a quick outline of what we're proposing:
+
+Collaboration Duration: A 3 to 6-month partnership where we work together to create content that integrates our skincare range in a natural, relatable way.
+
+Content Format: We're open to ideas — be it a skincare routine, product demo, daily ritual, or any other engaging concept that feels true to your style and voice.
+
+Flexibility: While we're aiming for a three to six-month collaboration initially, we understand that circumstances may change, and the duration of our partnership might be subject to company discretion and the performance of the video content. We believe in fostering long-term relationships, and we're open to adapting our approach based on mutual satisfaction and success.
+
+Commercials: As discussed, we'll be offering ${fee} for the reel + story set. Payments will be processed before uploading days from the invoice date once the content goes live and the partnership ad code is provided. We will also require content rights and raw footage, and we're open to running collab ads to extend the reach. The same reel will need to be posted on Facebook as well.
+
+We're excited about the potential to co-create content that feels authentic, adds value to your audience, and reflects the essence of theelement.skin.
+
+Looking forward to hearing your thoughts!
+
+Warm regards,
+${sender}`;
+}
+
+// Load the influencer + the deliverable whose fee the email should quote (the LATEST one, same recency
+// rule the Payment column uses: live_date → expected_date → created_at, id as tiebreak).
+async function loadEmailContext(influencerId) {
+    const { data: inf } = await supabase.from('influencers')
+        .select('id, name, instagram_handle, email, outreach_status, quoted_price, final_price').eq('id', influencerId).maybeSingle();
+    if (!inf) return null;
+    const { data: vids } = await supabase.from('influencer_videos')
+        .select('id, created_at, live_date, expected_date, quoted_price, final_price').eq('influencer_id', influencerId);
+    const rec = v => v.live_date || v.expected_date || String(v.created_at || '').slice(0, 10) || '';
+    const latest = (vids || []).length
+        ? vids.slice().sort((a, b) => (rec(a) < rec(b) ? -1 : rec(a) > rec(b) ? 1 : (a.id || 0) - (b.id || 0))).pop()
+        : null;
+    // Fee preference: the deliverable's agreed price first, then the profile's — final over quoted at each step.
+    const price = (latest && (latest.final_price || latest.quoted_price)) || inf.final_price || inf.quoted_price || null;
+    return { inf, latest, price };
+}
+
+// First name only — "Hi Dr. Preethi Nagaraj (drpreethiskintalks)," reads like a mail merge. Strips a
+// trailing parenthetical handle, drops emoji, and keeps an honorific with the name that follows it.
+function greetingName(inf) {
+    let n = String(inf.name || '').replace(/\([^)]*\)/g, '').trim();
+    n = n.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').replace(/\s+/g, ' ').trim();
+    if (!n) return '@' + (inf.instagram_handle || 'there');
+    const parts = n.split(' ');
+    if (/^(dr|mr|mrs|ms|prof)\.?$/i.test(parts[0]) && parts[1]) return `${parts[0]} ${parts[1]}`;
+    return parts[0];
+}
+
+// ── GET /inf/email/draft?influencerId= — build the editable draft. No AI, no send. ──
+router.get('/inf/email/draft', async (req, res) => {
+    try {
+        const id = req.query.influencerId;
+        if (!id) return res.status(400).json({ success: false, error: 'influencerId required' });
+        const ctx = await loadEmailContext(id);
+        if (!ctx) return res.status(404).json({ success: false, error: 'Influencer not found' });
+        const already = await emailedIds([Number(id)]);
+        const sender = actorName(req) === 'portal' ? 'Anandita' : actorName(req);
+        // Surface the sending mailbox up front — an unmapped user should learn that BEFORE writing the
+        // email, not when they press Send.
+        const who = await outreachSender(req);
+        res.json({
+            success: true,
+            to: ctx.inf.email || '',
+            subject: OUTREACH_SUBJECT,
+            body: collabEmailTemplate({ name: greetingName(ctx.inf), price: ctx.price, sender }),
+            videoId: ctx.latest ? ctx.latest.id : null,
+            price: ctx.price, priceKnown: !!ctx.price,
+            handle: ctx.inf.instagram_handle, name: ctx.inf.name,
+            outreach_status: ctx.inf.outreach_status,
+            alreadySent: already.has(Number(id)),
+            sendFrom: who.canSend ? { email: who.from, name: who.fromName, mode: who.mode } : null,
+            sendBlockedReason: who.canSend ? null : who.reason,
+        });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── POST /inf/email/polish — rewrite the draft with AI. Returns the ORIGINAL body if AI is off/failing,
+//    with a `reason`, so the flow never blocks on the model. ──
+router.post('/inf/email/polish', async (req, res) => {
+    try {
+        const body = String((req.body && req.body.body) || '').trim();
+        const subject = String((req.body && req.body.subject) || '').trim();
+        if (!body) return res.status(400).json({ success: false, error: 'Nothing to polish' });
+        if (!aiConfigured()) return res.json({ success: true, body, subject, ai: false, reason: 'AI is not configured (set AI_API_KEY / AI_API_URL / AI_MODEL)' });
+        const sys = 'You polish outbound brand-collaboration emails for an Indian skincare brand, theelement.skin. '
+            + 'Rewrite for warmth, clarity and flow while keeping a professional tone. HARD RULES: keep every factual '
+            + 'detail exactly as given (fee amount, durations, deliverables, rights, payment terms, the Facebook '
+            + 'cross-post); never invent a number, a date, a name or a claim; keep the greeting name and the sign-off '
+            + 'name unchanged; if the fee appears as a blank like ₹______ leave that blank exactly as it is; keep it '
+            + 'roughly the same length and keep the labelled sections. The subject line is fixed brand copy — '
+            + 'do NOT rewrite it. Reply with ONLY a JSON object: '
+            + '{"body": "..."} and no commentary, no markdown fences.';
+        // maxTokens must comfortably exceed the whole email: this pitch is ~1,800 chars and at 1,400 tokens
+        // Gemini returned a reply cut off MID-STRING, so the JSON never closed and the polish silently failed.
+        const out = await aiComplete([
+            { role: 'system', content: sys },
+            { role: 'user', content: `Current subject:\n${subject}\n\nCurrent body:\n${body}` },
+        ], { temperature: 0.6, maxTokens: 3000 });
+        if (!out) return res.json({ success: true, body, subject, ai: false, reason: aiLastError() || 'AI returned nothing' });
+        const p = parseAiJsonEmail(out);
+        if (!p.body) return res.json({ success: true, body, subject, ai: false, reason: 'AI reply could not be parsed — keeping your draft' });
+        // Sanity gate. A truncated or gutted rewrite must never reach a real influencer, so the polish is
+        // only accepted if it kept the sign-off, the commercials line and most of its length.
+        const bad = p.body.length < body.length * 0.6 ? 'the rewrite came back truncated'
+            : !/Warm regards/i.test(p.body) ? 'the sign-off went missing'
+            : !/Commercials\s*:/i.test(p.body) ? 'the commercials line went missing'
+            : null;
+        if (bad) return res.json({ success: true, body, subject, ai: false, reason: `Kept your draft — ${bad}.` });
+        // Subject is fixed brand copy — return it unchanged whatever the model suggested.
+        res.json({ success: true, body: p.body, subject: OUTREACH_SUBJECT, ai: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Pull {subject, body} out of a model reply. Gemini wraps JSON in ``` fences, emits raw newlines inside
+// strings (invalid JSON) and sometimes appends commentary — all three are handled here.
+function parseAiJsonEmail(draft) {
+    let s = String(draft || '').replace(/```json?/gi, '').replace(/```/g, '').trim();
+    const a = s.indexOf('{'), b = s.lastIndexOf('}');
+    if (a !== -1 && b > a) s = s.slice(a, b + 1);
+    const escapeRawNewlines = t => {
+        let out = '', inStr = false, prev = '';
+        for (const c of t) {
+            if (c === '"' && prev !== '\\') { inStr = !inStr; out += c; prev = c; continue; }
+            if (inStr && (c === '\n' || c === '\r' || c === '\t')) { out += (c === '\n' ? '\\n' : c === '\r' ? '\\r' : '\\t'); prev = c; continue; }
+            out += c; prev = c;
+        }
+        return out;
+    };
+    for (const cand of [s, escapeRawNewlines(s)]) {
+        try { const j = JSON.parse(cand); if (j && (j.body != null || j.subject != null)) return { subject: j.subject || null, body: j.body || null }; } catch (_) {}
+    }
+    const unesc = t => t == null ? null : String(t).replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim();
+    const sm = s.match(/"subject"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    const bm = s.match(/"body"\s*:\s*"([\s\S]*?)"\s*\}\s*$/);
+    return { subject: sm ? unesc(sm[1]) : null, body: bm ? unesc(bm[1]) : null };
+}
+
+// ── POST /inf/email/send — send it, tick the box, log it. ──
+router.post('/inf/email/send', async (req, res) => {
+    try {
+        // WHO MAY SEND — authorize BEFORE validating anything, so a permission failure is never masked by
+        // a 400 on the payload or a 409 on state. Exactly two ways in, nothing else:
+        //   1. a user with their OWN mapped mailbox → sends as themselves, so the reply reaches them;
+        //   2. a MASTER (admin) with no personal mailbox → sends from the shared brand mailbox.
+        // Everyone else is refused. Reading a thread is open to the whole team; sending is not.
+        const who = await outreachSender(req);
+        if (!who.canSend) return res.status(403).json({ success: false, error: who.reason });
+
+        const b = req.body || {};
+        const influencerId = Number(b.influencerId);
+        const to = String(b.to || '').trim();
+        // The subject is FIXED brand copy, set here and not taken from the client — every outreach email
+        // must carry the same line, and the AI polish step is explicitly not allowed to reword it.
+        const subject = OUTREACH_SUBJECT;
+        const body = String(b.body || '').trim();
+        if (!influencerId) return res.status(400).json({ success: false, error: 'influencerId required' });
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return res.status(400).json({ success: false, error: 'A valid recipient email is required' });
+        if (!body) return res.status(400).json({ success: false, error: 'Body is required' });
+
+        const ctx = await loadEmailContext(influencerId);
+        if (!ctx) return res.status(404).json({ success: false, error: 'Influencer not found' });
+        // Server-side enforcement of the same two rules the UI shows — a stale tab must not be able to
+        // re-send, and only a partnered influencer may be emailed in the first place.
+        const already = await emailedIds([influencerId]);
+        if (already.has(influencerId)) return res.status(409).json({ success: false, error: 'A collaboration email has already been sent to this influencer.' });
+        if (ctx.inf.outreach_status !== 'partnered') return res.status(409).json({ success: false, error: `Only a partnered influencer can be emailed (this one is "${ctx.inf.outreach_status || 'unset'}").` });
+
+        // Plain text is the source of truth; the HTML twin just preserves the paragraph breaks.
+        const html = body.split(/\n/).map(l => escapeHtmlText(l) || '&nbsp;').join('<br>');
+        let sent;
+        try {
+            sent = who.mode === 'user'
+                ? await sendMailAs(req.user.sub, { to, subject, text: body, html })
+                : await sendMail({ to, subject, text: body, html });
+        }
+        catch (e) {
+            const unmapped = e.code === 'NO_USER_MAILBOX';
+            return res.status(unmapped ? 400 : 502).json({ success: false, error: unmapped ? e.message : 'Send failed: ' + e.message });
+        }
+
+        const videoId = b.videoId ? Number(b.videoId) : (ctx.latest ? ctx.latest.id : null);
+        const nowIso = new Date().toISOString();
+        await supabase.from('influencer_emails_ecom').insert({
+            influencer_id: influencerId, video_id: videoId || null, to_email: to,
+            subject, body, ai_polished: !!b.aiPolished, message_id: sent.messageId || null,
+            kind: 'sent', thread_subject: String(subject).toLowerCase().trim(),
+            sent_by: actorName(req), from_email: sent.from || null, sent_at: nowIso,
+        });
+        // Keep the legacy per-video flag in step, so anything still reading it (exports, the old CRM) agrees.
+        if (videoId) await supabase.from('influencer_videos').update({ email_sent: true, email_sent_at: nowIso }).eq('id', videoId);
+        // Remember the address we actually used, so the next email is pre-filled.
+        if (!ctx.inf.email) await supabase.from('influencers').update({ email: to, updated_at: nowIso }).eq('id', influencerId);
+        await logActivity(influencerId, 'email_sent', `Collaboration email sent to ${to} by ${actorName(req)}`);
+        res.json({ success: true, to, from: sent.from, messageId: sent.messageId || null, sent_at: nowIso });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Minimal HTML escape for the text→HTML twin (this module had no escaper of its own).
+function escapeHtmlText(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ── GET /inf/email/log?influencerId= — what was sent, when, by whom. ──
+router.get('/inf/email/log', async (req, res) => {
+    try {
+        const id = req.query.influencerId;
+        if (!id) return res.status(400).json({ success: false, error: 'influencerId required' });
+        const { data } = await supabase.from('influencer_emails_ecom')
+            .select('id, to_email, subject, body, ai_polished, sent_by, sent_at')
+            .eq('influencer_id', id).order('sent_at', { ascending: false });
+        res.json({ success: true, emails: data || [] });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+
+// ── Outreach reply tracking (IMAP) ───────────────────────────────────────────────────────────────
+// Outreach leaves from the portal user's OWN mailbox, so the influencer's reply lands in THAT inbox —
+// not the shared reports mailbox the escalation poller watches. So this connects per sender, using the
+// credentials already stored in app_user_smtp_ecom (IMAP host derived from the SMTP host, same app
+// password), and only ever looks at mailboxes we have actually sent outreach from.
+const { ImapFlow } = require('imapflow');
+const { simpleParser } = require('mailparser');
+
+const normSubject = s => String(s || '').replace(/^(\s*(re|fwd?|fw)\s*:\s*)+/i, '').trim().toLowerCase();
+const stripId = s => String(s || '').trim().replace(/^<|>$/g, '');
+
+let _infPollRunning = false;
+// Poll every sender mailbox for replies to outreach sent in the last `days` days.
+// Safe to call often: it no-ops while a poll is in flight and skips messages already stored.
+async function pollInfluencerReplies({ days = 60, sinceDays = 14 } = {}) {
+    if (_infPollRunning) return { skipped: true };
+    _infPollRunning = true;
+    try {
+        const sinceISO = new Date(Date.now() - days * 86400000).toISOString();
+        const { data: sent } = await supabase.from('influencer_emails_ecom')
+            .select('id, influencer_id, message_id, subject, thread_subject, to_email, from_email')
+            .eq('kind', 'sent').gte('sent_at', sinceISO);
+        const sentRows = (sent || []).filter(r => r.from_email);
+        if (!sentRows.length) return { checked: 0, saved: 0, mailboxes: 0 };
+
+        // Group the threads we're watching by the mailbox they were sent from.
+        const byMailbox = new Map();
+        sentRows.forEach(r => {
+            const k = String(r.from_email).toLowerCase();
+            if (!byMailbox.has(k)) byMailbox.set(k, []);
+            byMailbox.get(k).push(r);
+        });
+
+        let checked = 0, saved = 0, boxes = 0;
+        for (const [mailbox, rows] of byMailbox) {
+            const mb = await getUserMailbox(mailbox);
+            if (!mb) { console.warn('[InfMail] no usable mailbox for', mailbox, '— skipping'); continue; }
+            const byMsgId = new Map(rows.filter(r => r.message_id).map(r => [stripId(r.message_id), r]));
+            // NO subject matching. The outreach subject is FIXED brand copy, so EVERY influencer's
+            // reply normalises to the same thread subject — a subject fallback attached 17 unrelated
+            // people's replies to one thread on the first live run. Only exact keys are safe here.
+            // The influencer's own address is the most reliable key: a reply from them belongs to their
+            // thread even when the mail client drops In-Reply-To or rewrites the subject.
+            const byTo = new Map(rows.filter(r => r.to_email).map(r => [String(r.to_email).toLowerCase(), r]));
+            // A reply-to-a-reply references the previous reply, so map those Message-IDs back too.
+            const { data: known } = await supabase.from('influencer_emails_ecom')
+                .select('message_id, parent_id').eq('kind', 'reply').not('message_id', 'is', null);
+            const parentById = new Map(rows.map(r => [r.id, r]));
+            (known || []).forEach(k => { const p = parentById.get(k.parent_id); if (p && k.message_id) byMsgId.set(stripId(k.message_id), p); });
+
+            const host = process.env.IMAP_HOST || String(mb.host || '').replace(/^smtp\./i, 'imap.');
+            const client = new ImapFlow({ host, port: 993, secure: true, logger: false, auth: { user: mb.user, pass: mb.pass } });
+            // An unhandled 'error' event (ECONNRESET etc.) would take the whole process down.
+            client.on('error', e => console.warn('[InfMail] IMAP error (ignored):', e.message));
+            try { await client.connect(); } catch (e) { console.warn('[InfMail] cannot connect', mailbox, '-', e.message); continue; }
+            boxes++;
+            const lock = await client.getMailboxLock('INBOX');
+            try {
+                const uids = await client.search({ since: new Date(Date.now() - sinceDays * 86400000) });
+                // PHASE 1 — envelopes only. Issuing client.download() inside an active fetch iterator
+                // deadlocks imapflow, so candidates are collected first (same trap as the escalation poller).
+                const candidates = [];
+                for await (const msg of client.fetch(uids, { envelope: true, uid: true })) {
+                    checked++;
+                    const env = msg.envelope || {};
+                    const fromAddr = ((env.from && env.from[0] && env.from[0].address) || '').toLowerCase();
+                    if (!fromAddr || fromAddr === mailbox) continue;              // our own copy
+                    const inReplyTo = stripId(env.inReplyTo);
+                    // Exact keys only: the In-Reply-To chain, or the address we actually wrote to.
+                    const parent = (inReplyTo && byMsgId.get(inReplyTo)) || byTo.get(fromAddr) || null;
+                    if (!parent) continue;
+                    const msgId = stripId(env.messageId);
+                    if (!msgId) continue;
+                    candidates.push({ uid: msg.uid, env, fromAddr, inReplyTo, msgId, parent });
+                }
+                // PHASE 2 — download + store (the fetch stream is closed by now).
+                for (const c of candidates) {
+                    const { data: exists } = await supabase.from('influencer_emails_ecom')
+                        .select('id').eq('message_id', c.msgId).maybeSingle();
+                    if (exists) continue;
+                    let text = '';
+                    try {
+                        const dl = await client.download(c.uid, undefined, { uid: true });
+                        const parsed = await simpleParser(dl.content);
+                        text = (parsed.text || parsed.html || '').toString();
+                    } catch (_) { /* envelope-only fallback */ }
+                    // Drop the quoted history — Gmail's "On … wrote:" header wraps across lines.
+                    text = text.split(/\r?\n\s*(?:>|On [\s\S]{5,140}?wrote:)/)[0].trim().slice(0, 8000);
+                    const { error } = await supabase.from('influencer_emails_ecom').insert({
+                        kind: 'reply', influencer_id: c.parent.influencer_id, parent_id: c.parent.id,
+                        message_id: c.msgId, in_reply_to: c.inReplyTo || null,
+                        thread_subject: normSubject(c.env.subject), subject: c.env.subject || '',
+                        from_email: c.fromAddr, to_email: mailbox, body: text,
+                        sent_at: c.env.date ? new Date(c.env.date).toISOString() : new Date().toISOString(),
+                    });
+                    if (error) { if (!/duplicate/i.test(error.message)) console.error('[InfMail] save reply error:', error.message); continue; }
+                    saved++;
+                    console.log(`[InfMail] reply from ${c.fromAddr} — "${(c.env.subject || '').slice(0, 60)}"`);
+                }
+            } finally { lock.release(); }
+            await client.logout().catch(() => {});
+        }
+        if (saved) console.log(`[InfMail] poll done — ${saved} new repl${saved === 1 ? 'y' : 'ies'} (${checked} checked, ${boxes} mailbox${boxes === 1 ? '' : 'es'})`);
+        return { checked, saved, mailboxes: boxes };
+    } catch (e) {
+        console.error('[InfMail] poll error:', e.message);
+        return { error: e.message };
+    } finally { _infPollRunning = false; }
+}
+
+// ── GET /inf/email/thread?influencerId=&refresh=1 — the sent mail + its replies. ──
+// `refresh=1` polls IMAP first so the panel can show a reply that arrived seconds ago.
+router.get('/inf/email/thread', async (req, res) => {
+    try {
+        const id = Number(req.query.influencerId);
+        if (!id) return res.status(400).json({ success: false, error: 'influencerId required' });
+        let poll = null;
+        if (String(req.query.refresh || '') === '1') poll = await pollInfluencerReplies({ sinceDays: 30 });
+        const { data } = await supabase.from('influencer_emails_ecom')
+            .select('id, kind, parent_id, to_email, from_email, subject, body, ai_polished, sent_by, sent_at')
+            .eq('influencer_id', id).order('sent_at', { ascending: true });
+        const rows = data || [];
+        res.json({
+            success: true,
+            messages: rows,
+            sentCount: rows.filter(r => r.kind === 'sent').length,
+            replyCount: rows.filter(r => r.kind === 'reply').length,
+            poll,
+        });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── POST /inf/email/poll — manual/cron trigger for the reply poll. ──
+router.post('/inf/email/poll', async (req, res) => {
+    try { res.json({ success: true, ...(await pollInfluencerReplies({})) }); }
+    catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 module.exports = router;
+module.exports.pollInfluencerReplies = pollInfluencerReplies;
+

@@ -52,7 +52,7 @@ async function loadLatestSnapshot() {
 const PLACE_ORDER_DOI = 20;
 const WARNING_DOI = 30;
 const TARGET_COVER_DAYS = 45;      // also the report's "low inventory" threshold
-const DRR_WINDOW_DAYS = 30;        // 30-day average — steadier than 7d for a 45-day order horizon
+const DRR_WINDOW_DAYS = 7;         // 7-day average — tracks current demand; drives DRR, DOI and the order qty
 
 async function fetchCaseSizes() {
     const { data } = await supabase.from('sku_case_size').select('sku, case_size');

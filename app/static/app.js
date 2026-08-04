@@ -3396,6 +3396,139 @@ function renderInsightDetail() {
 function renderSettings(){const c=document.getElementById('seller-connections');c.innerHTML=connections.map(e=>`<div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between"><div class="flex items-center"><img src="${platformLogos[e.name]}" class="w-10 h-10 mr-4 rounded-lg bg-slate-50 p-1"><div><p class="font-bold text-slate-900">${e.name}</p><p class="text-sm text-slate-500">${e.status==='Connected'?e.user:'Click to connect'}</p></div></div><button data-platform="${e.name}" data-action="${e.status==='Connected'?'disconnect':'connect'}" class="connection-btn ${e.status==='Connected'?'text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100':'text-white bg-indigo-600 hover:bg-indigo-700'} px-4 py-2 rounded-lg text-sm font-medium transition-colors">${e.status==='Connected'?'Disconnect':'Connect'}</button></div>`).join('');document.querySelectorAll('.connection-btn').forEach(b=>b.addEventListener('click',e=>handleConnection(e.currentTarget.dataset.platform,e.currentTarget.dataset.action)))}
 function handleConnection(p,a){if(a==='connect'){showNotification(`Simulating connection to ${p}...`);setTimeout(()=>{showNotification(`Successfully connected to ${p}.`)},1500)}else if(a==='disconnect'){if(confirm(`Are you sure you want to disconnect from ${p}?`)){showNotification(`Disconnected from ${p}.`)}}}
 
+
+// ─────────── Per-user sending mailboxes (admin only) ───────────
+// Every portal user is listed, mapped or not, so it's obvious who still can't send outreach.
+// Passwords are write-only: the API returns whether one is stored, never the value.
+let _umbRows = [];
+async function umbLoad(){
+  const box = document.getElementById('umb-list'); if(!box) return;
+  box.innerHTML = '<p class="text-sm text-slate-400 py-4">Loading…</p>';
+  try{
+    const r = await fetch('/api/admin/user-mailboxes',{headers:getAuthHeaders()});
+    const d = await r.json();
+    if(!d.success) throw new Error(d.message||'Load failed');
+    _umbRows = d.mailboxes||[];
+    umbRender();
+  }catch(e){ box.innerHTML = `<p class="text-sm text-rose-500 py-4">${escapeHtml(e.message)}</p>`; }
+}
+function umbRender(){
+  const box = document.getElementById('umb-list');
+  const th='px-3 py-2 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wide border-b border-slate-200 bg-slate-50/70 whitespace-nowrap';
+  const td='px-3 py-2 border-b border-slate-100 text-sm align-middle';
+  const chip=(t,c)=>`<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${c}">${t}</span>`;
+  const rows=_umbRows.map(m=>{
+    const state = !m.mapped ? chip('Not mapped','bg-slate-100 text-slate-500')
+      : !m.password_set ? chip('No password','bg-amber-50 text-amber-700')
+      : !m.active ? chip('Disabled','bg-slate-200 text-slate-600')
+      : chip('Ready','bg-emerald-50 text-emerald-700');
+    return `<tr class="hover:bg-slate-50">
+      <td class="${td}"><div class="font-medium text-slate-700">${escapeHtml(m.name||'—')}</div>
+        <div class="text-xs text-slate-400">${escapeHtml(m.user_email)}</div></td>
+      <td class="${td} text-slate-600">${m.mapped?escapeHtml(m.from_email||''):'<span class="text-slate-300">—</span>'}
+        ${m.from_name?`<div class="text-xs text-slate-400">as “${escapeHtml(m.from_name)}”</div>`:''}</td>
+      <td class="${td} text-slate-500 text-xs whitespace-nowrap">${m.mapped?escapeHtml((m.smtp_host||'default')+':'+(m.smtp_port||'587')):'<span class="text-slate-300">—</span>'}</td>
+      <td class="${td}">${state}</td>
+      <td class="${td} text-right whitespace-nowrap">
+        <button class="umb-edit px-2 py-1 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100" data-e="${escapeHtml(m.user_email)}">${m.mapped?'Edit':'Map'}</button>
+        ${m.mapped&&m.password_set?`<button class="umb-test px-2 py-1 rounded-lg text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 ml-1" data-e="${escapeHtml(m.user_email)}">Test</button>`:''}
+        ${m.mapped?`<button class="umb-del px-2 py-1 rounded-lg text-xs font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 ml-1" data-e="${escapeHtml(m.user_email)}">Remove</button>`:''}
+      </td></tr>`;
+  }).join('') || `<tr><td colspan="5" class="px-3 py-8 text-center text-sm text-slate-400">No portal users found.</td></tr>`;
+  box.innerHTML = `<table class="w-full min-w-[720px]"><thead><tr>
+    <th class="${th}">User</th><th class="${th}">Sends from</th><th class="${th}">SMTP</th><th class="${th}">State</th><th class="${th}"></th>
+  </tr></thead><tbody>${rows}</tbody></table>`;
+  box.querySelectorAll('.umb-edit').forEach(b=>b.addEventListener('click',()=>umbModal(b.dataset.e)));
+  box.querySelectorAll('.umb-test').forEach(b=>b.addEventListener('click',()=>umbTest(b.dataset.e)));
+  box.querySelectorAll('.umb-del').forEach(b=>b.addEventListener('click',()=>umbDelete(b.dataset.e)));
+}
+function umbStatus(t,ok){ const el=document.getElementById('umb-status'); if(!el) return;
+  el.textContent=t||''; el.className='text-sm mt-3 '+(ok===true?'text-emerald-600':ok===false?'text-rose-600':'text-slate-500'); }
+
+function umbModal(userEmail){
+  const m = _umbRows.find(x=>x.user_email===userEmail) || { user_email:userEmail, mapped:false };
+  const wrap=infModal('umb-modal',`${INF_MODAL_HEAD('Sending mailbox', escapeHtml(userEmail))}
+    <div class="px-5 py-4 space-y-3">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">From address *</label>
+          <input id="umb-from" class="filter-input w-full" value="${escapeHtml(m.from_email||m.user_email||'')}" placeholder="name@theelement.skin"></div>
+        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Display name</label>
+          <input id="umb-name" class="filter-input w-full" value="${escapeHtml(m.from_name||m.name||'')}" placeholder="Anandita"></div>
+        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">SMTP host</label>
+          <input id="umb-host" class="filter-input w-full" value="${escapeHtml(m.smtp_host||'')}" placeholder="smtp.gmail.com"></div>
+        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Port</label>
+          <input id="umb-port" type="number" class="filter-input w-full" value="${escapeHtml(String(m.smtp_port||''))}" placeholder="587"></div>
+        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">SMTP username</label>
+          <input id="umb-user" class="filter-input w-full" value="${escapeHtml(m.smtp_user||'')}" placeholder="blank → same as From"></div>
+        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">App password ${m.password_set?'<span class="text-emerald-600 normal-case font-normal">(stored)</span>':'*'}</label>
+          <input id="umb-pass" type="password" autocomplete="new-password" class="filter-input w-full" placeholder="${m.password_set?'blank → keep current':'16-char app password'}"></div>
+      </div>
+      <label class="flex items-center gap-2 text-sm text-slate-600"><input id="umb-active" type="checkbox" class="accent-indigo-600" ${m.active!==false?'checked':''}> Active (can send)</label>
+      <p class="text-xs text-slate-400">Host/port left blank fall back to the server defaults. Gmail and Workspace need an <b>app password</b> — a normal password is rejected.</p>
+      <p id="umb-err" class="text-xs text-rose-500 hidden"></p>
+    </div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="umb-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Save mailbox</button>
+    </div>`,'max-w-2xl');
+  const $=id=>wrap.querySelector('#'+id);
+  const err=t=>{const e=$('umb-err'); e.textContent=t||''; e.classList.toggle('hidden',!t);};
+  $('umb-save').addEventListener('click',async()=>{
+    const from=$('umb-from').value.trim();
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(from)) return err('Enter a valid From address.');
+    if(!m.password_set && !$('umb-pass').value.trim()) return err('An app password is required the first time.');
+    const btn=$('umb-save'); btn.disabled=true; btn.textContent='Saving…';
+    try{
+      const r=await fetch('/api/admin/user-mailboxes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},
+        body:JSON.stringify({user_email:userEmail,from_email:from,from_name:$('umb-name').value.trim(),
+          smtp_host:$('umb-host').value.trim(),smtp_port:$('umb-port').value.trim(),smtp_user:$('umb-user').value.trim(),
+          smtp_password:$('umb-pass').value,active:$('umb-active').checked})});
+      const d=await r.json();
+      if(!d.success) throw new Error(d.message||'Save failed');
+      wrap.remove(); umbStatus(`Mailbox saved for ${userEmail}.`,true); umbLoad();
+    }catch(e){ btn.disabled=false; btn.textContent='Save mailbox'; err(e.message); }
+  });
+}
+async function umbTest(userEmail){
+  umbStatus(`Sending a test from ${userEmail}…`);
+  try{
+    const r=await fetch('/api/admin/user-mailboxes/test',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},
+      body:JSON.stringify({user_email:userEmail})});
+    const d=await r.json();
+    if(!d.success) throw new Error(d.message||'Test failed');
+    umbStatus(d.message,true);
+  }catch(e){ umbStatus(e.message,false); }
+}
+async function umbDelete(userEmail){
+  if(!(await supConfirm({title:'Remove this mailbox?',message:`${userEmail} will no longer be able to send influencer outreach until an admin maps them again.`,confirmLabel:'Remove',danger:true}))) return;
+  try{
+    const r=await fetch('/api/admin/user-mailboxes/'+encodeURIComponent(userEmail),{method:'DELETE',headers:getAuthHeaders()});
+    const d=await r.json();
+    if(!d.success) throw new Error(d.message||'Delete failed');
+    umbStatus(`Removed the mailbox for ${userEmail}.`,true); umbLoad();
+  }catch(e){ umbStatus(e.message,false); }
+}
+
+
+// "+ Map a user" — pick from the portal users that have no mailbox yet. (Every row also carries its own
+// Map/Edit button; this is the shortcut when the user list is long.)
+function umbAddPrompt(){
+  const un=_umbRows.filter(m=>!m.mapped);
+  if(!un.length) return umbStatus('Every portal user already has a mailbox mapped.',true);
+  const wrap=infModal('umb-add-modal',`${INF_MODAL_HEAD('Map a sending mailbox','Choose the portal user to map')}
+    <div class="px-5 py-4">
+      <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Portal user</label>
+      <select id="umb-pick" class="filter-select w-full">${un.map(m=>`<option value="${escapeHtml(m.user_email)}">${escapeHtml(m.name||m.user_email)} — ${escapeHtml(m.user_email)}</option>`).join('')}</select>
+    </div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="umb-pick-go" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Continue</button>
+    </div>`,'max-w-lg');
+  try{ ecEnhanceSelect(wrap.querySelector('#umb-pick')); }catch(_){}
+  wrap.querySelector('#umb-pick-go').addEventListener('click',()=>{
+    const v=wrap.querySelector('#umb-pick').value; wrap.remove(); umbModal(v); });
+}
+
 // ─────────── Email & Reports settings (admin only) ───────────
 let _emailSettingsWired = false;
 async function renderEmailSettings(){
@@ -3408,12 +3541,15 @@ async function renderEmailSettings(){
     _emailSettingsWired = true;
     document.getElementById('es-save')?.addEventListener('click', saveEmailSettings);
     document.getElementById('es-test')?.addEventListener('click', testEmailSettings);
+    // + Map a user → pick from the portal user list (the modal is keyed by login email).
+    document.getElementById('umb-add')?.addEventListener('click', umbAddPrompt);
   }
   try{
     const r = await fetch('/api/admin/email-settings',{headers:getAuthHeaders()});
     const d = await r.json();
     if(!d.success) throw new Error(d.message||'Load failed');
     const s = d.settings, f = d.env_fallback || {};
+    umbLoad();   // per-user sending mailboxes table
     const set=(id,v)=>{const el=document.getElementById(id); if(el) el.value = v||'';};
     set('es-smtp-host', s.smtp_host); set('es-smtp-port', s.smtp_port);
     set('es-from', s.from_email || s.smtp_user); set('es-rapidshyp', s.rapidshyp_email);
@@ -10124,6 +10260,51 @@ function infAvatar(inf,cls){ const av=_avatar(inf.instagram_handle||inf.name||'?
 function infBucketOf(fc){ fc=Number(fc||0); if(fc>=1e6) return 'mega'; if(fc>=1e5) return 'macro'; if(fc>=1e4) return 'micro'; return 'nano'; }
 const INF_ACT_CHIP={note:'bg-indigo-50 text-indigo-700',status_change:'bg-slate-100 text-slate-600',video_added:'bg-violet-50 text-violet-700',payment:'bg-emerald-50 text-emerald-700',product_sent:'bg-amber-50 text-amber-700',email_sent:'bg-sky-50 text-sky-700'};
 function infActChip(t){ return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${INF_ACT_CHIP[t]||'bg-slate-100 text-slate-500'}">${escapeHtml(String(t||'').replace(/_/g,' '))}</span>`; }
+
+// ── Pincode → City/State autofill ────────────────────────────────────────────────────────────────
+// Wire any address form with: ecPincodeAutofill(pinInput, cityInput, stateInput).
+// Behaviour, deliberately:
+//   • fires when the pincode reaches 6 digits (on input AND on paste/blur)
+//   • fills City and State, which stay FULLY EDITABLE — the API's answer isn't always the name a user
+//     wants, so this is a head start, not a lock
+//   • a value the user typed themselves is never silently overwritten; changing the PINCODE clears
+//     that protection, because a new pincode invalidates the old city/state
+//   • SILENT by design — no "looking up" / "filled from pincode" status text. The filled boxes are the
+//     feedback; a failed lookup just leaves them alone for the user to type. Never blocks the form.
+function ecPincodeAutofill(pinEl, cityEl, stateEl){
+  if(!pinEl || (!cityEl && !stateEl)) return;
+  if(pinEl._ecPinWired) return; pinEl._ecPinWired = true;
+
+  // Mark a field as user-owned the moment they type in it, so autofill won't clobber their wording.
+  [cityEl, stateEl].forEach(el => { if(el) el.addEventListener('input', () => { el._ecUserEdited = true; }); });
+
+  let last = '', busy = false, timer = null;
+  const run = async () => {
+    const pin = String(pinEl.value || '').replace(/\D/g, '').slice(0, 6);
+    if(pin.length !== 6) return;
+    if(pin === last || busy) return;
+    last = pin;
+    // A new pincode supersedes whatever was in City/State, including manual edits for the OLD pincode.
+    [cityEl, stateEl].forEach(el => { if(el) el._ecUserEdited = false; });
+    busy = true;
+    try{
+      const r = await fetch('/api/pincode/' + pin, { headers: getAuthHeaders() });
+      const d = await r.json();
+      if(d && d.success){
+        const set = (el, v) => { if(el && v && !el._ecUserEdited){ el.value = v; el.dispatchEvent(new Event('change', { bubbles:true })); } };
+        set(cityEl, d.city); set(stateEl, d.state);
+      }
+    }catch(_){ /* unknown pincode or offline — leave the fields for the user to fill */ }
+    busy = false;
+  };
+  const debounced = () => { clearTimeout(timer); timer = setTimeout(run, 300); };
+  pinEl.addEventListener('input', debounced);
+  pinEl.addEventListener('blur', run);
+  pinEl.addEventListener('paste', () => setTimeout(run, 50));
+  // Prefill an existing record only if City/State are blank — never overwrite saved values on open.
+  if(String(pinEl.value||'').replace(/\D/g,'').length === 6 && !(cityEl&&cityEl.value.trim()) && !(stateEl&&stateEl.value.trim())) run();
+}
+
 function infModal(id, html, maxW){ document.getElementById(id)?.remove();
   const wrap=document.createElement('div'); wrap.id=id;
   wrap.className='fixed inset-0 z-[75] bg-slate-900/40 backdrop-blur-[2px] flex items-center justify-center p-4';
@@ -10315,8 +10496,8 @@ function infEditModal(inf, onDone){
       ${F('infe-followers','Followers',inf.follower_count,'number')}${F('infe-engagement','Engagement rate %',inf.engagement_rate,'number')}
       ${F('infe-quoted','Quoted price (₹)',inf.quoted_price,'number')}${F('infe-final','Final price (₹)',inf.final_price,'number')}
       ${F('infe-address1','Address line 1',inf.address1)}${F('infe-address2','Address line 2',inf.address2)}
-      ${F('infe-city','City',inf.city)}${F('infe-state','State',inf.state)}
-      ${F('infe-pincode','Pincode',inf.pincode)}${F('infe-next','Next video expected',inf.next_video_expected_date,'date')}
+      ${F('infe-pincode','Pincode',inf.pincode)}${F('infe-city','City',inf.city)}
+      ${F('infe-state','State',inf.state)}${F('infe-next','Next video expected',inf.next_video_expected_date,'date')}
       <div class="sm:col-span-2"><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Default collab products</label><div id="infe-products-mount"></div></div>
       <div class="sm:col-span-2"><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Notes</label><textarea id="infe-notes" class="filter-input w-full" style="height:70px">${escapeHtml(inf.notes||'')}</textarea></div>
     </div>
@@ -10324,6 +10505,7 @@ function infEditModal(inf, onDone){
       <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
       <button id="infe-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Save</button></div>`);
   const _infePP=infMountProductPicker(document.getElementById('infe-products-mount'), inf.product_ids, inf.product_qty);
+  ecPincodeAutofill(document.getElementById('infe-pincode'), document.getElementById('infe-city'), document.getElementById('infe-state'));
   document.getElementById('infe-save').addEventListener('click',async()=>{
     const v=id=>document.getElementById(id).value.trim();
     try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({
@@ -10361,6 +10543,9 @@ function infOrphanOrdersHtml(inf){
 }
 function infDetailRender(wrap){
   const {influencer:inf,videos,activities,lists}=wrap._data;
+  // Outreach state comes from the API, but is re-derived locally after a status change so the control
+  // flips in the same beat as the dropdown (see the #infd-status handler).
+  const _emailSent=!!wrap._data.email_sent, _canEmail=inflCanEmail({outreach_status:inf.outreach_status,email_sent:_emailSent});
   const statusSel=`<select id="infd-status" class="filter-select">${Object.entries(INF_STATUS).map(([k,[l]])=>`<option value="${k}" ${inf.outreach_status===k?'selected':''}>${l}</option>`).join('')}</select>`;
   const info=(label,val)=>`<div class="flex justify-between gap-3 py-1.5 border-b border-slate-50 last:border-0"><span class="text-xs text-slate-400">${label}</span><span class="text-xs font-semibold text-slate-700 text-right break-all">${val||'—'}</span></div>`;
   const vidCard=v=>{
@@ -10416,6 +10601,11 @@ function infDetailRender(wrap){
           </div>
           <button id="infd-note-btn" class="filter-btn" title="Add a note to the timeline">📝 Note</button>
           <button id="infd-dm" class="filter-btn" title="Open Instagram DM & mark reached out">💬 DM</button>
+          ${_emailSent
+            // A <button>, not a <span>: .filter-btn only sets height:38px with no vertical centring, so a
+            // span's label sits at the top of the box while every real button beside it is centred.
+            ? '<button id="infd-thread" class="filter-btn !text-emerald-700 !bg-emerald-50 !border-emerald-200 hover:!bg-emerald-100" title="View the email thread and any replies">✓ Email sent</button>'
+            : (_canEmail ? '<button id="infd-email" class="filter-btn !text-indigo-700 !bg-indigo-50 !border-indigo-200 hover:!bg-indigo-100" title="Compose the collaboration email">✉ Send Email</button>' : '')}
           <button id="infd-edit" class="filter-btn">✏ Edit</button>
           <button id="infd-del" class="text-rose-500 hover:bg-rose-50 rounded-lg px-3 text-sm" title="Delete influencer">🗑</button>
         </div>
@@ -10457,7 +10647,12 @@ function infDetailRender(wrap){
     inflColorStatusBtn(_infdStatus);
     const newStatus=e.target.value;
     const note=await infStatusNotePrompt((INF_STATUS[newStatus]||[newStatus])[0]);   // optional reason note
-    try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({outreach_status:newStatus,note:note||undefined})}); showNotification(note?'Status updated · note added':'Status updated'); _infRows=null; infDetailReload(wrap); if(currentView==='inf-influencers') infLoadRows(); }
+    try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({outreach_status:newStatus,note:note||undefined})}); showNotification(note?'Status updated · note added':'Status updated'); _infRows=null;
+      // Repaint the modal AND the campaign list behind it — the Send Email control depends on the status,
+      // so both surfaces have to flip now rather than on the next load.
+      wrap._data.influencer.outreach_status=newStatus; wrap._data.can_email=inflCanEmail({outreach_status:newStatus,email_sent:wrap._data.email_sent}); infDetailRender(wrap);
+      inflSyncMember(inf.id,{outreach_status:newStatus});
+      infDetailReload(wrap); if(currentView==='inf-influencers') infLoadRows(); }
     catch(err){ showNotification(err.message,true); } });
   try{ ecEnhanceSelect(_infdStatus); inflColorStatusBtn(_infdStatus); }catch(_){}   // standard .csel dropdown + colour-coded, matching the list page
   wrap.querySelector('#infd-note-btn').addEventListener('click',async()=>{
@@ -10470,6 +10665,8 @@ function infDetailRender(wrap){
     window.open('https://ig.me/m/'+encodeURIComponent(inf.instagram_handle||''),'_blank');
     if(inf.outreach_status==='not_contacted'){ try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({outreach_status:'reached_out'})}); _infRows=null; infDetailReload(wrap); }catch(_){}}
   });
+  wrap.querySelector('#infd-thread')?.addEventListener('click',()=>infThreadModal(inf.id, (inf.name||'')+' · @'+(inf.instagram_handle||'')));
+  wrap.querySelector('#infd-email')?.addEventListener('click',()=>infEmailModal(inf.id,()=>{ infDetailReload(wrap); inflSyncMember(inf.id,{email_sent:true}); }));
   wrap.querySelector('#infd-edit').addEventListener('click',()=>infEditModal(inf,()=>infDetailReload(wrap)));
   wrap.querySelector('#infd-del').addEventListener('click',async()=>{
     if(!(await supConfirm({title:'Delete this influencer?',message:`@${inf.instagram_handle} plus all their videos, notes and list memberships will be removed permanently.`,confirmLabel:'Delete',danger:true}))) return;
@@ -10709,14 +10906,15 @@ async function infSendProductModal(inf, video, onDone){
         ${F('infsp-name','Name',inf.name)}${F('infsp-phone','Phone *',inf.phone)}
         <div class="sm:col-span-2">${F('infsp-addr1','Address line 1 *',inf.address1)}</div>
         <div class="sm:col-span-2">${F('infsp-addr2','Address line 2',inf.address2)}</div>
-        ${F('infsp-city','City',inf.city)}${F('infsp-state','State',inf.state)}
-        ${F('infsp-pin','Pincode *',inf.pincode)}${F('infsp-email','Email',inf.email)}
+        ${F('infsp-pin','Pincode *',inf.pincode)}${F('infsp-city','City',inf.city)}
+        ${F('infsp-state','State',inf.state)}${F('infsp-email','Email',inf.email)}
       </div>
       <p id="infsp-err" class="text-xs text-rose-500 hidden"></p>
     </div>
     <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
       <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
       <button id="infsp-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Create prepaid order</button></div>`;
+  ecPincodeAutofill(document.getElementById('infsp-pin'), document.getElementById('infsp-city'), document.getElementById('infsp-state'));
   document.getElementById('infsp-q').addEventListener('input',e=>{ const q=e.target.value.toLowerCase();
     wrap.querySelectorAll('.infsp-item').forEach(el=>el.style.display=el.dataset.t.includes(q)?'':'none'); });
   // Qty is only live for a checked row; ticking a row focuses its qty so it can be typed straight away.
@@ -11085,6 +11283,168 @@ const INFL_COLS=[
 const INFL_SV={handle:m=>(m.instagram_handle||'').toLowerCase(),name:m=>(m.name||'').toLowerCase(),final:m=>m.final||0,payment:m=>m.payment||'',
   product_sent:m=>m.product_sent?1:0,email_sent:m=>m.email_sent?1:0,ad_run:m=>m.ad_run?1:0,status:m=>(INF_STATUS[m.outreach_status]?INF_STATUS[m.outreach_status][0]:m.outreach_status||''),
   views:m=>m.views_in_range||0,likes:m=>m.likes||0,comments:m=>m.comments||0,shares:m=>m.shares||0};
+
+// ── Collaboration outreach email — cell, modal, AI polish, send ──────────────────────────────────
+// The Email Sent cell is a three-state control, not a boolean icon:
+//   sent            → ✓ (with who/when on hover). Terminal: the button never comes back, whatever the
+//                     status later becomes — the send endpoint enforces that too, so a stale tab can't
+//                     double-send.
+//   partnered & not → ✉ Send Email
+//   anything else   → — (not partnered yet, so there is nothing to pitch)
+// The one rule, in one place: you may email a partnered influencer who has never been emailed. Used by
+// the list cell, the detail panel, and re-evaluated locally on every status change so the control flips
+// instantly instead of waiting for a reload. The server re-checks both halves on send regardless.
+function inflCanEmail(m){ return !!m && m.outreach_status==='partnered' && !m.email_sent; }
+
+// Push a change made in the detail modal back into the campaign list sitting behind it, and repaint —
+// otherwise the row keeps the state it was rendered with until the page is reloaded.
+function inflSyncMember(id, patch){
+  if(typeof _inflMembers==='undefined' || !Array.isArray(_inflMembers)) return;
+  const m=_inflMembers.find(x=>String(x.id)===String(id));
+  if(!m) return;
+  Object.assign(m, patch||{});
+  m.can_email=inflCanEmail(m);
+  if(document.getElementById('infl-table')) { inflRenderChips(); inflRenderTable(); }
+}
+
+function inflEmailCell(m){
+  if(m.email_sent) return `<button class="infl-thread inline-flex items-center gap-1 text-emerald-600 font-bold hover:text-emerald-700 hover:underline" data-id="${m.id}" title="View the email thread and any replies">✓</button>`;
+  if(m.can_email) return `<button class="infl-email inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-[11px] font-semibold hover:bg-indigo-100 hover:border-indigo-300 transition whitespace-nowrap" data-id="${m.id}" title="Compose the collaboration email">✉ Send Email</button>`;
+  return '<span class="text-slate-300" title="Only a partnered influencer can be emailed">—</span>';
+}
+
+// Compose modal: prefilled draft → optionally polish with AI → send. Body stays fully editable
+// throughout; AI is an assist, never a gate (if it is unconfigured or fails, the draft is kept and the
+// reason is shown inline).
+
+// ── Outreach email thread — what we sent + every reply ────────────────────────────────────────────
+// Opens from the "✓ Email sent" chip. Replies are polled from the SENDER'S own mailbox over IMAP, so
+// opening the thread does a refresh pass first (that's the only moment the user is actually waiting on
+// it) and a Check for replies button repeats it on demand.
+async function infThreadModal(influencerId, who){
+  const wrap=infModal('inf-thread-modal',`${INF_MODAL_HEAD('Email thread',who||'')}<div class="p-6">${brandLoader('Loading thread…')}</div>`,'max-w-2xl');
+  const load=async(refresh)=>{
+    const box=wrap.querySelector('.sup-pop');
+    try{
+      const d=await infFetch('/api/inf/email/thread?influencerId='+encodeURIComponent(influencerId)+(refresh?'&refresh=1':''));
+      const msgs=d.messages||[];
+      if(!msgs.length){ box.innerHTML=INF_MODAL_HEAD('Email thread',who||'')+'<p class="p-6 text-sm text-slate-400">Nothing sent yet.</p>'; return; }
+      const when=t=>{ const x=new Date(t); return isNaN(x)?'':x.toLocaleString('en-IN',{day:'2-digit',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit'}); };
+      const bubble=m=>{
+        const out=m.kind!=='reply';
+        return `<div class="flex ${out?'justify-end':'justify-start'}">
+          <div class="max-w-[85%] rounded-2xl border px-4 py-3 ${out?'bg-indigo-50 border-indigo-100':'bg-white border-slate-200'}">
+            <div class="flex flex-wrap items-baseline gap-2 mb-1">
+              <span class="text-[11px] font-bold ${out?'text-indigo-700':'text-slate-700'}">${out?'We sent':'Reply'}</span>
+              <span class="text-[11px] text-slate-400">${escapeHtml(out?(m.from_email||''):(m.from_email||''))} → ${escapeHtml(m.to_email||'')}</span>
+              <span class="text-[11px] text-slate-400 ml-auto">${when(m.sent_at)}</span>
+            </div>
+            ${m.subject?`<p class="text-xs font-semibold text-slate-700 mb-1">${escapeHtml(m.subject)}</p>`:''}
+            <pre class="text-[13px] text-slate-700 whitespace-pre-wrap break-words" style="font-family:inherit;margin:0">${escapeHtml(m.body||'')}</pre>
+            ${out&&m.ai_polished?'<p class="text-[10px] text-violet-500 mt-1.5">✨ AI-polished before sending</p>':''}
+            ${out&&m.sent_by?`<p class="text-[10px] text-slate-400 mt-1">by ${escapeHtml(m.sent_by)}</p>`:''}
+          </div></div>`;
+      };
+      const note=d.replyCount?`${d.replyCount} repl${d.replyCount===1?'y':'ies'}`:'No replies yet';
+      box.innerHTML=`${INF_MODAL_HEAD('Email thread',(who?who+' · ':'')+note)}
+        <div class="px-5 py-4 space-y-3">${msgs.map(bubble).join('')}</div>
+        <div class="flex items-center justify-between gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+          <span class="text-[11px] text-slate-400">Replies are read from the sending mailbox${msgs[0]&&msgs[0].from_email?' ('+escapeHtml(msgs[0].from_email)+')':''}</span>
+          <div class="flex items-center gap-2">
+            <button id="infth-refresh" class="px-3 py-1.5 text-xs rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold">Check for replies</button>
+            <button data-x class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Close</button>
+          </div></div>`;
+      wrap.querySelector('#infth-refresh').addEventListener('click',async e=>{
+        e.target.disabled=true; e.target.textContent='Checking…'; await load(true); });
+    }catch(e){ box.innerHTML=INF_MODAL_HEAD('Email thread',who||'')+`<p class="p-6 text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
+  };
+  load(true);   // refresh on open — the point of opening it is to see whether they replied
+}
+
+async function infEmailModal(influencerId, onDone){
+  const wrap=infModal('inf-email-modal',`${INF_MODAL_HEAD('Send collaboration email','Loading draft…')}<div class="p-6">${brandLoader('Preparing draft…')}</div>`,'max-w-2xl');
+  let d;
+  try{ d=await infFetch('/api/inf/email/draft?influencerId='+encodeURIComponent(influencerId)); }
+  catch(e){ wrap.querySelector('.sup-pop').innerHTML=INF_MODAL_HEAD('Send collaboration email')+`<p class="p-6 text-sm text-rose-500">${escapeHtml(e.message)}</p>`; return; }
+  if(d.alreadySent){ wrap.querySelector('.sup-pop').innerHTML=INF_MODAL_HEAD('Send collaboration email')+`<p class="p-6 text-sm text-slate-500">A collaboration email has already been sent to this influencer.</p>`; return; }
+
+  const who=d.name?`${escapeHtml(d.name)} · @${escapeHtml(d.handle||'')}`:'@'+escapeHtml(d.handle||'');
+  wrap.querySelector('.sup-pop').innerHTML=`${INF_MODAL_HEAD('Send collaboration email',who)}
+    <div class="px-5 py-4 space-y-3">
+      ${d.priceKnown?'':`<div class="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-[12px] text-amber-800">
+        <span class="font-bold">!</span><span>No fee is saved for this influencer, so the commercials line reads <b>₹______</b>. Fill it in before sending — nothing has been guessed.</span></div>`}
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">To *</label>
+          <input id="infem-to" type="email" class="filter-input w-full" value="${escapeHtml(d.to||'')}" placeholder="name@example.com"></div>
+        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Subject</label>
+          <input id="infem-subj" class="filter-input w-full bg-slate-50 text-slate-500" value="${escapeHtml(d.subject||'')}" readonly title="Fixed brand subject line"></div>
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-1.5">
+          <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide">Message</label>
+          <div class="flex items-center gap-2">
+            <span id="infem-ai-note" class="text-[11px] text-slate-400"></span>
+            <button id="infem-polish" class="px-2.5 py-1 rounded-lg border border-violet-200 bg-violet-50 text-violet-700 text-[11px] font-semibold hover:bg-violet-100 transition">✨ Polish with AI</button>
+            <button id="infem-reset" class="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-500 text-[11px] font-semibold hover:bg-slate-50 transition hidden">Undo polish</button>
+          </div>
+        </div>
+        <textarea id="infem-body" class="filter-input w-full text-[13px] leading-relaxed" style="height:340px;font-family:inherit">${escapeHtml(d.body||'')}</textarea>
+      </div>
+      <p id="infem-err" class="text-xs text-rose-500 hidden"></p>
+    </div>
+    <div class="flex items-center justify-between gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      ${d.sendFrom
+        ? `<span class="text-[11px] text-slate-400">Sends from <b class="text-slate-600">${escapeHtml(d.sendFrom.email)}</b>${d.sendFrom.mode==='master'?' <span class="text-amber-600">(shared brand mailbox — you have no personal one mapped)</span>':' · replies come back to you'} · ticks Email Sent</span>`
+        : `<span class="text-[11px] text-rose-600 font-semibold">${escapeHtml(d.sendBlockedReason||'You cannot send outreach — no mailbox is mapped for your account.')}</span>`}
+      <div class="flex items-center gap-2">
+        <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+        <button id="infem-send" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed" ${d.sendFrom?'':`disabled title="${escapeHtml(d.sendBlockedReason||'No sending mailbox mapped for your account')}"`}>Send email</button>
+      </div>
+    </div>`;
+  // No close wiring needed — infModal() already delegates [data-x] and backdrop clicks.
+  const $=id=>wrap.querySelector('#'+id);
+  const err=t=>{ const e=$('infem-err'); e.textContent=t||''; e.classList.toggle('hidden',!t); };
+  let original=d.body||'', aiUsed=false;
+
+  $('infem-polish').addEventListener('click',async()=>{
+    const btn=$('infem-polish'); const note=$('infem-ai-note');
+    const before=$('infem-body').value;
+    btn.disabled=true; btn.textContent='Polishing…'; note.textContent=''; err('');
+    try{
+      const r=await infFetch('/api/inf/email/polish',{method:'POST',body:JSON.stringify({subject:$('infem-subj').value,body:before})});
+      $('infem-body').value=r.body||before;
+      if(r.subject) $('infem-subj').value=r.subject;
+      aiUsed=!!r.ai;
+      note.textContent=r.ai?'Polished — review before sending':(r.reason||'AI unavailable');
+      note.className=r.ai?'text-[11px] text-violet-600':'text-[11px] text-amber-600';
+      if(r.ai){ original=before; $('infem-reset').classList.remove('hidden'); }
+    }catch(e){ err(e.message); }
+    btn.disabled=false; btn.textContent='✨ Polish with AI';
+  });
+  $('infem-reset').addEventListener('click',()=>{ $('infem-body').value=original; aiUsed=false;
+    $('infem-ai-note').textContent='Reverted to the original draft'; $('infem-ai-note').className='text-[11px] text-slate-400';
+    $('infem-reset').classList.add('hidden'); });
+
+  $('infem-send').addEventListener('click',async()=>{
+    err('');
+    const to=$('infem-to').value.trim(), subject=$('infem-subj').value.trim(), body=$('infem-body').value.trim();
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return err('Enter a valid recipient email address.');
+    if(!subject) return err('Subject is required.');
+    if(!body) return err('The message is empty.');
+    if(body.includes('₹______') && !(await supConfirm({title:'Send with a blank fee?',
+        message:'The commercials line still reads ₹______ — the influencer will see that blank. Fill in the fee first, or send anyway.',
+        confirmLabel:'Send anyway',danger:true}))) return;
+    if(!(await supConfirm({title:'Send this collaboration email?',
+      message:`It will go to ${to}. Email Sent will be ticked for this influencer and the button won't appear again.`,
+      confirmLabel:'Send email'}))) return;
+    const btn=$('infem-send'); btn.disabled=true; btn.textContent='Sending…';
+    try{
+      await infFetch('/api/inf/email/send',{method:'POST',body:JSON.stringify({influencerId,videoId:d.videoId,to,subject,body,aiPolished:aiUsed})});
+      wrap.remove(); showNotification('Collaboration email sent ✓'); if(onDone) onDone();
+    }catch(e){ btn.disabled=false; btn.textContent='Send email'; err(e.message); }
+  });
+}
+
 function inflPayBadge(p){ if(!p) return '<span class="text-slate-300">—</span>';
   const map={paid:['Paid','bg-emerald-50 text-emerald-700'],partial:['Partial','bg-amber-50 text-amber-700'],unpaid:['Unpaid','bg-slate-100 text-slate-500'],pending:['Pending','bg-slate-100 text-slate-500']};
   const [l,c]=map[p]||[p,'bg-slate-100 text-slate-500']; return `<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${c}">${escapeHtml(l)}</span>`; }
@@ -11196,7 +11556,7 @@ function inflRenderTable(){
     <td class="${TD} text-right tabular-nums">${m.final?infMoney(m.final):'<span class="text-slate-300">—</span>'}</td>
     <td class="${TD}">${inflPayBadge(m.payment)}${m.payment_date?`<div class="text-[10px] text-emerald-600 mt-0.5 whitespace-nowrap">Paid ${_dmy(m.payment_date)}</div>`:m.payment_due_date?`<div class="text-[10px] text-slate-400 mt-0.5 whitespace-nowrap">Due ${_dmy(m.payment_due_date)}</div>`:''}</td>
     <td class="${TD} text-center">${inflBool(m.product_sent)}</td>
-    <td class="${TD} text-center">${inflBool(m.email_sent)}</td>
+    <td class="${TD} text-center">${inflEmailCell(m)}</td>
     <td class="${TD} text-center">${m.ad_run?'<span class="text-emerald-600 font-bold whitespace-nowrap">✓ Live</span>':'<span class="text-slate-300">—</span>'}</td>
     <td class="${TD}">${inflStatusCell(m)}</td>
     <td class="${TD} text-right tabular-nums">${inflNum(m.views_in_range)}</td>
@@ -11212,10 +11572,21 @@ function inflRenderTable(){
     if(_inflSort.k===k) _inflSort.d*=-1; else _inflSort={k,d:['handle','name','status','payment'].includes(k)?1:-1};
     inflRenderTable(); }));
   box.querySelectorAll('.infl-open').forEach(a=>a.addEventListener('click',e=>{ e.preventDefault(); infDetailModal(a.dataset.id); }));
+  // ✉ Send Email — reload the list on success so the cell flips to ✓ straight away.
+  // ✉ Send Email — flip the cell to ✓ straight away, then refresh the list for the rollups.
+  box.querySelectorAll('.infl-thread').forEach(b=>b.addEventListener('click',e=>{ e.preventDefault();
+    const m=_inflMembers.find(x=>String(x.id)===String(b.dataset.id));
+    infThreadModal(b.dataset.id, m?((m.name||'')+' · @'+(m.instagram_handle||'')):''); }));
+  box.querySelectorAll('.infl-email').forEach(b=>b.addEventListener('click',e=>{ e.preventDefault();
+    infEmailModal(b.dataset.id,()=>{ inflSyncMember(b.dataset.id,{email_sent:true}); infListDetail(_inflId); }); }));
   box.querySelectorAll('.infl-status-sel').forEach(sel=>sel.addEventListener('change',async ()=>{ const id=sel.dataset.id, v=sel.value;
     try{ await infFetch('/api/inf/influencer/'+id,{method:'POST',body:JSON.stringify({outreach_status:v})});
-      const m=_inflMembers.find(x=>String(x.id)===String(id)); if(m) m.outreach_status=v;
-      inflColorStatusBtn(sel); inflRenderChips(); if(_inflFilter!=='all') inflRenderTable();   // recolour; active status filter → row may leave the view
+      const m=_inflMembers.find(x=>String(x.id)===String(id)); if(m){ m.outreach_status=v; m.can_email=inflCanEmail(m); }
+      inflColorStatusBtn(sel); inflRenderChips();
+      // ALWAYS re-render: the Send Email cell depends on the status, so it has to flip in the same beat
+      // as the dropdown. (It used to re-render only when a status filter was active, which left a stale
+      // ✉/— sitting there until the next page load.)
+      inflRenderTable();
       showNotification('Status updated'); }
     catch(err){ showNotification(err.message,true); } }));
   box.querySelectorAll('.infl-rm').forEach(b=>b.addEventListener('click',async()=>{

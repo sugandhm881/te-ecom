@@ -10,10 +10,10 @@
 //     Including it double-counted the same 17 SKUs and skewed every number.
 //   • EVERY SKU — not just those under threshold. You cannot plan a purchase order from a list that
 //     hides the healthy items.
-//   • Cover bands 20/30/45 on a 30d DRR. The image is the STOCK picture only — order quantities go in
+//   • Cover bands 20/30/45 on a 7d DRR. The image is the STOCK picture only — order quantities go in
 //     the Teams card below it, where the case arithmetic can be laid out as a real table.
 //   • Reads `inventory_snapshots` + `sku_case_size` directly rather than the inventory_doi_low RPC — the
-//     RPC filters by threshold, uses a 7d lookback and knows nothing about case sizes.
+//     RPC filters by threshold and knows nothing about case sizes.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
 import satori from 'https://esm.sh/satori@0.10.13'
 import { Resvg, initWasm } from 'https://esm.sh/@resvg/resvg-wasm@2.6.2'
@@ -27,7 +27,7 @@ const SHIFUPRO_LOC = 'wo66194027524'   // our own warehouse; the only stock this
 const PLACE_ORDER_DOI = 20             // 20d cover or less → order now
 const WARNING_DOI = 30                 // 30d cover or less → warning
 const TARGET_COVER = 45                // order up to 45 days of cover
-const LOOKBACK = 30                    // DRR window — steadier than 7d for a 45-day horizon
+const LOOKBACK = 7                     // DRR window — tracks current demand; drives DRR, DOI and the order qty
 
 const BG = '#0f1117', HEAD = '#222838', BORDER = '#2a3142', ZEBRA = '#151824'
 const TXT = '#e6e8ee', MUT = '#9aa3b2'
@@ -110,7 +110,7 @@ Deno.serve(async () => {
     const snap: any[] = []
     for (let from = 0; ; from += 1000) {
       const { data, error } = await sb.from('inventory_snapshots')
-        .select('sku, product_name, category, warehouse, available_quantity, units_sold_30d')
+        .select('sku, product_name, category, warehouse, available_quantity, units_sold_7d')
         .eq('snapshot_date', latest.snapshot_date).eq('location_id', SHIFUPRO_LOC)
         .order('sku', { ascending: true }).range(from, from + 999)
       if (error) throw new Error('snapshot rows: ' + error.message)
@@ -125,7 +125,7 @@ Deno.serve(async () => {
 
     const rows: Row[] = snap.map((r: any) => {
       const stock = Number(r.available_quantity) || 0
-      const sold = Number(r.units_sold_30d) || 0
+      const sold = Number(r.units_sold_7d) || 0
       const drr = Math.round((sold / LOOKBACK) * 100) / 100
       const doi = drr > 0 ? Math.round((stock / drr) * 10) / 10 : null
       let status: string

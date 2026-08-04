@@ -1724,6 +1724,20 @@
                         <span id="es-status" class="text-sm"></span>
                     </div>
                     <p id="es-meta" class="text-xs text-slate-400 mt-3"></p>
+                    <!-- Per-user sending mailboxes. The block above is the BRAND mailbox used by the
+                         automated reports; this maps each portal user to their OWN outgoing account so
+                         person-to-person mail (influencer outreach) leaves from their address and replies
+                         land in their inbox. -->
+                    <div class="mt-10 pt-7 border-t border-slate-200">
+                        <div class="flex items-center justify-between mb-1">
+                            <h3 class="text-base font-bold text-slate-800">Sending mailboxes <span class="text-xs font-normal text-slate-400">(per user)</span></h3>
+                            <button id="umb-add" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors">+ Map a user</button>
+                        </div>
+                        <p class="text-sm text-slate-500 mb-5">Influencer outreach sends from the logged-in user's own address, so replies reach the person who wrote the email. A user with no mailbox here cannot send outreach &mdash; there is deliberately no fallback to the brand mailbox, which would misattribute the mail and usually fail DMARC. For Gmail/Workspace use an <b>app password</b>, not the account password.</p>
+                        <div id="umb-list" class="overflow-x-auto"></div>
+                        <p id="umb-status" class="text-sm mt-3"></p>
+                    </div>
+
                 </div>
             </div>
         </div>

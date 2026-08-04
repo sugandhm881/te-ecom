@@ -95,6 +95,7 @@ const amazonReviewRoutes = require('./app/api/amazon_review');
 const { router: amazonAutoReviewRoutes, initAutoReviewCron } = require('./app/api/amazon_auto_review');
 const { router: fulfillmentOpsRoutes, syncLast7Days, syncMTD, syncStatusesToShopify } = require('./app/api/fulfillment_ops');
 const serviceabilityRoutes = require('./app/api/serviceability');
+const pincodeRoutes = require('./app/api/pincode');
 const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom, autoRouteHandledRejections } = require('./app/api/warehouse_slack_report');
 const deliveryReportsRoutes = require('./app/api/delivery_reports');
 const opsControlRoutes = require('./app/api/ops_control');
@@ -272,6 +273,9 @@ app.use('/api/amazon', requirePermission('amazon-review'), amazonReviewRoutes);
 app.use('/api/amazon', requirePermission('amazon-review'), amazonAutoReviewRoutes);
 app.use('/api/fulfillment-ops', requirePermission('fulfillment-ops'), fulfillmentOpsRoutes);
 app.use('/api/serviceability', serviceabilityRoutes);
+// Pincode → city/state autofill for the address forms. Shared: any logged-in user filling an address
+// needs it, so it is deliberately NOT behind a dashboard permission (tokenRequired is inside the router).
+app.use('/api', pincodeRoutes);
 app.use('/api', deliveryReportsRoutes);
 app.use('/api', opsControlRoutes);
 app.use('/api', amazonFbaRoutes);
