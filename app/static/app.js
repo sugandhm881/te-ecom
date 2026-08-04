@@ -933,6 +933,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('docpharma-recon-view');
             if (typeof dpreInit === 'function') dpreInit();
             break;
+        case 'rapidshyp-recon':
+            activeLinkElement = document.getElementById('nav-rapidshyp-recon');
+            activeViewElement = document.getElementById('rapidshyp-recon-view');
+            if (typeof rsreInit === 'function') rsreInit();
+            break;
         case 'amazon-fba':
             activeLinkElement = document.getElementById('nav-amazon-fba');
             activeViewElement = document.getElementById('amazon-fba-view');
@@ -4656,7 +4661,7 @@ const NAV_HREF = {
     'nav-customer-segments': 'customer-segments', 'nav-returns-analysis': 'returns-analysis', 'nav-ad-ranking': 'ad-ranking',
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
-    'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon',
+    'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-support-blacklist': 'support-blacklist', 'nav-support-voice': 'support-voice',
@@ -5372,6 +5377,7 @@ document.getElementById('nav-reports')?.addEventListener('click', (e) => { e.pre
 document.getElementById('nav-amazon-review')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-review'); });
 document.getElementById('nav-fulfillment-ops')?.addEventListener('click', (e) => { e.preventDefault(); navigate('fulfillment-ops'); });
 document.getElementById('nav-docpharma-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('docpharma-recon'); });
+document.getElementById('nav-rapidshyp-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('rapidshyp-recon'); });
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
 document.getElementById('nav-claims-sla')?.addEventListener('click', (e) => { e.preventDefault(); navigate('claims-sla'); });
@@ -5388,7 +5394,9 @@ document.getElementById('nav-user-analytics')?.addEventListener('click', (e) => 
 
 // ═══════════════ USERS & PERMISSIONS (admin) ═══════════════
 const PERM_GROUPS = [
-  ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['docpharma-recon','DocPharma Recon'],['amazon-fba','Amazon FBA']]],
+  ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['amazon-fba','Amazon FBA']]],
+  // Reconciliation — one group per billing partner; each ledger stays SEPARATE (different money flows).
+  ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
   ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['support-blacklist','Blacklist Numbers'],['support-voice','Voice Agent (beta)']]],
@@ -13453,3 +13461,584 @@ async function finBankImport(rows) {
     finally { _fb2.busy = false; if (btn) { btn.disabled = false; btn.textContent = 'Create draft voucher(s)'; } }
 }
 // ═══════════════ End Bank Statement import ═══════════════
+
+// ═══════════════ RAPIDSHYP RECON — tabbed workspace (mirrors the DocPharma Recon UX) ═══════════════
+// Overview · Reconciliation · Rate Card · Ledger · Payments.
+// Nothing here is a hand-entered rate: charges are RapidShyp's OWN billed figures on
+// shipment_journey_ecom, and the benchmark is the MEDIAN of what they charged per zone × 500 g slab.
+let _rsreTab = 'overview', _rsreWired = false, _rsreFrom = null, _rsreTo = null, _rsreData = null;
+let _rsreOpen = null, _rsreDetail = {}, _rsreSort = { k: 'closeDate', d: 'desc' };
+let _rsreLedger = null, _rsreLedWired = false, _rsrePayWired = false, _rsreLedOpen = null;
+const RSRE_INR = n => '₹' + Math.round(Number(n) || 0).toLocaleString('en-IN');
+const RSRE_DMY = s => { if (!s) return ''; const p = String(s).slice(0, 10).split('-'); return p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : s; };
+const RSRE_IN = 'text-sm px-2.5 py-1.5 rounded-lg border border-slate-200 focus:border-indigo-400 outline-none';
+const RSRE_FLAG_META = {
+  over_rate:      ['Over rate',          'bg-rose-50 text-rose-700 border-rose-200',         'Billed above RapidShyp own zone+slab rate'],
+  unpriced:       ['Unpriced',           'bg-amber-50 text-amber-800 border-amber-200',      'Delivered/RTO but no charge synced yet — a billing gap'],
+  rto_not_rto:    ['RTO fee, no RTO',    'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200','An RTO leg billed on a shipment that never RTOd'],
+  cod_on_prepaid: ['COD fee on prepaid', 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200','COD collection fee billed on a prepaid order'],
+  no_weight:      ['No weight',          'bg-slate-100 text-slate-600 border-slate-200',     'Billed with no applied weight — cannot be rate-checked'],
+};
+const RSRE_OUT = { delivered: ['Delivered', 'bg-emerald-100 text-emerald-700'], rto: ['RTO', 'bg-red-100 text-red-700'], lost: ['Lost', 'bg-rose-100 text-rose-800'], in_transit: ['In transit', 'bg-sky-100 text-sky-700'], ndr_pending: ['NDR', 'bg-amber-100 text-amber-800'] };
+
+function rsreTab(name) {
+  const v = document.getElementById('rapidshyp-recon-view'); if (!v) return;
+  _rsreTab = name;
+  v.querySelectorAll('.rsre-tabsec').forEach(s => s.classList.toggle('hidden', s.id !== 'rsre-tab-' + name));
+  v.querySelectorAll('.rsre-tab').forEach(b => { const on = b.dataset.tab === name;
+    b.classList.toggle('border-indigo-500', on); b.classList.toggle('text-indigo-600', on);
+    b.classList.toggle('border-transparent', !on); b.classList.toggle('text-slate-500', !on); });
+  if ((name === 'overview' || name === 'recon' || name === 'rates') && !_rsreData) rsreLoad();
+  else if (name === 'overview') rsreOverview();
+  else if (name === 'rates') rsreRates();
+  if (name === 'ledger') rsreLedgerLoad();
+  if (name === 'payments') rsrePayLoad();
+}
+
+function rsreInit() {
+  const v = document.getElementById('rapidshyp-recon-view'); if (!v) return;
+  if (!_rsreWired) {
+    const t = new Date(), f = new Date(t.getFullYear(), t.getMonth(), t.getDate() - 30);
+    _rsreFrom = _ymd(f); _rsreTo = _ymd(t);
+    const TABS = [['overview', 'Overview'], ['recon', 'Reconciliation'], ['rates', 'Rate Card'], ['ledger', 'Ledger'], ['payments', 'Payments']];
+    v.innerHTML = `
+      <div class="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200 px-6 pt-4">
+        <h1 class="text-2xl font-bold text-slate-800">RapidShyp</h1>
+        <nav class="flex gap-1 mt-3 -mb-px overflow-x-auto">
+          ${TABS.map(([k, l]) => `<button class="rsre-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-700 whitespace-nowrap" data-tab="${k}">${l}</button>`).join('')}
+        </nav>
+      </div>
+
+      <header class="px-6 py-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-3 bg-slate-50/50">
+        <p class="text-sm text-slate-400" id="rsre-sub">Billed by RapidShyp vs their own zone rate — no rate card, the benchmark is their invoices.<br><span class="text-xs">Date range = when a shipment <b>closed</b> (delivered / RTO), which is when RapidShyp bills it — not the order date.</span></p>
+        <div class="flex items-center gap-2 flex-wrap">
+          <input id="rsre-from" type="date" class="${RSRE_IN}" value="${_rsreFrom}">
+          <span class="text-slate-400 text-sm">→</span>
+          <input id="rsre-to" type="date" class="${RSRE_IN}" value="${_rsreTo}">
+          <button id="rsre-apply" class="text-sm px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Apply</button>
+          <button id="rsre-csv" class="text-sm px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-700 hover:border-indigo-400">Export CSV</button>
+        </div>
+      </header>
+
+      <section id="rsre-tab-overview" class="rsre-tabsec p-6"></section>
+
+      <section id="rsre-tab-recon" class="rsre-tabsec hidden">
+        <div class="px-6 py-3 flex items-center justify-between flex-wrap gap-2 border-b border-slate-100">
+          <div class="flex items-center gap-2 flex-wrap">
+            <select id="rsre-flag" class="${RSRE_IN}">
+              <option value="all">All shipments</option><option value="any">Flagged only</option>
+              <option value="over_rate">Over rate</option><option value="unpriced">Unpriced</option>
+              <option value="rto_not_rto">RTO fee, no RTO</option><option value="cod_on_prepaid">COD fee on prepaid</option>
+            </select>
+            <select id="rsre-zone" class="${RSRE_IN}"><option value="all">All zones</option>${['A','B','C','D','E'].map(z => `<option value="${z}">Zone ${z}</option>`).join('')}</select>
+            <select id="rsre-outcome" class="${RSRE_IN}"><option value="all">All outcomes</option><option value="delivered">Delivered</option><option value="rto">RTO</option><option value="in_transit">In transit</option></select>
+            <select id="rsre-pay" class="${RSRE_IN}"><option value="all">All payments</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select>
+            <input id="rsre-q" type="text" placeholder="AWB / order / city…" class="${RSRE_IN} w-44">
+          </div>
+          <span id="rsre-count" class="text-xs text-slate-500"></span>
+        </div>
+        <div id="rsre-table" class="overflow-x-auto"></div>
+      </section>
+
+      <section id="rsre-tab-rates" class="rsre-tabsec hidden p-6"></section>
+      <section id="rsre-tab-ledger" class="rsre-tabsec hidden p-6"></section>
+      <section id="rsre-tab-payments" class="rsre-tabsec hidden p-6"></section>`;
+
+    v.querySelectorAll('.rsre-tab').forEach(b => b.addEventListener('click', () => rsreTab(b.dataset.tab)));
+    document.getElementById('rsre-apply')?.addEventListener('click', () => { _rsreData = null; _rsreLedger = null; rsreLoad(); if (_rsreTab === 'ledger') rsreLedgerLoad(); });
+    ['rsre-flag', 'rsre-zone', 'rsre-outcome', 'rsre-pay'].forEach(id => document.getElementById(id)?.addEventListener('change', rsreLoad));
+    document.getElementById('rsre-q')?.addEventListener('keydown', e => { if (e.key === 'Enter') rsreLoad(); });
+    document.getElementById('rsre-csv')?.addEventListener('click', rsreCsv);
+    _rsreWired = true;
+    rsreTab('overview');
+  } else if (!_rsreData) rsreLoad();
+}
+
+async function rsreLoad() {
+  const g = id => document.getElementById(id)?.value || '';
+  const ov = document.getElementById('rsre-tab-overview'), tb = document.getElementById('rsre-table');
+  if (_rsreTab === 'overview' && ov) ov.innerHTML = brandLoader('Loading reconciliation…');
+  if (_rsreTab === 'recon' && tb) tb.innerHTML = brandLoader('Loading shipments…');
+  const qs = new URLSearchParams({
+    from: g('rsre-from') || _rsreFrom, to: g('rsre-to') || _rsreTo,
+    flag: g('rsre-flag') || 'all', zone: g('rsre-zone') || 'all',
+    outcome: g('rsre-outcome') || 'all', payment: g('rsre-pay') || 'all', search: g('rsre-q'),
+  });
+  try {
+    _rsreData = await fetchApiData('/rapidshyp-recon?' + qs.toString(), 'Failed to load RapidShyp recon');
+    if (_rsreTab === 'overview') rsreOverview();
+    else if (_rsreTab === 'rates') rsreRates();
+    else rsreTable();
+  } catch (e) {
+    const box = _rsreTab === 'overview' ? ov : tb;
+    if (box) box.innerHTML = `<div class="card p-6 text-sm text-rose-600">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// ── Tab 1 · Overview ──────────────────────────────────────────────────────────
+function rsreOverview() {
+  const box = document.getElementById('rsre-tab-overview'), d = _rsreData; if (!box || !d) return;
+  const k = d.kpis;
+  const card = (l, v, s, a) => `<div class="card p-4 lift"><div class="text-xs text-slate-400 uppercase tracking-wide">${l}</div>
+      <div class="text-2xl font-bold ${a || 'text-slate-800'} tabular-nums mt-1">${v}</div><div class="text-xs text-slate-400 mt-0.5">${s || ''}</div></div>`;
+  const seg = [['Forward freight', k.freightForward, '#6366f1'], ['RTO freight', k.freightRto, '#ef4444'], ['COD fees', k.codFees, '#0ea5e9']];
+  const tot = Math.max(1, seg.reduce((s, x) => s + x[1], 0));
+  // splits computed client-side from the same rows the table shows
+  const rows = d.shipments || [];
+  const byZone = {}, byOutcome = {};
+  rows.forEach(s => { const z = s.zone || '—'; (byZone[z] = byZone[z] || { n: 0, amt: 0 }).n++; byZone[z].amt += s.freight_total || 0;
+    const o = s.outcome || '—'; (byOutcome[o] = byOutcome[o] || { n: 0, amt: 0 }).n++; byOutcome[o].amt += s.freight_total || 0; });
+  const bar = (obj, colors) => { const t = Math.max(1, Object.values(obj).reduce((a, b) => a + b.amt, 0));
+    return Object.entries(obj).sort((a, b) => b[1].amt - a[1].amt).map(([kk, v], i) => `
+      <div class="flex items-center gap-3 text-sm py-1">
+        <span class="w-20 text-slate-500 shrink-0">${escapeHtml(kk)}</span>
+        <div class="flex-1 h-2 bg-slate-100 rounded overflow-hidden"><div style="width:${v.amt / t * 100}%;background:${colors[i % colors.length]}" class="h-full"></div></div>
+        <span class="w-24 text-right tabular-nums text-slate-700">${RSRE_INR(v.amt)}</span>
+        <span class="w-16 text-right tabular-nums text-slate-400 text-xs">${v.n}</span>
+      </div>`).join(''); };
+  box.innerHTML = `
+    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+      ${card('Shipments', (k.shipments || 0).toLocaleString('en-IN'), `${k.delivered} delivered · ${k.rto} RTO`)}
+      ${card('Billed', RSRE_INR(k.billed), `avg ${RSRE_INR(k.avgFreight)}/shipment`)}
+      ${card('Total incl. GST', RSRE_INR(k.billedWithGst), `GST 18% ${RSRE_INR(k.gst)}`, 'text-indigo-600')}
+      ${card('COD fees', RSRE_INR(k.codFees), `${k.codShipments} COD shipments`, 'text-sky-600')}
+      ${card('Unpriced', (k.unpriced || 0).toLocaleString('en-IN'), 'closed but not billed yet', k.unpriced ? 'text-amber-600' : 'text-emerald-600')}
+      ${card('Overcharge', RSRE_INR(k.overchargeTotal), `${k.overRate} above zone rate`, k.overchargeTotal > 0 ? 'text-rose-600' : 'text-emerald-600')}
+    </div>
+    <div class="card p-5 mt-4">
+      <div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Charge breakdown</div>
+      <div class="flex h-3 rounded overflow-hidden mb-3">${seg.map(x => `<div style="width:${x[1] / tot * 100}%;background:${x[2]}"></div>`).join('')}</div>
+      <div class="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+        ${seg.map(x => `<span class="text-slate-600"><span class="inline-block w-2.5 h-2.5 rounded-full mr-1 align-middle" style="background:${x[2]}"></span>${x[0]}: <b class="tabular-nums">${RSRE_INR(x[1])}</b></span>`).join('')}
+        <span class="ml-auto text-slate-500">Subtotal ${RSRE_INR(k.billed)} · GST 18% ${RSRE_INR(k.gst)} · <b class="text-slate-800">Total ${RSRE_INR(k.billedWithGst)}</b></span>
+      </div>
+    </div>
+    ${k.flagged ? `<div class="card p-5 mt-4">
+      <div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Needs attention</div>
+      <div class="flex flex-wrap gap-2">
+        ${k.overRate ? `<button class="rsre-chip px-3 py-1.5 rounded-lg text-xs font-semibold border bg-rose-50 text-rose-700 border-rose-200" data-flag="over_rate">${k.overRate} billed above zone rate · ${RSRE_INR(k.overchargeTotal)} disputable</button>` : ''}
+        ${k.unpriced ? `<button class="rsre-chip px-3 py-1.5 rounded-lg text-xs font-semibold border bg-amber-50 text-amber-800 border-amber-200" data-flag="unpriced">${k.unpriced} closed but unbilled — charges sync pending</button>` : ''}
+        <button class="rsre-chip px-3 py-1.5 rounded-lg text-xs font-semibold border bg-slate-100 text-slate-600 border-slate-200" data-flag="any">${k.flagged} flagged in total</button>
+      </div></div>` : ''}
+    <div class="grid md:grid-cols-2 gap-4 mt-4">
+      <div class="card p-5"><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Spend by zone</div>${bar(byZone, ['#6366f1','#0ea5e9','#14b8a6','#f59e0b','#ef4444','#8b5cf6'])}</div>
+      <div class="card p-5"><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Spend by outcome</div>${bar(byOutcome, ['#16a34a','#ef4444','#0ea5e9','#f59e0b'])}</div>
+    </div>`;
+  box.querySelectorAll('.rsre-chip').forEach(b => b.addEventListener('click', () => {
+    const sel = document.getElementById('rsre-flag'); if (sel) sel.value = b.dataset.flag;
+    rsreTab('recon'); rsreLoad();
+  }));
+}
+
+// ── Tab 2 · Reconciliation table (expandable rows) ────────────────────────────
+function rsreSortVal(s, k) {
+  switch (k) { case 'billed': return s.freight_total || 0; case 'forward': return s.freight_forward || 0;
+    case 'rto': return s.freight_rto || 0; case 'cod': return s.cod_charges || 0; case 'variance': return s.variance || 0;
+    case 'weight': return s.weight || 0; case 'awb': return String(s.awb || '').toLowerCase();
+    case 'closeDate': return s.closeDate || '';
+    case 'outcome': return s.outcome || ''; case 'zone': return s.zone || ''; default: return s.orderDate || ''; }
+}
+function rsreTable() {
+  const c = document.getElementById('rsre-table'), d = _rsreData; if (!c || !d) return;
+  let list = (d.shipments || []).slice();
+  const dir = _rsreSort.d === 'asc' ? 1 : -1;
+  list.sort((a, b) => { const va = rsreSortVal(a, _rsreSort.k), vb = rsreSortVal(b, _rsreSort.k); return va < vb ? -dir : va > vb ? dir : 0; });
+  const cnt = document.getElementById('rsre-count');
+  if (cnt) cnt.textContent = `${list.length.toLocaleString('en-IN')} shipments · ${RSRE_INR(list.reduce((s, o) => s + (o.freight_total || 0), 0))} billed${d.truncated ? ` · capped at ${d.shipments.length} of ${d.total}` : ''}`;
+  if (!list.length) { c.innerHTML = '<div class="text-slate-400 text-sm p-10 text-center">No RapidShyp shipments in this window</div>'; return; }
+  const th = 'px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
+  const td = 'px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
+  const cols = [{ k: 'awb', l: 'AWB / Order' }, { k: 'closeDate', l: 'Closed' }, { k: 'outcome', l: 'Outcome' }, { k: 'zone', l: 'Zone' },
+    { k: 'weight', l: 'Wt', a: 1 }, { k: 'forward', l: 'Forward', a: 1 }, { k: 'rto', l: 'RTO', a: 1 }, { k: 'cod', l: 'COD fee', a: 1 },
+    { k: 'billed', l: 'Billed', a: 1 }, { k: 'expected', l: 'Expected', a: 1 }, { k: 'variance', l: 'Variance', a: 1 }, { k: 'flags', l: 'Flags' }];
+  const head = cols.map(col => { const al = col.a ? ' text-right' : ''; const act = _rsreSort.k === col.k;
+    const ar = act ? `<span class="text-indigo-500">${_rsreSort.d === 'asc' ? '↑' : '↓'}</span>` : '<span class="text-slate-300">↕</span>';
+    return `<th class="${th}${al} rsre-sort cursor-pointer select-none ${act ? 'text-slate-600' : ''}" data-k="${col.k}">${col.l} ${ar}</th>`; }).join('');
+  const money = v => v ? `<span class="tabular-nums">${RSRE_INR(v)}</span>` : '<span class="text-slate-300">—</span>';
+  const rows = list.slice(0, 600).map(s => {
+    const ob = RSRE_OUT[String(s.outcome || '').toLowerCase()] || [s.outcome || '—', 'bg-slate-100 text-slate-600'];
+    const open = _rsreOpen === s.awb, over = s.variance != null && s.variance > 0;
+    let out = `<tr class="rsre-row cursor-pointer ${open ? 'bg-indigo-50/60' : s.flags.includes('over_rate') ? 'bg-rose-50/30 hover:bg-rose-50/60' : 'hover:bg-slate-50'}" data-awb="${escapeHtml(s.awb || '')}">`
+      + `<td class="${td} font-semibold"><span class="text-slate-300 text-xs mr-1">${open ? '▾' : '▸'}</span><span class="font-mono text-xs">${escapeHtml(s.awb || '—')}</span><div class="text-[11px] text-slate-400 font-normal ml-4">${escapeHtml(s.order || '')}</div></td>`
+      + `<td class="${td} text-slate-500 tabular-nums">${s.closeDate ? RSRE_DMY(s.closeDate) : '<span class="text-slate-300">—</span>'}<div class="text-[10px] text-slate-400">ord ${s.orderDate ? RSRE_DMY(s.orderDate) : '—'}</div></td>`
+      + `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${ob[1]}">${ob[0]}</span></td>`
+      + `<td class="${td} text-center">${escapeHtml(s.zone || '—')}</td>`
+      + `<td class="${td} text-right tabular-nums text-xs text-slate-500">${s.weight != null ? s.weight + 'g' : '—'}</td>`
+      + `<td class="${td} text-right">${money(s.freight_forward)}</td>`
+      + `<td class="${td} text-right">${money(s.freight_rto)}</td>`
+      + `<td class="${td} text-right">${money(s.cod_charges)}</td>`
+      + `<td class="${td} text-right font-bold">${s.priced ? `<span class="tabular-nums text-slate-800">${RSRE_INR(s.freight_total)}</span>` : '<span class="text-amber-600 text-xs">not billed</span>'}</td>`
+      + `<td class="${td} text-right tabular-nums text-slate-500">${s.expected != null ? RSRE_INR(s.expected) : '—'}</td>`
+      + `<td class="${td} text-right tabular-nums font-semibold ${over ? 'text-rose-600' : 'text-slate-400'}">${s.variance != null ? (over ? '+' : '') + RSRE_INR(s.variance) : '—'}</td>`
+      + `<td class="${td}">${(s.flags || []).map(f => { const m = RSRE_FLAG_META[f] || [f, 'bg-slate-100 text-slate-600 border-slate-200', ''];
+          return `<span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold border ${m[1]} mr-1" title="${escapeHtml(m[2])}">${m[0]}</span>`; }).join('') || '<span class="text-slate-300">—</span>'}</td>`
+      + `</tr>`;
+    if (open) out += rsreDetail(s);
+    return out; }).join('');
+  const more = list.length > 600 ? `<div class="text-xs text-slate-400 p-3 text-center border-t border-slate-100">Showing first 600 of ${list.length.toLocaleString('en-IN')} — narrow the filters, or Export CSV</div>` : '';
+  c.innerHTML = `<table class="w-full border-collapse"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>${more}`;
+  c.querySelectorAll('.rsre-sort').forEach(h => h.addEventListener('click', () => { const k = h.dataset.k;
+    if (_rsreSort.k === k) _rsreSort.d = _rsreSort.d === 'asc' ? 'desc' : 'asc';
+    else _rsreSort = { k, d: ['billed','forward','rto','cod','variance','weight','orderDate','closeDate'].includes(k) ? 'desc' : 'asc' };
+    rsreTable(); }));
+  c.querySelectorAll('.rsre-row').forEach(r => r.addEventListener('click', e => {
+    if (e.target.closest('a') || e.target.closest('button')) return;
+    const awb = r.dataset.awb; if (!awb) return;
+    _rsreOpen = (_rsreOpen === awb) ? null : awb;
+    rsreTable();
+    if (_rsreOpen && !_rsreDetail[awb]) rsreLoadDetail(awb);
+  }));
+}
+function rsreDetail(s) {
+  const det = _rsreDetail[s.awb];
+  const step = (label, iso, color) => { const on = !!iso;
+    return `<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:${on ? color : '#cbd5e1'}"></span>
+      <span class="w-24 text-slate-500">${label}</span><span class="tabular-nums ${on ? 'text-slate-700 font-medium' : 'text-slate-300'}">${on ? new Date(iso).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}</span></div>`; };
+  const j = det && det.shipment;
+  const tl = j ? step('Order placed', j.order_date, '#6366f1') + step('Dispatched', j.dispatched_at, '#0ea5e9')
+      + step('Out for delivery', j.out_for_delivery_at, '#f59e0b')
+      + (String(j.outcome) === 'rto' ? step('RTO', j.rto_at, '#ef4444') : step('Delivered', j.delivered_at, '#16a34a'))
+      + step('Promised EDD', j.first_edd, '#8b5cf6')
+    : '<div class="text-slate-400 text-xs py-2">Loading…</div>';
+  const scans = (j && Array.isArray(j.scans)) ? j.scans : [];
+  const scanHtml = det ? (scans.length
+    ? `<div class="space-y-1.5 max-h-64 overflow-auto pr-1">${scans.map(sc => `<div class="flex gap-2 text-xs">
+        <span class="w-1.5 h-1.5 rounded-full shrink-0 mt-1.5" style="background:#94a3b8"></span>
+        <span class="w-28 shrink-0 text-slate-400 tabular-nums">${sc.at ? new Date(sc.at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}</span>
+        <span class="text-slate-700">${escapeHtml(sc.label || '')}${sc.location ? ` <span class="text-slate-400">· ${escapeHtml(sc.location)}</span>` : ''}${sc.reason ? ` <span class="text-slate-400">· ${escapeHtml(sc.reason)}</span>` : ''}</span></div>`).join('')}</div>`
+    : '<div class="text-slate-400 text-xs py-2">No scan timeline stored for this AWB.</div>') : '<div class="text-slate-400 text-xs py-2">Loading…</div>';
+  const over = s.variance != null && s.variance > 0;
+  return `<tr class="rsre-detail"><td colspan="12" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
+      <div class="grid md:grid-cols-3 gap-6">
+        <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Charge</div>
+          <div class="text-xs text-slate-500">Forward <b class="text-slate-700">${RSRE_INR(s.freight_forward)}</b> · RTO <b class="text-slate-700">${RSRE_INR(s.freight_rto)}</b> · COD <b class="text-slate-700">${RSRE_INR(s.cod_charges)}</b></div>
+          <div class="text-sm text-slate-800 font-bold mt-1">Billed ${s.priced ? RSRE_INR(s.freight_total) : '<span class="text-amber-600 text-sm font-semibold">not billed yet</span>'}</div>
+          ${s.expected != null ? `<div class="text-xs mt-1 ${over ? 'text-rose-600 font-semibold' : 'text-slate-500'}">RapidShyp zone rate ${RSRE_INR(s.expected)}${over ? ` · overcharged ${RSRE_INR(s.variance)}` : ' · in line'}</div>` : ''}
+          <div class="text-xs text-slate-500 mt-2">📍 ${escapeHtml([s.dest_city, s.dest_state].filter(Boolean).join(', ') || '—')}${j && j.dest_pincode ? ` · ${escapeHtml(j.dest_pincode)}` : ''}</div>
+          <div class="text-xs text-slate-500">Zone <b class="text-slate-700">${escapeHtml(s.zone || '—')}</b> · Weight <b class="text-slate-700">${s.weight != null ? s.weight + 'g' : '—'}</b>${s.slab ? ` · slab ${s.slab}g` : ''}</div>
+          <div class="text-xs text-slate-500">Order value <b class="text-slate-700">${s.value != null ? RSRE_INR(s.value) : '—'}</b> · ${/prepaid/i.test(s.payment || '') ? 'Prepaid' : 'COD'}</div>
+          <div class="text-xs text-slate-500 mt-1">Courier <b class="text-slate-700">${escapeHtml(s.courier || '—')}</b></div>
+          ${(s.flags || []).length ? `<div class="mt-2">${s.flags.map(f => { const m = RSRE_FLAG_META[f] || [f, 'bg-slate-100 text-slate-600 border-slate-200', '']; return `<span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold border ${m[1]} mr-1" title="${escapeHtml(m[2])}">${m[0]}</span>`; }).join('')}</div>` : ''}
+        </div>
+        <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Timeline</div>${tl}</div>
+        <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log ${scans.length ? `<span class="text-slate-400 font-normal">(${scans.length})</span>` : ''}</div>${scanHtml}</div>
+      </div></td></tr>`;
+}
+async function rsreLoadDetail(awb) {
+  try { _rsreDetail[awb] = await fetchApiData('/rapidshyp-recon/shipment/' + encodeURIComponent(awb), 'Failed to load shipment'); }
+  catch (e) { _rsreDetail[awb] = { shipment: null }; }
+  if (_rsreOpen === awb) rsreTable();
+}
+
+// ── Tab 3 · Rate Card (derived from RapidShyp's own billing) ──────────────────
+function rsreRates() {
+  const box = document.getElementById('rsre-tab-rates'), d = _rsreData; if (!box || !d) return;
+  const bench = (d.benchmark || []);
+  const trusted = bench.filter(b => b.samples >= 5);
+  const zones = [...new Set(trusted.map(b => b.zone))].sort();
+  const slabs = [...new Set(trusted.map(b => b.slab))].sort((a, b) => a - b);
+  box.innerHTML = `
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between mb-1 flex-wrap gap-2">
+        <h3 class="font-bold text-slate-800">RapidShyp rate card</h3>
+        <span class="text-[11px] text-slate-400">${escapeHtml(d.rateSource || '')}</span></div>
+      <p class="text-xs text-slate-500 mb-4">Not entered by hand and not hardcoded — this is the <b>median freight RapidShyp actually billed</b> for each zone × weight slab in the selected window, so it updates itself when they revise pricing. A cell is only used for checking once it has <b>5+ shipments</b> behind it.</p>
+      ${trusted.length ? `<div class="overflow-x-auto"><table class="w-full text-sm border-collapse"><thead><tr>
+          <th class="text-left px-3 py-2 text-[11px] uppercase tracking-wider text-slate-400 border-b bg-slate-50/60">Zone</th>
+          ${slabs.map(s => `<th class="text-right px-3 py-2 text-[11px] uppercase tracking-wider text-slate-400 border-b bg-slate-50/60">up to ${s}g</th>`).join('')}
+        </tr></thead><tbody>
+          ${zones.map(z => `<tr class="border-b border-slate-50 hover:bg-slate-50">
+            <td class="px-3 py-2.5 font-semibold text-slate-700">Zone ${z}</td>
+            ${slabs.map(s => { const c = trusted.find(b => b.zone === z && b.slab === s);
+              return `<td class="px-3 py-2.5 text-right tabular-nums ${c ? 'text-slate-800 font-semibold' : 'text-slate-300'}">${c ? RSRE_INR(c.rate) + `<span class="block text-[10px] text-slate-400 font-normal">${c.samples.toLocaleString('en-IN')} shipments</span>` : '—'}</td>`; }).join('')}
+          </tr>`).join('')}
+        </tbody></table></div>` : '<div class="text-slate-400 text-sm py-6 text-center">Not enough billed shipments in this window to derive a rate card.</div>'}
+      ${bench.length > trusted.length ? `<p class="text-[11px] text-slate-400 mt-3">${bench.length - trusted.length} zone/slab combination(s) hidden — fewer than 5 shipments, too thin to trust.</p>` : ''}
+    </div>`;
+}
+
+// ── Tab 4 · Ledger ────────────────────────────────────────────────────────────
+async function rsreLedgerLoad() {
+  const box = document.getElementById('rsre-tab-ledger'); if (!box) return;
+  box.innerHTML = brandLoader('Loading ledger…');
+  const g = id => document.getElementById(id)?.value || '';
+  try {
+    _rsreLedger = await fetchApiData(`/rapidshyp-recon/ledger?from=${g('rsre-from') || _rsreFrom}&to=${g('rsre-to') || _rsreTo}`, 'Failed to load ledger');
+    rsreLedgerRender();
+  } catch (e) { box.innerHTML = `<div class="card p-6 text-sm text-rose-600">${escapeHtml(e.message)}</div>`; }
+}
+function rsreLedgerRender() {
+  const box = document.getElementById('rsre-tab-ledger'), d = _rsreLedger; if (!box || !d) return;
+  const t = d.totals || {}, ag = d.aging || {};
+  const card = (l, v, s, a) => `<div class="card p-4 lift"><div class="text-xs text-slate-400 uppercase tracking-wide">${l}</div>
+      <div class="text-2xl font-bold ${a || 'text-slate-800'} tabular-nums mt-1">${v}</div><div class="text-xs text-slate-400 mt-0.5">${s || ''}</div></div>`;
+  const th = 'px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+  const td = 'px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 whitespace-nowrap';
+
+  // Aging — where the outstanding actually sits
+  const agRow = (label, val, tone) => { const tot = Math.max(1, (ag.current || 0) + (ag.d31_60 || 0) + (ag.d61_90 || 0) + (ag.d90plus || 0));
+    return `<div class="flex items-center gap-3 py-1 text-sm">
+      <span class="w-24 text-slate-500 shrink-0">${label}</span>
+      <div class="flex-1 h-2 bg-slate-100 rounded overflow-hidden"><div style="width:${(val || 0) / tot * 100}%;background:${tone}" class="h-full"></div></div>
+      <span class="w-28 text-right tabular-nums font-semibold text-slate-700">${RSRE_INR(val)}</span></div>`; };
+
+  box.innerHTML = `
+    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+      ${card('Charges (excl. GST)', RSRE_INR(t.charges), `${(t.shipments || 0).toLocaleString('en-IN')} shipments`)}
+      ${card('GST 18%', RSRE_INR(t.gst), 'on freight')}
+      ${card('Total billed', RSRE_INR(t.chargesWithGst), 'incl. GST', 'text-indigo-600')}
+      ${card('Paid', RSRE_INR(t.payments), 'recorded payments', 'text-emerald-600')}
+      ${card('Outstanding', RSRE_INR(t.outstanding), t.creditLeft > 0 ? `+ ${RSRE_INR(t.creditLeft)} credit unused` : 'FIFO: oldest month first', t.outstanding > 0 ? 'text-rose-600' : 'text-emerald-600')}
+      ${card('Freight % of GMV', t.freightPctOfGmv != null ? t.freightPctOfGmv + '%' : '—', `avg ${RSRE_INR(t.avgFreight)}/shipment`)}
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4 mt-4">
+      <div class="card p-5">
+        <div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Outstanding by age</div>
+        ${agRow('0–30 days', ag.current, '#22c55e')}${agRow('31–60 days', ag.d31_60, '#f59e0b')}
+        ${agRow('61–90 days', ag.d61_90, '#f97316')}${agRow('90+ days', ag.d90plus, '#ef4444')}
+        <div class="text-[11px] text-slate-400 mt-2">Age is measured from the end of the billing month. Payments clear the oldest month first (FIFO).</div>
+      </div>
+      <div class="card p-5">
+        <div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Exceptions in this window</div>
+        <div class="grid grid-cols-3 gap-3 text-center">
+          <div><div class="text-2xl font-bold tabular-nums ${t.overRate ? 'text-rose-600' : 'text-emerald-600'}">${t.overRate || 0}</div><div class="text-[11px] text-slate-400 mt-0.5">over zone rate</div><div class="text-xs font-semibold text-rose-600 mt-0.5">${RSRE_INR(t.overcharge)}</div></div>
+          <div><div class="text-2xl font-bold tabular-nums ${t.unpriced ? 'text-amber-600' : 'text-emerald-600'}">${t.unpriced || 0}</div><div class="text-[11px] text-slate-400 mt-0.5">unpriced</div><div class="text-xs text-slate-400 mt-0.5">billing gap</div></div>
+          <div><div class="text-2xl font-bold tabular-nums text-slate-700">${t.flagged || 0}</div><div class="text-[11px] text-slate-400 mt-0.5">flagged</div><div class="text-xs text-slate-400 mt-0.5">total</div></div>
+        </div>
+        <button id="rsre-led-drill" class="mt-4 w-full text-sm px-3 py-2 rounded-lg bg-white border border-slate-200 text-slate-700 hover:border-indigo-400">Review flagged shipments →</button>
+      </div>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4 mt-4">
+      <div class="card p-5">
+        <div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-3">COD — cash RapidShyp collects for us</div>
+        <div class="grid grid-cols-3 gap-3 text-center mb-3">
+          <div><div class="text-xl font-bold tabular-nums text-slate-800">${(t.codShipments||0).toLocaleString('en-IN')}</div><div class="text-[11px] text-slate-400">COD shipments</div></div>
+          <div><div class="text-xl font-bold tabular-nums text-emerald-600">${(t.codDelivered||0).toLocaleString('en-IN')}</div><div class="text-[11px] text-slate-400">delivered (${t.codDeliveryRate||0}%)</div></div>
+          <div><div class="text-xl font-bold tabular-nums text-slate-400">${((t.codShipments||0)-(t.codDelivered||0)).toLocaleString('en-IN')}</div><div class="text-[11px] text-slate-400">not delivered</div></div>
+        </div>
+        <div class="rounded-xl bg-emerald-50 border border-emerald-200 p-3">
+          <div class="text-[11px] font-semibold text-emerald-800 uppercase tracking-wide">Expected COD remittance</div>
+          <div class="text-2xl font-bold tabular-nums text-emerald-700 mt-0.5">${RSRE_INR(t.expectedCodRemittance)}</div>
+          <div class="text-[11px] text-emerald-700/70 mt-0.5">order value of COD shipments that DELIVERED — cash the courier collected, owed back to us</div>
+        </div>
+        ${t.codRtoValue ? `<div class="text-[11px] text-slate-400 mt-2">${RSRE_INR(t.codRtoValue)} of COD value came back as RTO — nothing collected, nothing to remit.</div>` : ''}
+      </div>
+      <div class="card p-5">
+        <div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-3">Prepaid — already collected by us</div>
+        <div class="grid grid-cols-3 gap-3 text-center mb-3">
+          <div><div class="text-xl font-bold tabular-nums text-slate-800">${(t.prepaidShipments||0).toLocaleString('en-IN')}</div><div class="text-[11px] text-slate-400">prepaid shipments</div></div>
+          <div><div class="text-xl font-bold tabular-nums text-slate-700">${t.shipments?Math.round((t.prepaidShipments||0)/t.shipments*100):0}%</div><div class="text-[11px] text-slate-400">of all shipments</div></div>
+          <div><div class="text-xl font-bold tabular-nums text-amber-600">${t.valuePending||0}</div><div class="text-[11px] text-slate-400">value pending</div></div>
+        </div>
+        <div class="rounded-xl bg-indigo-50 border border-indigo-200 p-3">
+          <div class="text-[11px] font-semibold text-indigo-800 uppercase tracking-wide">Prepaid total value</div>
+          <div class="text-2xl font-bold tabular-nums text-indigo-700 mt-0.5">${RSRE_INR(t.prepaidValue)}</div>
+          <div class="text-[11px] text-indigo-700/70 mt-0.5">paid at checkout — no remittance due from RapidShyp</div>
+        </div>
+        ${t.valuePending ? `<div class="text-[11px] text-amber-600 mt-2">${t.valuePending} shipment(s) have no value yet — it arrives with the nightly charges sync, so these totals will rise.</div>` : ''}
+      </div>
+    </div>
+
+    <div class="card p-4 mt-4 flex items-center justify-between flex-wrap gap-3">
+      <div><div class="text-xs text-slate-400 uppercase tracking-wide">Net position with RapidShyp</div>
+        <div class="text-xs text-slate-500 mt-0.5">Expected COD remittance ${RSRE_INR(t.expectedCodRemittance)} minus freight outstanding ${RSRE_INR(t.outstanding)}</div></div>
+      <div class="text-3xl font-bold tabular-nums ${(t.netPosition||0) >= 0 ? 'text-emerald-600' : 'text-rose-600'}">${RSRE_INR(t.netPosition)}
+        <span class="block text-xs font-medium text-slate-400 text-right">${(t.netPosition||0) >= 0 ? 'net receivable from RapidShyp' : 'net payable to RapidShyp'}</span></div>
+    </div>
+
+    <div class="card mt-4 overflow-hidden">
+      <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-bold text-slate-800">Month by month <span class="text-xs font-normal text-slate-400">grouped by the month a shipment CLOSED · click a row for the breakdown</span></h3>
+        <span class="text-[11px] text-slate-400">${(d.months || []).length} month(s)</span></div>
+      <div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr>
+        ${['Month', 'Shipments', 'COD', 'Prepaid', 'COD delivered', 'Expected COD remit', 'Prepaid value', 'Charges', 'GST', 'Total', 'Settled', 'Outstanding', 'Age'].map((h, i) => `<th class="${th}${i ? ' text-right' : ''}">${h}</th>`).join('')}
+      </tr></thead><tbody>
+        ${(d.months || []).map(m => {
+          const open = _rsreLedOpen === m.month;
+          let r = `<tr class="rsre-led-row cursor-pointer ${open ? 'bg-indigo-50/60' : 'hover:bg-slate-50'}" data-month="${m.month}">
+            <td class="${td} font-semibold"><span class="text-slate-300 text-xs mr-1">${open ? '▾' : '▸'}</span>${m.month}</td>
+            <td class="${td} text-right tabular-nums text-slate-500">${m.shipments.toLocaleString('en-IN')}</td>
+            <td class="${td} text-right tabular-nums text-amber-700">${m.codShipments.toLocaleString('en-IN')}</td>
+            <td class="${td} text-right tabular-nums text-slate-600">${m.prepaidShipments.toLocaleString('en-IN')}</td>
+            <td class="${td} text-right tabular-nums text-emerald-700">${m.codDelivered.toLocaleString('en-IN')} <span class="text-[10px] text-slate-400">${m.codDeliveryRate}%</span></td>
+            <td class="${td} text-right tabular-nums font-semibold text-emerald-700">${RSRE_INR(m.expectedCodRemittance)}</td>
+            <td class="${td} text-right tabular-nums text-indigo-700">${RSRE_INR(m.prepaidValue)}</td>
+            <td class="${td} text-right tabular-nums">${RSRE_INR(m.charges)}</td>
+            <td class="${td} text-right tabular-nums text-slate-500">${RSRE_INR(m.gst)}</td>
+            <td class="${td} text-right tabular-nums font-semibold">${RSRE_INR(m.chargesWithGst)}</td>
+            <td class="${td} text-right"><div class="flex items-center justify-end gap-2">
+              <div class="w-14 h-1.5 bg-slate-100 rounded overflow-hidden"><div class="h-full" style="width:${m.settledPct}%;background:${m.settledPct >= 100 ? '#22c55e' : m.settledPct > 0 ? '#f59e0b' : '#e2e8f0'}"></div></div>
+              <span class="tabular-nums text-xs ${m.settledPct >= 100 ? 'text-emerald-600' : 'text-slate-500'}">${m.settledPct}%</span></div></td>
+            <td class="${td} text-right tabular-nums font-bold ${m.outstanding > 0 ? 'text-rose-600' : 'text-emerald-600'}">${RSRE_INR(m.outstanding)}</td>
+            <td class="${td} text-right tabular-nums text-xs ${m.ageDays > 60 ? 'text-rose-600 font-semibold' : m.ageDays > 30 ? 'text-amber-600' : 'text-slate-400'}">${m.outstanding > 0 ? m.ageDays + 'd' : '—'}</td>
+          </tr>`;
+          if (open) r += `<tr class="rsre-led-detail"><td colspan="13" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
+            <div class="grid md:grid-cols-5 gap-6">
+              <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Composition</div>
+                <div class="text-xs text-slate-500 space-y-0.5">
+                  <div>Forward <b class="text-slate-700">${RSRE_INR(m.forward)}</b></div>
+                  <div>RTO freight <b class="text-slate-700">${RSRE_INR(m.rto_freight)}</b></div>
+                  <div>COD fees <b class="text-slate-700">${RSRE_INR(m.cod)}</b> <span class="text-slate-400">(${m.codShipments} COD)</span></div>
+                  <div class="pt-1 border-t border-slate-200 mt-1">Subtotal <b class="text-slate-700">${RSRE_INR(m.charges)}</b></div>
+                  <div>GST 18% <b class="text-slate-700">${RSRE_INR(m.gst)}</b></div>
+                  <div class="text-sm text-slate-800 font-bold pt-1">Total ${RSRE_INR(m.chargesWithGst)}</div>
+                </div></div>
+              <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">COD &amp; prepaid</div>
+                <div class="text-xs text-slate-500 space-y-0.5">
+                  <div>COD <b class="text-slate-700">${m.codShipments}</b> · delivered <b class="text-emerald-700">${m.codDelivered}</b> (${m.codDeliveryRate}%)</div>
+                  <div>Expected remittance <b class="text-emerald-700">${RSRE_INR(m.expectedCodRemittance)}</b></div>
+                  ${m.codRtoValue ? `<div class="text-slate-400">RTO value ${RSRE_INR(m.codRtoValue)} — not collected</div>` : ''}
+                  <div class="pt-1 border-t border-slate-200 mt-1">Prepaid <b class="text-slate-700">${m.prepaidShipments}</b></div>
+                  <div>Prepaid value <b class="text-indigo-700">${RSRE_INR(m.prepaidValue)}</b></div>
+                  ${m.valuePending ? `<div class="text-amber-600">${m.valuePending} awaiting value</div>` : ''}
+                </div></div>
+              <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Unit economics</div>
+                <div class="text-xs text-slate-500 space-y-0.5">
+                  <div>Avg freight <b class="text-slate-700">${RSRE_INR(m.avgFreight)}</b>/shipment</div>
+                  <div>Avg weight <b class="text-slate-700">${m.avgWeight}g</b></div>
+                  <div>Order GMV <b class="text-slate-700">${RSRE_INR(m.gmv)}</b></div>
+                  <div>Freight <b class="text-slate-700">${m.freightPctOfGmv != null ? m.freightPctOfGmv + '%' : '—'}</b> of GMV</div>
+                  <div class="pt-1">RTO rate <b class="text-slate-700">${m.shipments ? Math.round(m.rto / m.shipments * 100) : 0}%</b></div>
+                </div></div>
+              <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Settlement</div>
+                <div class="text-xs text-slate-500 space-y-0.5">
+                  <div>Billed <b class="text-slate-700">${RSRE_INR(m.chargesWithGst)}</b></div>
+                  <div>Settled <b class="text-emerald-700">${RSRE_INR(m.settled)}</b> (${m.settledPct}%)</div>
+                  <div>Outstanding <b class="${m.outstanding > 0 ? 'text-rose-600' : 'text-emerald-600'}">${RSRE_INR(m.outstanding)}</b></div>
+                  ${m.outstanding > 0 ? `<div>Unpaid for <b class="${m.ageDays > 60 ? 'text-rose-600' : 'text-slate-700'}">${m.ageDays} days</b></div>` : '<div class="text-emerald-600">Fully settled</div>'}
+                </div></div>
+              <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Exceptions</div>
+                <div class="text-xs text-slate-500 space-y-0.5">
+                  <div>Over zone rate <b class="${m.overRate ? 'text-rose-600' : 'text-slate-700'}">${m.overRate}</b>${m.overcharge ? ` · <b class="text-rose-600">${RSRE_INR(m.overcharge)}</b>` : ''}</div>
+                  <div>Unpriced <b class="${m.unpriced ? 'text-amber-600' : 'text-slate-700'}">${m.unpriced}</b></div>
+                  <div>Flagged total <b class="text-slate-700">${m.flagged}</b></div>
+                </div>
+                <button class="rsre-led-month-drill mt-3 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-700 hover:border-indigo-400" data-month="${m.month}">Open these shipments →</button>
+              </div>
+            </div></td></tr>`;
+          return r; }).join('') || `<tr><td colspan="13" class="text-center py-10 text-slate-400 text-sm">Nothing in this window</td></tr>`}
+      </tbody></table></div>
+    </div>
+
+    <div class="card mt-4 overflow-hidden">
+      <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-bold text-slate-800">Payments applied <span class="text-xs font-normal text-slate-400">${(d.payments || []).length} recorded</span></h3>
+        <button id="rsre-led-addpay" class="text-xs px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-700 hover:border-indigo-400">Record a payment →</button></div>
+      <div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr>
+        ${['Date', 'Direction', 'Amount', 'Method', 'Reference', 'Period', 'Notes'].map((h, i) => `<th class="${th}${i === 2 ? ' text-right' : ''}">${h}</th>`).join('')}
+      </tr></thead><tbody>
+        ${(d.payments || []).map(p => `<tr class="hover:bg-slate-50">
+          <td class="${td} tabular-nums">${RSRE_DMY(p.payment_date)}</td>
+          <td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${p.direction === 'received' ? 'bg-sky-100 text-sky-700' : 'bg-emerald-100 text-emerald-700'}">${p.direction === 'received' ? 'Credit note' : 'Paid'}</span></td>
+          <td class="${td} text-right tabular-nums font-semibold">${RSRE_INR(p.amount)}</td>
+          <td class="${td} text-slate-500">${escapeHtml(p.method || '—')}</td>
+          <td class="${td} text-slate-500 font-mono text-xs">${escapeHtml(p.reference || '—')}</td>
+          <td class="${td} text-slate-500 text-xs">${p.period_from ? RSRE_DMY(p.period_from) + ' → ' + RSRE_DMY(p.period_to || '') : '—'}</td>
+          <td class="${td} text-slate-500 text-xs">${escapeHtml(p.notes || '—')}</td>
+        </tr>`).join('') || `<tr><td colspan="7" class="text-center py-8 text-slate-400 text-sm">No payments recorded yet — the balance above is the full billed amount</td></tr>`}
+      </tbody></table></div>
+      ${d.note ? `<div class="px-5 py-3 border-t border-slate-100 text-[11px] text-slate-400">${escapeHtml(d.note)}</div>` : ''}
+    </div>`;
+
+  box.querySelectorAll('.rsre-led-row').forEach(r => r.addEventListener('click', e => {
+    if (e.target.closest('button')) return;
+    const m = r.dataset.month; _rsreLedOpen = (_rsreLedOpen === m) ? null : m; rsreLedgerRender();
+  }));
+  box.querySelectorAll('.rsre-led-month-drill').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    const m = b.dataset.month, [y, mm] = m.split('-').map(Number);
+    const f = document.getElementById('rsre-from'), tt = document.getElementById('rsre-to');
+    if (f) f.value = `${m}-01`;
+    if (tt) tt.value = _ymd(new Date(y, mm, 0));
+    const fl = document.getElementById('rsre-flag'); if (fl) fl.value = 'all';
+    _rsreData = null; rsreTab('recon'); rsreLoad();
+  }));
+  document.getElementById('rsre-led-drill')?.addEventListener('click', () => {
+    const fl = document.getElementById('rsre-flag'); if (fl) fl.value = 'any';
+    _rsreData = null; rsreTab('recon'); rsreLoad();
+  });
+  document.getElementById('rsre-led-addpay')?.addEventListener('click', () => rsreTab('payments'));
+}
+
+// ── Tab 5 · Payments ──────────────────────────────────────────────────────────
+async function rsrePayLoad() {
+  const box = document.getElementById('rsre-tab-payments'); if (!box) return;
+  if (!_rsrePayWired) {
+    box.innerHTML = `
+      <div class="card p-5">
+        <h3 class="font-bold text-slate-800 mb-1">Record a payment to RapidShyp</h3>
+        <p class="text-xs text-slate-500 mb-4">RapidShyp's ledger is kept separate from DocPharma's — different invoices, different money flow.</p>
+        <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div><label class="block text-[11px] text-slate-500 mb-0.5">Date *</label><input id="rspay-date" type="date" class="${RSRE_IN} w-full" value="${_ymd(new Date())}"></div>
+          <div><label class="block text-[11px] text-slate-500 mb-0.5">Amount (₹) *</label><input id="rspay-amt" type="number" min="1" step="0.01" class="${RSRE_IN} w-full"></div>
+          <div><label class="block text-[11px] text-slate-500 mb-0.5">Direction</label><select id="rspay-dir" class="${RSRE_IN} w-full"><option value="paid">Paid to RapidShyp</option><option value="received">Credit note / refund</option></select></div>
+          <div><label class="block text-[11px] text-slate-500 mb-0.5">Method</label><input id="rspay-method" type="text" placeholder="NEFT / wallet" class="${RSRE_IN} w-full"></div>
+          <div><label class="block text-[11px] text-slate-500 mb-0.5">Reference / UTR</label><input id="rspay-ref" type="text" class="${RSRE_IN} w-full"></div>
+          <div><label class="block text-[11px] text-slate-500 mb-0.5">Period from</label><input id="rspay-pf" type="date" class="${RSRE_IN} w-full"></div>
+          <div><label class="block text-[11px] text-slate-500 mb-0.5">Period to</label><input id="rspay-pt" type="date" class="${RSRE_IN} w-full"></div>
+          <div><label class="block text-[11px] text-slate-500 mb-0.5">Notes</label><input id="rspay-notes" type="text" class="${RSRE_IN} w-full"></div>
+        </div>
+        <div class="mt-3"><button id="rspay-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Save payment</button></div>
+      </div>
+      <div class="card mt-4 overflow-hidden"><div class="px-5 py-3 border-b border-slate-100"><h3 class="font-bold text-slate-800">Recorded payments</h3></div>
+        <div id="rspay-list" class="overflow-x-auto"></div></div>`;
+    document.getElementById('rspay-save')?.addEventListener('click', rsrePaySave);
+    _rsrePayWired = true;
+  }
+  const list = document.getElementById('rspay-list'); if (list) list.innerHTML = brandLoader('Loading payments…');
+  try {
+    const d = await fetchApiData('/rapidshyp-payments', 'Failed to load payments');
+    const th = 'px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60';
+    const td = 'px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100';
+    list.innerHTML = `<table class="w-full border-collapse"><thead><tr>
+        ${['Date', 'Direction', 'Amount', 'Method', 'Reference', 'Period', 'Notes', ''].map(h => `<th class="${th}">${h}</th>`).join('')}
+      </tr></thead><tbody>
+      ${(d.payments || []).map(p => `<tr class="hover:bg-slate-50">
+        <td class="${td} tabular-nums">${RSRE_DMY(p.payment_date)}</td>
+        <td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${p.direction === 'received' ? 'bg-sky-100 text-sky-700' : 'bg-emerald-100 text-emerald-700'}">${p.direction === 'received' ? 'Credit note' : 'Paid'}</span></td>
+        <td class="${td} tabular-nums font-semibold">${RSRE_INR(p.amount)}</td>
+        <td class="${td} text-slate-500">${escapeHtml(p.method || '—')}</td>
+        <td class="${td} text-slate-500 font-mono text-xs">${escapeHtml(p.reference || '—')}</td>
+        <td class="${td} text-slate-500 text-xs">${p.period_from ? RSRE_DMY(p.period_from) + ' → ' + RSRE_DMY(p.period_to || '') : '—'}</td>
+        <td class="${td} text-slate-500 text-xs">${escapeHtml(p.notes || '—')}</td>
+        <td class="${td} text-right"><button class="rspay-del text-xs text-rose-500 hover:text-rose-700" data-id="${p.id}">Delete</button></td>
+      </tr>`).join('') || `<tr><td colspan="8" class="text-center py-10 text-slate-400 text-sm">No payments recorded yet</td></tr>`}
+      </tbody></table>`;
+    list.querySelectorAll('.rspay-del').forEach(b => b.addEventListener('click', () => rsrePayDelete(b.dataset.id)));
+  } catch (e) { if (list) list.innerHTML = `<div class="p-6 text-sm text-rose-600">${escapeHtml(e.message)}</div>`; }
+}
+async function rsrePaySave() {
+  const g = id => document.getElementById(id)?.value || '';
+  const body = { payment_date: g('rspay-date'), amount: g('rspay-amt'), direction: g('rspay-dir'),
+    method: g('rspay-method'), reference: g('rspay-ref'), period_from: g('rspay-pf') || null,
+    period_to: g('rspay-pt') || null, notes: g('rspay-notes') };
+  if (!body.payment_date || !(Number(body.amount) > 0)) return showNotification('Date and a positive amount are required', true);
+  try {
+    await fetchApiData('/rapidshyp-payments', 'Failed to save payment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    showNotification('Payment recorded');
+    ['rspay-amt', 'rspay-ref', 'rspay-method', 'rspay-notes'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    _rsreLedger = null; rsrePayLoad();
+  } catch (e) { showNotification(e.message, true); }
+}
+async function rsrePayDelete(id) {
+  if (!(await supConfirm({ title: 'Delete this payment?', message: 'It will be removed from the RapidShyp ledger.', confirmLabel: 'Delete' }))) return;
+  try { await fetchApiData('/rapidshyp-payments/' + id, 'Failed to delete', { method: 'DELETE' });
+    showNotification('Payment deleted'); _rsreLedger = null; rsrePayLoad();
+  } catch (e) { showNotification(e.message, true); }
+}
+
+function rsreCsv() {
+  const d = _rsreData;
+  if (!d || !d.shipments || !d.shipments.length) return showNotification('Nothing to export', true);
+  const head = ['AWB','Order','Order date','Close date','Outcome','Payment','Zone','Courier','City','State','Weight g','Slab g','Forward','RTO','COD fee','Billed','Expected','Variance','Flags'];
+  const esc = v => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const lines = [head.join(',')].concat(d.shipments.map(s => [s.awb, s.order, s.orderDate, s.closeDate, s.outcome, s.payment, s.zone, s.courier,
+    s.dest_city, s.dest_state, s.weight, s.slab, s.freight_forward, s.freight_rto, s.cod_charges, s.freight_total, s.expected, s.variance,
+    (s.flags || []).join(' | ')].map(esc).join(',')));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' }));
+  a.download = `rapidshyp-recon-${d.range.from}_to_${d.range.to}.csv`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}

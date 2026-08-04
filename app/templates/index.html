@@ -640,10 +640,6 @@
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                         <span class="ml-3 text-sm font-medium">Ops Control</span>
                     </a>
-                    <a href="#" id="nav-docpharma-recon" class="sidebar-link flex items-center px-3 py-2">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m-6 4h6m-6 4h4M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"></path></svg>
-                        <span class="ml-3 text-sm font-medium">DocPharma Recon</span>
-                    </a>
                     <a href="#" id="nav-amazon-fba" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9"></path></svg>
                         <span class="ml-3 text-sm font-medium">Amazon FBA</span>
@@ -651,6 +647,23 @@
                 </div>
             </div>
             
+            <div class="nav-group">
+                <div class="nav-section-header flex items-center justify-between px-3 py-2 mt-2" data-target="reconciliation-menu">
+                    <span>Reconciliation</span>
+                    <svg class="arrow-icon w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+                <div id="reconciliation-menu" class="nav-content collapsed space-y-1">
+                    <a href="#" id="nav-docpharma-recon" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m-6 4h6m-6 4h4M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"></path></svg>
+                        <span class="ml-3 text-sm font-medium">DocPharma Recon</span>
+                    </a>
+                    <a href="#" id="nav-rapidshyp-recon" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 14l6-6M9 8h.01M15 14h.01M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"></path></svg>
+                        <span class="ml-3 text-sm font-medium">RapidShyp Recon</span>
+                    </a>
+                </div>
+            </div>
+
             <div class="nav-group">
                 <div class="nav-section-header flex items-center justify-between px-3 py-2 mt-2" data-target="analytics-menu">
                     <span>Analytics</span>
@@ -2181,6 +2194,9 @@
         <!-- DocPharma Reconciliation — rendered by dpreInit() in app.js -->
         <div id="docpharma-recon-view" class="view-hidden"></div>
 
+        <!-- RapidShyp Recon — rendered entirely by rsreInit()/rsreRender() in app.js, like DocPharma Recon. -->
+        <div id="rapidshyp-recon-view" class="view-hidden"></div>
+
         <div id="delivery-perf-view" class="view-hidden">
           <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">
             <div>
@@ -2775,7 +2791,7 @@
     </div>
 </div>
 
-<script src="/static/app.js?v=2026-08-01-qty"></script>
+<script src="/static/app.js?v=2026-08-03-recon4"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

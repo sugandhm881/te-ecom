@@ -100,6 +100,7 @@ const deliveryReportsRoutes = require('./app/api/delivery_reports');
 const opsControlRoutes = require('./app/api/ops_control');
 const { router: amazonFbaRoutes, initFbaLocationCron } = require('./app/api/amazon_fba');
 const docpharmaReconRoutes = require('./app/api/docpharma_recon');
+const rapidshypReconRoutes = require('./app/api/rapidshyp_recon');
 const docpharmaInvoiceRoutes = require('./app/api/docpharma_invoices');
 const docpharmaLedgerRoutes = require('./app/api/docpharma_ledger');
 const docpharmaOverviewRoutes = require('./app/api/docpharma_overview');
@@ -139,6 +140,7 @@ app.use('/api', (req, res, next) => {
 // are intentionally NOT gated here — multiple dashboards consume them, so gating would break legit access.
 const _VIEW_PERMS = [
     [/^\/docpharma/i, 'docpharma-recon'],
+    [/^\/rapidshyp-(recon|payments)/i, 'rapidshyp-recon'],   // recon + its own payments ledger
     [/^\/fba\//i, 'amazon-fba'],
     [/^\/ops-control/i, 'ops-control'],
     [/^\/ndr-action/i, ['ops-control', 'delivery-perf']],   // NDR reattempt/return — both ops surfaces use it
@@ -283,6 +285,7 @@ app.use('/api', require('./app/api/tally').router);           // Finance → Dat
 app.use('/api', require('./app/api/tally_batch').router);     // Finance → nightly batch push + Teams approval
 app.use('/api', require('./app/api/tally_bank').router);      // Finance → bank statement upload, ledger suggestion, draft creation
 app.use('/api', docpharmaReconRoutes);
+app.use('/api', rapidshypReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
 app.use('/api', docpharmaLedgerRoutes);
 app.use('/api', docpharmaOverviewRoutes);

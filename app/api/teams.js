@@ -42,12 +42,64 @@ function slackToHtml(payload) {
             else if (b.type === 'section' && Array.isArray(b.fields)) parts.push(b.fields.map(f => mrkdwnHtml(f.text)).join('<br>'));
             else if (b.type === 'context' && Array.isArray(b.elements)) parts.push(mrkdwnHtml(b.elements.map(e => e.text || '').join('  ')));  // context text already carries its own _italics_
             else if (b.type === 'image' && b.image_url) parts.push(`<img src="${b.image_url}" alt="${String(b.alt_text || '').replace(/"/g, '&quot;')}" style="max-width:100%;border-radius:8px">`);
+            else if (b.type === 'table' && Array.isArray(b.rows)) parts.push(tableToHtml(b));
             // dividers dropped — the blank line between parts already separates sections
         }
     } else if (payload.text) {
         parts.push(mrkdwnHtml(payload.text));
     }
     return parts.join('<br><br>');
+}
+
+// ── `table` block ────────────────────────────────────────────────────────────────────────────────
+// A real tabular block, because neither of the obvious alternatives works in Teams: a ```code fence```
+// renders as literal backticks with the whitespace collapsed, and Adaptive Card 1.5's native Table
+// element isn't available to us (the Workflows connector pins 1.4).
+//
+// So we lay it out COLUMN-major: one ColumnSet whose N columns each hold a stack of TextBlocks
+// (header + every value for that column). Columns share one container width, so proportional `width`
+// weights line the rows up exactly — which separate per-row ColumnSets would not do.
+//
+//   { type: 'table', columns: [{ title, width?, align? }, ...], rows: [[c1, c2, ...], ...],
+//     total?: [c1, c2, ...] }
+// Cell values are mrkdwn strings. align: 'Center' (default — header and body share it) | 'Left' | 'Right'.
+function tableCols(b) {
+    return (b.columns || []).map(c => (typeof c === 'string' ? { title: c } : c))
+        .map((c, i) => ({ title: c.title || '', width: String(c.width || (i === 0 ? 3 : 2)), align: c.align || 'Center' }));
+}
+function tableToCard(b) {
+    const cols = tableCols(b);
+    const rows = b.rows || [];
+    const cellBlock = (txt, c, opts = {}) => ({
+        type: 'TextBlock', text: mrkdwn(txt == null ? '' : String(txt)), wrap: false, spacing: opts.spacing || 'Small',
+        horizontalAlignment: c.align, size: opts.size || 'Default',
+        weight: opts.weight, isSubtle: opts.isSubtle, separator: opts.separator,
+    });
+    return {
+        type: 'ColumnSet',
+        columns: cols.map((c, ci) => {
+            const items = [cellBlock(c.title, c, { weight: 'Bolder', size: 'Small', isSubtle: true, spacing: 'None' })];
+            rows.forEach(r => items.push(cellBlock(r[ci], c, { weight: ci === 0 ? 'Bolder' : undefined })));
+            if (b.total) items.push(cellBlock(b.total[ci], c, { weight: 'Bolder', separator: true }));
+            return { type: 'Column', width: c.width, items };
+        }),
+    };
+}
+function tableToHtml(b) {
+    const cols = tableCols(b);
+    const th = 'padding:6px 14px;border-bottom:2px solid #cbd5e1;font-size:12px;color:#64748b';
+    const td = 'padding:6px 14px;border-bottom:1px solid #e2e8f0;font-variant-numeric:tabular-nums';
+    const al = c => (c.align === 'Right' ? 'right' : c.align === 'Left' ? 'left' : 'center');
+    // Teams' HTML sanitizer drops `text-align` from inline styles on <td> (which is why only the header
+    // row looked centred — that was Teams' own default <th> styling, not ours). The legacy `align`
+    // attribute survives, so alignment goes there; the style is kept for every other client.
+    const cell = (tag, v, c, style) => `<${tag} align="${al(c)}" style="${style};text-align:${al(c)}">${mrkdwnHtml(v == null ? '' : String(v))}</${tag}>`;
+    return `<table style="border-collapse:collapse;font-size:14px;margin-top:6px"><thead><tr>`
+        + cols.map(c => cell('th', c.title, c, th)).join('')
+        + `</tr></thead><tbody>`
+        + (b.rows || []).map(r => `<tr>` + cols.map((c, i) => cell('td', r[i], c, td)).join('') + `</tr>`).join('')
+        + (b.total ? `<tr>` + cols.map((c, i) => cell('td', b.total[i], c, 'padding:8px 14px;font-weight:700')).join('') + `</tr>` : '')
+        + `</tbody></table>`;
 }
 
 function slackToCardBody(payload) {
@@ -70,6 +122,7 @@ function slackToCardBody(payload) {
             }
             else if (b.type === 'context' && Array.isArray(b.elements)) push({ type: 'TextBlock', text: mrkdwn(b.elements.map(e => e.text || '').join('  ')), isSubtle: true, size: 'Small', wrap: true });
             else if (b.type === 'image' && b.image_url) push({ type: 'Image', url: b.image_url, altText: String(b.alt_text || ''), size: 'Stretch' });
+            else if (b.type === 'table' && Array.isArray(b.rows)) push(tableToCard(b));
             else if (b.type === 'divider') pendingSep = true;
         }
     } else if (payload.text) {

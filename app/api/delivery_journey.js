@@ -305,6 +305,9 @@ async function fetchRsShipmentDetails(awb, tries = 3) {
                 shipment_value:  _num(sd.total_shipment_value),
                 applied_weight:  _num(sd.applied_weight),
                 edd:             parseScanDate(sd.current_courier_edd),
+                // RapidShyp's OWN AWB-assignment timestamp — the date their billing report filters on,
+                // so the reconciliation window keys on this. Comes as "DD-MM-YYYY HH:MM:SS" IST.
+                awb_assigned_at: parseScanDate(sd.awb_assigned_date),
                 status:          sd.shipment_status || '',
             };
         } catch (e) { if (attempt < tries) { await _sleep(attempt * 1200); continue; } return { found: false, definitive: false, error: e.message }; }
@@ -328,6 +331,7 @@ async function syncRsCharges(awb, opts = {}) {
         freight_total: d.freight_total, freight_forward: d.freight_forward,
         freight_rto: d.freight_rto, cod_charges: d.cod_charges,
         shipment_value: d.shipment_value, applied_weight: d.applied_weight,
+        awb_assigned_at: d.awb_assigned_at || undefined,
         charges_fetched_at: new Date().toISOString(),
     };
     if (opts.backfillEdd && d.edd) upd.first_edd = d.edd;
@@ -652,7 +656,8 @@ async function reprocessDocpharma({ concurrency = 4, onlyBadDelivered = true } =
     return { processed: rows.length, changed, changes };
 }
 
-module.exports = { classifyScan, parseScanDate, parseDpDate, zoneFromState, parseRapidshypJourney, parseDocpharmaJourney, saveJourney, supersedeStaleJourneys, fetchRsShipment, fetchRsShipmentDetails, syncRsCharges, syncChargesBatch, backfillCharges, updateJourneyForOrder, backfillJourneys, backfillTatZone, reprocessInTransit, reprocessFinal, reprocessDocpharma };
+module.exports = {
+    backfillAwbAssigned, classifyScan, parseScanDate, parseDpDate, zoneFromState, parseRapidshypJourney, parseDocpharmaJourney, saveJourney, supersedeStaleJourneys, fetchRsShipment, fetchRsShipmentDetails, syncRsCharges, syncChargesBatch, backfillCharges, updateJourneyForOrder, backfillJourneys, backfillTatZone, reprocessInTransit, reprocessFinal, reprocessDocpharma };
 
 // CLI: node app/api/delivery_journey.js backfill [days] [concurrency] [olderThanDays]
 //   `backfill 90 2 30` → gentle 30–90 day window only (skips the already-done recent 30 days)
@@ -666,6 +671,53 @@ if (require.main === module && process.argv[2] === 'backfill') {
 }
 // `charges-backfill [concurrency] [pageSize]` — one-time price of all final RapidShyp shipments
 // (silent-RTO → delivered → rest) via the shipment_details API. Safe to re-run; skips priced rows.
+
+// ── Backfill RapidShyp's awb_assigned_at ─────────────────────────────────────────────────────────
+// The RapidShyp reconciliation windows on THEIR "awb assigned date" — that is what their billing
+// report filters on, so it is the only basis that can tie out to their invoice. We only started
+// capturing it once it was added to syncRsCharges, so every shipment priced before that has it NULL.
+// This re-reads shipment_details for those (the same endpoint, no extra cost per shipment beyond the
+// call) and fills the column. Safe to re-run: it only ever picks rows still missing the date.
+async function backfillAwbAssigned({ concurrency = 4, pageSize = 500, maxPages = 100 } = {}) {
+    let total = 0, filled = 0, page = 0;
+    for (; page < maxPages; page++) {
+        const { data, error } = await supabase.from('shipment_journey_ecom')
+            .select('awb')
+            .eq('source', 'rapidshyp')
+            .is('awb_assigned_at', null).not('awb', 'is', null)
+            .limit(pageSize);
+        if (error) { console.error('[AwbDate] select error:', error.message); break; }
+        const rows = data || [];
+        if (!rows.length) break;
+        let i = 0;
+        const worker = async () => {
+            while (i < rows.length) {
+                const awb = rows[i++].awb;
+                total++;
+                try {
+                    const d = await fetchRsShipmentDetails(awb);
+                    if (d.found && d.awb_assigned_at) {
+                        const { error: e2 } = await supabase.from('shipment_journey_ecom')
+                            .update({ awb_assigned_at: d.awb_assigned_at }).eq('awb', awb);
+                        if (!e2) filled++;
+                    }
+                } catch (e) { /* transient — a later run picks it up again */ }
+                await _sleep(250);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
+        console.log(`[AwbDate] page ${page + 1}: ${filled}/${total} filled so far`);
+        if (rows.length < pageSize) break;
+    }
+    console.log(`[AwbDate] done — filled ${filled} of ${total} shipment(s)`);
+    return { processed: total, filled };
+}
+
+if (require.main === module && process.argv[2] === 'awb-dates') {
+    const conc = parseInt(process.argv[3] || '4', 10) || 4;
+    const pageSize = parseInt(process.argv[4] || '500', 10) || 500;
+    backfillAwbAssigned({ concurrency: conc, pageSize }).then(() => process.exit(0)).catch(e => { console.error(e.message); process.exit(1); });
+}
 if (require.main === module && process.argv[2] === 'charges-backfill') {
     const conc = parseInt(process.argv[3] || '4', 10) || 4;
     const pageSize = parseInt(process.argv[4] || '500', 10) || 500;

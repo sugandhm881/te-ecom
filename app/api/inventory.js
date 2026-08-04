@@ -35,9 +35,87 @@ async function loadLatestSnapshot() {
     // Drop phantom/unmapped locations (warehouse 'N/A') — their location_id is a bare warehouse name or an
     // Amazon FBA code the snapshot fn couldn't map to a real stock location, so they hold stray sales but
     // 0 stock and no product metadata (name=SKU, Uncategorized). Not real inventory — hide everywhere.
-    const clean = rows.filter(r => r.warehouse && String(r.warehouse).trim().toUpperCase() !== 'N/A');
+    // ALSO drop DP Bangalore (2026-08-04, user request): the dashboard and the daily report cover OUR OWN
+    // warehouse only. DocPharma holds its stock on our behalf and is reconciled separately, so mixing it in
+    // double-counted the catalogue (the same 17 SKUs appeared twice) and skewed every DOI/reorder number.
+    const clean = rows.filter(r =>
+        r.warehouse && String(r.warehouse).trim().toUpperCase() !== 'N/A' && r.location_id === SHIFUPRO_LOC);
     return { snapshot_date: date, rows: clean };
 }
+
+// ── Reorder model ────────────────────────────────────────────────────────────────────────────────
+// Cover targets (days of inventory), set by the user 2026-08-04:
+//   ≤ 20  → Place Order   ·  ≤ 30 → Warning  ·  30–45 → Healthy  ·  > 45 → Overstock
+// Recommended order qty = DRR × TARGET_COVER − current stock, then rounded UP to whole shipping CASES
+// (a supplier ships cases, not loose units). Case sizes live in `sku_case_size`, seeded from the
+// warehouse INVENTORY COUNT sheet — they exist nowhere else in the DB.
+const PLACE_ORDER_DOI = 20;
+const WARNING_DOI = 30;
+const TARGET_COVER_DAYS = 45;      // also the report's "low inventory" threshold
+const DRR_WINDOW_DAYS = 30;        // 30-day average — steadier than 7d for a 45-day order horizon
+
+async function fetchCaseSizes() {
+    const { data } = await supabase.from('sku_case_size').select('sku, case_size');
+    const map = {};
+    (data || []).forEach(r => { if (r.case_size > 0) map[r.sku] = Number(r.case_size); });
+    return map;
+}
+
+// One row per SKU with DRR, DOI, status and the recommended order quantity.
+function buildReorder(rows, caseSizes) {
+    return rows.map(r => {
+        const stock = Number(r.available_quantity) || 0;
+        const sold = Number(r[`units_sold_${DRR_WINDOW_DAYS}d`]) || 0;
+        const drr = Math.round((sold / DRR_WINDOW_DAYS) * 100) / 100;
+        const doi = drr > 0 ? Math.round((stock / drr) * 10) / 10 : null;
+        let status;
+        if (stock <= 0) status = 'Out of Stock';
+        else if (drr <= 0) status = 'No Sales';
+        else if (doi <= PLACE_ORDER_DOI) status = 'Place Order';
+        else if (doi <= WARNING_DOI) status = 'Warning';
+        else if (doi <= TARGET_COVER_DAYS) status = 'Healthy';
+        else status = 'Overstock';
+        const rawQty = Math.max(0, Math.ceil(drr * TARGET_COVER_DAYS - stock));
+        const caseSize = caseSizes[r.sku] || null;
+        // Round UP to whole cases. Without a known case size we still surface the raw need rather than
+        // hiding the SKU — the UI flags that it couldn't be cased.
+        const orderQty = (caseSize && rawQty > 0) ? Math.ceil(rawQty / caseSize) * caseSize : rawQty;
+        return {
+            sku: r.sku, product_name: r.product_name, category: r.category,
+            warehouse: r.warehouse, location_id: r.location_id,
+            stock, units_sold: sold, drr, doi, status,
+            case_size: caseSize, raw_qty: rawQty, order_qty: orderQty,
+            cases: caseSize && orderQty > 0 ? Math.round(orderQty / caseSize) : 0,
+            needsOrder: rawQty > 0,
+        };
+    });
+}
+
+// ── GET /inventory/reorder — the Recommended Order list (Shifupro only). ──
+router.get('/inventory/reorder', async (req, res) => {
+    try {
+        const [{ snapshot_date, rows }, caseSizes] = await Promise.all([loadLatestSnapshot(), fetchCaseSizes()]);
+        const all = buildReorder(rows, caseSizes)
+            .sort((a, b) => (a.doi == null ? 1e9 : a.doi) - (b.doi == null ? 1e9 : b.doi));
+        const order = all.filter(r => r.needsOrder);
+        res.json({
+            success: true, snapshot_date, today: istDate(),
+            stale: !!(snapshot_date && snapshot_date < istDate()),
+            thresholds: { placeOrder: PLACE_ORDER_DOI, warning: WARNING_DOI, target: TARGET_COVER_DAYS, drrWindow: DRR_WINDOW_DAYS },
+            counts: {
+                skus: all.length,
+                outOfStock: all.filter(r => r.status === 'Out of Stock').length,
+                placeOrder: all.filter(r => r.status === 'Place Order').length,
+                warning: all.filter(r => r.status === 'Warning').length,
+                healthy: all.filter(r => r.status === 'Healthy').length,
+                overstock: all.filter(r => r.status === 'Overstock').length,
+                noCaseSize: all.filter(r => r.needsOrder && !r.case_size).length,
+            },
+            totalUnits: order.reduce((s, r) => s + r.order_qty, 0),
+            order, rows: all,
+        });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
 
 // ── GET /inventory/snapshot — latest snapshot rows + facets. Frontend computes DRR/DOI per DRR-period. ──
 router.get('/inventory/snapshot', async (req, res) => {
@@ -85,11 +163,56 @@ async function sendInventoryTeamsReport() {
     } catch (e) { console.error('[Inventory] DOI image render failed:', e.message); return false; }
     const { image_url, label, rows: nRows, critical, watch, stockouts, warehouses = [] } = img;
     const whLine = warehouses.map(w => `${w.warehouse}: ${w.count}${w.oos ? ` (${w.oos} OOS)` : ''}`).join('  ·  ');
+
+    // ── Recommended Order list — sits directly ABOVE the "Ecom Central · Inventory Analytics" footer.
+    //    Recommend Qty = DRR(30d) × 45 − stock (units still needed)
+    //    Case Qty      = Recommend Qty ÷ case size, rounded UP  →  how many CASES to actually order
+    //    Order Units   = Case Qty × case size (what lands in the warehouse)
+    //    Only SKUs that actually need ordering. Rendered as a `table` block: a code fence renders as
+    //    literal backticks in Teams and collapses the padding, so alignment has to come from the card.
+    let orderBlocks = [];
+    try {
+        const [{ rows: snapRows }, caseSizes] = await Promise.all([loadLatestSnapshot(), fetchCaseSizes()]);
+        const need = buildReorder(snapRows, caseSizes)
+            .filter(r => r.needsOrder)
+            .sort((a, b) => (a.doi == null ? 1e9 : a.doi) - (b.doi == null ? 1e9 : b.doi));
+        if (need.length) {
+            const n = v => Number(v || 0).toLocaleString('en-IN');
+            const units = need.reduce((s, r) => s + r.order_qty, 0);
+            const cases = need.reduce((s, r) => s + r.cases, 0);
+            const noCase = need.filter(r => !r.case_size).length;
+            const table = {
+                type: 'table',
+                columns: [
+                    { title: 'SKU', width: 4 },
+                    { title: `DRR/${DRR_WINDOW_DAYS}d`, width: 2 },
+                    { title: 'DOI', width: 2 },
+                    { title: 'Recommend Qty', width: 3 },
+                    { title: 'Case Size', width: 2 },
+                    { title: 'Case Qty', width: 2 },
+                    { title: 'Order Units', width: 3 },
+                ],
+                rows: need.map(r => [r.sku, r.drr.toFixed(2), r.doi == null ? '—' : r.doi.toFixed(1) + 'd',
+                    n(r.raw_qty), r.case_size ? n(r.case_size) : '—',
+                    r.case_size ? n(r.cases) : '—', r.case_size ? n(r.order_qty) : n(r.raw_qty) + '*']),
+                total: ['TOTAL', '', '', '', '', n(cases), n(units)],
+            };
+            const title = `🧾 *Recommended Order* — ${need.length} SKU${need.length > 1 ? 's' : ''}  ·  ${n(cases)} cases  ·  ${n(units)} units`;
+            orderBlocks = [
+                { type: 'divider' },
+                { type: 'section', text: { type: 'mrkdwn', text: title } },
+                table,
+                ...(noCase ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: `_* ${noCase} SKU${noCase > 1 ? 's have' : ' has'} no case size on file — raw quantity shown._` }] }] : []),
+            ];
+        }
+    } catch (e) { console.error('[Inventory] reorder list failed (report still sent):', e.message); }
+
     const payload = { blocks: [
-        { type: 'header', text: { type: 'plain_text', text: `📦 Low Inventory (DOI < 30d) — ${label}` } },
-        { type: 'section', text: { type: 'mrkdwn', text: `*${nRows}* SKU×location need attention  ·  *${critical}* critical  ·  *${watch}* watch  ·  *${stockouts}* out of stock` } },
+        { type: 'header', text: { type: 'plain_text', text: `📦 Inventory & Reorder — Shifupro — ${label}` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*${nRows}* SKUs  ·  *${critical}* place order (≤${PLACE_ORDER_DOI}d)  ·  *${watch}* warning (≤${WARNING_DOI}d)  ·  *${stockouts}* out of stock` } },
         ...(whLine ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: whLine }] }] : []),
-        { type: 'image', image_url, alt_text: `Low Inventory DOI report — ${label}` },
+        { type: 'image', image_url, alt_text: `Inventory & Reorder — Shifupro — ${label}` },
+        ...orderBlocks,
         { type: 'context', elements: [{ type: 'mrkdwn', text: `Ecom Central · Inventory Analytics · ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}` }] },
     ] };
     // text:true sends the HTML twin alongside the card, so this works whether the Inventory webhook is a
