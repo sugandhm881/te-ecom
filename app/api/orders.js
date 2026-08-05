@@ -491,16 +491,34 @@ router.get('/ee-hold-marks', async (req, res) => {
     // moot and a HOLD chip on it only misguides. Cancellation truth = `orders.cancelled_at` (the SAME source
     // the Orders dashboard uses for its "Cancelled" badge; `enriched_orders_ecom.cancelled_at` lags because
     // the data-sync skips terminal orders). This makes the chip disappear on EVERY dashboard reading /ee-hold-marks.
+    // …and ALSO for orders that have MOVED ON. A held order by definition has not shipped, so anything
+    // with an AWB, a courier scan, a fulfilled state or a terminal outcome cannot still be on hold.
+    // ⚠️ This is the fix for stale chips after a RELEASE: releasing removes the `shopify_hold` mark, but
+    // the EasyEcom side of this endpoint trusts `raw_data.order_status_id = 44`, which EasyEcom leaves at
+    // 44 even after the order ships — its own status text says "Shipped" while the id still says On Hold.
+    // Dropping only cancelled orders left released-then-shipped orders chipped forever (measured: 6 kept,
+    // ALL already shipped, 4 of them delivered/RTO).
     const heldNames = Object.keys(map);
     if (heldNames.length) {
         const variants = heldNames.flatMap(k => ['#' + k, k]);
-        const cancelled = new Set();
+        const MOVED_RE = /IN.?TRANSIT|OUT.?FOR.?DELIVERY|\bOFD\b|DELIVERED|\bRTO\b|RETURN|PICKED.?UP|PICKUP.?COMPLETED|SORTING|DISPATCHED|\bLOST\b/i;
+        const stale = new Set();
         for (let i = 0; i < variants.length; i += 300) {
             const { data } = await supabase.from('orders')
-                .select('name, cancelled_at').in('name', variants.slice(i, i + 300)).not('cancelled_at', 'is', null);
-            (data || []).forEach(r => cancelled.add(nk(r.name)));
+                .select('name, cancelled_at, awb_number, tracking_status, fulfillment_status')
+                .in('name', variants.slice(i, i + 300));
+            // NOTE: an AWB alone is deliberately NOT a drop reason. An order can be genuinely held in
+            // EasyEcom after the AWB is assigned but before pickup (the Call Queue treats that state as
+            // still holdable), so dropping on `awb_number` would hide real holds. Only a courier scan,
+            // a fulfilled state or a cancellation proves the parcel is actually gone.
+            (data || []).forEach(r => {
+                const moved = r.cancelled_at
+                    || MOVED_RE.test(String(r.tracking_status || ''))
+                    || String(r.fulfillment_status || '').toLowerCase() === 'fulfilled';
+                if (moved) stale.add(nk(r.name));
+            });
         }
-        cancelled.forEach(k => { delete map[k]; });
+        stale.forEach(k => { delete map[k]; });
     }
     res.json({ success: true, marks: Object.values(map) });
 });

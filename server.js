@@ -96,6 +96,7 @@ const { router: amazonAutoReviewRoutes, initAutoReviewCron } = require('./app/ap
 const { router: fulfillmentOpsRoutes, syncLast7Days, syncMTD, syncStatusesToShopify } = require('./app/api/fulfillment_ops');
 const serviceabilityRoutes = require('./app/api/serviceability');
 const pincodeRoutes = require('./app/api/pincode');
+const customerProfileRoutes = require('./app/api/customer_profile');
 const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom, autoRouteHandledRejections } = require('./app/api/warehouse_slack_report');
 const deliveryReportsRoutes = require('./app/api/delivery_reports');
 const opsControlRoutes = require('./app/api/ops_control');
@@ -158,7 +159,13 @@ const _VIEW_PERMS = [
     [/^\/intransit-late/i, 'claims-sla'],
     [/^\/kwikship\//i, 'delivery-perf'],   // manual Kwikship tracking re-sync (cron runs nightly 2 AM)
     // Customer Support console — any support view permission unlocks its API group.
-    [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist']],
+    [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist', 'customer-profile']],
+    // Customer Profile page (replaces Blacklist Numbers) — same audience. Issuing store credit is gated
+    // a SECOND time inside the router by requirePermission('support-store-credit'), so being able to
+    // view a customer never implies being able to hand out money.
+    // Both keys accepted: the view was renamed support-blacklist -> customer-profile, and the DB is
+    // shared with live, so users carry both until the old key is retired.
+    [/^\/customer\//i, ['customer-profile', 'support-blacklist']],
     [/^\/voice-(config|order-lookup|order-list)/i, 'support-voice'],   // Voice Agent tool endpoints — permitted users / admins only
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
@@ -276,6 +283,9 @@ app.use('/api/serviceability', serviceabilityRoutes);
 // Pincode → city/state autofill for the address forms. Shared: any logged-in user filling an address
 // needs it, so it is deliberately NOT behind a dashboard permission (tokenRequired is inside the router).
 app.use('/api', pincodeRoutes);
+// Customer Profile (Customer Support) — 360 view, store credit, blacklist. Gated below by
+// support-blacklist for the page; the store-credit WRITE additionally needs support-store-credit.
+app.use('/api', customerProfileRoutes);
 app.use('/api', deliveryReportsRoutes);
 app.use('/api', opsControlRoutes);
 app.use('/api', amazonFbaRoutes);

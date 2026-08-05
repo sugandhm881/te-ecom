@@ -89,10 +89,22 @@ async function chunkedIn(table, select, col, ids, extra) {
     }));
     return parts.flatMap(p => p.data || []);
 }
-// Latest note + count + author per order for a list of order_ids.
-async function notesByOrder(orderIds) {
+// When each order was FIRST seen undelivered — the boundary between "worked pre-dispatch" (Call Queue /
+// hold) and "worked as an undelivered parcel". Used to scope notes to the panel they were written in.
+async function undeliveredSince(orderIds) {
     if (!orderIds.length) return {};
-    const rows = await chunkedIn('order_notes', 'order_id, content, created_at, agent_id', 'order_id', orderIds);
+    const rows = await chunkedIn('undelivered_tracking', 'order_id, first_seen_at', 'order_id', orderIds);
+    const m = {};
+    rows.forEach(r => { m[String(r.order_id)] = r.first_seen_at; });
+    return m;
+}
+
+// Latest note + count + author per order for a list of order_ids.
+// `keep(note)` optionally scopes which notes count — see the note-context filter in /support/queue.
+async function notesByOrder(orderIds, keep) {
+    if (!orderIds.length) return {};
+    let rows = await chunkedIn('order_notes', 'order_id, content, created_at, agent_id', 'order_id', orderIds);
+    if (typeof keep === 'function') rows = rows.filter(keep);
     const map = {};
     rows.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     rows.forEach(n => { const m = map[n.order_id] || (map[n.order_id] = { count: 0, latest: null, latest_at: null, latest_agent: null }); m.count++; m.latest = n.content; m.latest_at = n.created_at; m.latest_agent = n.agent_id; });
@@ -365,9 +377,28 @@ router.get('/support/queue', async (req, res) => {
             rows = rows.filter(r => !r._moved);   // orders the courier already took are gone — drop before enriching
         }
 
+        // NOTE CONTEXT — a note belongs to the panel it was written in, not to every panel that later
+        // shows the order. A "confirmed" note added on the Call Queue while the order was still
+        // pre-dispatch was surfacing on the Undelivered panel days later, where it reads as a statement
+        // about the delivery. (Real case: TE25-37934 — note 27 Jul 08:35, first seen undelivered 30 Jul
+        // 06:42.) The boundary is `undelivered_tracking.first_seen_at`:
+        //   • Undelivered / Status-changed panels → only notes written AT OR AFTER that moment
+        //   • Call Queue (repeat, pre-dispatch)   → only notes written BEFORE it
+        // Derived from timestamps we already store, so it scopes the 2,000+ historical notes correctly
+        // too — no column to backfill and no note is ever deleted, only shown in the right place.
+        const orderIds = rows.map(r => r.order_id);
+        const undSince = await undeliveredSince(orderIds);
+        const isUndPanel = (tab === 'und' || tab === 'changed');
+        const keepNote = n => {
+            const since = undSince[String(n.order_id)];
+            if (!since) return !isUndPanel;   // never tracked undelivered → it can only be pre-dispatch work
+            return isUndPanel
+                ? new Date(n.created_at) >= new Date(since)
+                : new Date(n.created_at) < new Date(since);
+        };
         const [notes, scans] = await Promise.all([
-            notesByOrder(rows.map(r => r.order_id)),
-            scanTimesByOrder(rows.map(r => r.order_id)),
+            notesByOrder(orderIds, keepNote),
+            scanTimesByOrder(orderIds),
         ]);
         rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; r.last_scan_at = scans[r.order_id] || null; });
         // Payment type (COD vs Prepaid) — `order_buckets` carries no payment column, so read

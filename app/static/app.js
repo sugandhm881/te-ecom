@@ -914,9 +914,9 @@ function navigate(view) {
             activeViewElement = document.getElementById('support-contacts-view');
             if (typeof supContactsInit === 'function') supContactsInit();
             break;
-        case 'support-blacklist':
-            activeLinkElement = document.getElementById('nav-support-blacklist');
-            activeViewElement = document.getElementById('support-blacklist-view');
+        case 'customer-profile':
+            activeLinkElement = document.getElementById('nav-customer-profile');
+            activeViewElement = document.getElementById('customer-profile-view');
             if (typeof supBlacklistInit === 'function') supBlacklistInit();
             break;
         case 'support-voice':
@@ -4703,6 +4703,12 @@ function supContactModal(){
 let _blkWired=false, _blk={ blocked:[], history:[], q:'', histOpen:false };
 function supBlacklistInit(){
   if(!_blkWired){ _blkWired=true;
+    // Customer Profile is the page; the blacklist register is a panel you open from the header.
+    document.getElementById('cp-go')?.addEventListener('click',cpSearch);
+    document.getElementById('cp-q')?.addEventListener('keydown',e=>{ if(e.key==='Enter') cpSearch(); });
+    document.getElementById('cp-blk-list')?.addEventListener('click',()=>{
+      const p=document.getElementById('cp-blk-panel'); const open=p.classList.toggle('hidden')===false;
+      if(open){ document.getElementById('cp-profile').innerHTML=''; supBlacklistLoad(); } });
     document.getElementById('blk-add')?.addEventListener('click',supBlacklistModal);
     document.getElementById('blk-search')?.addEventListener('input',e=>{ _blk.q=e.target.value.trim().toLowerCase(); supBlacklistRender(); });
     document.getElementById('blk-hist-toggle')?.addEventListener('click',()=>{ _blk.histOpen=!_blk.histOpen;
@@ -4724,17 +4730,17 @@ function supBlacklistRender(){
   const TH='px-4 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
   const TD='px-4 py-3 text-sm text-slate-700 border-b border-slate-100 align-middle';
   const q=_blk.q;
-  const match=r=>!q||String(r.phone||'').includes(q)||String(r.reason||'').toLowerCase().includes(q);
+  const match=r=>!q||String(r.phone||'').includes(q)||String(r.email||'').toLowerCase().includes(q)||String(r.customer_name||'').toLowerCase().includes(q)||String(r.reason||'').toLowerCase().includes(q);
   const rows=_blk.blocked.filter(match);
   const t=document.getElementById('blk-table');
-  t.innerHTML=rows.length?`<table class="w-full"><thead><tr>${['Phone','Reason','Blocked by','Blocked on',''].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+  t.innerHTML=rows.length?`<table class="w-full"><thead><tr>${['Customer','Reason','Blocked by','Blocked on',''].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
     rows.map(r=>`<tr class="hover:bg-slate-50">
-      <td class="${TD} font-semibold font-mono text-slate-800">${escapeHtml(r.phone)}</td>
+      <td class="${TD} text-slate-800">${r.phone?`<div class="font-semibold font-mono">${escapeHtml(r.phone)}</div>`:''}${r.email?`<div class="text-xs text-slate-500">${escapeHtml(r.email)}</div>`:''}${r.customer_name?`<div class="text-xs text-slate-400">${escapeHtml(r.customer_name)}</div>`:''}${!r.phone&&!r.email&&!r.customer_name?'<span class="text-xs text-slate-400">customer id only</span>':''}</td>
       <td class="${TD} max-w-[320px]">${escapeHtml(r.reason||'—')}</td>
       <td class="${TD} text-xs text-slate-500">${escapeHtml(r.added_by||'—')}</td>
       <td class="${TD} text-xs text-slate-500">${_blkDate(r.created_at)}</td>
-      <td class="${TD} text-right"><button class="blk-unblock text-xs px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 font-semibold hover:bg-emerald-50" data-id="${r.id}" data-phone="${escapeHtml(r.phone)}">Unblock</button></td></tr>`).join('')
-  }</tbody></table>`:`<div class="text-slate-400 text-sm p-10 text-center">${q?'No blacklisted numbers match.':'No numbers blacklisted yet — click “Blacklist a number”.'}</div>`;
+      <td class="${TD} text-right"><button class="blk-unblock text-xs px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 font-semibold hover:bg-emerald-50" data-id="${r.id}" data-phone="${escapeHtml(r.phone||r.email||'This customer')}">Unblock</button></td></tr>`).join('')
+  }</tbody></table>`:`<div class="text-slate-400 text-sm p-10 text-center">${q?'No blacklisted customers match.':'No customers blacklisted yet — click “Blacklist a customer”.'}</div>`;
   t.querySelectorAll('.blk-unblock').forEach(b=>b.addEventListener('click',async()=>{
     if(!(await supConfirm({ title:'Unblock this number?', message:b.dataset.phone+' will be removed from the blacklist.', confirmLabel:'Unblock' }))) return;
     try{ await supFetch('/api/support/blacklist/'+b.dataset.id+'/unblock',{method:'POST'}); showNotification('Number unblocked'); supBlacklistLoad(); }
@@ -4755,18 +4761,25 @@ function supBlacklistRender(){
     h.querySelectorAll('.blk-reblock').forEach(b=>b.addEventListener('click',()=>supBlacklistModal(b.dataset.phone,b.dataset.reason)));
   }
 }
-function supBlacklistModal(phone,reason){
+// Blacklist a CUSTOMER — by phone and/or email and/or Shopify customer id. Any one identifier is
+// enough; supplying several blocks every route back in. Called bare from the header button, or
+// pre-filled from a profile.
+function supBlacklistModal(phone,reason,email,custId,custName){
   document.getElementById('blk-modal')?.remove();
   const wrap=document.createElement('div'); wrap.id='blk-modal';
   wrap.className='fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+  const v=x=>escapeHtml(typeof x==='string'?x:'');
   wrap.innerHTML=`<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-md flex flex-col">
-    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200"><h3 class="text-lg font-bold text-slate-800">Blacklist a number</h3>
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200"><h3 class="text-lg font-bold text-slate-800">Blacklist a customer</h3>
       <button class="blk-close text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div>
     <div class="p-6 space-y-4">
-      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Phone number <span class="text-rose-500">*</span></label>
-        <input id="blk-phone" type="tel" inputmode="numeric" maxlength="10" class="filter-input w-full" placeholder="10-digit mobile number" value="${escapeHtml(typeof phone==='string'?phone:'')}"></div>
-      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Reason</label>
-        <textarea id="blk-reason" rows="3" class="filter-input w-full !h-auto py-2 resize-none" placeholder="Why is this number being blacklisted?">${escapeHtml(typeof reason==='string'?reason:'')}</textarea></div>
+      <p class="text-xs text-slate-400">Fill at least one identifier. Giving both phone and email blocks them whichever way they come back.</p>
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Phone number</label>
+        <input id="blk-phone" type="tel" inputmode="numeric" maxlength="10" class="filter-input w-full" placeholder="10-digit mobile number" value="${v(phone).replace(/\D/g,'').slice(-10)}"></div>
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Email</label>
+        <input id="blk-email" type="email" class="filter-input w-full" placeholder="customer@example.com" value="${v(email)}"></div>
+      <div><label class="block text-xs font-semibold text-slate-500 mb-1.5">Reason <span class="text-rose-500">*</span></label>
+        <textarea id="blk-reason" rows="3" class="filter-input w-full !h-auto py-2 resize-none" placeholder="Why is this customer being blacklisted?">${v(reason)}</textarea></div>
     </div>
     <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200">
       <span id="blk-status" class="text-sm mr-auto"></span>
@@ -4774,20 +4787,278 @@ function supBlacklistModal(phone,reason){
       <button id="blk-save" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700">Blacklist</button></div></div>`;
   document.body.appendChild(wrap);
   const close=()=>wrap.remove();
-  wrap.querySelectorAll('.blk-close').forEach(b=>b.addEventListener('click',close));
+  wrap.querySelectorAll('.blk-close').forEach(x=>x.addEventListener('click',close));
   wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
   const pin=document.getElementById('blk-phone');
   pin.addEventListener('input',e=>{ e.target.value=e.target.value.replace(/\D/g,'').slice(0,10); });
   document.getElementById('blk-save').addEventListener('click',async()=>{
     const st=document.getElementById('blk-status');
-    const phoneV=pin.value.trim(), reasonV=document.getElementById('blk-reason').value.trim();
-    if(!/^\d{10}$/.test(phoneV)){ st.textContent='Enter a valid 10-digit number.'; st.className='text-sm text-rose-600 mr-auto'; return; }
-    try{ await supFetch('/api/support/blacklist',{method:'POST',body:JSON.stringify({ phone:phoneV, reason:reasonV })});
-      showNotification('Number blacklisted'); close(); supBlacklistLoad(); }
-    catch(e){ st.textContent=e.message; st.className='text-sm text-rose-600 mr-auto'; }
+    const fail=t=>{ st.textContent=t; st.className='text-sm text-rose-600 mr-auto'; };
+    const phoneV=pin.value.trim(), emailV=document.getElementById('blk-email').value.trim(), reasonV=document.getElementById('blk-reason').value.trim();
+    if(!phoneV && !emailV) return fail('Give a phone number or an email.');
+    if(phoneV && !/^\d{10}$/.test(phoneV)) return fail('Phone must be 10 digits.');
+    if(emailV && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailV)) return fail('Enter a valid email.');
+    if(!reasonV) return fail('A reason is required.');
+    try{ await supFetch('/api/customer/blacklist',{method:'POST',body:JSON.stringify({ phone:phoneV||null, email:emailV||null, shopify_customer_id:custId||null, customer_name:custName||null, reason:reasonV })});
+      showNotification('Customer blacklisted'); close();
+      if(typeof _cp!=='undefined' && _cp.data) cpReload(); else supBlacklistLoad(); }
+    catch(e){ fail(e.message); }
   });
   setTimeout(()=>pin.focus(),50);
 }
+
+// ═══════════ Customer Profile — search → 360 profile → store credit / blacklist ═══════════
+// Replaces the phone-only Blacklist Numbers page. The blacklist register still lives here (button in
+// the header) but the main event is now the customer itself.
+let _cp = { q:'', results:[], data:null, credit:null, block:null, tab:'orders', busy:false };
+const _cpMoney = n => '₹' + Number(n||0).toLocaleString('en-IN', { maximumFractionDigits:0 });
+// Name: Shopify's customer record is the only trustworthy source — the `orders` mirror has no name
+// column and EasyEcom's customer_name is often a placeholder ("DUMMY"), which the API already filters.
+function cpName(id, cr){
+  return (cr && cr.found && cr.customer && cr.customer.name) || id.name || id.phone || id.email || 'Customer';
+}
+// Show EVERY identifier the profile merged, marking the one that was searched. One person legitimately
+// has several numbers (matched through a shared email), and showing only the newest made the header
+// look like it had loaded somebody else.
+function cpIds(id){
+  const mark = (v, isSearched) => `<span class="${isSearched?'font-semibold text-slate-700':''}">${escapeHtml(v)}</span>`;
+  const ph = (id.phones||[]).map(p => mark(p, p === (id.searched||{}).phone));
+  const em = (id.emails||[]).map(e => mark(e, e === (id.searched||{}).email));
+  const parts = [];
+  if(ph.length) parts.push(ph.join(' · '));
+  if(em.length) parts.push(em.join(' · '));
+  const extra = (ph.length + em.length) > 2
+    ? ` <span class="text-[11px] text-slate-400">(${ph.length} number${ph.length===1?'':'s'}, ${em.length} email${em.length===1?'':'s'} — merged as one customer)</span>` : '';
+  return (parts.join(' &nbsp;·&nbsp; ') || '—') + extra;
+}
+const _cpDate  = t => t ? new Date(t).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'2-digit'}) : '—';
+const _cpDT    = t => t ? new Date(t).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+
+async function cpSearch(){
+  const q = document.getElementById('cp-q').value.trim();
+  const box = document.getElementById('cp-results');
+  if(q.length < 3){ box.innerHTML = '<p class="text-xs text-slate-400">Type at least 3 characters.</p>'; return; }
+  box.innerHTML = '<p class="text-xs text-slate-400">Searching…</p>';
+  try{
+    const d = await supFetch('/api/customer/search?q='+encodeURIComponent(q));
+    _cp.results = d.results||[];
+    if(!_cp.results.length){ box.innerHTML = '<p class="text-xs text-slate-400">No customer found.</p>'; return; }
+    // A single hit is what you almost always want — open it rather than making you click again.
+    if(_cp.results.length === 1){ box.innerHTML=''; return cpOpen(_cp.results[0]); }
+    box.innerHTML = `<div class="divide-y divide-slate-100 border border-slate-100 rounded-xl overflow-hidden">`
+      + _cp.results.map((r,i)=>`<button class="cp-hit w-full text-left px-4 py-2.5 hover:bg-slate-50 flex flex-wrap items-center gap-x-4 gap-y-1" data-i="${i}">
+          <span class="font-medium text-slate-700">${escapeHtml(r.phone||'—')}</span>
+          <span class="text-xs text-slate-500">${escapeHtml(r.email||'—')}</span>
+          <span class="text-xs text-slate-400 ml-auto">${r.orders} order${r.orders>1?'s':''} · ${_cpMoney(r.value)} · last ${_cpDate(r.last_order)}</span>
+        </button>`).join('') + `</div>`;
+    box.querySelectorAll('.cp-hit').forEach(b=>b.addEventListener('click',()=>cpOpen(_cp.results[+b.dataset.i])));
+  }catch(e){ box.innerHTML = `<p class="text-xs text-rose-500">${escapeHtml(e.message)}</p>`; }
+}
+
+async function cpOpen(hit){
+  const box = document.getElementById('cp-profile');
+  document.getElementById('cp-blk-panel').classList.add('hidden');
+  box.innerHTML = `<div class="card p-8 text-center text-sm text-slate-400">Loading customer…</div>`;
+  const qs = `phone=${encodeURIComponent(hit.phone||'')}&email=${encodeURIComponent(hit.email||'')}`;
+  try{
+    // Profile is the blocking read; credit + block state fill in beside it and must never break the page.
+    const d = await supFetch('/api/customer/profile?'+qs);
+    _cp.data = d;
+    if(!d.found){ box.innerHTML = `<div class="card p-8 text-center text-sm text-slate-400">No orders found for this customer.</div>`; return; }
+    cpRender();
+    Promise.allSettled([
+      supFetch('/api/customer/store-credit?'+qs),
+      supFetch('/api/customer/blacklist/check?'+qs),
+    ]).then(([c,b])=>{
+      _cp.credit = c.status==='fulfilled' ? c.value : { error:(c.reason||{}).message||'unavailable' };
+      _cp.block  = b.status==='fulfilled' ? b.value : null;
+      cpRender();
+    });
+  }catch(e){ box.innerHTML = `<div class="card p-8 text-sm text-rose-500">${escapeHtml(e.message)}</div>`; }
+}
+
+function cpRender(){
+  const d=_cp.data; if(!d||!d.found) return;
+  const s=d.stats, id=d.identity, cr=_cp.credit, blk=_cp.block;
+  const tile=(l,v,sub,cls)=>`<div class="card p-4"><p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${l}</p>
+    <p class="text-lg font-bold ${cls||'text-slate-800'} mt-0.5">${v}</p>${sub?`<p class="text-[11px] text-slate-400 mt-0.5">${sub}</p>`:''}</div>`;
+  const chip=(t,c)=>`<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${c}">${t}</span>`;
+  const rtoCls = s.rto_rate==null ? 'text-slate-800' : s.rto_rate>=30 ? 'text-rose-600' : s.rto_rate>=15 ? 'text-amber-600' : 'text-emerald-600';
+
+  const tabBtn=(k,l,n)=>`<button class="cp-tab px-3 py-1.5 rounded-lg text-sm font-semibold ${_cp.tab===k?'bg-indigo-600 text-white':'text-slate-600 hover:bg-slate-100'}" data-k="${k}">${l}${n!=null?` <span class="opacity-60">${n}</span>`:''}</button>`;
+
+  document.getElementById('cp-profile').innerHTML = `
+    ${blk&&blk.blocked?`<div class="card p-4 mb-4 border-l-4 border-rose-500 bg-rose-50/60 flex flex-wrap items-center gap-3">
+      <span class="font-bold text-rose-700">⛔ Blacklisted</span>
+      <span class="text-sm text-rose-700">${escapeHtml((blk.block||{}).reason||'')}</span>
+      <span class="text-xs text-rose-500">since ${_cpDate((blk.block||{}).created_at)} by ${escapeHtml(((blk.block||{}).added_by||'').split('@')[0])}</span>
+      <button id="cp-unblock" class="ml-auto px-3 py-1.5 rounded-lg text-xs font-semibold text-rose-700 bg-white border border-rose-200 hover:bg-rose-100">Remove from blacklist</button>
+    </div>`:''}
+
+    <div class="card p-5 mb-4 flex flex-wrap items-start gap-x-8 gap-y-3">
+      <div>
+        <p class="text-lg font-bold text-slate-800">${escapeHtml(cpName(id,cr))}</p>
+        <p class="text-sm text-slate-500">${cpIds(id)}</p>
+        <p class="text-xs text-slate-400 mt-1">First order ${_cpDate(id.first_order)} · Last ${_cpDate(id.last_order)} (${s.days_since_last}d ago)
+          ${id.customer_type!=='Regular'?' · '+chip(escapeHtml(id.customer_type),'bg-violet-50 text-violet-700'):''}</p>
+      </div>
+      <div class="ml-auto flex items-center gap-2">
+        ${!(blk&&blk.blocked)?`<button id="cp-block" class="px-3 py-2 rounded-lg text-sm font-semibold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100">Blacklist</button>`:''}
+        <button id="cp-credit-btn" class="px-3 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">Manage store credit</button>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-4">
+      ${tile('Orders', s.orders, `${s.units} units`)}
+      ${tile('Lifetime value', _cpMoney(s.lifetime_value), `avg ${_cpMoney(s.avg_order_value)}`)}
+      ${tile('Delivered', s.delivered, _cpMoney(s.delivered_value), 'text-emerald-600')}
+      ${tile('RTO', s.rto, s.rto_rate==null?'no settled orders':s.rto_rate+'% of settled', rtoCls)}
+      ${tile('Cancelled', s.cancelled, s.in_flight?`${s.in_flight} in flight`:'')}
+      ${tile('COD / Prepaid', `${s.cod} / ${s.prepaid}`, s.total_ndr?`${s.total_ndr} NDR`:'')}
+      ${tile('Store credit', cr?(cr.error?'—':_cpMoney(cr.balance||0)):'…', cr&&cr.error?'unavailable':(cr&&cr.found?'Shopify':'no account yet'), 'text-indigo-600')}
+    </div>
+
+    <div class="flex flex-wrap items-center gap-2 mb-3">
+      ${tabBtn('orders','Order history',s.orders)}
+      ${tabBtn('products','Top products',(d.topProducts||[]).length)}
+      ${tabBtn('credit','Store credit',cr&&cr.found?(cr.log||[]).length+(cr.transactions||[]).length:null)}
+    </div>
+    <div class="card overflow-hidden"><div class="overflow-x-auto" id="cp-tab-body"></div></div>`;
+
+  cpRenderTab();
+  document.querySelectorAll('.cp-tab').forEach(b=>b.addEventListener('click',()=>{ _cp.tab=b.dataset.k; cpRender(); }));
+  document.getElementById('cp-credit-btn')?.addEventListener('click',cpCreditModal);
+  document.getElementById('cp-block')?.addEventListener('click',()=>supBlacklistModal(id.phone,'',id.email,(cr&&cr.customer)?cr.customer.id:null,cpName(id,cr)));
+  document.getElementById('cp-unblock')?.addEventListener('click',async()=>{
+    if(!(await supConfirm({title:'Remove from blacklist?',message:'This customer will be able to order again.',confirmLabel:'Remove'}))) return;
+    try{ await supFetch('/api/customer/blacklist/'+(_cp.block.block.id)+'/unblock',{method:'POST'});
+      showNotification('Removed from blacklist'); cpReload(); }catch(e){ showNotification(e.message,true); }
+  });
+}
+
+function cpRenderTab(){
+  const d=_cp.data, cr=_cp.credit, box=document.getElementById('cp-tab-body'); if(!box) return;
+  const TH='px-3 py-2 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wide border-b border-slate-200 bg-slate-50/70 whitespace-nowrap';
+  const TD='px-3 py-2 border-b border-slate-100 text-sm';
+  const OUT={delivered:'bg-emerald-50 text-emerald-700',rto:'bg-rose-50 text-rose-600',cancelled:'bg-slate-200 text-slate-600',in_transit:'bg-indigo-50 text-indigo-700',ndr_pending:'bg-amber-50 text-amber-700'};
+
+  if(_cp.tab==='orders'){
+    box.innerHTML = `<table class="w-full min-w-[900px]"><thead><tr>
+      ${['Order','Date','Value','Payment','Status','Courier','Items','Destination'].map(h=>`<th class="${TH}">${h}</th>`).join('')}
+    </tr></thead><tbody>${(d.orders||[]).map(o=>{
+      const st=o.outcome||o.tracking_status||(o.cancelled?'cancelled':'—');
+      return `<tr class="hover:bg-slate-50">
+        <td class="${TD} font-medium text-slate-700 whitespace-nowrap">${escapeHtml(o.name)}</td>
+        <td class="${TD} text-slate-500 whitespace-nowrap">${_cpDate(o.created_at)}</td>
+        <td class="${TD} text-right tabular-nums">${_cpMoney(o.total)}</td>
+        <td class="${TD} whitespace-nowrap">${escapeHtml(o.payment||'—')}</td>
+        <td class="${TD} whitespace-nowrap"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${OUT[st]||'bg-slate-100 text-slate-500'}">${escapeHtml(String(st).replace(/_/g,' '))}</span>
+          ${o.silent_rto?' <span class="text-[10px] text-rose-500 font-bold">silent</span>':''}
+          ${o.ndr_count?` <span class="text-[10px] text-amber-600">${o.ndr_count} NDR</span>`:''}</td>
+        <td class="${TD} text-slate-500 whitespace-nowrap">${escapeHtml(o.courier||'—')}</td>
+        <td class="${TD} text-slate-500">${escapeHtml((o.items||[]).map(i=>`${i.sku||i.title||''}×${i.qty}`).join(', ')||'—')}</td>
+        <td class="${TD} text-slate-400 whitespace-nowrap">${escapeHtml([o.city,o.state].filter(Boolean).join(', ')||'—')}</td></tr>`;
+    }).join('')||`<tr><td colspan="8" class="px-4 py-8 text-center text-sm text-slate-400">No orders.</td></tr>`}</tbody></table>`;
+    return;
+  }
+
+  if(_cp.tab==='products'){
+    const tp=d.topProducts||[];
+    const max=Math.max(1,...tp.map(p=>p.units));
+    box.innerHTML = `<table class="w-full min-w-[700px]"><thead><tr>
+      ${['SKU','Product','Units','Spend','Orders','Last bought',''].map(h=>`<th class="${TH}">${h}</th>`).join('')}
+    </tr></thead><tbody>${tp.map(p=>`<tr class="hover:bg-slate-50">
+      <td class="${TD} font-mono font-medium text-slate-700 whitespace-nowrap">${escapeHtml(p.sku||'—')}</td>
+      <td class="${TD} text-slate-600">${escapeHtml((p.title||'').slice(0,60))}</td>
+      <td class="${TD} text-right tabular-nums font-bold">${p.units}</td>
+      <td class="${TD} text-right tabular-nums">${_cpMoney(p.spend)}</td>
+      <td class="${TD} text-right tabular-nums text-slate-500">${p.orders}</td>
+      <td class="${TD} text-slate-500 whitespace-nowrap">${_cpDate(p.last)}</td>
+      <td class="${TD}" style="width:120px"><div style="height:6px;border-radius:3px;background:#e2e8f0"><div style="height:6px;border-radius:3px;background:#6366f1;width:${Math.round(p.units/max*100)}%"></div></div></td>
+    </tr>`).join('')||`<tr><td colspan="7" class="px-4 py-8 text-center text-sm text-slate-400">No line items recorded.</td></tr>`}</tbody></table>`;
+    return;
+  }
+
+  // Store credit — our audit log (who/why) plus Shopify's own ledger (includes checkout redemptions).
+  if(!cr){ box.innerHTML='<p class="px-4 py-8 text-center text-sm text-slate-400">Loading store credit…</p>'; return; }
+  if(cr.error){ box.innerHTML=`<p class="px-4 py-8 text-center text-sm text-rose-500">${escapeHtml(cr.error)}</p>`; return; }
+  if(!cr.found){ box.innerHTML='<p class="px-4 py-8 text-center text-sm text-slate-400">No Shopify customer record — store credit can only be issued to a Shopify customer.</p>'; return; }
+  const dirChip=t=>t==='credit'?'<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700">credit</span>'
+                              :'<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-50 text-rose-600">debit</span>';
+  box.innerHTML = `<div class="p-4 flex flex-wrap items-center gap-4 border-b border-slate-100">
+      <div><p class="text-[11px] text-slate-400 uppercase tracking-wide font-semibold">Balance</p>
+        <p class="text-2xl font-bold text-indigo-600">${_cpMoney(cr.balance)}</p></div>
+      <div class="text-xs text-slate-400">Shopify customer <b class="text-slate-600">${escapeHtml(cr.customer.name||'')}</b> · ${cr.customer.orders} orders · ${_cpMoney(cr.customer.spent)} spent</div>
+    </div>
+    <table class="w-full min-w-[700px]"><thead><tr>
+      ${['When','Type','Amount','Balance after','Reason','By'].map(h=>`<th class="${TH}">${h}</th>`).join('')}
+    </tr></thead><tbody>
+      ${(cr.log||[]).map(l=>`<tr class="hover:bg-slate-50">
+        <td class="${TD} text-slate-500 whitespace-nowrap">${_cpDT(l.created_at)}</td>
+        <td class="${TD}">${dirChip(l.direction)}</td>
+        <td class="${TD} text-right tabular-nums font-semibold">${_cpMoney(l.amount)}</td>
+        <td class="${TD} text-right tabular-nums text-slate-500">${l.balance_after==null?'—':_cpMoney(l.balance_after)}</td>
+        <td class="${TD} text-slate-600">${escapeHtml(l.reason||'')}</td>
+        <td class="${TD} text-slate-400 whitespace-nowrap">${escapeHtml(String(l.actor||'').split('@')[0])}</td></tr>`).join('')}
+      ${(cr.transactions||[]).filter(t=>!(cr.log||[]).some(l=>Math.abs(new Date(l.created_at)-new Date(t.at))<60000)).map(t=>`<tr class="hover:bg-slate-50 opacity-80">
+        <td class="${TD} text-slate-500 whitespace-nowrap">${_cpDT(t.at)}</td>
+        <td class="${TD}">${dirChip(t.type)}</td>
+        <td class="${TD} text-right tabular-nums font-semibold">${_cpMoney(t.amount)}</td>
+        <td class="${TD} text-right tabular-nums text-slate-500">${t.balance_after==null?'—':_cpMoney(t.balance_after)}</td>
+        <td class="${TD} text-slate-400 italic">used at checkout / issued outside Ecom Central</td>
+        <td class="${TD} text-slate-400">Shopify</td></tr>`).join('')}
+      ${!(cr.log||[]).length && !(cr.transactions||[]).length ? `<tr><td colspan="6" class="px-4 py-8 text-center text-sm text-slate-400">No store-credit activity yet.</td></tr>`:''}
+    </tbody></table>`;
+}
+
+function cpReload(){ const id=(_cp.data||{}).identity; if(id) cpOpen({ phone:id.phone, email:id.email }); }
+
+// Issue / deduct store credit. No cap by design — the guard is the permission plus a mandatory reason.
+function cpCreditModal(){
+  const d=_cp.data, cr=_cp.credit;
+  if(!cr||!cr.found) return showNotification('No Shopify customer record for this person — credit cannot be issued.',true);
+  const wrap=infModal('cp-credit-modal',`${INF_MODAL_HEAD('Store credit', escapeHtml(cr.customer.name||d.identity.phone||''))}
+    <div class="px-5 py-4 space-y-3">
+      <div class="flex items-center gap-3 px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
+        <span class="text-xs text-slate-500">Current balance</span>
+        <span class="text-lg font-bold text-indigo-600">${_cpMoney(cr.balance)}</span>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Action</label>
+          <select id="cpc-dir" class="filter-select w-full"><option value="credit">Add credit</option><option value="debit">Deduct credit</option></select></div>
+        <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Amount (₹) *</label>
+          <input id="cpc-amt" type="number" min="1" step="1" class="filter-input w-full" placeholder="500"></div>
+      </div>
+      <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Reason *</label>
+        <input id="cpc-reason" class="filter-input w-full" placeholder="e.g. Goodwill for delayed delivery of TE25-37561">
+        <p class="text-[11px] text-slate-400 mt-1">Shopify records the money but not who issued it or why — this reason is the only audit trail.</p></div>
+      <p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">This writes real store credit the customer can spend at checkout. There is no undo — a mistake has to be reversed with a matching deduction.</p>
+      <p id="cpc-err" class="text-xs text-rose-500 hidden"></p>
+    </div>
+    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
+      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
+      <button id="cpc-save" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">Apply</button>
+    </div>`,'max-w-lg');
+  try{ ecEnhanceSelect(wrap.querySelector('#cpc-dir')); }catch(_){}
+  const $=i=>wrap.querySelector('#'+i);
+  const err=t=>{const e=$('cpc-err'); e.textContent=t||''; e.classList.toggle('hidden',!t);};
+  $('cpc-save').addEventListener('click',async()=>{
+    const dir=$('cpc-dir').value, amt=Number($('cpc-amt').value), reason=$('cpc-reason').value.trim();
+    if(!(amt>0)) return err('Enter an amount greater than 0.');
+    if(!reason) return err('A reason is required.');
+    if(dir==='debit'&&amt>cr.balance) return err(`Cannot deduct more than the balance (${_cpMoney(cr.balance)}).`);
+    if(!(await supConfirm({title:dir==='credit'?'Add store credit?':'Deduct store credit?',
+      message:`${dir==='credit'?'Add':'Deduct'} ${_cpMoney(amt)} ${dir==='credit'?'to':'from'} ${cr.customer.name||'this customer'}. This is real money in Shopify and cannot be undone.`,
+      confirmLabel:dir==='credit'?'Add credit':'Deduct',danger:dir==='debit'}))) return;
+    const btn=$('cpc-save'); btn.disabled=true; btn.textContent='Applying…';
+    try{
+      const r=await supFetch('/api/customer/store-credit',{method:'POST',body:JSON.stringify({
+        phone:d.identity.phone, email:d.identity.email, direction:dir, amount:amt, reason })});
+      wrap.remove(); showNotification(`Store credit updated — new balance ${_cpMoney(r.balance)}`); cpReload();
+    }catch(e){ btn.disabled=false; btn.textContent='Apply'; err(e.message); }
+  });
+}
+
 // ═════════════════ END CUSTOMER SUPPORT CONSOLE ═════════════════
 
 // ─────────── Deep-linkable views (open-in-new-tab / refresh / bookmark) ───────────
@@ -4800,7 +5071,7 @@ const NAV_HREF = {
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
-    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-support-blacklist': 'support-blacklist', 'nav-support-voice': 'support-voice',
+    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
     'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions',
     'nav-finance-entry': 'finance-entry', 'nav-finance-register': 'finance-register', 'nav-finance-books': 'finance-books'
@@ -5517,7 +5788,7 @@ document.getElementById('nav-rapidshyp-recon')?.addEventListener('click', (e) =>
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
 document.getElementById('nav-claims-sla')?.addEventListener('click', (e) => { e.preventDefault(); navigate('claims-sla'); });
-['support-dashboard','support-queue','support-orders','support-calls','support-contacts','support-blacklist','support-voice'].forEach(v =>
+['support-dashboard','support-queue','support-orders','support-calls','support-contacts','customer-profile','support-voice'].forEach(v =>
     document.getElementById('nav-' + v)?.addEventListener('click', (e) => { e.preventDefault(); navigate(v); }));
 document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
 document.getElementById('nav-amazon-fba')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-fba'); });
@@ -5535,7 +5806,7 @@ const PERM_GROUPS = [
   ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
-  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['support-blacklist','Blacklist Numbers'],['support-voice','Voice Agent (beta)']]],
+  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
   ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)']]],
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],
