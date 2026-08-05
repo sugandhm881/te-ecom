@@ -680,6 +680,29 @@ async function eeHoldCall(path, body) {
     if (r.status === 429) { await new Promise(x => setTimeout(x, 6000)); r = await axios.put(`${EASYECOM_API_BASE}${path}`, body, { headers, timeout: 20000, validateStatus: () => true }); }
     return r;
 }
+// Hold an order INSIDE EasyEcom by order name. Same call and same side effects the /hold-order route
+// has always made — extracted only so the auto-holder can reuse it. Route behaviour is unchanged.
+// Returns { ok, message, alreadyHeld? } and never throws.
+async function holdOrderInEasyecom(orderName, reason, actor) {
+    try {
+        if (!orderName) return { ok: false, message: 'orderName is required' };
+        const note = String(reason || '').trim().slice(0, 200) || 'Auto-hold';
+        const inv = await resolveInvoiceId(orderName);
+        if (!inv) return { ok: false, message: 'not in EasyEcom yet (no invoice id)' };
+        const r = await eeHoldCall('/orders/holdOrders', { invoice_id: inv.invoiceId, hold_reason: note });
+        const body = r.data || {};
+        await supabase.from('api_logs_ecom').insert({ action: 'easyecom_hold_order', status_code: r.status, payload: { orderName, invoice_id: inv.invoiceId, reason: note, by: actor || 'auto' }, response: body }).then(() => {}).catch(() => {});
+        const already = /already.{0,25}(on ?hold|hold status)/i.test(String(body.message || ''));
+        const ok = (r.status === 200 && (body.code === 200 || body.status === true || body.success === true || /success/i.test(String(body.message || '')))) || already;
+        if (!ok) return { ok: false, message: body.message || `EasyEcom rejected the hold (HTTP ${r.status})` };
+        await supabase.from('order_marks_ecom').upsert({
+            order_name: String(orderName).replace('#', '').trim(), mark_type: 'ee_hold', note,
+            created_by: actor || 'auto', created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        }, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
+        return { ok: true, message: `Order ${orderName} put on hold in EasyEcom.`, alreadyHeld: already };
+    } catch (e) { return { ok: false, message: e.message }; }
+}
+
 router.post('/hold-order', tokenRequired, async (req, res) => {
     try {
         const { orderName, reason } = req.body || {};
@@ -929,7 +952,29 @@ router.post('/unhold-order', tokenRequired, async (req, res) => {
         if (ok || alreadyUnheld) {
             // Clear the live hold-state mark (the unhold event itself is preserved in api_logs_ecom).
             await supabase.from('order_marks_ecom').delete().eq('order_name', String(orderName).replace('#', '').trim()).eq('mark_type', 'ee_hold').then(() => {}).catch(() => {});
-            return res.json({ success: true, message: alreadyUnheld ? `Order ${orderName} was already released in EasyEcom — dashboard updated.` : `Order ${orderName} released from hold — it returns to its previous status.` });
+            // RELEASE BOTH. When the auto-holder catches an order after the EasyEcom import it holds it in
+            // BOTH systems (EasyEcom stops it; the Shopify hold mirrors that so the two agree), and the
+            // dashboard offers only this one Unhold. Releasing here must therefore clear the Shopify hold
+            // too — otherwise the order would stay silently held on Shopify with no button left to free it.
+            // Best-effort: EasyEcom is the release that actually matters, so a Shopify failure is logged,
+            // not surfaced as an error.
+            let alsoShopify = false;
+            try {
+                const shopifyHold = require('./shopify_hold');
+                const nm = String(orderName).replace('#', '').trim();
+                const st = (await shopifyHold.getHoldStates([nm]))[nm];
+                if (st && st.status === 'held') {
+                    // releaseOrder needs the SHOPIFY order id, not the name — resolve it from the mirror.
+                    const { data: ord } = await supabase.from('orders').select('id, name')
+                        .in('name', [nm, '#' + nm]).limit(1).maybeSingle();
+                    const rel = ord && ord.id
+                        ? await shopifyHold.releaseOrder(nm, String(ord.id), (req.user && req.user.sub) || 'auto')
+                        : { ok: false, error: 'shopify order id not found' };
+                    alsoShopify = !!(rel && rel.ok);
+                    console.log(`[Unhold] ${nm}: EasyEcom released · Shopify ${alsoShopify ? 'released too' : 'release failed/skipped'}`);
+                }
+            } catch (e) { console.error('[Unhold] Shopify mirror-release failed:', e.message); }
+            return res.json({ success: true, alsoShopify, message: alreadyUnheld ? `Order ${orderName} was already released in EasyEcom — dashboard updated.` : `Order ${orderName} released from hold${alsoShopify ? ' (EasyEcom + Shopify)' : ''} — it returns to its previous status.` });
         }
         return res.status(502).json({ success: false, message: body.message || `EasyEcom rejected the unhold (HTTP ${r.status}).` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -949,3 +994,4 @@ module.exports.resolveInvoiceAndWarehouse = resolveInvoiceAndWarehouse;
 module.exports.ourCompanyCid = ourCompanyCid;
 module.exports.markWarehouseRouted = markWarehouseRouted;
 module.exports.SHIFUPRO_CID = SHIFUPRO_CID;
+module.exports.holdOrderInEasyecom = holdOrderInEasyecom;

@@ -334,8 +334,13 @@ router.post('/shopify-order', async (req, res) => {
             const shopifyHold = require('./shopify_hold');
             const reasons = await shopifyHold.holdReasons({ phone, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price, address });
             if (!reasons.length) { console.log(`[ShopifyHold] ${orderName}: not a repeat-COD candidate → no hold`); return; }
-            const r = await shopifyHold.autoHoldOrder(orderName, o.id, shopifyHold.reasonNoteFrom(reasons), o.created_at);
+            const r = await shopifyHold.holdOrderSmart(orderName, o.id, shopifyHold.reasonNoteFrom(reasons), o.created_at);
             console.log(`[ShopifyHold] ${orderName}: ${r.held ? 'HELD on Shopify ✓' : r.skipped ? 'skipped (' + r.skipped + ')' : 'hold FAILED (' + r.failed + ')'}`);
+            // Hold the customer's OTHER open orders too. The per-order rules only trip on the order that
+            // matches them, so on a 2–3 order burst the earlier ones would otherwise ship. This runs on the
+            // WEBHOOK — i.e. the instant the new order lands — which is the only moment the earlier orders
+            // are still upstream of the EasyEcom import and therefore still holdable on Shopify.
+            if (r.held) await shopifyHold.holdSiblingOrders({ phone, excludeOrderName: orderName, reasonNote: shopifyHold.reasonNoteFrom(reasons) });
         } catch (e) { console.error('[ShopifyHold] webhook error:', e.message); }
     });
 });

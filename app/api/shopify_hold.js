@@ -218,7 +218,7 @@ async function cancelOrder(orderName, shopifyOrderId, by, reasonLabel) {
 
 // Auto-hold (cron/webhook). Skips if already held OR a human already released it OR it's past pickup.
 // `reasonNote` (from reasonNoteFrom) records WHY it qualified, so the panel can show the category later.
-async function autoHoldOrder(orderName, shopifyOrderId, reasonNote, createdAt) {
+async function autoHoldOrder(orderName, shopifyOrderId, reasonNote, createdAt, opts) {
     // GUARD — an auto-hold only makes sense for a BRAND-NEW order, UPSTREAM of the EasyEcom import.
     // (a) AGE: a Shopify hold only keeps an order out of EasyEcom if placed before the import (~30-min
     //     lag). Once an order is hours old it's already imported/shipping, so holding does nothing — and
@@ -232,7 +232,10 @@ async function autoHoldOrder(orderName, shopifyOrderId, reasonNote, createdAt) {
     //     2026-07-20). reference_code holds the Shopify order name (e.g. TE25-38408). Never auto-hold it.
     const { data: ee } = await supabase.from('b2c_order_easycom')
         .select('order_id').eq('reference_code', norm(orderName)).limit(1).maybeSingle();
-    if (ee) return { skipped: 'in-easyecom' };
+    //     `allowImported` is passed ONLY by holdOrderSmart() below, which has already placed the
+    //     EasyEcom hold — the Shopify hold is then added alongside it so both systems agree and a
+    //     single Unhold can release both. Every other caller keeps the original refusal.
+    if (ee && !(opts && opts.allowImported)) return { skipped: 'in-easyecom' };
     const st = (await getHoldStates([orderName]))[norm(orderName)];
     if (st && (st.status === 'held' || st.status === 'released')) return { skipped: st.status };
     const out = await holdShopifyOrder(shopifyOrderId, reasonNote);
@@ -241,6 +244,134 @@ async function autoHoldOrder(orderName, shopifyOrderId, reasonNote, createdAt) {
     if (out.ok) { await recordHold(orderName, 'auto', reasonNote || HOLD_NOTE); return { held: true }; }
     await recordFailed(orderName, out.error);
     return { failed: out.error };
+}
+
+
+
+
+// ── Has the parcel already left? ─────────────────────────────────────────────────────────────────
+// A hold is only meaningful BEFORE the courier takes the parcel. Shopify refuses a hold on a fulfilled
+// order by itself (`notHoldable`), but the EasyEcom fallback has no such protection — without this
+// check an in-transit order could be held in EasyEcom, which achieves nothing and confuses the WH team.
+//
+// ⚠️ An AWB alone is NOT "dispatched". EasyEcom can still hold an order after the AWB is assigned but
+// before pickup/manifest — the Call Queue treats that state as holdable too. Only an actual courier
+// movement or a fulfilled state proves the parcel is gone.
+const DISPATCHED_RE = /IN.?TRANSIT|OUT.?FOR.?DELIVERY|\bOFD\b|DELIVERED|\bRTO\b|RETURN|PICKED.?UP|PICKUP.?COMPLETED|SORTING|DISPATCHED|\bLOST\b|EXCEPTION/i;
+async function isDispatchedOrder(orderName) {
+    const nm = norm(orderName);
+    try {
+        const { data: o } = await supabase.from('orders')
+            .select('fulfillment_status, tracking_status, cancelled_at')
+            .in('name', [nm, '#' + nm]).limit(1).maybeSingle();
+        if (o) {
+            if (o.cancelled_at) return { dispatched: true, why: 'cancelled' };
+            if (String(o.fulfillment_status || '').toLowerCase() === 'fulfilled') return { dispatched: true, why: 'fulfilled' };
+            if (DISPATCHED_RE.test(String(o.tracking_status || ''))) return { dispatched: true, why: 'tracking:' + o.tracking_status };
+        }
+        // Courier-side truth — a scan exists the moment the parcel physically moves.
+        const { data: j } = await supabase.from('shipment_journey_ecom')
+            .select('outcome, dispatched_at, out_for_delivery_at').eq('order_name', nm).limit(1).maybeSingle();
+        if (j) {
+            if (['delivered', 'rto', 'lost'].includes(String(j.outcome || ''))) return { dispatched: true, why: 'outcome:' + j.outcome };
+            if (j.dispatched_at || j.out_for_delivery_at) return { dispatched: true, why: 'picked-up' };
+        }
+        return { dispatched: false };
+    } catch (e) { return { dispatched: false, error: e.message }; }
+}
+
+// ── holdOrderSmart — Shopify first, EasyEcom once the window has closed ───────────────────────────
+// A Shopify hold is the PREFERRED stop: it keeps the order out of EasyEcom altogether. But it only
+// works upstream of the import (~2 min in practice) — after that a Shopify hold does nothing to stop
+// fulfilment, which is why autoHoldOrder refuses on `in-easyecom`.
+//
+// Measured on live data: repeat orders arrive 4 minutes to 15 hours apart, so by the time the newest
+// order trips a rule the EARLIER one has almost always imported already. Shopify-only would therefore
+// hold ~nothing on the real pattern (simulated over 24h: 5 bursts, 5 siblings, 0 holdable).
+//
+// So: try Shopify; if the order has already imported, hold it in EASYECOM instead — which still stops
+// it before the batch/manifest — and then ALSO place the Shopify hold so both systems agree.
+// The dashboard shows a single Unhold for such an order (EasyEcom's), and that release clears BOTH.
+async function holdOrderSmart(orderName, shopifyOrderId, reasonNote, createdAt, actor = 'auto') {
+    const name = norm(orderName);
+    // 1) Preferred path — still upstream of EasyEcom.
+    const first = await autoHoldOrder(name, shopifyOrderId, reasonNote, createdAt);
+    if (first.held) return { held: true, where: 'shopify' };
+    if (first.skipped !== 'in-easyecom') return first;   // stale / already held / released / shipped — leave it
+
+    // 2) Window closed — stop it inside EasyEcom instead, but ONLY if the parcel hasn't left yet.
+    //    Shopify refuses a hold on a fulfilled order by itself; EasyEcom does not, so this is the guard
+    //    that stops an already-dispatched order being pointlessly held.
+    const disp = await isDispatchedOrder(name);
+    if (disp.dispatched) return { skipped: 'dispatched:' + (disp.why || '') };
+    const { holdOrderInEasyecom } = require('./easyecom');
+    const ee = await holdOrderInEasyecom(name, reasonNote, actor);
+    if (!ee.ok) return { failed: 'ee:' + ee.message };
+
+    // 3) Mirror the hold onto Shopify so the two systems don't disagree. Best-effort: the EasyEcom hold
+    //    is the one actually stopping the order, so a Shopify failure here must not fail the operation.
+    const mirror = await autoHoldOrder(name, shopifyOrderId, reasonNote, createdAt, { allowImported: true });
+    return { held: true, where: 'easyecom', mirroredToShopify: !!mirror.held, alreadyHeld: !!ee.alreadyHeld };
+}
+
+// ── Sibling hold — hold the customer's OTHER open orders too ──────────────────────────────────────
+// Why: the per-order rules hold the order that TRIPS them. When a customer places 2–3 orders, the
+// `in_flight` reason fires on the newest ("an OLDER live order is open → THIS one is the repeat") and
+// the EARLIER orders sail through, because when they were placed there was no prior live order to trip
+// on. The team was left with one held order and one or two shipping — which defeats the purpose, since
+// the risk being screened for (wrong address, wrong product) applies to the whole batch.
+//
+// ⚠️ TIMING IS THE WHOLE CONSTRAINT. A Shopify hold only works UPSTREAM of the EasyEcom import (~2 min
+// in practice); `autoHoldOrder` already refuses once the order is in `b2c_order_easycom` because the
+// hold is a verified no-op there. So a sibling placed seconds/minutes ago gets held; one placed long
+// enough ago to have imported CANNOT be — no code can pull it back out of EasyEcom.
+// Those are reported as `skip:in-easyecom` so the team can act on them by hand. EasyEcom hold behaviour
+// is deliberately left untouched — it stays a manual action.
+//
+// BOUNDED DELIBERATELY. Only orders placed within SIBLING_WINDOW_H are considered. Without that bound a
+// customer with an old open order would be retro-held — exactly the 2026-07-28 failure where a bulk
+// re-scan held 53 already-shipped orders.
+const SIBLING_WINDOW_H = Number(process.env.SHOPIFY_SIBLING_HOLD_HOURS || 24);
+
+async function holdSiblingOrders({ phone, excludeOrderName, reasonNote }) {
+    const out = { checked: 0, held: 0, skipped: 0, failed: 0, orders: [] };
+    const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
+    if (last10.length !== 10) return out;
+
+    const sinceISO = new Date(Date.now() - SIBLING_WINDOW_H * 3600 * 1000).toISOString();
+    // Open = not delivered / RTO / cancelled. order_buckets is the same source the hold rules use.
+    const { data } = await supabase.from('order_buckets')
+        .select('order_id, order_name, bucket, created_at')
+        .ilike('phone', `%${last10}`).gte('created_at', sinceISO)
+        .order('created_at', { ascending: false }).limit(20);
+
+    const exclude = norm(excludeOrderName);
+    const siblings = (data || []).filter(o =>
+        norm(o.order_name) !== exclude && !['delivered', 'rto', 'cancelled'].includes(String(o.bucket || '')));
+    out.checked = siblings.length;
+    if (!siblings.length) return out;
+
+    const note = `${reasonNote || HOLD_NOTE} · batch with ${exclude}`;
+    for (const o of siblings) {
+        const name = norm(o.order_name);
+        try {
+            // Never touch a parcel the courier already has — order_buckets only rules out
+            // delivered/RTO/cancelled, so an in-transit order would otherwise reach the hold call.
+            const d = await isDispatchedOrder(name);
+            if (d.dispatched) { out.skipped++; out.orders.push({ order: name, result: 'skip:dispatched:' + (d.why || '') }); continue; }
+            // holdOrderSmart enforces the rest: not already held/released, not stale, Shopify first,
+            // EasyEcom only once the import window has closed.
+            const r = await holdOrderSmart(name, String(o.order_id), note, o.created_at);
+            if (r.held) { out.held++; out.orders.push({ order: name, result: 'held:' + (r.where || 'shopify') }); }
+            else if (r.skipped) { out.skipped++; out.orders.push({ order: name, result: 'skip:' + r.skipped }); }
+            else { out.failed++; out.orders.push({ order: name, result: 'failed:' + r.failed }); }
+        } catch (e) { out.failed++; out.orders.push({ order: name, result: 'error:' + e.message }); }
+        await new Promise(x => setTimeout(x, 400));   // gentle on the Shopify API
+    }
+    if (out.held || out.failed) {
+        console.log(`[ShopifyHold] siblings of ${exclude}: held ${out.held}, skipped ${out.skipped}, failed ${out.failed} (of ${out.checked})`);
+    }
+    return out;
 }
 
 // Does a NEW order qualify for auto-hold? Mirrors the Call Queue Repeat reasons — COD (not prepaid) AND any
@@ -332,5 +463,5 @@ async function qualifiesForHold(opts) { return (await holdReasons(opts)).length 
 
 module.exports = {
     listFulfillmentOrders, holdShopifyOrder, releaseShopifyOrder,
-    getHoldStates, holdOrderManual, releaseOrder, cancelOrder, autoHoldOrder, qualifiesForHold, holdReasons, reasonNoteFrom, HOLD_NOTE,
+    getHoldStates, holdOrderManual, releaseOrder, cancelOrder, autoHoldOrder, holdOrderSmart, holdSiblingOrders, isDispatchedOrder, qualifiesForHold, holdReasons, reasonNoteFrom, HOLD_NOTE,
 };

@@ -5,7 +5,7 @@ const express = require('express');
 const router = express.Router();
 const ExcelJS = require('exceljs');
 const { supabase } = require('../supabase');
-const { fetchRsShipment, parseScanDate, parseDpDate } = require('./delivery_journey');
+const { fetchRsShipment, fetchRsShipmentDetails, parseScanDate, parseDpDate } = require('./delivery_journey');
 const { fetchKwikshipShipment, fetchKwikshipPublic, parseKwikDate } = require('./kwikship_sync');
 const { fetchDocpharmaDetails } = require('./helpers');
 const { requirePermission } = require('../auth');
@@ -44,6 +44,9 @@ const STATE_LABEL = {
     in_transit: 'In-transit',
 };
 
+// Charges are deliberately NOT selected here. The expanded row reads them from /shipment/:awb (which
+// selects them itself and can fetch live), so pulling 7 more columns for every one of ~5.5k rows would
+// be paid on every page load and never used.
 const _JOURNEY_COLS = 'awb, order_name, source, courier, outcome, attempts, ndr_count, reached_delivery, first_attempt_success, ndr_reasons, out_for_delivery_at, delivered_at, rto_at, dispatched_at, order_date, first_edd, status_code, payment_mode, zone, order_type, dest_state, dest_city, dest_pincode';
 async function fetchJourneys(fromISO, toISO, source, payment, zone, courier, orderType, state) {
     const PAGE = 1000;
@@ -482,7 +485,7 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
     if (!awb) return res.status(400).json({ success: false, error: 'awb required' });
     try {
         const { data: j } = await supabase.from('shipment_journey_ecom')
-            .select('awb, order_name, source, courier, outcome, status_code, order_date, dispatched_at, out_for_delivery_at, delivered_at, rto_at, first_edd, ndr_reasons, attempts, ndr_count, raw')
+            .select('awb, order_name, source, courier, outcome, status_code, order_date, dispatched_at, out_for_delivery_at, delivered_at, rto_at, first_edd, ndr_reasons, attempts, ndr_count, raw, freight_total, freight_forward, freight_rto, cod_charges, shipment_value, applied_weight, charges_fetched_at')
             .eq('awb', awb).maybeSingle();
 
         // Normalize any scan array → { at, desc, code, location }, oldest first.
@@ -569,8 +572,45 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
             }
         }
 
+        // ── Shipment charges for the expanded row ────────────────────────────────────────────────
+        // Stored charges cover FINAL shipments (delivered 89% / RTO 88%) but almost no live ones
+        // (in-transit 0%, NDR-pending 3%) because the charges sync only prices final shipments. Those
+        // live ones are exactly what the explorer is used to chase, so when a RapidShyp shipment has no
+        // stored charge we fetch it ON DEMAND — one call, only when a human actually expands the row —
+        // and persist it so the next expand (and the recon) costs nothing.
+        let charges = null, chargesLive = false;
+        if (j) {
+            // "Already attempted" is `charges_fetched_at`, NOT the presence of a freight number:
+            // RapidShyp only prices a shipment once it is FINAL, so a live in-transit fetch legitimately
+            // returns shipment value + applied weight with freight still null. Keying off freight would
+            // re-call their API on every expand forever; keying off the stamp means one call per shipment,
+            // and the nightly charges sync fills the freight in once the shipment settles.
+            if (j.charges_fetched_at || j.freight_total != null) {
+                charges = { freight_total: j.freight_total, freight_forward: j.freight_forward, freight_rto: j.freight_rto,
+                    cod_charges: j.cod_charges, shipment_value: j.shipment_value, applied_weight: j.applied_weight,
+                    fetched_at: j.charges_fetched_at || null };
+            } else if (j.source === 'rapidshyp') {
+                try {
+                    const c = await fetchRsShipmentDetails(awb);
+                    if (c.found) {
+                        charges = { freight_total: c.freight_total, freight_forward: c.freight_forward, freight_rto: c.freight_rto,
+                            cod_charges: c.cod_charges, shipment_value: c.shipment_value, applied_weight: c.applied_weight,
+                            fetched_at: new Date().toISOString() };
+                        chargesLive = true;
+                        // Persist so this is a one-time cost per shipment.
+                        supabase.from('shipment_journey_ecom').update({
+                            freight_total: c.freight_total, freight_forward: c.freight_forward, freight_rto: c.freight_rto,
+                            cod_charges: c.cod_charges, shipment_value: c.shipment_value, applied_weight: c.applied_weight,
+                            charges_fetched_at: new Date().toISOString(),
+                        }).eq('awb', awb).then(() => {}, () => {});
+                    }
+                } catch (_e) { /* charges are a nice-to-have — never fail the detail view */ }
+            }
+        }
+
         res.json({
             success: true, awb, source: j ? j.source : null, live, scans: scans || [], dp: dpInfo,
+            charges, chargesLive,
             journey: j ? {
                 order_name: j.order_name, courier: j.courier, outcome: j.outcome, status_code: j.status_code,
                 attempts: j.attempts, ndr_count: j.ndr_count, ndr_reasons: j.ndr_reasons || [],

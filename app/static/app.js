@@ -1648,8 +1648,8 @@ function buildOrderDetailHtml(order) {
                     <div class="pt-2 border-t border-slate-100">
                         <div class="flex justify-between items-center p-2.5 rounded-lg bg-amber-50 border border-amber-200">
                             <div>
-                                <p class="text-sm font-bold text-amber-700">⏸ On hold in EasyEcom</p>
-                                <p class="text-[10px] text-amber-600 mt-0.5">${meta || 'Held in EasyEcom'}</p>
+                                <p class="text-sm font-bold text-amber-700">⏸ On hold in EasyEcom${order.shopifyHold ? ' + Shopify' : ''}</p>
+                                <p class="text-[10px] text-amber-600 mt-0.5">${meta || 'Held in EasyEcom'}${order.shopifyHold ? ' · one Unhold releases both' : ''}</p>
                             </div>
                             <button onclick="holdOrderModal('${escapeHtml(String(order.id))}', 'unhold')" class="px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shadow-sm whitespace-nowrap">▶ Unhold EasyEcom</button>
                         </div>
@@ -1694,7 +1694,7 @@ function buildOrderDetailHtml(order) {
     // upstream of EasyEcom). Held → Unhold Shopify; not held + still pre-pickup → Hold on Shopify.
     let shopifyHoldHtml = '';
     if (order.status !== 'Cancelled' && !order.cancelled_at) { const sh = order.shopifyHold;   // cancelled → no Shopify hold/unhold either
-      if (sh) {
+      if (sh && !order.eeHold) {   // held in BOTH → the EasyEcom panel owns the single Unhold (it releases both)
         const sm = [sh.reason ? `“${escapeHtml(sh.reason)}”` : '', sh.by ? 'by ' + escapeHtml(sh.by) : ''].filter(Boolean).join(' · ');
         shopifyHoldHtml = `<div class="bg-white p-4 rounded-xl border border-rose-200 shadow-sm mt-2"><div class="flex justify-between items-center">
              <div><p class="text-sm font-bold text-rose-700">🔒 On hold in Shopify</p><p class="text-[10px] text-rose-500 mt-0.5">${sm || "Won't ship / import to EasyEcom"}</p></div>
@@ -8907,9 +8907,59 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
     c.querySelectorAll('.dp-mark-fake').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpToggleMark(b); }));
     c.querySelectorAll('.dp-send-critical').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpComposeCritical([b.dataset.awb]); }));
     c.querySelectorAll('.dp-view-thread').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpToggleThread(b.dataset.awb); }));
+    c.querySelectorAll('.dp-basket-add').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpBasketToggle(b.dataset.awb); }));
     c.querySelectorAll('.dp-ndr-action').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); ndrActionModal(b.dataset.awb, b.dataset.order, ''); }));
+    dpBasketRenderBar();   // keep the floating bar in step with the table
 }
 // Expanded detail row — date-log (instant, from stored timeline) + scan-log (fetched on demand).
+
+// ── Order basket — collect shipments, then escalate them in ONE email ─────────────────────────────
+// The compose endpoint already accepts an ARRAY of AWBs and writes a single email (it is what the
+// "Escalate all N marked" button uses), so the basket is purely a selection layer on top of it.
+// Persisted in localStorage: orders get gathered across searches, filters and page reloads during a
+// shift, and losing the basket to an accidental refresh would be maddening.
+const DP_BASKET_KEY = 'ec_dp_basket_v1';
+const DP_BASKET_MAX = 60;                    // matches the compose endpoint's own cap
+let _dpBasket = new Set();
+try { _dpBasket = new Set(JSON.parse(localStorage.getItem(DP_BASKET_KEY) || '[]')); } catch (_) { _dpBasket = new Set(); }
+const dpBasketSave = () => { try { localStorage.setItem(DP_BASKET_KEY, JSON.stringify([..._dpBasket])); } catch (_) {} };
+// Only a LIVE shipment can still be acted on — a delivered/RTO/cancelled parcel is finished, so
+// escalating it makes no sense. Matches the rule: basket button on NDR-pending and in-transit only.
+const dpBasketEligible = r => r && r.awb && (r.state === 'ndr_pending' || r.state === 'in_transit');
+
+function dpBasketToggle(awb) {
+    if (!awb) return;
+    if (_dpBasket.has(awb)) _dpBasket.delete(awb);
+    else {
+        if (_dpBasket.size >= DP_BASKET_MAX) return showNotification(`Basket is full (${DP_BASKET_MAX} orders max — the escalation email caps there).`, true);
+        _dpBasket.add(awb);
+    }
+    dpBasketSave(); dpBasketRenderBar(); dpTableRender();
+}
+function dpBasketClear() { _dpBasket.clear(); dpBasketSave(); dpBasketRenderBar(); dpTableRender(); }
+
+// Floating bar — one button, as asked. Only present while the basket has something in it.
+function dpBasketRenderBar() {
+    let bar = document.getElementById('dp-basket-bar');
+    if (!_dpBasket.size) { bar?.remove(); return; }
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'dp-basket-bar';
+        bar.className = 'fixed left-1/2 bottom-6 z-[60] flex items-center gap-3 px-4 py-3 rounded-2xl shadow-2xl bg-slate-900 text-white';
+        bar.style.transform = 'translateX(-50%)';
+        document.body.appendChild(bar);
+    }
+    const n = _dpBasket.size;
+    bar.innerHTML = `<span class="text-sm font-semibold">🧺 ${n} order${n > 1 ? 's' : ''} in basket</span>
+        <button id="dp-basket-send" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-500 hover:bg-indigo-400">✉️ Send one email for all</button>
+        <button id="dp-basket-clear" class="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white/10 hover:bg-white/20">Clear</button>`;
+    document.getElementById('dp-basket-send').addEventListener('click', () => {
+        if (!canSendEmails()) return showNotification('You do not have permission to send escalation emails.', true);
+        dpComposeCritical([..._dpBasket]);
+    });
+    document.getElementById('dp-basket-clear').addEventListener('click', dpBasketClear);
+}
+
 function dpRenderDetail(r,td){ const ts=r.ts||{};
     const sc=_dpScanCache[r.awb];
     const eddVal=ts.edd||(sc&&sc.edd)||null;   // fall back to the live DocPharma promise EDD
@@ -8926,6 +8976,30 @@ function dpRenderDetail(r,td){ const ts=r.ts||{};
         <span>NDRs: <b class="text-slate-700">${r.ndr_count}</b></span>
         ${r.otdHrs!=null?`<span>O→Dispatch: <b class="text-slate-700">${Math.round(r.otdHrs)}h</b></span>`:''}
         ${(r.reasons&&r.reasons.length)?`<span>Reasons: <b class="text-slate-700">${r.reasons.join('; ')}</b></span>`:''}</div>`;
+    // Shipment charges. Stored for FINAL shipments; for a live one the detail endpoint fetches them on
+    // demand. ⚠️ RapidShyp only PRICES a shipment once it settles, so an in-transit parcel legitimately
+    // comes back with value + weight but no freight — say "not billed yet" rather than showing a bare
+    // dash, which reads like a bug.
+    const ch = sc && sc.charges;
+    const money = v => (v == null ? null : '₹' + Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 }));
+    const chargeHtml = (() => {
+        if (!sc || sc.loading) return '';
+        if (!ch) return `<div class="text-xs text-slate-400 mt-2">Charges: <span class="text-slate-400">not available for this platform</span></div>`;
+        const bits = [];
+        if (ch.freight_total != null) bits.push(`Freight: <b class="text-slate-700">${money(ch.freight_total)}</b>`);
+        if (ch.freight_forward != null) bits.push(`Forward: <b class="text-slate-700">${money(ch.freight_forward)}</b>`);
+        if (ch.freight_rto != null) bits.push(`RTO: <b class="text-rose-600">${money(ch.freight_rto)}</b>`);
+        if (ch.cod_charges != null) bits.push(`COD fee: <b class="text-slate-700">${money(ch.cod_charges)}</b>`);
+        if (ch.shipment_value != null) bits.push(`Order value: <b class="text-slate-700">${money(ch.shipment_value)}</b>`);
+        if (ch.applied_weight != null) bits.push(`Billed wt: <b class="text-slate-700">${ch.applied_weight} g</b>`);
+        const unbilled = ch.freight_total == null
+            ? `<span class="text-amber-600">freight not billed yet — the courier prices a shipment once it settles</span>` : '';
+        if (!bits.length && !unbilled) return '';
+        return `<div class="text-xs text-slate-500 mt-2 pt-2 border-t border-slate-200 flex flex-wrap gap-x-4 gap-y-1">
+            <span class="font-bold text-slate-600 uppercase tracking-wide">Charges</span>${bits.map(x => `<span>${x}</span>`).join('')}
+            ${unbilled ? `<span>${unbilled}</span>` : ''}
+            ${sc.chargesLive ? '<span class="text-[10px] text-emerald-500">● fetched live</span>' : ''}</div>`;
+    })();
     let scanHtml;
     const scanRows=arr=>`<div class="space-y-1 max-h-64 overflow-auto pr-1">${arr.map(s=>`<div class="flex gap-2 text-xs"><span class="w-28 shrink-0 text-slate-400 tabular-nums">${dpFmtTs(s.at)}</span><span class="text-slate-700">${s.desc}${s.code?` <span class="text-slate-400">(${s.code})</span>`:''}${s.location?` <span class="text-slate-400">· ${s.location}</span>`:''}</span></div>`).join('')}</div>`;
     if(!sc||sc.loading) scanHtml=brandLoaderSm('Loading scan log…');
@@ -8945,12 +9019,13 @@ function dpRenderDetail(r,td){ const ts=r.ts||{};
         ${r.mail_sent
             ? `<button class="dp-view-thread px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100" data-awb="${ecEsc(r.awb||'')}">📧 ${_dpThreadCache[r.awb]?'Hide email':'View email & replies'}</button>`
             : (canSendEmails()?`<button class="dp-send-critical px-3 py-1.5 rounded-lg text-xs font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300" data-awb="${ecEsc(r.awb||'')}">✉️ Send critical email</button>`:'')}
+        ${dpBasketEligible(r)?`<button class="dp-basket-add px-3 py-1.5 rounded-lg text-xs font-semibold ${_dpBasket.has(r.awb)?'bg-slate-900 text-white hover:bg-slate-800':'bg-white border border-slate-200 text-slate-600 hover:border-slate-400'}" data-awb="${ecEsc(r.awb)}">${_dpBasket.has(r.awb)?'🧺 In basket — remove':'🧺 Add to basket'}</button>`:''}
         ${(r.state==='ndr_pending'&&r.awb)?`<button class="dp-ndr-action px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100" data-awb="${ecEsc(r.awb)}" data-order="${ecEsc(r.order||'')}">🔁 NDR action (reattempt / return)</button>`:''}
         <span class="dp-action-status text-xs"></span>
       </div>`;
     return `<tr class="dp-detail"><td colspan="12" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
         <div class="grid md:grid-cols-2 gap-6">
-          <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Date log</div>${timeline}${meta}</div>
+          <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Date log</div>${timeline}${meta}${chargeHtml}</div>
           <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log</div>${scanHtml}</div>
         </div>${actions}${dpThreadHtml(r.awb)}</td></tr>`;
 }
@@ -8958,7 +9033,7 @@ function dpRenderDetail(r,td){ const ts=r.ts||{};
 async function dpLoadScans(awb){ _dpScanCache[awb]={loading:true}; try{
         const r=await fetch(`/api/delivery-performance/shipment/${encodeURIComponent(awb)}`,{headers:getAuthHeaders()});
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
-        _dpScanCache[awb]={loading:false,scans:d.scans||[],live:!!d.live,dp:d.dp||null,edd:(d.journey&&d.journey.ts&&d.journey.ts.edd)||null};
+        _dpScanCache[awb]={loading:false,scans:d.scans||[],live:!!d.live,dp:d.dp||null,edd:(d.journey&&d.journey.ts&&d.journey.ts.edd)||null,charges:d.charges||null,chargesLive:!!d.chargesLive};
     }catch(e){ _dpScanCache[awb]={loading:false,error:e.message}; }
     if(_dpOpenAwb===awb) dpTableRender();
 }
