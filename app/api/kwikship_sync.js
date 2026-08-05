@@ -62,10 +62,17 @@ function parseKwikDate(v) {
 // the shipment's top-level `status` (the actual internal status, not the filter group name).
 function parseKwikshipJourney(statusHistory, currentStatus, courier, zone) {
     const status = String(currentStatus || '').toLowerCase().trim();
+    // Field names differ between the two Kwikship endpoints, so accept both:
+    //   v1 (auth)   → { status, description, location, datetime }
+    //   v2 (public) → { status, description, location, status_datetime, creation_datetime,
+    //                   shipper_status, shipper_remark }
+    // `shipper_remark` is the ONLY human NDR reason either endpoint gives ("Consignee Unavailable");
+    // v1's `description` is a courier code (`UD_EOD-11_Pending`) that means nothing to an agent, so
+    // prefer the remark and keep the code as the fallback.
     const evts = (statusHistory || [])
         .map(h => ({
-            desc: h.description || h.status || '',
-            at: parseKwikDate(h.datetime || h.date || h.timestamp),
+            desc: h.shipper_remark || h.description || h.status || '',
+            at: parseKwikDate(h.status_datetime || h.datetime || h.date || h.timestamp || h.creation_datetime),
             type: classifyKwikStatus(h.status),
         }))
         .filter(e => e.type || e.desc)
@@ -125,6 +132,38 @@ function kwikHeaders() {
     };
 }
 
+// ── Kwikship PUBLIC tracking (v2) — no auth ──────────────────────────────────────────────────────
+// GET /track/v2/public?order_code=<awb|order no>  (merchant_id is accepted but ignored)
+// Why we call it in ADDITION to v1: it is the only endpoint that carries `shipper_remark`, the human
+// NDR reason ("Consignee Unavailable"). v1's `description` is a courier code (`UD_EOD-11_Pending`)
+// that tells an agent nothing — production rows were storing exactly that. It is NOT a replacement:
+// v2 has no current status, no shipping address (so no zone) and only a masked phone, so v1 stays the
+// source of identity and this supplies the reason-bearing timeline.
+async function fetchKwikshipPublic(awb, tries = 2) {
+    if (!awb) return { found: false };
+    const base = String(config.KWIKSHIP_BASE_URL || '').replace(/\/+$/, '');
+    for (let attempt = 1; attempt <= tries; attempt++) {
+        try {
+            const r = await axios.get(`${base}/track/v2/public?order_code=${encodeURIComponent(awb)}`,
+                { timeout: 20000, validateStatus: () => true });
+            if (r.status === 429 || r.status >= 500) { if (attempt < tries) { await _sleep(attempt * 1200); continue; } return { found: false }; }
+            const d = r.data && r.data.data;
+            if (r.status !== 200 || !d) return { found: false };
+            const hist = Array.isArray(d.statusHistory) ? d.statusHistory : [];
+            if (!hist.length) return { found: false };
+            return {
+                found: true,
+                statusHistory: hist,
+                // shipper_info.shipper_name is v1's courier_name; master_shipper_name is the parent carrier.
+                courier: (d.shipper_info && (d.shipper_info.shipper_name || d.shipper_info.master_shipper_name)) || null,
+                edd: parseKwikDate(d.estimated_dd),
+                orderCode: (d.product_details && d.product_details.orderCode) || d.order_id || null,
+            };
+        } catch (e) { if (attempt < tries) { await _sleep(attempt * 1000); continue; } return { found: false, error: e.message }; }
+    }
+    return { found: false };
+}
+
 // Fetch one shipment's detail (status_history + address) by AWB. Retries on 429/5xx.
 // Returns { found, status, courier, statusHistory, state, city, edd } | { found:false }.
 async function fetchKwikshipShipment(awb, tries = 3) {
@@ -156,17 +195,93 @@ async function fetchKwikshipShipment(awb, tries = 3) {
 // Resolve + save ONE Kwikship order's journey. zoneHint = destination-derived zone from EasyEcom
 // address (used when the Kwikship detail response has no state/city). Returns true if saved.
 async function updateKwikshipJourney(awb, orderName, courier, orderDate, paymentMode, zoneHint) {
-    const s = await fetchKwikshipShipment(awb);
-    if (!s.found) return false;
-    const zone = zoneFromState(s.state, s.city) || zoneHint || null;
-    const j = parseKwikshipJourney(s.statusHistory, s.status, s.courier || courier, zone);
-    if (s.edd) j.first_edd = s.edd;
+    // API BUDGET — v2 first, v1 only when we actually need it.
+    // v2 (public, no auth) carries the whole timeline plus the NDR reason, and its newest scan IS the
+    // current status. v1's unique contribution is identity: shipping address → zone, courier, EDD —
+    // none of which ever change once captured. So a shipment we've already stored needs v2 ONLY, and
+    // the nightly run costs the same one call per shipment it did before this change.
+    // v1 is still fetched when: v2 failed, or we have no stored zone/courier yet (first sync).
+    const pub = await fetchKwikshipPublic(awb);
+    let known = null;
+    if (pub.found) {
+        const { data } = await supabase.from('shipment_journey_ecom')
+            .select('zone, courier, first_edd').eq('awb', awb).maybeSingle();
+        known = data || null;
+    }
+    const needV1 = !pub.found || !known || !known.zone || !known.courier;
+    const s = needV1 ? await fetchKwikshipShipment(awb) : { found: true, statusHistory: [], status: '', courier: null, state: null, city: null, edd: null };
+    if (!s.found && !pub.found) return false;
+
+    const zone = zoneFromState(s.state, s.city) || (known && known.zone) || zoneHint || null;
+    const timeline = (pub.found && pub.statusHistory.length) ? pub.statusHistory : s.statusHistory;
+    if (!timeline.length) return false;
+    // Current status: v1's top-level `status` when we fetched it, else the newest v2 scan — the two agree
+    // (verified on live shipments), and v2's history is already sorted newest-first.
+    const curStatus = s.status || (pub.found ? String(pub.statusHistory[0].status || '') : '');
+    const j = parseKwikshipJourney(timeline, curStatus, s.courier || (known && known.courier) || pub.courier || courier, zone);
+    const edd = s.edd || pub.edd || (known && known.first_edd) || null;
+    if (edd) j.first_edd = edd;
     // Keep the timeline as evidence on a silent RTO so the claims report can show it with 0 extra calls.
-    const raw = j.rto_no_attempt ? { status_history: s.statusHistory, status: s.status, captured_at: new Date().toISOString() } : null;
+    // Use the MERGED timeline/status — v1's copies are empty whenever we skipped that call.
+    const raw = j.rto_no_attempt ? { status_history: timeline, status: curStatus, captured_at: new Date().toISOString() } : null;
     await saveJourney(awb, orderName, 'kwikship', j, orderDate, raw, paymentMode);
     // If this order was re-allocated to Kwikship from another aggregator, drop the stale (non-final) old row.
     if (orderName) await supersedeStaleJourneys(orderName, awb);
     return true;
+}
+
+// ── One-off backfill: replace courier-CODE NDR reasons with the human remark ─────────────────────
+// Rows synced before the v2 timeline landed stored v1's `description` — "UD_EOD-11_Pending" — which
+// tells an agent nothing. This re-reads ONLY the public v2 endpoint (no auth, no credentials) for the
+// handful of rows that actually carry such a code, and rewrites `ndr_reasons` alone.
+//
+// Deliberately light: it selects only rows whose reasons look like courier codes (28 of 271 today, the
+// rest have no NDR at all), so it is a few dozen calls, not a full re-sync. Nothing else on the row is
+// touched — outcome/attempts/ndr_count are already correct and must not move.
+const CODE_RE = /^UD[_-]|_(Pending|Dispatched|Delivered)$/i;
+async function backfillKwikshipNdrReasons({ concurrency = 3, sleepMs = 400, dry = false } = {}) {
+    const rows = [];
+    for (let f = 0; ; f += 1000) {
+        const { data, error } = await supabase.from('shipment_journey_ecom')
+            .select('awb, ndr_reasons').eq('source', 'kwikship').gt('ndr_count', 0)
+            .order('awb', { ascending: true }).range(f, f + 999);
+        if (error) { console.error('[Kwikship BF] select:', error.message); break; }
+        rows.push(...(data || []));
+        if (!data || data.length < 1000) break;
+    }
+    const need = rows.filter(r => Array.isArray(r.ndr_reasons) && r.ndr_reasons.some(x => CODE_RE.test(String(x))));
+    console.log(`[Kwikship BF] ${need.length} row(s) carry courier-code reasons (of ${rows.length} with NDRs)${dry ? ' — DRY RUN' : ''}`);
+    let i = 0, updated = 0, unchanged = 0, missed = 0;
+    const worker = async () => {
+        while (i < need.length) {
+            const r = need[i++];
+            try {
+                const pub = await fetchKwikshipPublic(r.awb);
+                if (!pub.found) { missed++; continue; }
+                // Same rule the parser uses: only a failed attempt AFTER an OFD counts as an NDR.
+                const evts = pub.statusHistory
+                    .map(h => ({ type: classifyKwikStatus(h.status), desc: h.shipper_remark || h.description || '', at: parseKwikDate(h.status_datetime || h.creation_datetime) }))
+                    .sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+                let seenOFD = false; const reasons = [];
+                for (const e of evts) {
+                    if (e.type === 'attempt') seenOFD = true;
+                    else if (e.type === 'ndr' && seenOFD && e.desc) reasons.push(e.desc);
+                }
+                const next = [...new Set(reasons)].slice(0, 10);
+                if (!next.length || JSON.stringify(next) === JSON.stringify(r.ndr_reasons)) { unchanged++; continue; }
+                if (!dry) {
+                    const { error } = await supabase.from('shipment_journey_ecom').update({ ndr_reasons: next }).eq('awb', r.awb);
+                    if (error) { console.error(`[Kwikship BF] ${r.awb}:`, error.message); missed++; continue; }
+                }
+                updated++;
+                console.log(`[Kwikship BF] ${r.awb}: ${JSON.stringify(r.ndr_reasons)} -> ${JSON.stringify(next)}`);
+            } catch (e) { missed++; }
+            await _sleep(sleepMs);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, need.length || 1) }, worker));
+    console.log(`[Kwikship BF] done — ${updated} updated, ${unchanged} already fine, ${missed} unavailable`);
+    return { candidates: need.length, updated, unchanged, missed };
 }
 
 // Nightly sync: refresh journeys for Kwikship-allocated orders (location = 'kwikship') that are NOT
@@ -225,7 +340,7 @@ async function syncKwikship({ days = 30, concurrency = 3, sleepMs = 300 } = {}) 
     return { processed: todo.length, updated, none, total: list.length };
 }
 
-module.exports = { classifyKwikStatus, kwikOutcome, parseKwikDate, parseKwikshipJourney, fetchKwikshipShipment, updateKwikshipJourney, syncKwikship };
+module.exports = { classifyKwikStatus, kwikOutcome, parseKwikDate, parseKwikshipJourney, fetchKwikshipShipment, fetchKwikshipPublic, updateKwikshipJourney, syncKwikship, backfillKwikshipNdrReasons };
 
 // CLI: node app/api/kwikship_sync.js sync [days] [concurrency]
 if (require.main === module && process.argv[2] === 'sync') {

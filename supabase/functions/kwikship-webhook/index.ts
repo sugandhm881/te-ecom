@@ -64,8 +64,12 @@ function parseKwikshipJourney(statusHistory: any[], currentStatus: string, couri
   const status = String(currentStatus || "").toLowerCase().trim();
   const evts = (statusHistory || [])
     .map((h: any) => ({
-      desc: h.description || h.status || "",
-      at: parseKwikDate(h.datetime || h.date || h.timestamp),
+      // Accept BOTH Kwikship shapes: v1 (auth) {datetime, description} and v2 (public)
+      // {status_datetime, shipper_remark}. `shipper_remark` is the only HUMAN NDR reason either
+      // endpoint gives ("Consignee Unavailable"); v1's description is a courier code
+      // ("UD_EOD-11_Pending") that means nothing to an agent, so prefer the remark.
+      desc: h.shipper_remark || h.description || h.status || "",
+      at: parseKwikDate(h.status_datetime || h.datetime || h.date || h.timestamp || h.creation_datetime),
       type: classifyKwikStatus(h.status),
     }))
     .filter((e: any) => e.type || e.desc)
@@ -102,6 +106,27 @@ function parseKwikshipJourney(statusHistory: any[], currentStatus: string, couri
 }
 
 // Fetch authoritative shipment detail from Kwikship. Returns null if creds missing or not found.
+// ── Kwikship PUBLIC tracking (v2) — no auth, no credentials ──────────────────────────────────────
+// GET /track/v2/public?order_code=<awb>   (merchant_id is accepted but ignored)
+// Called ALONGSIDE v1, not instead of it: v2 is the only source of `shipper_remark` (the human NDR
+// reason), while v1 owns the current status, courier and shipping address (→ zone). Because it needs
+// no credentials it also still works if KWIKSHIP_APP_ID/SECRET are ever missing or rotated.
+async function fetchKwikshipPublic(awb: string) {
+  try {
+    const r = await fetch(`${KWIK_BASE}/track/v2/public?order_code=${encodeURIComponent(awb)}`);
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => null);
+    const d = j && j.data;
+    const hist = d && Array.isArray(d.statusHistory) ? d.statusHistory : [];
+    if (!hist.length) return null;
+    return {
+      statusHistory: hist,
+      courier: (d.shipper_info && (d.shipper_info.shipper_name || d.shipper_info.master_shipper_name)) || null,
+      edd: parseKwikDate(d.estimated_dd),
+    };
+  } catch (_) { return null; }
+}
+
 async function fetchKwikshipShipment(awb: string) {
   const id = Deno.env.get("KWIKSHIP_APP_ID"), secret = Deno.env.get("KWIKSHIP_APP_SECRET");
   if (!id || !secret || !awb) return null;
@@ -184,16 +209,24 @@ Deno.serve(async (req) => {
     }
 
     // AUTHORITATIVE: pull the full timeline from Kwikship's API (falls back to the webhook body if creds/API unavailable).
-    const detail = await fetchKwikshipShipment(awb);
-    const statusHistory = detail ? detail.statusHistory : (extractStatusHistory(payload) || []);
-    const curStatus = detail ? detail.status : extractStatus(payload);
-    const courier = detail ? detail.courier : (payload.courier_name || payload.courier || null);
+    // Both endpoints in parallel. v1 = identity (status/courier/address→zone); v2 = the timeline that
+    // carries the NDR reason. Either can fail independently without losing the other.
+    const [detail, pub] = await Promise.all([fetchKwikshipShipment(awb), fetchKwikshipPublic(awb)]);
+    // Timeline preference: v2 (has shipper_remark) → v1 → whatever the webhook body carried.
+    const statusHistory = (pub && pub.statusHistory.length) ? pub.statusHistory
+      : (detail ? detail.statusHistory : (extractStatusHistory(payload) || []));
+    // Current status: v1 when we have it, else v2's NEWEST scan (its history is newest-first and the
+    // two agree on live shipments), else whatever the event body carried.
+    const curStatus = (detail && detail.status)
+      || (pub && pub.statusHistory.length ? String(pub.statusHistory[0].status || "") : "")
+      || extractStatus(payload);
+    const courier = (detail && detail.courier) || (pub && pub.courier) || payload.courier_name || payload.courier || null;
 
     // If we have NEITHER an authoritative fetch NOR any timeline/status in the event body, do NOT upsert —
     // a data-less ping must never overwrite fields the cron already set (courier/attempts/outcome…). Ack and
     // let the 2 AM cron own it. (Set KWIKSHIP_APP_ID/KWIKSHIP_APP_SECRET secrets so the authoritative fetch
     // always runs and this branch is never hit.)
-    if (!detail && !(statusHistory && statusHistory.length) && !curStatus) {
+    if (!detail && !pub && !(statusHistory && statusHistory.length) && !curStatus) {
       console.log(`[kwikship-webhook] ${awb}: no timeline in event + Kwikship API creds not set — acking; cron will sync.`);
       await logHit("no-timeline", { awb });
       return new Response(JSON.stringify({ success: true, awb, note: "no timeline; deferred to cron" }),

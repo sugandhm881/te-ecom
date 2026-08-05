@@ -6,7 +6,7 @@ const router = express.Router();
 const ExcelJS = require('exceljs');
 const { supabase } = require('../supabase');
 const { fetchRsShipment, parseScanDate, parseDpDate } = require('./delivery_journey');
-const { fetchKwikshipShipment, parseKwikDate } = require('./kwikship_sync');
+const { fetchKwikshipShipment, fetchKwikshipPublic, parseKwikDate } = require('./kwikship_sync');
 const { fetchDocpharmaDetails } = require('./helpers');
 const { requirePermission } = require('../auth');
 // Email-send routes below are gated by the 'send-escalation-emails' capability (admins pass via '*';
@@ -494,8 +494,17 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
         })).filter(x => x.desc).sort((a, b) => (a.at || '').localeCompare(b.at || ''));
         // Kwikship status_history → { at, desc, code, location } (its own shape; used for both cache-read + live).
         const ksHuman = s => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        // Accepts BOTH Kwikship shapes: v1 (auth) {datetime, description} and v2 (public)
+        // {status_datetime, shipper_remark}. `shipper_remark` is the human reason a support agent needs
+        // ("Consignee Unavailable"); v1's `description` is a courier code ("UD_EOD-11_Pending") that says
+        // nothing — so prefer the remark and keep the code as the fallback.
         const ksScans = (hist) => (hist || [])
-            .map(h => ({ at: parseKwikDate(h.datetime || h.date), desc: h.description || ksHuman(h.status), code: h.status || '', location: h.location || '' }))
+            .map(h => ({
+                at: parseKwikDate(h.status_datetime || h.datetime || h.date || h.creation_datetime),
+                desc: h.shipper_remark || h.description || ksHuman(h.status),
+                code: h.status || '',
+                location: h.location || '',
+            }))
             .filter(x => x.desc).sort((a, b) => (a.at || '').localeCompare(b.at || ''));
 
         // Serve from the cached scan log if we have one — raw.scans (RapidShyp) or raw.status_history (Kwikship).
@@ -507,7 +516,10 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
 
         if (!scans || !scans.length) {
             if (j?.source === 'kwikship') {                        // Kwikship — real status_history timeline (by AWB)
-                const ks = await fetchKwikshipShipment(awb);
+                // PUBLIC v2 first: same timeline, plus the per-scan `shipper_remark`, and no auth needed.
+                // Falls back to the authenticated v1 if v2 is unavailable.
+                let ks = await fetchKwikshipPublic(awb);
+                if (!(ks.found && ks.statusHistory && ks.statusHistory.length)) ks = await fetchKwikshipShipment(awb);
                 if (ks.found && ks.statusHistory && ks.statusHistory.length) {
                     scans = ksScans(ks.statusHistory); live = true;
                     if (j && !(j.raw && Array.isArray(j.raw.status_history))) {   // cache back so repeat views cost 0 API calls (matches RapidShyp)
