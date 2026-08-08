@@ -4059,9 +4059,9 @@ function supQueueInit(){
   supRenderRange('sup-range-queue', supLoadQueue);
   if(!_supQueueWired){ _supQueueWired=true;
     document.querySelectorAll('.sup-tab').forEach(b=>b.addEventListener('click',()=>{ _supTab=b.dataset.tab; supTabPaint(); supLoadQueue(); }));
-    ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
+    ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay','sup-f-platform'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
     document.getElementById('sup-f-notesearch')?.addEventListener('input', debounce(supQueueTable,250));
-    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay'].forEach((id,i)=>{ const el=document.getElementById(id); if(el) el.value=['all','any','all','all'][i]; }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
+    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay','sup-f-platform'].forEach((id,i)=>{ const el=document.getElementById(id); if(el) el.value=['all','any','all','all','all'][i]; }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
     document.getElementById('sup-refresh')?.addEventListener('click', supRefreshTracking);
   }
   supTabPaint(); supLoadQueue();
@@ -4121,7 +4121,12 @@ function supQueueTable(){
   const fA=document.getElementById('sup-f-age')?.value||'any';
   const fH=document.getElementById('sup-f-hold')?.value||'all';
   const fP=document.getElementById('sup-f-pay')?.value||'all';
-  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fH!=='all'||fP!=='all'||_supSort)?'':'none';
+  // Courier platform. Only meaningful once a shipment exists, so the control is hidden on Repeat — and
+  // forced back to 'all' there, otherwise a filter left set on Undelivered would silently empty that tab.
+  const platSel=document.getElementById('sup-f-platform'), platOn=_supTab!=='repeat';
+  if(platSel){ platSel.style.display=platOn?'':'none'; if(!platOn) platSel.value='all'; }
+  const fL=platOn?(platSel?.value||'all'):'all';
+  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fH!=='all'||fP!=='all'||fL!=='all'||_supSort)?'':'none';
   let list=_supQueueRows.slice();
   if(fN==='with') list=list.filter(r=>r.note_count>0);
   if(fN==='none') list=list.filter(r=>!r.note_count);
@@ -4130,6 +4135,9 @@ function supQueueTable(){
     return fA==='lt1'?dAge<1:fA==='1-3'?(dAge>=1&&dAge<3):fA==='3-7'?(dAge>=3&&dAge<7):dAge>=7; });
   if(fH!=='all'){ const isHeld=r=>(r.shopify_hold&&r.shopify_hold.status==='held')||r.ee_hold; list=list.filter(r=>fH==='held'?isHeld(r):!isHeld(r)); }
   if(fP!=='all') list=list.filter(r=>String(r.payment||'').toLowerCase()===fP);
+  // 'none' = the server couldn't resolve a platform (no journey row yet, no usable partner/courier) —
+  // worth being able to isolate, since those are the rows whose tracking nobody is syncing.
+  if(fL!=='all') list=list.filter(r=>{ const p=String(r.platform||'').toLowerCase(); return fL==='none'?!p:p===fL; });
   if(_supSort&&_supSort.k) list.sort(_supSortCmp(_supSort.k,_supSort.d));   // else keep the server order (confirmed → oldest)
   const cnt=document.getElementById('sup-queue-count'); if(cnt) cnt.textContent=`${list.length} shown`;
   document.querySelector(`.sup-tab[data-tab="${_supTab}"] .sup-tab-count`).textContent=`(${list.length})`;
