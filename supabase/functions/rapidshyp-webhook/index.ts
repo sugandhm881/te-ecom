@@ -96,10 +96,18 @@ function parseRapidshypJourney(scans: any[], currentStatus: string, courier: str
     else if (e.type === "lost" && !lostAt) lostAt = e.at;
   }
   const codeOut = codeOutcome(statusCode);
-  const delivered = codeOut === "delivered" || !!deliveredAt || (/deliver/.test(status) && !/rto/.test(status));
+  // ⚠️ `\bdelivered\b`, NOT `/deliver/`. The loose test matched **OUT_FOR_DELIVERY** (and UNDELIVERED),
+  // so every webhook event on a shipment that was merely out for delivery wrote outcome='delivered' with
+  // is_final=true and delivered_at=null — and because the nightly sync SKIPS final shipments by design,
+  // the row could never correct itself. 264 rows were frozen this way, 176 of them on parcels that were
+  // still in transit / on NDR (TE25-38414 read "Delivered · after NDR" while out for delivery).
+  // The Node parser was fixed months ago; THIS FILE was not, and it is the one RapidShyp actually calls.
+  // The header says "PORTS the Node parseRapidshypJourney() logic exactly" — keep it true.
+  const delivered = codeOut === "delivered" || !!deliveredAt || (/\bdelivered\b/.test(status) && !/not[\s_-]*delivered|undeliver|rto/.test(status));
   const rto = codeOut === "rto" || !!rtoAt || /\brto|return/.test(status);
   const lost = codeOut === "lost" || !!lostAt || /\blost\b/.test(status);
-  const reached_delivery = seenOFD || delivered || /out for delivery/.test(status);
+  // Underscore form too — RapidShyp sends OUT_FOR_DELIVERY, which /out for delivery/ never matched.
+  const reached_delivery = seenOFD || delivered || /out[\s_]for[\s_]delivery/.test(status);
   const outcome = delivered ? "delivered" : rto ? "rto" : lost ? "lost" : (ndr_count > 0 ? "ndr_pending" : "in_transit");
 
   return {
@@ -111,7 +119,11 @@ function parseRapidshypJourney(scans: any[], currentStatus: string, courier: str
     dispatched_at: pickedUpAt, zone: zone || null, status_code: statusCode || null,
     first_edd: parseScanDate(edd) || null,
     rto_no_attempt: rto && !seenOFD,
-    is_final: delivered || rto || lost,
+    // ⚠️ NEVER FINALIZE A DELIVERY WITHOUT EVIDENCE (mirrors the Node parser — keep both in step).
+    // A wrong `outcome` self-corrects on the next sync; a wrong `is_final` does NOT, because the sync
+    // skips final shipments. Finality therefore requires a DEL code or a real delivered scan. With this
+    // in place, even a future text-matching mistake repairs itself instead of freezing the row forever.
+    is_final: (delivered && (codeOut === "delivered" || !!deliveredAt)) || rto || lost,
   };
 }
 

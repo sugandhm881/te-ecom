@@ -659,8 +659,9 @@ const PLATFORM_LABEL = { rapidshyp: 'RapidShyp', docpharma: 'DocPharma', kwikshi
 // restricts to one platform; otherwise BOTH are attempted. A platform is skipped when it has no matching
 // rows OR no recipient configured. fetchFn(fromISO,toISO,platform,extra) → rows; buildFn(rows,rangeLabel,
 // platform,extra) → { subject, html }. Returns { ok, skipped?, reason?, to, count, results }.
-async function sendReportPerPlatform({ fetchFn, buildFn, rg, source, extra }) {
-    const platforms = source ? [source] : ['rapidshyp', 'docpharma', 'kwikship'];
+async function sendReportPerPlatform({ fetchFn, buildFn, rg, source, extra, exclude }) {
+    const skip = new Set(exclude || []);
+    const platforms = (source ? [source] : ['rapidshyp', 'docpharma', 'kwikship']).filter(p => !skip.has(p));
     const results = [];
     for (const p of platforms) {
         const rows = await fetchFn(rg.fromISO, rg.toISO, p, extra);
@@ -893,7 +894,7 @@ function buildFirstOfdMail(rows, rangeLabel, platform) {
 }
 async function sendFirstOfdReport(opts = {}) {
     const rg = opts.fromISO ? opts : rangeEndingYesterday(opts.days || 30);
-    return sendReportPerPlatform({ fetchFn: fetchFirstOfdLate, buildFn: buildFirstOfdMail, rg, source: opts.source });
+    return sendReportPerPlatform({ fetchFn: fetchFirstOfdLate, buildFn: buildFirstOfdMail, rg, source: opts.source, exclude: opts.exclude });
 }
 
 // Shared email chrome — a titled card with a striped table; `rightCols` are right-aligned header cells.
@@ -1084,12 +1085,33 @@ router.post('/critical-email/compose', requireEmailSender, async (req, res) => {
             .in('awb', awbs);
         const rows = data || [];
         if (!rows.length) return res.status(400).json({ success: false, message: 'Selected shipments not found.' });
-        // Route the escalation to the RIGHT courier partner by shipment source: DocPharma rows → DocPharma
-        // recipients, everything else (RapidShyp / Kwikship) → RapidShyp. CC (our team) comes from the same
-        // per-platform config. Dominant source wins when a batch is mixed.
-        const dpN = rows.filter(r => r.source === 'docpharma').length;
-        const platform = dpN > rows.length / 2 ? 'docpharma' : 'rapidshyp';
+        // ── Route to the courier platform the order is ACTUALLY on ────────────────────────────────────
+        // Was: DocPharma rows → DocPharma, "everything else (RapidShyp / Kwikship) → RapidShyp". So every
+        // KwikShip escalation was addressed to RapidShyp — a courier with no visibility of the shipment.
+        // Now each of the three routes to its own recipients, taken from the shipment's `source`.
+        //
+        // ⚠️ MIXED BATCHES ARE REFUSED, not averaged. The old rule let the DOMINANT source win, so a basket
+        // of 6 RapidShyp + 5 KwikShip orders sent all 11 to RapidShyp — the exact cross-delivery this is
+        // meant to prevent, and easy to hit now that the basket collects orders across a whole shift.
+        // One email, one courier: the agent escalates each platform separately.
+        const PLATFORM_LABEL = { rapidshyp: 'RapidShyp', docpharma: 'DocPharma', kwikship: 'KwikShip' };
+        const platformOf = r => (r.source === 'docpharma' || r.source === 'kwikship') ? r.source : 'rapidshyp';
+        const counts = {};
+        rows.forEach(r => { const p = platformOf(r); counts[p] = (counts[p] || 0) + 1; });
+        const present = Object.keys(counts);
+        if (present.length > 1) {
+            const split = present.map(p => `${counts[p]} ${PLATFORM_LABEL[p]}`).join(' + ');
+            return res.status(400).json({ success: false,
+                message: `This selection mixes couriers (${split}). An escalation goes to ONE courier — send them separately so no order is raised with a partner that never carried it.`,
+                mixed: counts });
+        }
+        const platform = present[0] || 'rapidshyp';
         const rcpt = await recipientsFor(platform);
+        // An unmapped platform must fail loudly here rather than silently fall back to another courier.
+        if (!rcpt.to || !rcpt.to.length) {
+            return res.status(400).json({ success: false,
+                message: `No escalation email is mapped for ${PLATFORM_LABEL[platform]}. Add it in Settings → Email (${platform === 'kwikship' ? 'KwikShip' : PLATFORM_LABEL[platform]} To).` });
+        }
         const toHint = (rcpt.to || []).join(', ');
         const toneLine = MAIL_TONES[req.body && req.body.tone] || MAIL_TONES.formal;
         // Pick the narrative from the ACTUAL data (fake / stuck-no-scan / repeated-NDR / general) — not
@@ -1142,10 +1164,17 @@ router.post('/critical-email/send', requireEmailSender, async (req, res) => {
         const { subject, body, to, tableHtml } = req.body || {};
         if (!subject || !body) return res.status(400).json({ success: false, message: 'Subject and body are required.' });
         const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#0f172a;max-width:840px;white-space:pre-wrap;line-height:1.5;">${esc(body)}</div>${tableHtml || ''}`;
-        // TO = the courier partner for this shipment's source (DocPharma vs RapidShyp); CC = our team.
-        // A hand-typed recipient overrides the TO; the platform's CC (internal team) is always applied.
-        const platform = (req.body && req.body.platform) === 'docpharma' ? 'docpharma' : 'rapidshyp';
+        // TO = the courier partner this shipment is actually on (RapidShyp / DocPharma / KwikShip);
+        // CC = our team. A hand-typed recipient overrides the TO; the platform's CC is always applied.
+        // The platform comes from the draft, which derived it from the shipments' own `source` — so the
+        // send cannot address a different courier than the one the draft was written for.
+        const PLATFORMS = ['rapidshyp', 'docpharma', 'kwikship'];
+        const platform = PLATFORMS.includes(req.body && req.body.platform) ? req.body.platform : 'rapidshyp';
         const rcpt = await recipientsFor(platform);
+        // Never fall back to another courier's list — that is how a KwikShip escalation reached RapidShyp.
+        if (!to && (!rcpt.to || !rcpt.to.length)) {
+            return res.status(400).json({ success: false, message: `No escalation email is mapped for ${platform}. Add it in Settings → Email.` });
+        }
         const toList = to ? to : (rcpt.to && rcpt.to.length ? rcpt.to : null);
         const r = await sendMail({ to: toList || undefined, cc: rcpt.cc, subject, html, text: body });
         // Log which orders were escalated (audit + the row shows "mail sent", prevents accidental dupes).

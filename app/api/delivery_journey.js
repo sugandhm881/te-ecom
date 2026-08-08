@@ -150,7 +150,16 @@ function parseRapidshypJourney(scans, currentStatus, courier, zone, statusCode, 
         // RTO'd but the courier NEVER went Out for Delivery (no OFD scan) → a "silent RTO" returned
         // without ever attempting delivery. Flagged for the "RTO without attempt" report.
         rto_no_attempt: rto && !seenOFD,
-        is_final: delivered || rto || lost,
+        // ⚠️ NEVER FINALIZE A DELIVERY WITHOUT EVIDENCE. This is the guard that makes the whole class of
+        // bug self-healing. A wrong `outcome` is recoverable — the next sync overwrites it. A wrong
+        // `is_final` is NOT: the sync SKIPS final shipments by design, so the row is locked out of every
+        // future correction. That is precisely how a single loose regex (/deliver/ matching
+        // OUT_FOR_DELIVERY) left 264 rows permanently reading "Delivered", 176 of them on parcels still
+        // in transit or on NDR.
+        // Evidence = a DEL status code, or an actual delivered SCAN (which is what sets delivered_at).
+        // A text-only "delivered" still reports as delivered, but stays re-checkable — so if the text
+        // test is ever wrong again, the very next sync repairs it instead of freezing it forever.
+        is_final: (delivered && (codeOut === 'delivered' || !!deliveredAt)) || rto || lost,
     };
 }
 
@@ -656,8 +665,76 @@ async function reprocessDocpharma({ concurrency = 4, onlyBadDelivered = true } =
     return { processed: rows.length, changed, changes };
 }
 
+// ── Repair rows FROZEN as delivered by the old /deliver/ parser bug (RapidShyp) ──────────────────
+// ⚠️ THE SIGNATURE: `outcome='delivered'` with `delivered_at IS NULL`. A genuine delivery always carries
+// a DEL scan and therefore a timestamp, so this combination is impossible from correct parsing.
+//
+// HOW THEY GOT STUCK, and why nothing self-healed:
+//   1. The old parser tested /deliver/ against the current status. "OUT_FOR_DELIVERY" contains "deliver",
+//      so any shipment caught mid-OFD was written as outcome='delivered'.
+//   2. `is_final = delivered || rto || lost` → true.
+//   3. The nightly sync SKIPS final shipments by design (a real delivery never changes, so re-fetching
+//      wastes an API call). A wrongly-final row is therefore never looked at again.
+//   4. The parser was fixed (`\bdelivered\b`, which does NOT match OUT_FOR_DELIVERY) — but the fix only
+//      protects NEW rows. The already-frozen ones stayed wrong, permanently.
+// `reprocessDocpharma` was written to repair exactly this for DocPharma; RapidShyp never got the twin,
+// which is why 264 rows were still reading "Delivered · after NDR" on shipments out for delivery.
+//
+// Ignores `is_final` (that flag is the thing being corrected) and passes dry:true to preview only.
+async function reprocessBadDelivered({ concurrency = 3, sleepMs = 250, source = 'rapidshyp', dry = false } = {}) {
+    const { data, error } = await supabase.from('shipment_journey_ecom')
+        .select('awb, order_name, courier, order_date, payment_mode, outcome, status_code, zone')
+        .eq('source', source).eq('outcome', 'delivered').is('delivered_at', null).limit(5000);
+    if (error) { console.error('[BadDelivered] select:', error.message); return { processed: 0, changed: 0 }; }
+    const rows = data || [];
+    console.log(`[BadDelivered] ${rows.length} ${source} row(s) marked delivered with NO delivered_at${dry ? ' — DRY RUN' : ''}`);
+    let i = 0, processed = 0, changed = 0, unreachable = 0; const changes = {};
+    const worker = async () => {
+        while (i < rows.length) {
+            const r = rows[i++];
+            try {
+                const rs = await fetchRsShipment(r.awb);
+                if (!rs.found) { unreachable++; continue; }
+                const j = parseRapidshypJourney(rs.scans, rs.status, rs.courier || r.courier, rs.zone || r.zone, rs.statusCode, rs.eddRaw);
+                processed++;
+                if (j.outcome !== r.outcome) { changed++; const k = `${r.outcome} → ${j.outcome}`; changes[k] = (changes[k] || 0) + 1; }
+                if (!dry) {
+                    const raw = j.rto_no_attempt ? { scans: rs.scans, status: rs.status, status_code: rs.statusCode, captured_at: new Date().toISOString() } : null;
+                    await saveJourney(r.awb, r.order_name, 'rapidshyp', j, r.order_date, raw, r.payment_mode);
+                }
+            } catch (_e) { unreachable++; }
+            await _sleep(sleepMs);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, rows.length || 1) }, worker));
+    console.log(`[BadDelivered] ${dry ? 'WOULD CHANGE' : 'DONE — changed'} ${changed}/${processed}${unreachable ? ` (${unreachable} unreachable)` : ''}`, JSON.stringify(changes));
+    return { total: rows.length, processed, changed, unreachable, changes };
+}
+
+// ── Impossible-state detector — the third layer, so this can never hide again ────────────────────
+// Layer 1 fixed the regex. Layer 2 (evidence-required `is_final`) means a future mistake self-heals.
+// This is the alarm: a cheap DB-only count of states that CANNOT exist if the parsers are correct.
+//   • delivered with no delivered_at  — a real delivery always carries a DEL scan
+//   • delivered + is_final + no delivered_at — the frozen state that made the 2026-08-08 bug permanent
+// It went unnoticed for weeks because nothing was watching; now the nightly sync logs it, and any
+// non-zero count names the exact repair to run. Read-only — never writes.
+async function auditJourneyIntegrity({ log = true } = {}) {
+    const q = async (build) => { const { count } = await build(supabase.from('shipment_journey_ecom').select('awb', { count: 'exact', head: true })); return count || 0; };
+    const out = {
+        delivered_without_timestamp: await q(b => b.eq('outcome', 'delivered').is('delivered_at', null)),
+        frozen_delivered: await q(b => b.eq('outcome', 'delivered').is('delivered_at', null).eq('is_final', true)),
+        rto_without_timestamp: await q(b => b.eq('outcome', 'rto').is('rto_at', null).eq('source', 'rapidshyp')),
+    };
+    if (log) {
+        const bad = out.delivered_without_timestamp + out.frozen_delivered;
+        if (bad) console.warn(`[Journey audit] ⚠️ ${out.delivered_without_timestamp} delivered rows with NO delivered_at (${out.frozen_delivered} of them FROZEN is_final) — run reprocessBadDelivered()`);
+        else console.log('[Journey audit] clean — no impossible delivery states');
+    }
+    return out;
+}
+
 module.exports = {
-    backfillAwbAssigned, classifyScan, parseScanDate, parseDpDate, zoneFromState, parseRapidshypJourney, parseDocpharmaJourney, saveJourney, supersedeStaleJourneys, fetchRsShipment, fetchRsShipmentDetails, syncRsCharges, syncChargesBatch, backfillCharges, updateJourneyForOrder, backfillJourneys, backfillTatZone, reprocessInTransit, reprocessFinal, reprocessDocpharma };
+    backfillAwbAssigned, classifyScan, parseScanDate, parseDpDate, zoneFromState, parseRapidshypJourney, parseDocpharmaJourney, saveJourney, supersedeStaleJourneys, fetchRsShipment, fetchRsShipmentDetails, syncRsCharges, syncChargesBatch, backfillCharges, updateJourneyForOrder, backfillJourneys, backfillTatZone, reprocessInTransit, reprocessFinal, reprocessDocpharma, reprocessBadDelivered, auditJourneyIntegrity };
 
 // CLI: node app/api/delivery_journey.js backfill [days] [concurrency] [olderThanDays]
 //   `backfill 90 2 30` → gentle 30–90 day window only (skips the already-done recent 30 days)

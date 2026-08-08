@@ -3555,6 +3555,7 @@ async function renderEmailSettings(){
     set('es-from', s.from_email || s.smtp_user); set('es-rapidshyp', s.rapidshyp_email);
     set('es-to', s.to_emails); set('es-cc', s.cc_emails);
     set('es-dp-to', s.docpharma_to_emails); set('es-dp-cc', s.docpharma_cc_emails);
+  set('es-ks-to', s.kwikship_to_emails); set('es-ks-cc', s.kwikship_cc_emails);
     // Password: show a placeholder indicating one is already stored; blank = keep unchanged.
     const pass=document.getElementById('es-smtp-pass'); if(pass){ pass.value=''; pass.placeholder = s.password_set ? '•••••• (stored — leave blank to keep)' : (f.password_set ? '•••••• (using server default)' : 'not set'); }
     // Fallback placeholders on blank fields.
@@ -3573,6 +3574,7 @@ async function saveEmailSettings(){
     smtp_password:document.getElementById('es-smtp-pass')?.value||'',   // blank = keep existing
     from_email:val('es-from'), rapidshyp_email:val('es-rapidshyp'), to_emails:val('es-to'), cc_emails:val('es-cc'),
     docpharma_to_emails:val('es-dp-to'), docpharma_cc_emails:val('es-dp-cc'),
+  kwikship_to_emails:val('es-ks-to'), kwikship_cc_emails:val('es-ks-cc'),
   };
   if(st){ st.textContent='Saving…'; st.className='text-sm text-slate-500'; }
   try{
@@ -8626,6 +8628,10 @@ function dpPaymentSplit(bp){ const el=document.getElementById('dp-payment-split'
 }
 // #4 — Compose a critical escalation email from the shipments currently shown, AI-polished, review + send.
 // Compose a critical escalation for one AWB (per-order) or many (batch of marked orders), then review + send.
+// Which courier partner an escalation is addressed to. Shown on the draft so an agent can SEE the
+// recipient before sending — a KwikShip NDR must never go to RapidShyp, who never carried the parcel.
+const DP_PLATFORM_LABEL = { rapidshyp:'RapidShyp', docpharma:'DocPharma', kwikship:'KwikShip' };
+const DP_PLATFORM_BADGE = { rapidshyp:'bg-indigo-50 text-indigo-700', docpharma:'bg-teal-50 text-teal-700', kwikship:'bg-amber-50 text-amber-700' };
 async function dpComposeCritical(awbs){
   awbs = (awbs||[]).filter(Boolean).slice(0,60);
   if(!awbs.length){ showNotification('No shipment selected.', true); return; }
@@ -8645,7 +8651,8 @@ function dpCriticalModal(d){
   wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
     <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
       <div><h3 class="text-lg font-bold text-slate-800">Critical escalation email</h3>
-        <p class="text-xs text-slate-400 mt-0.5">${d.count} shipments · ${d.aiUsed?'✨ AI-polished':(d.aiAvailable?('⚠️ AI unavailable'+(d.aiError?' ('+ecEsc(d.aiError)+')':'')+' — using template'):'AI not configured — using template')}</p></div>
+        <p class="text-xs text-slate-400 mt-0.5">${d.count} shipments · ${d.aiUsed?'✨ AI-polished':(d.aiAvailable?('⚠️ AI unavailable'+(d.aiError?' ('+ecEsc(d.aiError)+')':'')+' — using template'):'AI not configured — using template')}</p>
+        <p class="text-[11px] mt-1"><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-bold ${DP_PLATFORM_BADGE[d.platform]||'bg-slate-100 text-slate-600'}">Going to ${ecEsc(DP_PLATFORM_LABEL[d.platform]||d.platform||'—')}</span>${d.toHint?` <span class="text-slate-400">· ${ecEsc(d.toHint)}</span>`:''}</p></div>
       <button id="crit-close" class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button>
     </div>
     <div class="p-6 space-y-4 overflow-y-auto">
@@ -8680,7 +8687,7 @@ function dpCriticalModal(d){
   document.getElementById('crit-body').value = d.body||'';
   // Recipient defaults to the courier partner for this shipment's source (RapidShyp / DocPharma); our team is CC'd.
   const _toEl = document.getElementById('crit-to');
-  if (_toEl) _toEl.placeholder = (d.toHint || ((d.platform==='docpharma'?'DocPharma':'RapidShyp')+' email')) + ' — default from Settings (your team is CC’d)';
+  if (_toEl) _toEl.placeholder = (d.toHint || ((DP_PLATFORM_LABEL[d.platform]||'Courier')+' email')) + ' — default from Settings (your team is CC’d)';
   const close=()=>wrap.remove();
   document.getElementById('crit-close').addEventListener('click', close);
   document.getElementById('crit-cancel').addEventListener('click', close);
@@ -8770,7 +8777,7 @@ async function dpSendCritical(draft){
   const body=document.getElementById('crit-body').value.trim();
   const to=document.getElementById('crit-to').value.trim();
   if(!subject||!body){ if(st){ st.textContent='Subject and message required'; st.className='text-sm text-rose-600'; } return; }
-  const partner = draft.platform==='docpharma' ? 'DocPharma' : 'RapidShyp';
+  const partner = DP_PLATFORM_LABEL[draft.platform] || 'the courier';
   const dest = to ? (' to '+to) : (' to the '+partner+' team'+(draft.toHint?(' ('+draft.toHint+')'):'')+', CC your team');
   if(!confirm('Send this escalation email'+dest+'?')) return;
   if(st){ st.textContent='Sending…'; st.className='text-sm text-slate-500'; }

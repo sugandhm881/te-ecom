@@ -35,9 +35,15 @@ async function getEmailConfig() {
     const docTo = splitList(s.docpharma_to_emails);
     const docCc = s.docpharma_cc_emails ? splitList(s.docpharma_cc_emails) : cc;
     const rsTo = to.length ? to : (rapidshyp ? [rapidshyp] : []);
+    // KwikShip (GoKwik) — its own recipients. ⚠️ NO fallback to the RapidShyp list on purpose: Kwikship
+    // orders used to be lumped in with RapidShyp, which meant escalating a GoKwik NDR to the wrong courier.
+    // An unset mapping must surface as "not configured" so it gets set, never as a silent misdelivery.
+    const kwikTo = splitList(s.kwikship_to_emails);
+    const kwikCc = s.kwikship_cc_emails ? splitList(s.kwikship_cc_emails) : cc;
     const platforms = {
         rapidshyp: { to: rsTo, cc },
         docpharma: { to: docTo, cc: docCc },
+        kwikship: { to: kwikTo, cc: kwikCc },
     };
     if (!host || !user || !pass) return null;     // not enough to send
     return { host, port, user, pass, from, to, cc, rapidshyp, platforms };
@@ -83,6 +89,7 @@ router.get('/email-settings', async (req, res) => {
         settings: {
             from_email: s.from_email || '', to_emails: s.to_emails || '', cc_emails: s.cc_emails || '',
             docpharma_to_emails: s.docpharma_to_emails || '', docpharma_cc_emails: s.docpharma_cc_emails || '',
+            kwikship_to_emails: s.kwikship_to_emails || '', kwikship_cc_emails: s.kwikship_cc_emails || '',
             rapidshyp_email: s.rapidshyp_email || '', smtp_host: s.smtp_host || '',
             smtp_port: s.smtp_port || '', smtp_user: s.smtp_user || '',
             password_set: !!s.smtp_password_enc, updated_at: s.updated_at || null, updated_by: s.updated_by || null,
@@ -105,6 +112,8 @@ router.post('/email-settings', async (req, res) => {
         cc_emails: (b.cc_emails || '').trim() || null,
         docpharma_to_emails: (b.docpharma_to_emails || '').trim() || null,
         docpharma_cc_emails: (b.docpharma_cc_emails || '').trim() || null,
+        kwikship_to_emails: (b.kwikship_to_emails || '').trim() || null,
+        kwikship_cc_emails: (b.kwikship_cc_emails || '').trim() || null,
         rapidshyp_email: (b.rapidshyp_email || '').trim() || null,
         smtp_host: (b.smtp_host || '').trim() || null,
         smtp_port: b.smtp_port ? parseInt(b.smtp_port, 10) || null : null,

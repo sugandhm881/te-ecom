@@ -108,7 +108,7 @@ const docpharmaLedgerRoutes = require('./app/api/docpharma_ledger');
 const docpharmaOverviewRoutes = require('./app/api/docpharma_overview');
 const docpharmaInventoryRoutes = require('./app/api/docpharma_inventory');
 const { ingestRecentDocpharmaOrders } = require('./app/api/docpharma_portal');
-const { backfillJourneys, syncChargesBatch } = require('./app/api/delivery_journey');
+const { backfillJourneys, syncChargesBatch, auditJourneyIntegrity } = require('./app/api/delivery_journey');
 const { syncKwikship } = require('./app/api/kwikship_sync');
 const cron = require('node-cron');
 // Every scheduled job goes through the reporter → the Teams "Cron Response" channel. Failures post a
@@ -348,6 +348,11 @@ cronJob('TallyBatch (5 * * * *)', '5 * * * *', async () => {
 cronJob('Journey (45 */6 * * *)', '45 */6 * * *', async () => {
     console.log('[Journey] 6-hr gap-fill — refreshing non-final shipment journeys…');
     await backfillJourneys(30).catch(e => console.error('[Journey] gap-fill error:', e.message));
+    // Integrity alarm. The gap-fill deliberately SKIPS final shipments, so a wrongly-finalized row is
+    // invisible to it by design — which is exactly how 264 rows sat reading "Delivered" on parcels that
+    // were still out for delivery, unnoticed for weeks. This costs 3 counting queries and makes that
+    // state impossible to hide: any non-zero count names the repair to run (reprocessBadDelivered).
+    await auditJourneyIntegrity().catch(e => console.error('[Journey audit] error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // Escalation reply poll — every 10 min, read the mail inbox (IMAP) for replies to sent critical
@@ -541,8 +546,12 @@ cronJob('Late-Del (45 9 1,16 * *)', '45 9 1,16 * *', async () => {
 // 9:30 AM IST, terminal-stage date in the last 30 days ending yesterday. Sends SEPARATE emails per platform
 // (RapidShyp rows → RapidShyp recipients, DocPharma rows → DocPharma recipients). No-op if empty.
 cronJob('First-OFD (30 9 * * *)', '30 9 * * *', async () => {
-    console.log('[First-OFD] 9:30 AM IST — sending daily first-OFD-late report…');
-    try { const r = await deliveryReportsRoutes.sendFirstOfdReport({ days: 30 }); console.log('[First-OFD]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
+    console.log('[First-OFD] 9:30 AM IST — sending daily first-OFD-late report (RapidShyp excluded)…');
+    // ⚠️ RAPIDSHYP EXCLUDED from the DAILY send — by request 2026-08-08 ("stop sending the daily email to
+    // RapidShyp"). This was the only daily report reaching them; Silent-RTO is weekly (Mon) and
+    // Late-Deliveries fortnightly (1st/16th), both untouched. DocPharma and KwikShip still get their daily
+    // copy. The report itself is unchanged — you can still send RapidShyp's on demand from the dashboard.
+    try { const r = await deliveryReportsRoutes.sendFirstOfdReport({ days: 30, exclude: ['rapidshyp'] }); console.log('[First-OFD]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[First-OFD] error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
