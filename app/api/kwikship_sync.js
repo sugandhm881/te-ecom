@@ -225,9 +225,71 @@ async function updateKwikshipJourney(awb, orderName, courier, orderDate, payment
     // Use the MERGED timeline/status — v1's copies are empty whenever we skipped that call.
     const raw = j.rto_no_attempt ? { status_history: timeline, status: curStatus, captured_at: new Date().toISOString() } : null;
     await saveJourney(awb, orderName, 'kwikship', j, orderDate, raw, paymentMode);
+    // Feed the bucket engine too — without this the order never leaves `order_to_dispatch`.
+    await mirrorKwikshipToOrderTracking(awb, orderName, j, j.status_code);
     // If this order was re-allocated to Kwikship from another aggregator, drop the stale (non-final) old row.
     if (orderName) await supersedeStaleJourneys(orderName, awb);
     return true;
+}
+
+// ── Mirror the journey into `order_tracking` — this is what puts Kwikship INTO the bucket engine ──
+// The `order_buckets` view (Undelivered / Delivered / RTO / age buckets, the Support console, the hold
+// rules) is built ONLY from `order_tracking` + `rapidshyp_tracking_ecom` + `orders.tracking_status`.
+// Kwikship wrote to NONE of them — only to `shipment_journey_ecom` — so every Kwikship order sat in
+// `order_to_dispatch` for life: 528 of 532 at the time of the fix, including 26 that were sitting on a
+// live NDR and never appeared on the Undelivered list (reported on TE25-40300 / 47607613040881,
+// "Consignee Unavailable" since 07 Aug). RapidShyp and DocPharma both write `order_tracking`; Kwikship
+// simply never joined. Writing the same row is the whole fix — no view change, and every consumer of
+// the view becomes correct at once.
+//
+// `order_tracking.order_id` is UNIQUE (one row per order), so this must never clobber another platform's
+// row: we write only when there is no row, or the existing row is already ours (same source or same AWB).
+const KS_TRACKING_STATUS = {
+    // 'new' means "manifest uploaded" — NOT dispatched. The view decides dispatch by excluding a list of
+    // pre-pickup statuses, and 'new' is not on it, so left raw it would fake a dispatch and push the order
+    // out of order_to_dispatch. The pickup states are spelled the way that list spells them.
+    new: 'manifested', out_for_pickup: 'out for pickup', pickup_completed: 'pickup completed',
+};
+// OUTCOME decides the status text, NOT the raw code. The view matches on the text — `rto` via the regex
+// `(^| )rto( |$)`, `undelivered` via an exact list — and several Kwikship codes carry neither word while
+// still being that outcome: `reached_at_seller_city` IS an RTO leg, and an NDR shipment often still reads
+// `out_for_delivery`. Trusting the raw code put 3 RTOs and 1 NDR into an age bucket instead of rto /
+// undelivered (measured on the first 116 backfilled rows). The parser has already resolved the outcome
+// from the whole timeline, so use it; the code only refines the non-terminal in_transit case.
+const KS_OUTCOME_STATUS = { delivered: 'delivered', rto: 'rto', ndr_pending: 'undelivered', lost: 'lost' };
+function ksTrackingStatus(outcome, statusCode) {
+    const byOutcome = KS_OUTCOME_STATUS[String(outcome || '')];
+    if (byOutcome) return byOutcome;
+    const code = String(statusCode || '').toLowerCase().trim();
+    return KS_TRACKING_STATUS[code] || code || null;
+}
+async function mirrorKwikshipToOrderTracking(awb, orderName, j, statusCode) {
+    const name = String(orderName || '').replace('#', '').trim();
+    if (!name) return false;
+    try {
+        const { data: o } = await supabase.from('orders').select('id, name')
+            .in('name', [name, '#' + name]).limit(1).maybeSingle();
+        if (!o) return false;
+        const { data: ex } = await supabase.from('order_tracking')
+            .select('order_id, source, awb_number').eq('order_id', o.id).maybeSingle();
+        if (ex && ex.source !== 'kwikship' && String(ex.awb_number || '') !== String(awb)) return false;
+        const status = ksTrackingStatus(j.outcome, statusCode || j.status_code);
+        if (!status) return false;
+        const { error } = await supabase.from('order_tracking').upsert({
+            order_id: String(o.id), order_name: name, awb_number: awb, source: 'kwikship',
+            courier_name: j.courier || null, tracking_status: status,
+            // The view derives dispatch from MIN(status_updated_at) over non-pre-pickup rows. With one row
+            // per order that IS this value, so it must be the real dispatch moment, not the latest scan —
+            // otherwise `dispatch_at` (shown in the console, and read by the hold rules) would drift
+            // forward with every new scan.
+            status_updated_at: j.dispatched_at || j.out_for_delivery_at || null,
+            delivered_date: j.delivered_at || null,
+            edd: j.first_edd || null,
+            last_tracked_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        }, { onConflict: 'order_id' });
+        if (error) { console.error('[Kwikship→tracking]', awb, error.message); return false; }
+        return true;
+    } catch (e) { console.error('[Kwikship→tracking]', awb, e.message); return false; }
 }
 
 // ── One-off backfill: replace courier-CODE NDR reasons with the human remark ─────────────────────
@@ -238,6 +300,31 @@ async function updateKwikshipJourney(awb, orderName, courier, orderDate, payment
 // Deliberately light: it selects only rows whose reasons look like courier codes (28 of 271 today, the
 // rest have no NDR at all), so it is a few dozen calls, not a full re-sync. Nothing else on the row is
 // touched — outcome/attempts/ndr_count are already correct and must not move.
+// ── One-off backfill: give every EXISTING Kwikship journey its `order_tracking` row ─────────────
+// The mirror above only fires on the next sync/webhook for a shipment, and a FINAL shipment (delivered /
+// RTO) may never be touched again — so without this the historical rows stay stuck in order_to_dispatch
+// forever. Pure DB work: reads journeys, writes tracking rows. ZERO API calls.
+async function backfillKwikshipOrderTracking({ dry = false } = {}) {
+    const rows = [];
+    for (let f = 0; ; f += 1000) {
+        const { data, error } = await supabase.from('shipment_journey_ecom')
+            .select('awb, order_name, courier, outcome, status_code, dispatched_at, out_for_delivery_at, delivered_at, first_edd')
+            .eq('source', 'kwikship').order('awb', { ascending: true }).range(f, f + 999);
+        if (error) { console.error('[Kwikship OT] select:', error.message); break; }
+        rows.push(...(data || []));
+        if (!data || data.length < 1000) break;
+    }
+    console.log(`[Kwikship OT] ${rows.length} Kwikship journey row(s)${dry ? ' — DRY RUN' : ''}`);
+    let wrote = 0, skipped = 0;
+    for (const r of rows) {
+        if (dry) { if (ksTrackingStatus(r.outcome, r.status_code)) wrote++; else skipped++; continue; }
+        const ok = await mirrorKwikshipToOrderTracking(r.awb, r.order_name, r, r.status_code);
+        if (ok) wrote++; else skipped++;
+    }
+    console.log(`[Kwikship OT] ${dry ? 'would write' : 'wrote'} ${wrote}, skipped ${skipped}`);
+    return { total: rows.length, wrote, skipped };
+}
+
 const CODE_RE = /^UD[_-]|_(Pending|Dispatched|Delivered)$/i;
 async function backfillKwikshipNdrReasons({ concurrency = 3, sleepMs = 400, dry = false } = {}) {
     const rows = [];
@@ -340,7 +427,7 @@ async function syncKwikship({ days = 30, concurrency = 3, sleepMs = 300 } = {}) 
     return { processed: todo.length, updated, none, total: list.length };
 }
 
-module.exports = { classifyKwikStatus, kwikOutcome, parseKwikDate, parseKwikshipJourney, fetchKwikshipShipment, fetchKwikshipPublic, updateKwikshipJourney, syncKwikship, backfillKwikshipNdrReasons };
+module.exports = { classifyKwikStatus, kwikOutcome, parseKwikDate, parseKwikshipJourney, fetchKwikshipShipment, fetchKwikshipPublic, updateKwikshipJourney, syncKwikship, backfillKwikshipNdrReasons, mirrorKwikshipToOrderTracking, backfillKwikshipOrderTracking };
 
 // CLI: node app/api/kwikship_sync.js sync [days] [concurrency]
 if (require.main === module && process.argv[2] === 'sync') {

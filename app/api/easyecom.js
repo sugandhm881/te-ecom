@@ -716,7 +716,9 @@ router.post('/hold-order', tokenRequired, async (req, res) => {
         if (!inv) return res.status(404).json({ success: false, message: 'Order not found in EasyEcom (no invoice id in the synced data yet).' });
         const r = await eeHoldCall('/orders/holdOrders', { invoice_id: inv.invoiceId, hold_reason: String(reason).trim().slice(0, 200) });
         const body = r.data || {};
-        await supabase.from('api_logs_ecom').insert({ action: 'easyecom_hold_order', status_code: r.status, payload: { orderName, invoice_id: inv.invoiceId, reason }, response: body }).then(() => {}).catch(() => {});
+        // `by` — WHO held it. Without it the hold/unhold timeline can't tell a human hold from the auto-holder
+        // and reads every EasyEcom entry as "auto" (the auto path at holdOrderInEasyecom already writes it).
+        await supabase.from('api_logs_ecom').insert({ action: 'easyecom_hold_order', status_code: r.status, payload: { orderName, invoice_id: inv.invoiceId, reason, by: (req.user && req.user.sub) || null }, response: body }).then(() => {}).catch(() => {});
         const ok = (r.status === 200 && (body.code === 200 || body.status === true || body.success === true || /success/i.test(String(body.message || ''))))
             || /already.{0,25}(on ?hold|hold status)/i.test(String(body.message || ''));   // held inside EasyEcom already → same end state
         if (ok) {
@@ -951,7 +953,9 @@ router.post('/unhold-order', tokenRequired, async (req, res) => {
         if (!inv) return res.status(404).json({ success: false, message: 'Order not found in EasyEcom (no invoice id in the synced data yet).' });
         const r = await eeHoldCall('/orders/unholdOrders', { invoice_id: inv.invoiceId });
         const body = r.data || {};
-        await supabase.from('api_logs_ecom').insert({ action: 'easyecom_unhold_order', status_code: r.status, payload: { orderName, invoice_id: inv.invoiceId }, response: body }).then(() => {}).catch(() => {});
+        // `by` — an EasyEcom unhold is ALWAYS a human action (there is no auto-unhold), so the timeline must
+        // be able to name them. Historical rows have no `by` and render as an unattributed release.
+        await supabase.from('api_logs_ecom').insert({ action: 'easyecom_unhold_order', status_code: r.status, payload: { orderName, invoice_id: inv.invoiceId, by: (req.user && req.user.sub) || null }, response: body }).then(() => {}).catch(() => {});
         const ok = r.status === 200 && (body.code === 200 || body.status === true || body.success === true || /success/i.test(String(body.message || '')));
         // "Already in Unhold status" (released directly inside EasyEcom) → the desired end state is
         // already true, so treat it as success and clear our stale mark instead of erroring.

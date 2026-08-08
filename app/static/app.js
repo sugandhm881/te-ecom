@@ -4091,6 +4091,18 @@ const SUP_REASON_META={
   high_value:['💰','Above ₹1500','bg-emerald-100 text-emerald-700','Order value is above ₹1500','bg-emerald-50 text-emerald-700'],
   short_address:['📍','Short address','bg-amber-100 text-amber-700','Address is under 60 characters (often incomplete → RTO-prone); skipped if a past order was delivered to the same address','bg-amber-50 text-amber-700'],
 };
+// Courier PLATFORM tag (the aggregator, not the courier) — RapidShyp / DocPharma / KwikShip. Sits next to
+// the courier name on the shipped panels so an agent knows which partner portal / escalation route owns the
+// parcel before opening it. Server-resolved from shipment_journey_ecom.source (see platformByOrder).
+const SUP_PLATFORM_META={
+  rapidshyp:['RapidShyp','bg-indigo-50 text-indigo-700 border-indigo-200'],
+  docpharma:['DocPharma','bg-teal-50 text-teal-700 border-teal-200'],
+  kwikship:['KwikShip','bg-amber-50 text-amber-700 border-amber-200'],
+};
+function supPlatformTag(p){
+  const m=SUP_PLATFORM_META[String(p||'').toLowerCase()]; if(!m) return '';
+  return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border ${m[1]} whitespace-nowrap" title="Shipped through ${m[0]} — use this partner for tracking / escalation">${m[0]}</span>`;
+}
 function supReasonChips(r){
   if(!r.reasons||!r.reasons.length) return '';
   return r.reasons.map(k=>{ const m=SUP_REASON_META[k]; if(!m) return '';
@@ -4131,6 +4143,8 @@ function supQueueTable(){
   // Payment (COD / Prepaid) — shown on Undelivered + Status-changed. Hidden on Repeat, which is COD-only
   // by definition (fully-prepaid orders are never repeat candidates), so the column would be noise there.
   const showPay=_supTab!=='repeat';
+  // Courier-platform tag — only the shipped panels carry one (Repeat orders are pre-dispatch, no shipment yet).
+  const showPlat=_supTab!=='repeat';
   const COLS=[{h:'Order',k:'order_name',d:1},{h:'Customer',k:null},...(showBucket?[{h:'Bucket',k:'bucket',d:1}]:[]),...(showPay?[{h:'Payment',k:'payment',d:1}]:[]),{h:'Age',k:'created_at',d:1},{h:'Courier',k:'courier',d:1},...(showScan?[{h:'Last scan',k:'last_scan_at',d:-1}]:[]),{h:'Actions',k:null}];
   const thHtml=COLS.map(col=>{ if(!col.k) return `<th class="${TH}">${col.h}</th>`;
     const on=_supSort&&_supSort.k===col.k; const car=on?(_supSort.d===1?'▲':'▼'):'<span class="text-slate-300">↕</span>';
@@ -4153,7 +4167,7 @@ function supQueueTable(){
       ${showBucket?`<td class="${TD}">${supBadge(r.bucket)}</td>`:''}
       ${showPay?`<td class="${TD}">${supPayChip(r)}</td>`:''}
       <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
-      <td class="${TD}"><div>${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}</div>${r.awb_number?`<div class="text-[10px] mt-0.5">${supAwbLink(r.awb_number,r.order_name,r.courier)}</div>`:''}</td>
+      <td class="${TD}"><div class="flex items-center gap-1.5 flex-wrap">${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}${showPlat?supPlatformTag(r.platform):''}</div>${r.awb_number?`<div class="text-[10px] mt-0.5">${supAwbLink(r.awb_number,r.order_name,r.courier)}</div>`:''}</td>
       ${showScan?`<td class="${TD} whitespace-nowrap">${r.last_scan_at?`<span class="text-slate-500" title="Latest AWB scan by courier: ${new Date(r.last_scan_at).toLocaleString()}">🛰 ${supRelTime(r.last_scan_at)}</span>`:'<span class="text-slate-300">—</span>'}</td>`:''}
       <td class="${TD}"><div class="flex items-start gap-2">
         <div class="flex-1 min-w-0 space-y-1.5">
@@ -4476,9 +4490,16 @@ async function supOrderModal(orderId){
       <div class="space-y-1.5">
         <div class="flex items-start gap-2 text-xs"><span>📦</span><div><span class="font-semibold text-slate-700">Order placed</span> <span class="text-slate-400">· ${_hlFmt(o.created_at)}</span></div></div>
         ${(d.holdLog||[]).map(ev=>{
-          if(ev.action==='shopify_release') return `<div class="flex items-start gap-2 text-xs"><span>🔓</span><div><span class="font-semibold text-emerald-700">Released${ev.by==='auto'?'':' by '+escapeHtml(supPrettyUser(ev.by))}</span> <span class="text-slate-400">· ${_hlFmt(ev.at)}</span></div></div>`;
-          const who=ev.by==='auto'?'Auto-held on Shopify':('Held by '+supPrettyUser(ev.by));
-          return `<div class="flex items-start gap-2 text-xs"><span>${ev.ok?'🔒':'⚠️'}</span><div><span class="font-semibold text-rose-700">${escapeHtml(who)}</span>${ev.reason?` <span class="px-1.5 py-0.5 rounded bg-rose-50 text-rose-600 font-semibold">${escapeHtml(ev.reason)}</span>`:''} <span class="text-slate-400">· ${_hlFmt(ev.at)}${ev.ok?'':' · '+escapeHtml(ev.result||'failed')}</span></div></div>`;
+          // Which SYSTEM the event happened in matters as much as who did it: an order can be held on
+          // Shopify (stops the EasyEcom import) or inside EasyEcom (stops the batch after import), and the
+          // team needs to see both — an EasyEcom-only hold used to leave this timeline completely empty.
+          const byTxt=ev.by&&ev.by!=='auto'?' by '+escapeHtml(supPrettyUser(ev.by)):'';
+          if(ev.action==='easyecom_unhold_order') return `<div class="flex items-start gap-2 text-xs"><span>${ev.ok?'🔓':'⚠️'}</span><div><span class="font-semibold text-emerald-700">Unheld in EasyEcom${byTxt}</span> <span class="text-slate-400">· ${_hlFmt(ev.at)}${ev.ok?'':' · '+escapeHtml(ev.result||'failed')}</span></div></div>`;
+          if(ev.action==='easyecom_hold_order'){ const w=ev.by&&ev.by!=='auto'?'Held in EasyEcom'+byTxt:'Auto-held in EasyEcom';
+            return `<div class="flex items-start gap-2 text-xs"><span>${ev.ok?'⏸':'⚠️'}</span><div><span class="font-semibold text-orange-700">${w}</span>${ev.reason?` <span class="px-1.5 py-0.5 rounded bg-orange-50 text-orange-600 font-semibold">${escapeHtml(ev.reason)}</span>`:''} <span class="text-slate-400">· ${_hlFmt(ev.at)}${ev.ok?'':' · '+escapeHtml(ev.result||'failed')}</span></div></div>`; }
+          if(ev.action==='shopify_release') return `<div class="flex items-start gap-2 text-xs"><span>🔓</span><div><span class="font-semibold text-emerald-700">Released on Shopify${byTxt}</span> <span class="text-slate-400">· ${_hlFmt(ev.at)}</span></div></div>`;
+          const who=ev.by==='auto'?'Auto-held on Shopify':('Held on Shopify'+byTxt);
+          return `<div class="flex items-start gap-2 text-xs"><span>${ev.ok?'🔒':'⚠️'}</span><div><span class="font-semibold text-rose-700">${who}</span>${ev.reason?` <span class="px-1.5 py-0.5 rounded bg-rose-50 text-rose-600 font-semibold">${escapeHtml(ev.reason)}</span>`:''} <span class="text-slate-400">· ${_hlFmt(ev.at)}${ev.ok?'':' · '+escapeHtml(ev.result||'failed')}</span></div></div>`;
         }).join('')||'<p class="text-xs text-slate-400 pl-6">No hold/unhold activity — never held.</p>'}
       </div></div>`;
     wrap.firstElementChild.innerHTML=`

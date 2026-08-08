@@ -91,6 +91,30 @@ async function recordReleased(orderName, by) {
 }
 async function recordFailed(orderName, error) { await clearHoldMarks(orderName, ['shopify_hold']); await setMark(orderName, 'shopify_hold_failed', error, 'auto'); }
 
+// ── A HUMAN RELEASE IS FINAL FOR AUTOMATION ──────────────────────────────────────────────────────
+// One rule, one place: once ANY Ecom user unholds an order, no automatic path may ever hold it again.
+// Only a human can (the manual Hold buttons, which clear the tombstone deliberately).
+//
+// Both systems record their release as a tombstone mark, and BOTH count — an order can be held on
+// Shopify, in EasyEcom, or (since the batch-hold change) in both at once, and the agent only ever sees
+// one Unhold button:
+//   • `shopify_hold_released` — written by releaseOrder() / recordReleased()
+//   • `ee_hold_released`      — written by POST /api/easyecom/unhold-order
+// Neither is ever written by automation (there is no auto-unhold), so a tombstone always means a person.
+//
+// ⚠️ Do NOT fold this into getHoldStates(): that function reads only the three `shopify_*` HOLD_TYPES and
+// is used for DISPLAY (which button to show). This is the automation gate, and it must see the EasyEcom
+// release too — the gap that let the auto-holder re-hold TE25-40985 three minutes after a human released it.
+const RELEASE_MARKS = ['shopify_hold_released', 'ee_hold_released'];
+async function releasedByHuman(orderName) {
+    const { data } = await supabase.from('order_marks_ecom')
+        .select('mark_type, created_by, updated_at')
+        .eq('order_name', norm(orderName)).in('mark_type', RELEASE_MARKS);
+    if (!data || !data.length) return null;
+    const m = data.slice().sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))[0];
+    return { by: m.created_by || 'user', at: m.updated_at, where: m.mark_type === 'ee_hold_released' ? 'easyecom' : 'shopify' };
+}
+
 // Hold-state map for a set of order names → { [orderName]: { status:'held'|'released'|'failed', reason, by, at } }.
 async function getHoldStates(orderNames) {
     const names = [...new Set((orderNames || []).map(norm).filter(Boolean))];
@@ -219,6 +243,14 @@ async function cancelOrder(orderName, shopifyOrderId, by, reasonLabel) {
 // Auto-hold (cron/webhook). Skips if already held OR a human already released it OR it's past pickup.
 // `reasonNote` (from reasonNoteFrom) records WHY it qualified, so the panel can show the category later.
 async function autoHoldOrder(orderName, shopifyOrderId, reasonNote, createdAt, opts) {
+    // (0) HUMAN RELEASE WINS — checked FIRST, before every other guard, because this is the lowest-level
+    //     automatic hold and EVERY auto path reaches it (webhook → holdOrderSmart, cron → holdOrderSmart,
+    //     holdSiblingOrders → holdOrderSmart, and the EasyEcom mirror). Ordering matters: the checks below
+    //     return early on their own conditions, so anything placed after them can be skipped over — which is
+    //     exactly how the original re-hold bug worked (the `in-easyecom` check at (b) short-circuited before
+    //     the release check at (c) ever ran). Nothing may precede this one.
+    const rel = await releasedByHuman(orderName);
+    if (rel) return { skipped: 'released-by-human', by: rel.by, where: rel.where };
     // GUARD — an auto-hold only makes sense for a BRAND-NEW order, UPSTREAM of the EasyEcom import.
     // (a) AGE: a Shopify hold only keeps an order out of EasyEcom if placed before the import (~30-min
     //     lag). Once an order is hours old it's already imported/shipping, so holding does nothing — and
@@ -299,17 +331,17 @@ async function holdOrderSmart(orderName, shopifyOrderId, reasonNote, createdAt, 
     if (first.held) return { held: true, where: 'shopify' };
     if (first.skipped !== 'in-easyecom') return first;   // stale / already held / released / shipped — leave it
 
-    // ⚠️ RE-HOLD GUARD. autoHoldOrder checks `in-easyecom` BEFORE it checks the hold marks, so for an
-    // imported order it returns 'in-easyecom' without ever looking at whether a human released it. Falling
-    // straight through to the EasyEcom hold therefore RE-HELD orders the team had just unheld — they would
-    // release an order and watch it go back on hold minutes later. Check the release state here, and treat
-    // BOTH tombstones as final: `shopify_hold_released` and `ee_hold_released`. A human release always wins;
-    // only a human may hold it again.
+    // ⚠️ RE-HOLD GUARD — SECOND LAYER. The human-release test now runs first inside autoHoldOrder(), so by
+    // here we already know no tombstone exists. This layer is deliberately kept anyway: it is the reason the
+    // original bug was possible (autoHoldOrder returned 'in-easyecom' BEFORE looking at the marks, and this
+    // function read that as permission to hold in EasyEcom), and a re-hold is the one failure the team feels
+    // directly — they release an order and watch it go back on hold minutes later. Cheap, and it also covers
+    // the case the first layer does not: ALREADY held in EasyEcom, where re-calling the API is pure noise
+    // (before this, the cron re-sent the hold every 2 minutes for hours — 88 calls in 74 minutes on 08-08).
     const marks = (await getHoldStates([name]))[name];
     if (marks && (marks.status === 'held' || marks.status === 'released')) return { skipped: marks.status };
-    const { data: rel } = await supabase.from('order_marks_ecom')
-        .select('order_name').eq('order_name', name).eq('mark_type', 'ee_hold_released').limit(1).maybeSingle();
-    if (rel) return { skipped: 'ee-released' };
+    const rel = await releasedByHuman(name);
+    if (rel) return { skipped: 'released-by-human', by: rel.by, where: rel.where };
     const { data: eeHeld } = await supabase.from('order_marks_ecom')
         .select('order_name').eq('order_name', name).eq('mark_type', 'ee_hold').limit(1).maybeSingle();
     if (eeHeld) return { skipped: 'ee-already-held' };
@@ -478,5 +510,5 @@ async function qualifiesForHold(opts) { return (await holdReasons(opts)).length 
 
 module.exports = {
     listFulfillmentOrders, holdShopifyOrder, releaseShopifyOrder,
-    getHoldStates, holdOrderManual, releaseOrder, cancelOrder, autoHoldOrder, holdOrderSmart, holdSiblingOrders, isDispatchedOrder, qualifiesForHold, holdReasons, reasonNoteFrom, HOLD_NOTE,
+    getHoldStates, releasedByHuman, holdOrderManual, releaseOrder, cancelOrder, autoHoldOrder, holdOrderSmart, holdSiblingOrders, isDispatchedOrder, qualifiesForHold, holdReasons, reasonNoteFrom, HOLD_NOTE,
 };

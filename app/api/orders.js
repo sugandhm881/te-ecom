@@ -463,26 +463,48 @@ router.get('/ee-hold-marks', async (req, res) => {
     // hold_type ('ee' | 'shopify' | 'both'), so the HOLD chip shows on EVERY dashboard for any hold —
     // no dashboard ever shows a held order as if it's actionable.
     const sinceHold = moment().subtract(60, 'days').toISOString();
-    const [markRes, shopRes, eeRes, eeIdRes] = await Promise.all([
-        // All four paginated — the server caps every response at 1000 rows, so the old .limit(2000)s
+    const [markRes, shopRes, eeRes, eeIdRes, relRes] = await Promise.all([
+        // All five paginated — the server caps every response at 1000 rows, so the old .limit(2000)s
         // (and bare selects) silently truncated once the tables grew past 1000 → missing HOLD chips.
         fetchPaged((f, t) => supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'ee_hold').order('order_name', { ascending: true }).range(f, t)),
         fetchPaged((f, t) => supabase.from('order_marks_ecom').select('order_name, note, created_by, created_at').eq('mark_type', 'shopify_hold').order('order_name', { ascending: true }).range(f, t)),
-        fetchPaged((f, t) => supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status').ilike('order_status', '%hold%').gte('order_date', sinceHold).order('order_id', { ascending: true }).range(f, t)),
+        fetchPaged((f, t) => supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status, updated_at').ilike('order_status', '%hold%').gte('order_date', sinceHold).order('order_id', { ascending: true }).range(f, t)),
         // EasyEcom's text `order_status` is UNRELIABLE for holds — when an order is held from the panel it
         // often stays "Open"/"Shipped" while only the item is flagged, so the ilike above catches ~4 of ~65
         // real holds. The authoritative signal is `raw_data.order_status_id = 44` (On Hold) — filter on it
         // directly so panel-held orders actually surface. (Stale-cancelled id=44 rows are dropped below.)
-        fetchPaged((f, t) => supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status').filter('raw_data->>order_status_id', 'eq', '44').gte('order_date', sinceHold).order('order_id', { ascending: true }).range(f, t)),
+        fetchPaged((f, t) => supabase.from('b2c_order_easycom').select('reference_code, store_order_id, awb_number, order_status, updated_at').filter('raw_data->>order_status_id', 'eq', '44').gte('order_date', sinceHold).order('order_id', { ascending: true }).range(f, t)),
+        // Human EasyEcom releases (the `ee_hold_released` tombstone) — see the staleness rule below.
+        fetchPaged((f, t) => supabase.from('order_marks_ecom').select('order_name, created_at').eq('mark_type', 'ee_hold_released').order('order_name', { ascending: true }).range(f, t)),
     ]);
     if (markRes.error) return res.status(500).json({ success: false, error: markRes.error.message });
     const nk = n => String(n || '').replace('#', '').trim();
     const map = {};
+    // ⚠️ STALE-HOLD-AFTER-UNHOLD. `raw_data.order_status_id` is a SYNCED copy of EasyEcom's state, refreshed
+    // only when the EasyEcom sync next touches the order. Unhold an order and the id stays 44 until then, so
+    // the chip kept reading "EasyEcom hold" on an order that EasyEcom itself reports as unheld. (TE25-40985,
+    // 2026-08-08: released 13:56 IST, row last synced 13:45 — the agent clicked Unhold five more times,
+    // EasyEcom answering "Order is already in Unhold status" every time.)
+    //
+    // The `ee_hold_released` tombstone records the human release with a timestamp, so compare the two:
+    // suppress the synced hold only while the tombstone is NEWER than the synced row. If the row was synced
+    // AFTER the release, its id=44 is fresh evidence — someone re-held it in the EasyEcom panel — and the
+    // chip must stand. (The local `ee_hold` mark can't collide: holding deletes the tombstone and releasing
+    // deletes the mark, so only one of the pair ever exists; the timestamp test covers it regardless.)
+    const releasedAt = {};
+    (relRes.data || []).forEach(m => { const k = nk(m.order_name); if (k) releasedAt[k] = m.created_at; });
+    const releasedAfter = (k, syncedAt) => {
+        const rel = releasedAt[k]; if (!rel) return false;
+        if (!syncedAt) return true;                       // no sync stamp → trust the human release
+        return new Date(rel) > new Date(syncedAt);
+    };
     // EasyEcom holds (local mark + synced "On Hold" text + order_status_id=44) → type 'ee'. Skip cancelled rows.
-    (markRes.data || []).forEach(m => { const k = nk(m.order_name); if (k) map[k] = { order_name: k, hold_type: 'ee', note: m.note, created_by: m.created_by, created_at: m.created_at }; });
+    (markRes.data || []).forEach(m => { const k = nk(m.order_name); if (!k || releasedAfter(k, m.created_at)) return;
+        map[k] = { order_name: k, hold_type: 'ee', note: m.note, created_by: m.created_by, created_at: m.created_at }; });
     [...(eeRes.data || []), ...(eeIdRes.data || [])]
         .filter(r => !/cancel/i.test(r.order_status || ''))
-        .forEach(r => { const k = nk(r.reference_code || r.store_order_id); if (k && !map[k]) map[k] = { order_name: k, hold_type: 'ee', note: 'Held in EasyEcom', created_by: null, created_at: null }; });
+        .forEach(r => { const k = nk(r.reference_code || r.store_order_id);
+            if (k && !map[k] && !releasedAfter(k, r.updated_at)) map[k] = { order_name: k, hold_type: 'ee', note: 'Held in EasyEcom', created_by: null, created_at: null }; });
     // Shopify holds → type 'shopify' (or 'both' if also held in EasyEcom).
     (shopRes.data || []).forEach(m => { const k = nk(m.order_name); if (!k) return;
         if (map[k]) map[k].hold_type = 'both';

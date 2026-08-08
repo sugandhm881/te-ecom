@@ -129,6 +129,29 @@ async function scanTimesByOrder(orderIds) {
     rows.forEach(r => { const t = best(r); if (!t) return; if (!map[r.order_id] || new Date(t) > new Date(map[r.order_id])) map[r.order_id] = t; });
     return map;
 }
+// Courier PLATFORM (the aggregator the parcel shipped through) per order — RapidShyp / DocPharma / KwikShip.
+// `order_buckets.partner` looks like the obvious source but is NOT trustworthy for this: KwikShip shipments
+// land there as the courier SERVICE name ('delhiverydirectsurface500g' — 532 rows), some RapidShyp rows as
+// 'delhivery enterprise' / 'ekart brands', and 128 recent rows are null while the shipment clearly exists.
+// The authoritative signal is `shipment_journey_ecom.source` — written by whichever sync owns the shipment.
+// partner / courier / AWB prefix are fallbacks only, for orders with no journey row yet.
+const PLATFORM_KEYS = new Set(['rapidshyp', 'docpharma', 'kwikship']);
+const _pk = n => String(n || '').replace('#', '').trim();
+async function platformByOrder(rows) {
+    const names = [...new Set(rows.map(r => _pk(r.order_name)).filter(Boolean))];
+    const jr = names.length ? await chunkedIn('shipment_journey_ecom', 'order_name, source', 'order_name', names) : [];
+    const bySrc = {};
+    jr.forEach(j => { const k = _pk(j.order_name); if (k && j.source) bySrc[k] = String(j.source).toLowerCase(); });
+    const map = {};
+    rows.forEach(r => {
+        const partner = String(r.partner || '').toLowerCase();
+        const courier = String(r.courier || '').toLowerCase();
+        map[r.order_id] = bySrc[_pk(r.order_name)]
+            || (PLATFORM_KEYS.has(partner) ? partner : null)
+            || ((courier.includes('docpharma') || /^EL/i.test(String(r.awb_number || ''))) ? 'docpharma' : null);
+    });
+    return map;
+}
 // Orders CANCELLED in EasyEcom (b2c_order_easycom.order_status "Cancelled"). EasyEcom can cancel an order
 // while Shopify's `cancelled_at` + the `order_buckets` bucket still show it active (Shopify sync lags), so
 // for EasyEcom-fulfilled orders this is the authoritative "cancelled" signal. (Unlike holds, the cancel text
@@ -401,6 +424,12 @@ router.get('/support/queue', async (req, res) => {
             scanTimesByOrder(orderIds),
         ]);
         rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; r.last_scan_at = scans[r.order_id] || null; });
+        // Courier platform — only for the shipped panels. Repeat-tab orders are still pre-dispatch (no AWB,
+        // no journey row), so the lookup would cost a query and return nothing but nulls.
+        if (isUndPanel && rows.length) {
+            const plat = await platformByOrder(rows);
+            rows.forEach(r => { r.platform = plat[r.order_id] || null; });
+        }
         // Payment type (COD vs Prepaid) — `order_buckets` carries no payment column, so read
         // `orders.financial_status`. Same rule as the Orders dashboard: fully-settled = Prepaid;
         // anything else still has money to collect on delivery = COD (incl. partially_paid).
@@ -428,15 +457,24 @@ router.get('/support/queue', async (req, res) => {
             // EasyEcom's text `order_status` often stays "Open"/"Shipped" while the item is actually On Hold, so
             // the authoritative held signal is `raw_data.order_status_id = 44` — without this, panel-held orders
             // showed a "Hold" button instead of "Unhold" and were dropped as untouched-dispatched.
-            const eeHoldIdRows = names.length ? await chunkedIn('b2c_order_easycom', 'reference_code', 'reference_code', names, q => q.filter('raw_data->>order_status_id', 'eq', '44')) : [];
-            const eeHeldById = new Set(eeHoldIdRows.map(r => nk(r.reference_code)));
+            const eeHoldIdRows = names.length ? await chunkedIn('b2c_order_easycom', 'reference_code, updated_at', 'reference_code', names, q => q.filter('raw_data->>order_status_id', 'eq', '44')) : [];
+            const eeHeldById = new Map(eeHoldIdRows.map(r => [nk(r.reference_code), r.updated_at]));
+            // ⚠️ Same staleness rule as /ee-hold-marks: `order_status_id` is a SYNCED copy, so it still reads
+            // 44 after an unhold until the EasyEcom sync next touches the order. A human release newer than
+            // that sync wins — otherwise the panel shows "held" on an order EasyEcom reports as unheld, and
+            // the agent clicks Unhold over and over against an already-unheld order.
+            const relRows = names.length ? await chunkedIn('order_marks_ecom', 'order_name, created_at', 'order_name', names, q => q.eq('mark_type', 'ee_hold_released')) : [];
+            const releasedAt = {}; relRows.forEach(m => { releasedAt[nk(m.order_name)] = m.created_at; });
+            const staleHold = (k, syncedAt) => { const rel = releasedAt[k]; if (!rel) return false;
+                return !syncedAt || new Date(rel) > new Date(syncedAt); };
             rows.forEach(r => {
                 const k = nk(r.order_name);
                 r.shopify_hold = holds[k] || null;
                 const ee = eeBy[k];
                 r.in_ee = !!ee;                                                   // imported into EasyEcom?
                 r.easyecom_order_id = ee ? String(ee.order_id) : null;
-                r.ee_hold = eeHeld.has(k) || eeHeldById.has(k) || /hold/i.test((ee && ee.order_status) || '');   // already held in EasyEcom?
+                const syncedHeld = (eeHeldById.has(k) || /hold/i.test((ee && ee.order_status) || '')) && !staleHold(k, eeHeldById.get(k));
+                r.ee_hold = eeHeld.has(k) || syncedHeld;                          // already held in EasyEcom?
             });
             // Show a candidate if it matches ≥1 call-reason (in_flight / recent_undelivered / high_value) OR the
             // team is already working it (held on EasyEcom/Shopify — incl. a failed hold — or has agent notes).
@@ -517,15 +555,36 @@ router.get('/support/order/:orderId', async (req, res) => {
         // Hold / unhold log — every auto/manual Shopify hold + release for THIS order (from api_logs_ecom),
         // oldest first, so the modal can render a full timeline (who, when, auto vs manual, reason).
         const onmNorm = nkn(b.order_name);
+        // ⚠️ EasyEcom events belong here too. The log used to query only the three `shopify_*` actions, so an
+        // order auto-held INSIDE EasyEcom (what holdOrderSmart does once the order has already imported —
+        // now the common case) showed an empty timeline while the row wore an "EasyEcom hold" chip: held,
+        // with nothing on record saying who or why. Two shapes have to be reconciled:
+        //   • key      — shopify_* writes `payload.order` (no #), easyecom_* writes `payload.orderName` (with #)
+        //   • success  — easyecom_* always returns HTTP 200; the REAL result is in the body (`response.code`
+        //                / `response.message`), so `status_code < 400` would score every failure as a success.
         const { data: holdRows } = await supabase.from('api_logs_ecom')
             .select('action, status_code, payload, response, created_at')
-            .in('action', ['shopify_hold', 'shopify_release', 'shopify_cancel'])
-            .order('created_at', { ascending: false }).limit(500);
-        // Exact match on payload.order (always written by logApi) — the old JSON-substring test made
-        // TE25-3810/3811/…'s events bleed into TE25-381's timeline (prefix substring).
+            .in('action', ['shopify_hold', 'shopify_release', 'shopify_cancel', 'easyecom_hold_order', 'easyecom_unhold_order'])
+            .order('created_at', { ascending: false }).limit(2000);
+        // Exact match on the order key (never a JSON substring test — that made TE25-3810/3811/…'s events
+        // bleed into TE25-381's timeline via the prefix).
+        const isEE = a => a === 'easyecom_hold_order' || a === 'easyecom_unhold_order';
+        const eeOk = resp => { const b = resp && typeof resp === 'object' ? resp : {};
+            return b.code === 200 || /success/i.test(String(b.message || '')); };
+        // A no-op ("Order already in Hold Status" / "already in Unhold status") changed nothing, so it is not
+        // a timeline event. Before the re-hold fix the auto-holder produced hundreds of these per order —
+        // rendering them would bury the three entries that actually matter.
+        const eeNoop = resp => /already.{0,25}(in )?(un)?hold/i.test(String((resp || {}).message || ''));
         const holdLog = (holdRows || [])
-            .filter(l => nkn((l.payload || {}).order) === onmNorm)
-            .map(l => { const p = l.payload || {}; return { action: l.action, by: p.by || 'auto', reason: p.reason || null, ok: (l.status_code || 0) < 400, result: l.response || null, at: l.created_at }; })
+            .filter(l => {
+                const p = l.payload || {};
+                if (nkn(isEE(l.action) ? p.orderName : p.order) !== onmNorm) return false;
+                return !isEE(l.action) || !eeNoop(l.response);
+            })
+            .map(l => { const p = l.payload || {};
+                return { action: l.action, by: p.by || (isEE(l.action) ? null : 'auto'), reason: p.reason || null,
+                    ok: isEE(l.action) ? eeOk(l.response) : (l.status_code || 0) < 400,
+                    result: isEE(l.action) ? ((l.response || {}).message || null) : l.response, at: l.created_at }; })
             .sort((x, y) => new Date(x.at) - new Date(y.at));
         // MSG91 thread by phone (last 20).
         let msg91 = [];

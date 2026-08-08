@@ -3,21 +3,35 @@ const router  = express.Router();
 const axios   = require('axios');
 const config  = require('../../config');
 const { getRapidshypTimeline, fetchDocpharmaDetails, extractDocpharmaStatusString } = require('./helpers');
-const { fetchKwikshipShipment } = require('./kwikship_sync');
+const { fetchKwikshipShipment, fetchKwikshipPublic } = require('./kwikship_sync');
 const { supabase } = require('../supabase');
 
 const GQL_URL = `https://${config.SHOPIFY_SHOP_URL}/admin/api/2025-01/graphql.json`;
 
 // Kwikship (GoKwik) live-tracking fallback — RapidShyp 400s on GoKwik AWBs, so when RapidShyp/DocPharma
-// yield nothing, ask Kwikship's API by AWB (returns 404 for non-Kwikship AWBs → null, so this is safe to
+// yield nothing, ask Kwikship by AWB (returns nothing for non-Kwikship AWBs → null, so this is safe to
 // try for any order). Returns { events (newest-first), status } | null.
+//
+// ⚠️ PUBLIC v2 FIRST. The authenticated v1 endpoint does NOT know every shipment — it answered `found:false`
+// for AWB 47607613096671 (order TE25-40596) while v2 returned all 16 scans, so the modal showed "No tracking
+// events yet" on a parcel that was plainly moving. This was the last v1-only call site; the sync, the
+// Delivery-Performance scan log and the webhook were all switched to v2-first earlier. v1 stays as the
+// fallback for the reverse case.
 async function kwikshipTrack(awb) {
     try {
-        const ks = await fetchKwikshipShipment(awb);
+        let ks = await fetchKwikshipPublic(awb);
+        if (!(ks && ks.found && ks.statusHistory && ks.statusHistory.length)) ks = await fetchKwikshipShipment(awb);
         if (!ks || !ks.found || !ks.statusHistory || !ks.statusHistory.length) return null;
         const human = s => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        // The two endpoints name the same fields differently — v1 {datetime, description}, v2
+        // {status_datetime, shipper_remark}. Read both, or v2's events render with blank timestamps and a
+        // generic status name instead of the real remark ("Shipment picked up", "Consignee Unavailable").
         const events = ks.statusHistory
-            .map(h => ({ status: h.description || human(h.status), timestamp: h.datetime || h.date || '', location: h.location || '' }))
+            .map(h => ({
+                status: h.shipper_remark || h.description || human(h.status),
+                timestamp: h.status_datetime || h.datetime || h.date || h.creation_datetime || '',
+                location: h.location || '',
+            }))
             .filter(ev => ev.status)
             .sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));   // newest first
         return { events, status: human(ks.status) || (events[0] && events[0].status) || '' };
@@ -44,6 +58,50 @@ async function fetchRsTrackingByAwbs(awbs, columns = 'awb, raw_status, updated_a
         return data || [];
     }));
     return batches.flat();
+}
+
+// ── Delivery status for shipments RapidShyp does not carry ───────────────────────────────────────
+// `rapidshyp_tracking_ecom` is a RAPIDSHYP-ONLY cache: RapidShyp 400s on a Kwikship/DocPharma AWB, so
+// nothing is ever written for those, `o.rapidshypStatus` stays undefined, and the table falls back to
+// Shopify's `displayFulfillmentStatus` — which reads **"Confirmed"** forever no matter where the parcel
+// actually is. That is why Fulfillment Ops showed 386 Confirmed / 0 in transit / 0 delivered while
+// Kwikship orders were mid-route and delivered.
+//
+// `shipment_journey_ecom` already holds the truth for all three platforms (kept fresh by the Kwikship
+// webhook + 2 AM cron and the RapidShyp/DocPharma syncs), so use it to FILL THE GAPS — never to override
+// a RapidShyp cache hit, which is the fresher signal for RapidShyp's own shipments.
+//
+// The frontend classifier (`fopsGetDS`) is a substring matcher over this string, so emit phrases it
+// already understands rather than raw codes.
+async function fetchJourneyByAwbs(awbs) {
+    const uniq = [...new Set(awbs.filter(Boolean))];
+    const out = {};
+    for (let i = 0; i < uniq.length; i += 200) {
+        const { data, error } = await supabase.from('shipment_journey_ecom')
+            .select('awb, source, outcome, status_code').in('awb', uniq.slice(i, i + 200));
+        if (error) { console.error('[FulfillmentOps] journey chunk error:', error.message); continue; }
+        (data || []).forEach(r => { out[r.awb] = r; });
+    }
+    return out;
+}
+function journeyStatusText(j) {
+    if (!j) return null;
+    const code = String(j.status_code || '').toLowerCase();
+    switch (String(j.outcome || '')) {
+        case 'delivered': return 'Delivered';
+        case 'rto':       return 'RTO';
+        case 'ndr_pending': return 'Undelivered — delivery attempted';
+        // Not a delivery outcome, but it needs a human either way — surface it under Attempted (action
+        // needed) instead of letting it fall back to a placid "Confirmed".
+        case 'lost':      return 'Undelivered — shipment lost';
+        case 'in_transit':
+            if (code === 'out_for_delivery') return 'Out for Delivery';
+            // `out_for_pickup` means the courier hasn't collected it yet — Shopify's own state is correct
+            // there, so leave it alone rather than claiming movement that hasn't happened.
+            if (code === 'out_for_pickup') return null;
+            return 'In Transit';
+        default: return null;
+    }
 }
 
 // AWBs RapidShyp itself has rejected as unknown (HTTP 400) — i.e. shipments booked with ANOTHER carrier
@@ -148,6 +206,25 @@ router.post('/orders', async (req, res) => {
                 const awb = ti[0].number;
                 if (awb && rsMap[awb]) o.rapidshypStatus = rsMap[awb].raw_status;
             });
+
+            // GAP FILL — every AWB the RapidShyp cache has nothing for (Kwikship / DocPharma / anything
+            // RapidShyp 400s on) gets its status from shipment_journey_ecom instead. Without this those
+            // orders read "Confirmed" for their whole life. Still zero live API calls: one indexed table read.
+            const missing = awbs.filter(a => !(rsMap[a] && rsMap[a].raw_status));
+            if (missing.length) {
+                const jMap = await fetchJourneyByAwbs(missing);
+                let filled = 0;
+                allOrders.forEach(o => {
+                    if (o.rapidshypStatus) return;
+                    const f = o.fulfillments || [];
+                    if (!f.length) return;
+                    const ti = f[0].trackingInfo || [];
+                    if (!ti.length) return;
+                    const txt = journeyStatusText(jMap[ti[0].number]);
+                    if (txt) { o.rapidshypStatus = txt; o.statusSource = (jMap[ti[0].number] || {}).source || 'journey'; filled++; }
+                });
+                if (filled) console.log(`[FulfillmentOps] filled ${filled}/${missing.length} statuses from shipment_journey_ecom (non-RapidShyp shipments)`);
+            }
         }
 
         res.json({ success: true, orders: allOrders });
@@ -372,8 +449,10 @@ router.get('/track-order/:numericId', async (req, res) => {
         if (!ti.length) return res.json({ success: false, error: 'No tracking info on this order' });
         const latestAWB = ti[0].number;
 
-        // 2. Call RapidShyp for latest status + events
-        let events = [], rsStatus = '', fromDocpharma = false;
+        // 2. Call RapidShyp for latest status + events.
+        // `statusFrom` records WHICH source produced `rsStatus`. Only 'rapidshyp' may be pushed to Shopify
+        // (see 3b) — every other source is display-and-cache only.
+        let events = [], rsStatus = '', fromDocpharma = false, statusFrom = null;
         try {
             const rsRes = await axios.post(RS_URL, { awb: latestAWB }, { headers: RS_HDR(), timeout: 10000 });
             const data  = rsRes.data;
@@ -390,6 +469,7 @@ router.get('/track-order/:numericId', async (req, res) => {
                 // Fall back to the latest scan when the summary fields are empty, so a
                 // real status (e.g. "Consignee refused…") still gets surfaced & cached.
                 rsStatus = ship.current_tracking_status_desc || ship.shipment_status || (events[0] && events[0].status) || '';
+                if (rsStatus) statusFrom = 'rapidshyp';
             }
         } catch (rsErr) {
             console.error(`[TrackOrder] RS error for ${latestAWB}:`, rsErr.message);
@@ -404,7 +484,7 @@ router.get('/track-order/:numericId', async (req, res) => {
                 const dpStatus = extractDocpharmaStatusString(dp);
                 if (dpStatus) {
                     rsStatus = dpStatus;
-                    fromDocpharma = true; // display + cache only — never push to Shopify (avoids delivered emails)
+                    fromDocpharma = true; statusFrom = 'docpharma';   // display + cache only — never pushed
                     if (!events.length) events = [{ status: dpStatus, timestamp: '', location: 'DocPharma' }];
                     console.log(`[TrackOrder] ${order.name} → RapidShyp empty → DocPharma: ${dpStatus}`);
                 } else {
@@ -420,9 +500,19 @@ router.get('/track-order/:numericId', async (req, res) => {
             const ks = await kwikshipTrack(latestAWB);
             if (ks && ks.events.length) {
                 events = ks.events;
-                if (ks.status) rsStatus = ks.status;
+                if (ks.status) { rsStatus = ks.status; statusFrom = 'kwikship'; }   // display + cache only — never pushed
                 console.log(`[TrackOrder] ${order.name} → Kwikship: ${ks.status || '(events only)'} (${events.length} events)`);
             }
+        }
+
+        // 2d. Last resort — our own journey table. Every platform's sync writes here, so if all three live
+        //     lookups came back empty (API blip, auth expiry, a courier we don't call directly) we still
+        //     know where the parcel is and the row shows it instead of a false "Confirmed".
+        //     Display + cache only: `statusFrom = 'journey'` keeps it out of the Shopify push at 3b.
+        if (!rsStatus && latestAWB) {
+            const j = (await fetchJourneyByAwbs([latestAWB]))[latestAWB];
+            const txt = journeyStatusText(j);
+            if (txt) { rsStatus = txt; statusFrom = 'journey'; console.log(`[TrackOrder] ${order.name} → journey (${j.source}): ${txt}`); }
         }
 
         // 3. Save latest AWB + status to DB
@@ -436,8 +526,13 @@ router.get('/track-order/:numericId', async (req, res) => {
 
         // 3b. Push RapidShyp status to Shopify when they don't match (keeps Shopify in sync
         //     with the courier — e.g. RapidShyp "Ready to Ship" but Shopify still "Confirmed").
-        let statusPush = { pushed: false };
-        if (fulfillment && rsStatus && !order.cancelledAt && !fromDocpharma) {
+        // ⚠️ RAPIDSHYP-SOURCED STATUSES ONLY — by explicit instruction (2026-08-08): we do NOT push
+        // DocPharma, Kwikship or journey-derived statuses to Shopify. This is the ONLY writer here, and
+        // `statusFrom` gates it, so the Kwikship/journey lookups added above stay strictly read-only:
+        // they fix what the DASHBOARD shows and never change the customer-facing order on Shopify.
+        // (Historically this was gated by `!fromDocpharma`, which no longer covers the new sources.)
+        let statusPush = { pushed: false, reason: 'not-rapidshyp' };
+        if (fulfillment && rsStatus && !order.cancelledAt && statusFrom === 'rapidshyp') {
             statusPush = await pushShopifyFulfillmentStatus(fulfillment.id, fulfillment.displayStatus, rsStatus, { manual: true });
         }
 
