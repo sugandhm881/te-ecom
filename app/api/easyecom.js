@@ -695,8 +695,12 @@ async function holdOrderInEasyecom(orderName, reason, actor) {
         const already = /already.{0,25}(on ?hold|hold status)/i.test(String(body.message || ''));
         const ok = (r.status === 200 && (body.code === 200 || body.status === true || body.success === true || /success/i.test(String(body.message || '')))) || already;
         if (!ok) return { ok: false, message: body.message || `EasyEcom rejected the hold (HTTP ${r.status})` };
+        const _nm = String(orderName).replace('#', '').trim();
+        // A deliberate hold clears the release tombstone (mirrors how recordHold() clears the Shopify one).
+        // The auto-holder never reaches here for a released order — holdOrderSmart() stops it first.
+        await supabase.from('order_marks_ecom').delete().eq('order_name', _nm).eq('mark_type', 'ee_hold_released').then(() => {}).catch(() => {});
         await supabase.from('order_marks_ecom').upsert({
-            order_name: String(orderName).replace('#', '').trim(), mark_type: 'ee_hold', note,
+            order_name: _nm, mark_type: 'ee_hold', note,
             created_by: actor || 'auto', created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
         }, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
         return { ok: true, message: `Order ${orderName} put on hold in EasyEcom.`, alreadyHeld: already };
@@ -718,6 +722,9 @@ router.post('/hold-order', tokenRequired, async (req, res) => {
         if (ok) {
             // Live hold-state mark → the dashboard shows "On Hold" + Unhold instantly (EasyEcom's own
             // status only reflects after their next sync). api_logs_ecom above is the permanent history.
+            // A human deliberately re-holding clears any release tombstone, so the state can't read as
+            // both held and released at once.
+            await supabase.from('order_marks_ecom').delete().eq('order_name', String(orderName).replace('#', '').trim()).eq('mark_type', 'ee_hold_released').then(() => {}).catch(() => {});
             const mark = { order_name: String(orderName).replace('#', '').trim(), mark_type: 'ee_hold', note: String(reason).trim().slice(0, 200), created_by: req.user && req.user.sub, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
             await supabase.from('order_marks_ecom').upsert(mark, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
             return res.json({ success: true, message: `Order ${orderName} put on hold in EasyEcom.`, hold: { reason: mark.note, by: mark.created_by, at: mark.created_at } });
@@ -952,6 +959,16 @@ router.post('/unhold-order', tokenRequired, async (req, res) => {
         if (ok || alreadyUnheld) {
             // Clear the live hold-state mark (the unhold event itself is preserved in api_logs_ecom).
             await supabase.from('order_marks_ecom').delete().eq('order_name', String(orderName).replace('#', '').trim()).eq('mark_type', 'ee_hold').then(() => {}).catch(() => {});
+            // ⚠️ TOMBSTONE — record that a HUMAN released this. Deleting the `ee_hold` mark alone left no
+            // trace, so the auto-holder had no way to know and would put the order straight back on hold on
+            // its next pass. `holdOrderSmart()` treats `ee_hold_released` as final: a human release always
+            // wins, and only a human (this route) may hold it again.
+            await supabase.from('order_marks_ecom').upsert({
+                order_name: String(orderName).replace('#', '').trim(), mark_type: 'ee_hold_released',
+                note: 'released by ' + ((req.user && req.user.sub) || 'user'),
+                created_by: (req.user && req.user.sub) || null,
+                created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            }, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
             // RELEASE BOTH. When the auto-holder catches an order after the EasyEcom import it holds it in
             // BOTH systems (EasyEcom stops it; the Shopify hold mirrors that so the two agree), and the
             // dashboard offers only this one Unhold. Releasing here must therefore clear the Shopify hold

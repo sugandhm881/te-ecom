@@ -299,6 +299,21 @@ async function holdOrderSmart(orderName, shopifyOrderId, reasonNote, createdAt, 
     if (first.held) return { held: true, where: 'shopify' };
     if (first.skipped !== 'in-easyecom') return first;   // stale / already held / released / shipped — leave it
 
+    // ⚠️ RE-HOLD GUARD. autoHoldOrder checks `in-easyecom` BEFORE it checks the hold marks, so for an
+    // imported order it returns 'in-easyecom' without ever looking at whether a human released it. Falling
+    // straight through to the EasyEcom hold therefore RE-HELD orders the team had just unheld — they would
+    // release an order and watch it go back on hold minutes later. Check the release state here, and treat
+    // BOTH tombstones as final: `shopify_hold_released` and `ee_hold_released`. A human release always wins;
+    // only a human may hold it again.
+    const marks = (await getHoldStates([name]))[name];
+    if (marks && (marks.status === 'held' || marks.status === 'released')) return { skipped: marks.status };
+    const { data: rel } = await supabase.from('order_marks_ecom')
+        .select('order_name').eq('order_name', name).eq('mark_type', 'ee_hold_released').limit(1).maybeSingle();
+    if (rel) return { skipped: 'ee-released' };
+    const { data: eeHeld } = await supabase.from('order_marks_ecom')
+        .select('order_name').eq('order_name', name).eq('mark_type', 'ee_hold').limit(1).maybeSingle();
+    if (eeHeld) return { skipped: 'ee-already-held' };
+
     // 2) Window closed — stop it inside EasyEcom instead, but ONLY if the parcel hasn't left yet.
     //    Shopify refuses a hold on a fulfilled order by itself; EasyEcom does not, so this is the guard
     //    that stops an already-dispatched order being pointlessly held.
