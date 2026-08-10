@@ -6,6 +6,14 @@ async function refresh() {
   let s = status || 'Not run yet.';
   if (statusAt) s += `\n(${new Date(statusAt).toLocaleString()})`;
   $('status').textContent = s;
+  // Show the NEXT automatic run. Until now the only way to tell the 20-minute timer had stopped was to
+  // notice the status still said "(manual)" from the last button press — which nobody does.
+  chrome.runtime.sendMessage('alarm-info', info => {
+    const el = $('next'); if (!el) return;
+    el.textContent = (info && info.scheduledTime)
+      ? `Auto-runs every ${info.periodInMinutes || 20} min · next at ${new Date(info.scheduledTime).toLocaleTimeString()}`
+      : 'Timer not scheduled — reopening this popup restores it.';
+  });
 }
 
 $('save').onclick = async () => {

@@ -39,12 +39,19 @@ async function pushCookie(reason) {
   }
 }
 
-// Periodic sync (alarms survive service-worker restarts).
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create('ee-sync', { periodInMinutes: SYNC_MINUTES });
-  pushCookie('installed');
-});
-chrome.runtime.onStartup.addListener(() => pushCookie('startup'));
+// Periodic sync. ⚠️ Re-assert the alarm on EVERY worker start, not just onInstalled — that listener
+// fires once per install/update, so an alarm lost for any reason was never recreated and the timer
+// silently stopped for good. create() replaces an existing alarm of the same name, so this is free and
+// self-heals the next time anything wakes the worker.
+async function ensureAlarm() {
+  try {
+    if (await chrome.alarms.get('ee-sync')) return;
+    await chrome.alarms.create('ee-sync', { delayInMinutes: 1, periodInMinutes: SYNC_MINUTES });
+  } catch (e) { await setStatus('⚠️ Could not schedule the timer: ' + e.message); }
+}
+ensureAlarm();
+chrome.runtime.onInstalled.addListener(() => { ensureAlarm(); pushCookie('installed'); });
+chrome.runtime.onStartup.addListener(() => { ensureAlarm(); pushCookie('startup'); });
 chrome.alarms.onAlarm.addListener(a => { if (a.name === 'ee-sync') pushCookie('timer'); });
 
 // Push soon after a fresh login (the session cookie changing), throttled so browsing EasyEcom

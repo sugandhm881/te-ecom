@@ -814,7 +814,13 @@ async function callUpdateVendor(cookie, invoiceId, vendorCid, cId, eeOrderId) {
     const raw = typeof r.data === 'object' ? JSON.stringify(r.data) : String(r.data);
     const data = (typeof r.data === 'object') ? r.data : (() => { try { return JSON.parse(raw); } catch (_) { return {}; } })();
     const expired = r.status === 302 || r.status === 401 || /unauthenticated|<!doctype|<html|sign ?in|please log ?in/i.test(raw);
-    const ok = r.status === 200 && !expired && (raw.trim() === '0' || data.code === 200 || data.status === true || data.success === true) && data.code !== 400;
+    // Success is a bare "0" or "200" (see the note in the extension's background.js — proven on
+    // TE25-41231), or a JSON body that says so. Kept identical to the extension's test so the two paths
+    // can never disagree about whether a route landed.
+    const reply = raw.trim();   // `body` is already the POST payload above
+    const ok = r.status === 200 && !expired
+        && (reply === '0' || reply === '200' || data.code === 200 || data.status === true || data.success === true)
+        && data.code !== 400;
     return { status: r.status, raw, data, ok, expired };
 }
 

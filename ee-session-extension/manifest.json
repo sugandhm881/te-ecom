@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Ecom Central — EasyEcom Session Sync",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Keeps the Ecom Central dashboard's EasyEcom panel session fresh by syncing the login cookie from your logged-in browser. No passwords stored.",
   "permissions": ["cookies", "alarms", "storage"],
   "host_permissions": [
