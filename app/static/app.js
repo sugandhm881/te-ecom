@@ -8490,7 +8490,9 @@ function dpRender(d){
     document.getElementById('dp-kpis').innerHTML = [
         {label:'First-Attempt Strike Rate', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.bolt,   val:k.fasr+'%',            foot:`${k.fasrNumerator} of ${k.totalShipments} tracked on 1st attempt`, cur:k.fasr,            prev:c?c.fasr:null,            better:true,  unit:'pp'},
         {label:'NDR Recovery',            accent:'#059669', tint:'#ecfdf5', icon:DP_ICONS.refresh, val:k.ndrRecoveryRate+'%', foot:`${k.ndrRecovered} of ${k.ndrTotal} NDRs recovered`,      cur:k.ndrRecoveryRate, prev:c?c.ndrRecoveryRate:null, better:true,  unit:'pp'},
-        {label:'RTO Rate',                accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn,   val:k.rtoRate+'%',         foot:`${k.rto} of ${k.totalShipments} returned`,               cur:k.rtoRate,         prev:c?c.rtoRate:null,         better:false, unit:'pp'},
+        // Denominator is `resolved` (delivered + RTO), NOT totalShipments — an in-transit parcel hasn't had
+        // its chance to come back yet. The caption names the base so the number can be checked by hand.
+        {label:'RTO Rate',                accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn,   val:k.rtoRate+'%',         foot:`${k.rto} of ${k.resolved} shipped (delivered + RTO)`,    cur:k.rtoRate,         prev:c?c.rtoRate:null,         better:false, unit:'pp'},
         {label:'Avg Delivery Attempts',   accent:'#0891b2', tint:'#ecfeff', icon:DP_ICONS.hash,    val:k.avgAttempts,         foot:`across ${k.resolved} resolved`,                          cur:k.avgAttempts,     prev:c?c.avgAttempts:null,     better:false, unit:''},
     ].map(dpKpiCard).join('');
     dpStatus(d.statusBreakdown, c);
@@ -8564,9 +8566,19 @@ function dpTat(t,c){ const el=document.getElementById('dp-tat'); if(!el) return;
         if(_dpTatFilter!=null) document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'});
     }));
 }
-// Clickable partition chip — filters the shipment explorer to that state. Sums to `total`.
-function dpStatusChip(dot,label,val,total,state,prevShare){ const p=total?Math.round(val/total*1000)/10:0;
-    return `<button data-state="${state||''}" class="dp-chip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-indigo-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${val}</b><span class="text-slate-400 text-xs tabular-nums">${p}%</span>${dpPP(p,prevShare)}</button>`; }
+// Clickable partition chip — filters the shipment explorer to that state. COUNTS always sum to `total`.
+// `opts.pct` / `opts.prevPct` override the percentage when a chip must show a RATE rather than its share
+// of tracked — used by RTO, so the chip reads the same 24.6% as the RTO Rate card instead of 19.3%.
+// `opts.base` names the denominator in the tooltip, so no chip's percentage is ambiguous.
+function dpStatusChip(dot,label,val,total,state,prevShare,opts){ opts=opts||{};
+    const p = opts.pct!=null ? opts.pct : (total?Math.round(val/total*1000)/10:0);
+    const prev = opts.prevPct!=null ? opts.prevPct : prevShare;
+    const tip = `${val} of ${opts.base||(total+' tracked')} = ${p}%`;
+    return `<button data-state="${state||''}" title="${tip}" class="dp-chip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-indigo-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${val}</b><span class="text-slate-400 text-xs tabular-nums">${p}%</span>${dpPP(p,prev)}</button>`; }
+// RTO rate from the status counts — the SAME formula the backend uses for the KPI card
+// (RTO ÷ (delivered 1st attempt + delivered after NDR + RTO)), so the chip and the card can't drift.
+function dpRtoRate(s){ const resolved=(s.firstAttempt||0)+(s.deliveredMulti||0)+(s.rto||0);
+    return resolved ? Math.round((s.rto/resolved)*1000)/10 : 0; }
 function dpStatus(s,c){ const el=document.getElementById('dp-status'); if(!s){ el.innerHTML=''; return; }
     const t=s.total||0, pt=c?c.totalShipments:0;
     const ps=v=> (c&&pt&&v!=null)? Math.round(v/pt*1000)/10 : null;   // previous-period share %
@@ -8574,11 +8586,16 @@ function dpStatus(s,c){ const el=document.getElementById('dp-status'); if(!s){ e
         `<span class="inline-flex items-center px-3 py-1.5 bg-slate-800 text-white rounded-lg font-semibold tabular-nums">${t} tracked</span>`+
         dpStatusChip('bg-indigo-500','Delivered · 1st attempt', s.firstAttempt, t, 'delivered_first', ps(c&&c.firstAttempt))+
         dpStatusChip('bg-sky-500','Delivered · after NDR', s.deliveredMulti, t, 'delivered_ndr', ps(c&&c.deliveredMulti))+
-        dpStatusChip('bg-red-500','RTO', s.rto, t, 'rto', ps(c&&c.rto))+
+        // RTO shows the RATE (÷ shipped = delivered + RTO), matching the RTO Rate card — the chip used to
+        // show its share of tracked (735/3808 = 19.3%) directly under a card reading 24.6%, which looked
+        // like one of the two was broken. Its delta comes from the same coreStats rate, so both sides of
+        // the comparison use one base. The COUNT is unchanged, so the strip still adds up to tracked.
+        dpStatusChip('bg-red-500','RTO', s.rto, t, 'rto', null,
+            { pct: dpRtoRate(s), prevPct: (c && c.rtoRate!=null) ? c.rtoRate : null, base: (s.firstAttempt+s.deliveredMulti+s.rto)+' shipped (delivered + RTO)' })+
         (s.lost>0 ? dpStatusChip('bg-rose-800','Lost', s.lost, t, 'lost', ps(c&&c.lost)) : '')+
         dpStatusChip('bg-amber-500','NDR pending', s.ndrPending, t, 'ndr_pending', ps(c&&c.ndrPending))+
         dpStatusChip('bg-slate-400','In-transit', s.inTransit, t, 'in_transit', ps(c&&c.inTransit))+
-        `<span class="inline-flex items-center gap-1 text-xs text-slate-400 ml-1">= sums to tracked</span>`;
+        `<span class="inline-flex items-center gap-1 text-xs text-slate-400 ml-1" title="The COUNTS add up to tracked. Percentages are each chip's share of tracked — except RTO, which shows the RTO rate over shipped (delivered + RTO) so it matches the card above.">counts sum to tracked</span>`;
     el.querySelectorAll('.dp-chip').forEach(b=>b.addEventListener('click',()=>{ const st=b.dataset.state||'all';
         const sel=document.getElementById('dp-state'); if(sel){ sel.value=st; } dpTableRender();
         document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }));

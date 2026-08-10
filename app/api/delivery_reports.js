@@ -123,7 +123,7 @@ function summarizeAll(rows) {
         firstAttempt: firstAttempt.length, deliveredMulti,
         firstAttemptCount: firstAttempt.length, ndrTotal: ndr.length, ndrRecovered: ndrDelivered.length,
         rtoAttempted: ndrRto.length, rtoSilent: rto.length - ndrRto.length,
-        fasr: pct(firstAttempt.length, tracked), rtoRate: pct(rto.length, tracked),
+        fasr: pct(firstAttempt.length, tracked), rtoRate: pct(rto.length, resolved),
         deliveredRate: pct(delivered.length, tracked), ndrRecoveryRate: pct(ndrDelivered.length, ndr.length),
         avgAttempts, otdAvg: otd.avg, dtdAvg: dtd.avg,
     };
@@ -146,7 +146,7 @@ function paymentSplit(rows) {
         return {
             tracked, delivered: delivered.length, ndrTotal: ndr.length, rto: rto.length,
             fasr: pct(first.length, tracked), ndrRate: pct(ndr.length, tracked),
-            ndrRecoveryRate: pct(ndrDelivered.length, ndr.length), rtoRate: pct(rto.length, tracked),
+            ndrRecoveryRate: pct(ndrDelivered.length, ndr.length), rtoRate: pct(rto.length, delivered.length + rto.length),
             deliveredRate: pct(delivered.length, tracked),
         };
     };
@@ -254,7 +254,15 @@ router.get('/delivery-performance', async (req, res) => {
             deliveredMulti,                               // "NDR" in the model (delivered after a failed attempt)
             fasr: pct(firstAttempt.length, tracked),      // First-Attempt ÷ Total Tracked (the trend uses the same base)
             fasrNumerator: firstAttempt.length,
-            rtoRate: pct(rto.length, tracked),            // RTO ÷ Total Tracked
+// ⚠️ RTO RATE IS MEASURED ON SETTLED SHIPMENTS, NOT ALL TRACKED (changed 2026-08-08 by request):
+//     RTO% = RTO ÷ (delivered on 1st attempt + delivered after NDR + RTO) = RTO ÷ `resolved`.
+// A parcel still in transit or sitting on an open NDR has not had its chance to come back yet, so
+// counting it in the denominator drags the rate down and makes it move whenever shipping VOLUME moves
+// rather than when returns do. On the live 30-day window that is 735/2983 = 24.6% instead of
+// 735/3808 = 19.3% — the same returns, honestly measured against the orders that actually finished.
+// Applied to every RTO-rate computation (headline KPI, previous-period comparison, COD/Prepaid split)
+// so the dashboard never shows two different definitions of the same number.
+            rtoRate: pct(rto.length, resolved),           // RTO ÷ (delivered + RTO)
             deliveredRate: pct(delivered.length, tracked),
             avgAttempts,
             ndrTotal: ndr.length,
@@ -654,21 +662,38 @@ function rangeEndingYesterday(days) {
 const emailRangeLabel = rg => rg.rangeLabelDMY || dmyLabel(rg.fromLabel) + ' → ' + dmyLabel(rg.toLabel);
 const PLATFORM_LABEL = { rapidshyp: 'RapidShyp', docpharma: 'DocPharma', kwikship: 'KwikShip' };
 
+// ── AUTOMATIC MAIL BLOCKLIST ─────────────────────────────────────────────────────────────────────
+// Couriers that must NEVER receive an UNATTENDED (cron) report. Manual sends from the dashboard are
+// deliberately unaffected — this is about mail that goes out with nobody watching.
+//
+// ⚠️ ENFORCED IN THE SENDERS, NOT IN THE CRONS. The first attempt at this excluded RapidShyp from the
+// one DAILY cron only, and the weekly Silent-RTO + fortnightly Late-Deliveries kept mailing them,
+// because each cron carries its own recipient logic. A per-cron opt-out is something you must remember
+// three times over, and again for every report added later. Blocking at the send path makes a blocked
+// courier silent by default — a new report cannot forget it.
+// To resume mail to a courier: remove it from this set. One line, one place.
+const AUTO_MAIL_BLOCKED = new Set(['rapidshyp']);
+const autoBlocked = (platform, auto) => !!auto && AUTO_MAIL_BLOCKED.has(platform);
+
 // Send a delivery report as SEPARATE emails per platform — RapidShyp rows go to the RapidShyp recipients,
 // DocPharma rows to the DocPharma recipients (each configured in Settings → Email & Reports). `source`
 // restricts to one platform; otherwise BOTH are attempted. A platform is skipped when it has no matching
 // rows OR no recipient configured. fetchFn(fromISO,toISO,platform,extra) → rows; buildFn(rows,rangeLabel,
 // platform,extra) → { subject, html }. Returns { ok, skipped?, reason?, to, count, results }.
-async function sendReportPerPlatform({ fetchFn, buildFn, rg, source, extra, exclude }) {
+async function sendReportPerPlatform({ fetchFn, buildFn, rg, source, extra, exclude, auto, dryRun }) {
     const skip = new Set(exclude || []);
     const platforms = (source ? [source] : ['rapidshyp', 'docpharma', 'kwikship']).filter(p => !skip.has(p));
     const results = [];
     for (const p of platforms) {
+        if (autoBlocked(p, auto)) { results.push({ platform: p, count: 0, skipped: true, reason: `${PLATFORM_LABEL[p] || p}: automatic mail disabled` }); continue; }
         const rows = await fetchFn(rg.fromISO, rg.toISO, p, extra);
         if (!rows.length) { results.push({ platform: p, count: 0, skipped: true, reason: `${PLATFORM_LABEL[p] || p}: none in range` }); continue; }
         const rcpt = await recipientsFor(p);
         if (!rcpt.to.length) { results.push({ platform: p, count: rows.length, skipped: true, reason: `${PLATFORM_LABEL[p] || p}: no recipient set in Settings` }); continue; }
         const mail = buildFn(rows, emailRangeLabel(rg), p, extra);
+        // dryRun → build everything, send nothing. See the note on sendSilentRtoReport: this is how you
+        // verify a report's routing without putting mail in a courier's inbox.
+        if (dryRun) { results.push({ platform: p, count: rows.length, to: rcpt.to, dryRun: true }); continue; }
         const r = await sendMail({ to: rcpt.to, cc: rcpt.cc, subject: mail.subject, html: mail.html });
         results.push({ platform: p, count: rows.length, to: r.to });
     }
@@ -719,6 +744,10 @@ function buildSilentRtoMail(rows, rangeLabel) {
     return { subject: `Silent RTO Claim — ${s.count} shipments, ${inr(s.totalFreight)} freight (${rangeLabel})`, html };
 }
 async function sendSilentRtoReport(opts = {}) {
+    // This report is RapidShyp-only and addresses them directly (it never goes through
+    // sendReportPerPlatform), so the blocklist has to be applied here too — this is the weekly mail that
+    // kept going after the daily one was stopped.
+    if (autoBlocked('rapidshyp', opts.auto)) return { ok: false, skipped: true, reason: 'RapidShyp: automatic mail disabled' };
     const rg = opts.fromISO ? opts : rangeEndingYesterday(opts.days || 7);
     const rows = await fetchSilentRto(rg.fromISO, rg.toISO);          // RapidShyp-only by design
     if (!rows.length) return { ok: false, skipped: true, reason: 'No silent-RTO shipments in the selected range.' };
@@ -726,6 +755,10 @@ async function sendSilentRtoReport(opts = {}) {
     let to = opts.to, cc;
     if (!to) { const rcpt = await recipientsFor('rapidshyp'); to = rcpt.to; cc = rcpt.cc; }
     if (!to || !to.length) throw new Error('No RapidShyp recipient set — add it in Settings → Email & Reports.');
+    // dryRun → resolve recipients and build the mail, but DO NOT send. Added after a verification run of the
+    // "stop mailing RapidShyp" change called this function directly and put a real report in their inbox:
+    // there was no way to exercise the path without sending. Never test a sender without this.
+    if (opts.dryRun) return { ok: true, dryRun: true, to, count: rows.length };
     const r = await sendMail({ to, cc, subject: mail.subject, html: mail.html });
     return { ok: true, to: r.to, count: rows.length };
 }
@@ -780,7 +813,7 @@ function buildLateMail(rows, rangeLabel, platform) {
 }
 async function sendLateDeliveriesReport(opts = {}) {
     const rg = opts.fromISO ? opts : rangeEndingYesterday(opts.days || 30);
-    return sendReportPerPlatform({ fetchFn: fetchLateDeliveries, buildFn: buildLateMail, rg, source: opts.source });
+    return sendReportPerPlatform({ fetchFn: fetchLateDeliveries, buildFn: buildLateMail, rg, source: opts.source, auto: opts.auto, dryRun: opts.dryRun });
 }
 
 // ── In-transit but PAST promise date: overdue shipments not yet delivered/RTO (proactive chase list).
@@ -894,7 +927,7 @@ function buildFirstOfdMail(rows, rangeLabel, platform) {
 }
 async function sendFirstOfdReport(opts = {}) {
     const rg = opts.fromISO ? opts : rangeEndingYesterday(opts.days || 30);
-    return sendReportPerPlatform({ fetchFn: fetchFirstOfdLate, buildFn: buildFirstOfdMail, rg, source: opts.source, exclude: opts.exclude });
+    return sendReportPerPlatform({ fetchFn: fetchFirstOfdLate, buildFn: buildFirstOfdMail, rg, source: opts.source, exclude: opts.exclude, auto: opts.auto, dryRun: opts.dryRun });
 }
 
 // Shared email chrome — a titled card with a striped table; `rightCols` are right-aligned header cells.

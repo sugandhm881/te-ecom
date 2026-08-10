@@ -530,7 +530,7 @@ cronJob('ShopifyHold (*/2 * * * *)', '*/2 * * * *', async () => {
 // there are none or the RapidShyp recipient isn't set in Settings.
 cronJob('Silent-RTO (30 9 * * 1)', '30 9 * * 1', async () => {
     console.log('[Silent-RTO] Mon 9:30 AM IST — sending weekly silent-RTO claim report to RapidShyp…');
-    try { const r = await deliveryReportsRoutes.sendSilentRtoReport({ days: 30 }); console.log('[Silent-RTO]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
+    try { const r = await deliveryReportsRoutes.sendSilentRtoReport({ days: 30, auto: true }); console.log('[Silent-RTO]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[Silent-RTO] error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
@@ -538,7 +538,7 @@ cronJob('Silent-RTO (30 9 * * 1)', '30 9 * * 1', async () => {
 // IST, last 30 days ending yesterday. Sent to the configured internal recipients.
 cronJob('Late-Del (45 9 1,16 * *)', '45 9 1,16 * *', async () => {
     console.log('[Late-Del] 9:45 AM IST (1st/16th) — sending fortnightly late-delivery report…');
-    try { const r = await deliveryReportsRoutes.sendLateDeliveriesReport({ days: 30 }); console.log('[Late-Del]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
+    try { const r = await deliveryReportsRoutes.sendLateDeliveriesReport({ days: 30, auto: true }); console.log('[Late-Del]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[Late-Del] error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
@@ -546,12 +546,8 @@ cronJob('Late-Del (45 9 1,16 * *)', '45 9 1,16 * *', async () => {
 // 9:30 AM IST, terminal-stage date in the last 30 days ending yesterday. Sends SEPARATE emails per platform
 // (RapidShyp rows → RapidShyp recipients, DocPharma rows → DocPharma recipients). No-op if empty.
 cronJob('First-OFD (30 9 * * *)', '30 9 * * *', async () => {
-    console.log('[First-OFD] 9:30 AM IST — sending daily first-OFD-late report (RapidShyp excluded)…');
-    // ⚠️ RAPIDSHYP EXCLUDED from the DAILY send — by request 2026-08-08 ("stop sending the daily email to
-    // RapidShyp"). This was the only daily report reaching them; Silent-RTO is weekly (Mon) and
-    // Late-Deliveries fortnightly (1st/16th), both untouched. DocPharma and KwikShip still get their daily
-    // copy. The report itself is unchanged — you can still send RapidShyp's on demand from the dashboard.
-    try { const r = await deliveryReportsRoutes.sendFirstOfdReport({ days: 30, exclude: ['rapidshyp'] }); console.log('[First-OFD]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
+    console.log('[First-OFD] 9:30 AM IST — sending daily first-OFD-late report…');
+    try { const r = await deliveryReportsRoutes.sendFirstOfdReport({ days: 30, auto: true }); console.log('[First-OFD]', r.skipped ? r.reason : `sent ${r.count} to ${r.to.join(', ')}`); }
     catch (e) { console.error('[First-OFD] error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
