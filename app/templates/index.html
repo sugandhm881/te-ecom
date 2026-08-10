@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ecom Central - Unified Dashboard</title>
+<title>Ecom Central</title>
 <link rel="icon" type="image/png" href="/static/assets/ecom-logo.png">
 <link rel="stylesheet" href="/static/tailwind.css"><!-- pre-built Tailwind — replaces the runtime cdn.tailwindcss.com JIT compiler (huge per-render cost) -->
 <link rel="stylesheet" href="/static/smooth.css?v=2026-07-29e"><!-- motion/polish layer — smoother popups/loaders/transitions on the SAME original colours -->
@@ -70,6 +70,103 @@
         opacity: 1;
     }
     .arrow-icon { transition: transform 0.3s ease; }
+    /* Nav search: hide non-matching links/groups with a CLASS, never by touching style.display —
+       permission hiding owns the inline style, and the two must not overwrite each other. */
+    .nav-filtered-out { display: none !important; }
+    /* While searching, matched groups are force-opened without disturbing the saved accordion state. */
+    .nav-content.search-open { max-height: 900px; opacity: 1; }
+    .sidebar-link.nav-first-hit { background: rgba(99,102,241,.20); border-radius: .5rem; }
+    /* ⚠️ Written as REAL CSS, not Tailwind utilities. Tailwind here is PREBUILT, and pl-8 / pr-7 /
+       left-2.5 / -translate-y-1/2 / placeholder-slate-500 / focus:ring-indigo-500 are all absent from the
+       compiled file — they silently do nothing, which is why the placeholder sat underneath the search
+       icon. Same trap as the z-[90] tracking modal. Anything not already in tailwind.css must be real CSS. */
+    .nav-search-wrap { padding: .75rem .75rem .25rem; }
+    .nav-search-box { position: relative; display: flex; align-items: center; }
+    .nav-search-icon {
+        position: absolute; left: .625rem; width: 1rem; height: 1rem;
+        color: #64748b; pointer-events: none;
+    }
+    #nav-search {
+        width: 100%; box-sizing: border-box;
+        /* the padding the icon needs — this is the bit that was missing */
+        padding: .5rem 1.75rem .5rem 2rem;
+        background: rgba(30,41,59,.7); border: 1px solid #334155; border-radius: .5rem;
+        color: #e2e8f0; font-size: .875rem; line-height: 1.25rem; outline: none;
+    }
+    #nav-search::placeholder { color: #64748b; }
+    #nav-search:focus { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,.35); }
+    #nav-search-clear {
+        position: absolute; right: .375rem; width: 1.25rem; height: 1.25rem;
+        display: flex; align-items: center; justify-content: center;
+        border: 0; background: transparent; color: #94a3b8; cursor: pointer;
+        border-radius: .25rem; font-size: 1rem; line-height: 1;
+    }
+    #nav-search-clear:hover { color: #fff; background: #334155; }
+    #nav-search-empty { padding: .5rem .25rem 0; font-size: .75rem; color: #64748b; }
+    /* Row hover for the compact RTO-by-courier chart. `hover:bg-slate-50` is NOT in the prebuilt
+       tailwind.css, so the rows never actually highlighted — real CSS instead. */
+    .dp-cr:hover { background: #f8fafc; }
+
+    /* ── Home ─────────────────────────────────────────────────────────────────────────────────
+       Real CSS, not Tailwind utilities: the build is prebuilt and arbitrary/uncommon classes
+       (pl-8, text-[10px], min-w-[…], hover:bg-*) are absent from it and silently do nothing. */
+    /* Brand band — the anchor Home was missing: every other view opens on a solid header, Home opened on
+       bare text over white. Deep slate matching the sidebar, with an indigo wash so it reads as a lit
+       surface rather than a flat block.
+       ⚠️ It ENDS cleanly and content starts below. An earlier version pulled the content up to overlap the
+       band; the boundary then ran straight through the card row, leaving every tile half on dark and half
+       on light. Overlap only works when the crossing element is clearly one object — a row of separate
+       tiles is not. */
+    .home-band { background:
+        radial-gradient(1100px 260px at 12% -40%, rgba(99,102,241,.42), transparent 62%),
+        linear-gradient(120deg, #131c33 0%, #0f172a 46%, #131a2e 100%);
+        padding: 30px 0 30px; border-bottom: 1px solid #1e293b; }
+    .home-band-in { max-width: 1100px; margin: 0 auto; padding: 0 32px; display: flex; align-items: center; gap: 18px; }
+    .home-logo { width: 52px; height: 52px; flex: none; border-radius: 14px; background: #fff; padding: 5px;
+        box-shadow: 0 10px 26px -10px rgba(0,0,0,.75), 0 0 0 1px rgba(255,255,255,.10); }
+    .home-band-txt { min-width: 0; }
+    #home-greet { margin: 0; font-size: 29px; font-weight: 700; letter-spacing: -.035em; color: #fff;
+        line-height: 1.12; text-wrap: balance; }
+    .home-sub { margin: 5px 0 0; font-size: 13px; color: #93a3bd; font-variant-numeric: tabular-nums; }
+    /* pulled up over the band */
+    .home-wrap { max-width: 1100px; margin: 0 auto; padding: 26px 32px 52px; }
+    .home-lab { display: flex; align-items: baseline; gap: 10px; margin: 0 0 16px; }
+    .home-lab h2 { margin: 0; font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: #94a3b8; }
+    .home-hint { font-size: 12px; color: #94a3b8; }
+    .home-clear { margin-left: auto; border: 0; background: transparent; color: #94a3b8;
+        font-size: 12px; cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+    .home-clear:hover { color: #e11d48; background: #fff1f2; }
+    /* Icon mosaic. Each business area carries its own hue, so a dashboard is recognised by MARK +
+       COLOUR before the name is read — that identity is what the flat white-on-white grid was missing.
+       The per-tile colour arrives as --c (solid mark) and --ct (8% tint ground), both precomputed in JS:
+       color-mix() would be tidier but is avoided here so the tint can't silently fail to resolve. */
+    .home-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(166px, 1fr)); gap: 13px; }
+    .home-card { display: flex; flex-direction: column; align-items: center;
+        text-align: center; gap: 10px; padding: 22px 14px 18px; min-height: 132px; justify-content: center;
+        text-decoration: none; color: inherit;
+        border: 1px solid #e6ebf3; border-radius: 16px;
+        background: linear-gradient(180deg, var(--ct, #f8fafc), #fff 72%);
+        box-shadow: 0 1px 2px rgba(15,23,42,.05), 0 10px 24px -18px rgba(15,23,42,.5);
+        transition: border-color .15s, transform .15s, box-shadow .15s; }
+    .home-card:hover { border-color: var(--c, #4f46e5); transform: translateY(-2px); box-shadow: var(--cs); }
+    .home-card:focus-visible { outline: 2px solid var(--c, #4f46e5); outline-offset: 2px; }
+    .home-mk { width: 46px; height: 46px; flex: none; border-radius: 13px; background: var(--c, #4f46e5);
+        color: #fff; display: flex; align-items: center; justify-content: center; box-shadow: var(--cs); }
+    .home-mk svg { width: 24px; height: 24px; }
+    .home-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .home-name { font-weight: 600; font-size: 13.5px; letter-spacing: -.01em; color: #0f172a; }
+    .home-when { font-size: 11.5px; color: #94a3b8; font-variant-numeric: tabular-nums; }
+    /* "Last opened" marks the most recent card. It lives IN the flow as part of the time line — an
+       absolutely-positioned badge collided with the centred icon and could not be spaced away from it. */
+    .home-when .home-first-tag { color: var(--c); font-weight: 700; letter-spacing: .02em; }
+    .home-empty { border: 1px dashed #cbd5e1; border-radius: 12px; padding: 28px; text-align: center; color: #64748b; font-size: 13.5px; }
+    .home-empty b { color: #0f172a; }
+    .home-empty kbd { background: #f1f5f9; border: 1px solid #cbd5e1; border-bottom-width: 2px;
+        border-radius: 5px; padding: 1px 6px; font-size: 12px; font-family: inherit; color: #334155; }
+    @media (max-width: 640px) { .home-band { padding: 26px 0 52px; } .home-band-in { padding: 0 16px; gap: 13px; }
+        #home-greet { font-size: 23px; } .home-logo { width: 44px; height: 44px; }
+        .home-wrap { padding: 0 16px 36px; } }
+    @media (prefers-reduced-motion: reduce) { .home-card { transition: none; } }
     .rotate-180 { transform: rotate(180deg); }
 
     /* Cards */
@@ -612,8 +709,26 @@
             <span class="ml-3 text-white font-bold text-lg tracking-tight">Ecom Central</span>
         </div>
 
+        <!-- Nav search — filters the sidebar to matching dashboards. Only ever matches links the user is
+             already permitted to see (permission hiding uses inline display:none; this uses a class, so the
+             two never fight and search can't surface a dashboard someone lacks access to). -->
+        <div class="nav-search-wrap">
+            <div class="nav-search-box">
+                <svg class="nav-search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z"></path></svg>
+                <input id="nav-search" type="text" autocomplete="off" spellcheck="false" placeholder="Search dashboards…">
+                <button id="nav-search-clear" type="button" title="Clear (Esc)" aria-label="Clear search">&times;</button>
+            </div>
+            <p id="nav-search-empty" class="hidden">No dashboard matches.</p>
+        </div>
+
         <nav class="flex-1 px-3 py-4 space-y-2 overflow-y-auto select-none">
-            
+
+            <!-- Home sits ABOVE the groups: it is the landing page, not a member of any category. -->
+            <a href="#" id="nav-home" class="sidebar-link flex items-center px-3 py-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l9-9 9 9M5 10v10a1 1 0 001 1h4v-6h4v6h4a1 1 0 001-1V10"></path></svg>
+                <span class="ml-3 text-sm font-medium">Home</span>
+            </a>
+
             <div class="nav-group">
                 <div class="nav-section-header flex items-center justify-between px-3 py-2 mt-2" data-target="ops-menu">
                     <span>Operations</span>
@@ -867,6 +982,29 @@
             </button>
             <img src="/static/assets/ecom-logo.png" class="w-7 h-7 rounded-md">
             <span class="font-bold tracking-tight">Ecom Central</span>
+        </div>
+
+        <!-- Home — the landing page. Contents are rendered by homeRender() from the sidebar itself, so it
+             always lists exactly the dashboards this user is permitted to see and never needs its own list. -->
+        <div id="home-view" class="view-hidden hidden">
+            <!-- Brand band. The page previously opened on bare text over white, which is why it read as
+                 lighter-weight than every other dashboard — those all have a solid header. This gives Home
+                 the same anchor, carries the mark, and the mosaic below overlaps it so the two lock together. -->
+            <div class="home-band">
+                <div class="home-band-in">
+                    <img src="/static/assets/ecom-logo.png" alt="" class="home-logo">
+                    <div class="home-band-txt">
+                        <h1 id="home-greet">Welcome back</h1>
+                        <p id="home-sub" class="home-sub"></p>
+                    </div>
+                </div>
+            </div>
+            <div class="home-wrap">
+                <div class="home-lab"><h2>Recent</h2><span id="home-hint" class="home-hint"></span>
+                    <button id="home-clear" type="button" class="home-clear hidden">Clear history</button></div>
+                <div id="home-recent" class="home-tiles"></div>
+                <div id="home-empty" class="home-empty hidden"></div>
+            </div>
         </div>
 
         <div id="orders-dashboard-view">

@@ -1166,13 +1166,17 @@ router.post('/critical-email/compose', requireEmailSender, async (req, res) => {
         const idRule = n <= FEW
             ? `IMPORTANT: list each order number with its AWB in the body so they are clearly visible (a table with full details is also attached).`
             : `Reference the count, not each AWB (a table with all details is attached).`;
-        const sys = `You are an operations manager at an Indian D2C skincare brand (The Element) writing an escalation email to the courier partner RapidShyp. Tone: ${toneLine} Be concise, specific and action-oriented. Do NOT invent facts beyond the data given — describe the problem exactly as the data shows it, do not assume fake attempts unless the data indicates it. ${NO_CODES_RULE} Respond with ONLY the raw JSON object {"subject":"...","body":"..."} and NOTHING else — no markdown, no code fences, no word-count notes or commentary before or after. Body is plain text with \\n line breaks, under 180 words.`;
+        // ⚠️ Name the ACTUAL partner. This prompt hardcoded "RapidShyp", so the AI opened every draft with
+        // "Hi RapidShyp team" — including KwikShip escalations the routing had correctly addressed to
+        // GoKwik. Right envelope, wrong letter, which is worse than either mistake alone.
+        const partnerName = PLATFORM_LABEL[platform] || 'the courier partner';
+        const sys = `You are an operations manager at an Indian D2C skincare brand (The Element) writing an escalation email to the courier partner ${partnerName}. Address them as "${partnerName}" and never name any other courier. Tone: ${toneLine} Be concise, specific and action-oriented. Do NOT invent facts beyond the data given — describe the problem exactly as the data shows it, do not assume fake attempts unless the data indicates it. ${NO_CODES_RULE} Respond with ONLY the raw JSON object {"subject":"...","body":"..."} and NOTHING else — no markdown, no code fences, no word-count notes or commentary before or after. Body is plain text with \\n line breaks, under 180 words.`;
         const usr = `Write an escalation email. ${K.ai} ${idRule}\n\nShipments:\n${lines}`;
         let draft = await aiComplete([{ role: 'system', content: sys }, { role: 'user', content: usr }], { temperature: 0.4 });
         const p = parseAiEmail(draft);
         let subject = p.subject, body = p.body;
         if (!subject) subject = K.subject(n);
-        if (!body) body = `Hi RapidShyp team,\n\n${K.intro(n)}\n\n${refText}\n\nThank you,\nThe Element — Operations`;
+        if (!body) body = `Hi ${partnerName} team,\n\n${K.intro(n)}\n\n${refText}\n\nThank you,\nThe Element — Operations`;
         res.json({ success: true, subject, body, count: rows.length, kind, platform, toHint, aiUsed: !!draft, aiAvailable: aiConfigured(), aiError: draft ? null : lastAiError(), tableHtml: buildCriticalTable(rows), orders: rows.map(r => ({ order_name: r.order_name, awb: r.awb })) });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });

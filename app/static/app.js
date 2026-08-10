@@ -567,6 +567,188 @@ function logActivity(event, view) {
 // --- Roles & permissions (client-side nav gating; server enforces the admin routes) ---
 let currentUser = null;
 function parseJwt(t) { try { const b = String(t).split('.')[1].replace(/-/g, '+').replace(/_/g, '/'); return JSON.parse(atob(b + '='.repeat((4 - b.length % 4) % 4))); } catch (_) { return {}; } }
+// ── Home ──────────────────────────────────────────────────────────────────────────────────────────
+// Landing page: the dashboards this user actually opened, most recent first. History is per-user and
+// lives in localStorage — no table, no endpoint, and it stays right even when several people share a
+// machine (each browser profile keeps its own, keyed by email).
+//
+// ⚠️ The catalog is READ FROM THE SIDEBAR DOM, never from a second hardcoded list. applyPermissions()
+// has already hidden the links this user may not open, so building from the DOM means Home can never
+// surface a dashboard they lack access to, and a nav item added later appears here with no extra work.
+const HOME_MAX = 8;
+const homeKey = () => 'ec_recent_views_v1:' + ((currentUser && currentUser.email) || 'anon');
+function homeCatalog() {
+    const out = {};
+    document.querySelectorAll('#app-sidebar .sidebar-link').forEach(a => {
+        const view = (typeof NAV_HREF !== 'undefined') ? NAV_HREF[a.id] : null;
+        if (!view || view === 'home' || a.style.display === 'none') return;   // display:none = not permitted
+        const group = a.closest('.nav-group')?.querySelector('.nav-section-header span')?.textContent?.trim() || '';
+        out[view] = { view, label: navLabelOf(a), group, icon: a.querySelector('svg')?.innerHTML || '' };
+    });
+    return out;
+}
+// One hue per business area — a dashboard is recognised by MARK + COLOUR before its name is read.
+// Keys match the sidebar section headings exactly; anything unmapped falls back to the brand indigo.
+const HOME_HUE = {
+    'Operations': '#4f46e5', 'Reconciliation': '#0891b2', 'Analytics': '#7c3aed', 'Marketing': '#db2777',
+    'Customer Support': '#0d9488', 'Influencer Marketing': '#ea580c', 'Inventory': '#d97706', 'Finance': '#059669',
+};
+// Tint + shadow are computed here rather than with CSS color-mix(): the tint is load-bearing (it IS the
+// tile background), and a colour function that fails to resolve would leave the mosaic flat white —
+// exactly the look this replaced.
+function homeRgb(hex) { const h = String(hex).replace('#', ''); return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)); }
+function homeTint(hex, a) { const [r, g, b] = homeRgb(hex); return `rgba(${r},${g},${b},${a})`; }
+function homeVars(group) {
+    const c = HOME_HUE[group] || '#4f46e5';
+    return `--c:${c};--ct:${homeTint(c, .09)};--cs:0 10px 22px -12px ${homeTint(c, .65)}`;
+}
+
+function homeRead() { try { return JSON.parse(localStorage.getItem(homeKey()) || '[]'); } catch (_) { return []; } }
+function homeRecordVisit(view) {
+    if (!view || view === 'home') return;   // Home isn't a destination worth remembering
+    try {
+        const list = homeRead().filter(e => e && e.view !== view);
+        list.unshift({ view, at: Date.now() });
+        localStorage.setItem(homeKey(), JSON.stringify(list.slice(0, HOME_MAX * 2)));
+    } catch (_) { /* private mode / quota — history is a convenience, never break navigation for it */ }
+}
+// "just now / 12 minutes ago / Yesterday" — when you were last there is the useful fact; a visit COUNT
+// tells you nothing about where you left off.
+function homeAgo(ts) {
+    const s = Math.max(0, (Date.now() - ts) / 1000);
+    if (s < 90) return 'just now';
+    const m = Math.round(s / 60); if (m < 60) return m + (m === 1 ? ' minute ago' : ' minutes ago');
+    const h = Math.round(m / 60); if (h < 24) return h + (h === 1 ? ' hour ago' : ' hours ago');
+    const d = Math.round(h / 24); if (d === 1) return 'Yesterday';
+    if (d < 7) return d + ' days ago';
+    return new Date(ts).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+}
+function homeGreeting() { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; }
+function homeRender() {
+    const box = document.getElementById('home-recent'); if (!box) return;
+    const cat = homeCatalog();
+    const total = Object.keys(cat).length;
+    // FIRST NAME ONLY — "Good afternoon, Sugandh Kumar Mishra" is a form field, not a greeting.
+    // Falls back to the email local-part with any trailing digits stripped (sugandhm881 → Sugandh).
+    const raw = (currentUser && (currentUser.name || String(currentUser.email || '').split('@')[0])) || '';
+    let first = (raw.replace(/[._-]+/g, ' ').trim().split(/\s+/)[0] || '').replace(/\d+$/, '');
+    // An all-caps entry (SHAVETA) is a data-entry artefact, not emphasis — title-case it so the greeting
+    // doesn't shout. Mixed case is left alone: "McDonald" must not become "Mcdonald".
+    if (/^[A-Z]{2,}$/.test(first)) first = first.toLowerCase();
+    const pretty = first.replace(/^./, c => c.toUpperCase());
+    const greet = document.getElementById('home-greet');
+    if (greet) greet.textContent = homeGreeting() + (pretty ? ', ' + pretty : '');
+    const sub = document.getElementById('home-sub');
+    if (sub) sub.textContent = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+        + ' · ' + total + (total === 1 ? ' dashboard' : ' dashboards') + ' available to you';
+
+    // Drop history entries the user can no longer open (permission revoked, or a view that was removed).
+    const recent = homeRead().filter(e => e && cat[e.view]).slice(0, HOME_MAX);
+    const emptyEl = document.getElementById('home-empty');
+    const hint = document.getElementById('home-hint');
+    const clear = document.getElementById('home-clear');
+    clear?.classList.toggle('hidden', !recent.length);
+
+    if (!recent.length) {
+        box.innerHTML = '';
+        if (hint) hint.textContent = '';
+        if (emptyEl) {
+            emptyEl.classList.remove('hidden');
+            // Without the "All dashboards" list, a first-time user would otherwise land on a blank page —
+            // so the empty state has to carry them to the nav rather than just apologise.
+            emptyEl.innerHTML = '<b>Nothing here yet.</b><br>Open a dashboard from the sidebar and it will show up here next time — press <kbd>/</kbd> to search them by name.';
+        }
+        return;
+    }
+    emptyEl?.classList.add('hidden');
+    if (hint) hint.textContent = 'where you left off';
+    // stroke-width 1.75 keeps the mark crisp at 24-28px — the nav icons are drawn for 20px.
+    box.innerHTML = recent.map((e, i) => { const c = cat[e.view];
+        return `<a href="#${c.view}" class="home-card" data-view="${c.view}" style="${homeVars(c.group)}" title="${escapeHtml(c.group || '')}">
+            <span class="home-mk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">${c.icon}</svg></span>
+            <span class="home-txt">
+                <span class="home-name">${escapeHtml(c.label)}</span>
+                <span class="home-when">${i === 0 ? '<span class="home-first-tag">Last opened</span> · ' : ''}${homeAgo(e.at)}</span>
+            </span>
+        </a>`; }).join('');
+    box.querySelectorAll('.home-card').forEach(t => t.addEventListener('click', ev => { ev.preventDefault(); navigate(t.dataset.view); }));
+}
+function homeInit() {
+    homeRender();
+    const clear = document.getElementById('home-clear');
+    if (clear && !clear.dataset.wired) {
+        clear.dataset.wired = '1';
+        clear.addEventListener('click', () => { try { localStorage.removeItem(homeKey()); } catch (_) {} homeRender(); });
+    }
+}
+
+// ── Sidebar search ────────────────────────────────────────────────────────────────────────────────
+// Filters the nav to dashboards whose name matches, auto-opening the groups that contain a hit.
+// The nav is ~30 items across 9 collapsed groups, so finding one meant remembering which group it lived in.
+//
+// ⚠️ Permission hiding owns `style.display` (see applyPermissions). This uses the `.nav-filtered-out`
+// CLASS instead, so the two never overwrite each other and search can NEVER reveal a dashboard the user
+// isn't permitted to see — a permission-hidden link keeps its inline display:none whatever the search does.
+const navLinkLabel = a => navLabelOf(a);
+const navPermVisible = a => a.style.display !== 'none';   // permitted for this user?
+function navSearchApply(q) {
+    const term = String(q || '').trim().toLowerCase();
+    const empty = document.getElementById('nav-search-empty');
+    const clearBtn = document.getElementById('nav-search-clear');
+    if (clearBtn) clearBtn.classList.toggle('hidden', !term);
+
+    if (!term) {   // restore: drop every search-only class and let the accordion state stand again
+        document.querySelectorAll('#app-sidebar .sidebar-link').forEach(a => a.classList.remove('nav-first-hit'));
+        document.querySelectorAll('#app-sidebar .sidebar-link, #app-sidebar .nav-group').forEach(el => el.classList.remove('nav-filtered-out'));
+        document.querySelectorAll('#app-sidebar .nav-content').forEach(c => c.classList.remove('search-open'));
+        empty?.classList.add('hidden');
+        return 0;
+    }
+    let hits = 0, first = null;
+    document.querySelectorAll('#app-sidebar .nav-group').forEach(g => {
+        let groupHits = 0;
+        g.querySelectorAll('.sidebar-link').forEach(a => {
+            const match = navPermVisible(a) && navLinkLabel(a).toLowerCase().includes(term);
+            a.classList.toggle('nav-filtered-out', !match);
+            if (match) { groupHits++; hits++; if (!first) first = a; }
+        });
+        g.classList.toggle('nav-filtered-out', groupHits === 0);
+        // Force the group open so its matches are actually on screen, without touching expanded/collapsed
+        // (the user's own accordion state is restored untouched when the search is cleared).
+        g.querySelector('.nav-content')?.classList.toggle('search-open', groupHits > 0);
+    });
+    // Mark the first match so Enter's target is visible rather than guessed at.
+    document.querySelectorAll('#app-sidebar .sidebar-link.nav-first-hit').forEach(a => a.classList.remove('nav-first-hit'));
+    first?.classList.add('nav-first-hit');
+    empty?.classList.toggle('hidden', hits > 0);
+    return hits;
+}
+function navSearchInit() {
+    const box = document.getElementById('nav-search');
+    if (!box || box.dataset.wired) return;
+    box.dataset.wired = '1';
+    const clearBtn = document.getElementById('nav-search-clear');
+    const reset = () => { box.value = ''; navSearchApply(''); box.blur(); };
+    box.addEventListener('input', () => navSearchApply(box.value));
+    box.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.preventDefault(); reset(); return; }
+        if (e.key !== 'Enter') return;
+        // Enter opens the first match — the whole point is to reach a dashboard without using the mouse.
+        e.preventDefault();
+        const first = document.querySelector('#app-sidebar .sidebar-link:not(.nav-filtered-out)');
+        if (first) { first.click(); reset(); }
+    });
+    clearBtn?.addEventListener('click', reset);
+    // "/" focuses the search from anywhere — but never while the user is typing in a real field.
+    document.addEventListener('keydown', e => {
+        if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+        const t = e.target, tag = (t && t.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
+        if (document.getElementById('login-view') && !document.getElementById('login-view').classList.contains('hidden')) return;
+        e.preventDefault(); box.focus(); box.select();
+    });
+}
+
 function applyPermissions() {
     const c = parseJwt(authToken);
     // A legacy token (no role/permissions claim) belongs only to the bootstrap admin → treat as full access.
@@ -576,6 +758,7 @@ function applyPermissions() {
     currentUser = { email: c.sub, name: c.name || null, role: isAdmin ? 'admin' : (c.role || 'user'), isAdmin, permissions: [...perms] };
     try {
         document.querySelectorAll('#app-sidebar .sidebar-link').forEach(a => {
+            if (a.id === 'nav-home') { a.style.display = ''; return; }   // landing page — always visible
             if (a.id === 'nav-users' || a.id === 'nav-user-analytics') { a.style.display = isAdmin ? '' : 'none'; return; }
             const key = (typeof NAV_HREF !== 'undefined') ? NAV_HREF[a.id] : null;
             a.style.display = (isAdmin || (key && perms.has(key))) ? '' : 'none';
@@ -781,9 +964,34 @@ async function downloadShipmentLabel(awb) {
 }
 
 // --- UI RENDERING ---
+// A nav link's own name. ⚠️ NOT `span.textContent` — some labels carry a nested badge span ("Voice
+// Agent" + BETA), and textContent glues them into "Voice Agent BETA". Read only the label span's DIRECT
+// text nodes. Used by the tab title, the sidebar search and Home so all three agree on one name.
+function navLabelOf(a) {
+    const span = a && a.querySelector('span');
+    if (!span) return '';
+    return [...span.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim();
+}
+
+// Browser tab title follows the open dashboard: "Delivery Performance · Ecom Central". With eight or
+// nine tabs of this app open — which is how it actually gets used — every tab otherwise reads the same
+// and you have to click through them to find the one you want.
+// The label is taken from the SIDEBAR LINK, the same single source the nav search and Home read, so a
+// renamed nav item retitles its tab with no second list to update.
+const APP_TITLE = 'Ecom Central';
+function setTabTitle(view) {
+    let label = '';
+    for (const [id, v] of Object.entries(typeof NAV_HREF !== 'undefined' ? NAV_HREF : {})) {
+        if (v !== view) continue;
+        label = navLabelOf(document.getElementById(id));
+        break;
+    }
+    document.title = label ? `${label} · ${APP_TITLE}` : APP_TITLE;
+}
+
 function navigate(view) {
     // Permission gate — non-admins can only open dashboards they've been granted ('users' is admin-only).
-    if (currentUser && !currentUser.isAdmin && !canView(view)) {
+    if (currentUser && !currentUser.isAdmin && view !== 'home' && !canView(view)) {
         const first = (currentUser.permissions || [])[0];
         if (!first) return;
         view = first;
@@ -791,7 +999,9 @@ function navigate(view) {
     showLoader();
     console.log("Navigating to:", view);
     logActivity('view', view);   // record the dashboard visit for User Analytics (debounced inside)
+    homeRecordVisit(view);       // …and for the Home "Recent" list (per-user, localStorage)
     currentView = view;
+    setTabTitle(view);
     // Reflect the current view in the URL, so refresh / open-in-new-tab / bookmark reopen the same page.
     if (view && ('#' + view) !== location.hash) { try { history.replaceState(null, '', '#' + view); } catch (e) {} }
 
@@ -814,6 +1024,11 @@ function navigate(view) {
     let activeViewElement = null;
     
     switch(view) {
+        case 'home':
+            activeLinkElement = document.getElementById('nav-home');
+            activeViewElement = document.getElementById('home-view');
+            homeInit();
+            break;
         case 'orders-dashboard': 
             activeLinkElement = document.getElementById('nav-orders-dashboard'); 
             activeViewElement = document.getElementById('orders-dashboard-view'); 
@@ -5095,6 +5310,7 @@ function cpCreditModal(){
 // ─────────── Deep-linkable views (open-in-new-tab / refresh / bookmark) ───────────
 // Map each nav item to a #hash so its page survives a full page load, not just an in-app click.
 const NAV_HREF = {
+    'nav-home': 'home',
     'nav-orders-dashboard': 'orders-dashboard', 'nav-order-insights': 'order-insights', 'nav-profitability': 'profitability',
     'nav-customer-segments': 'customer-segments', 'nav-returns-analysis': 'returns-analysis', 'nav-ad-ranking': 'ad-ranking',
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
@@ -5190,7 +5406,7 @@ async function loadInitialData() {
     // Render the interactive shell immediately, then load data in the background —
     // the home page is usable right away instead of blocking on the slow /get-orders call.
     initializeAllFilters();
-    navigate(viewFromHash() || 'orders-dashboard');   // honor a deep-linked #view on first load
+    navigate(viewFromHash() || 'home');   // honor a deep-linked #view on first load; else land on Home
     const ordersList = document.getElementById('orders-list');
     // Branded ecom-central logo + spinner shown right in the table area while orders load (non-blocking).
     if (ordersList) ordersList.innerHTML = `<tr><td colspan="10" class="py-16"><div class="flex flex-col items-center justify-center gap-3"><span class="relative inline-flex items-center justify-center w-14 h-14"><span class="absolute w-14 h-14 rounded-full border-[3px] border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/ecom-logo.png" class="w-9 h-9 rounded-lg"></span><span class="text-slate-400 text-sm font-medium">Loading latest orders…</span></div></td></tr>`;
@@ -5827,6 +6043,7 @@ document.getElementById('nav-inventory-count')?.addEventListener('click', (e) =>
 document.getElementById('nav-inventory-count-analysis')?.addEventListener('click', (e) => { e.preventDefault(); navigate('inventory-count-analysis'); });
 ['finance-entry', 'finance-register', 'finance-books'].forEach(v =>
     document.getElementById('nav-' + v)?.addEventListener('click', (e) => { e.preventDefault(); navigate(v); }));
+document.getElementById('nav-home')?.addEventListener('click', (e) => { e.preventDefault(); navigate('home'); });
 document.getElementById('nav-users')?.addEventListener('click', (e) => { e.preventDefault(); navigate('users'); });
 document.getElementById('nav-user-analytics')?.addEventListener('click', (e) => { e.preventDefault(); navigate('user-analytics'); });
 
@@ -8836,7 +9053,10 @@ async function dpLoadLikelyFake(){
       ${kpi('Mails sent', s.mailsSent, 'text-indigo-600')}
     </div>
     <p class="text-xs text-slate-400 mb-3">“Delivered — fake ✓” = orders you flagged that were then delivered fine, confirming the earlier failed attempt was fake.</p>
-    ${canSendEmails()?`<button id="dp-batch-escalate" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700">✉️ Escalate all ${s.total} marked to RapidShyp</button>`:''}`;
+    <!-- No courier named here: the marked set can span platforms, and compose decides the recipient from
+         the shipments themselves (refusing a mixed batch). Promising "to RapidShyp" on the button was the
+         same wrong assumption that sent KwikShip escalations to RapidShyp. -->
+    ${canSendEmails()?`<button id="dp-batch-escalate" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700">✉️ Escalate all ${s.total} marked</button>`:''}`;
     document.getElementById('dp-batch-escalate')?.addEventListener('click', ()=>dpComposeCritical((d.rows||[]).map(x=>x.awb).filter(Boolean)));
   }catch(e){ el.innerHTML=`<div class="text-rose-400 text-sm py-4">${ecEsc(e.message)}</div>`; }
 }
@@ -8858,23 +9078,29 @@ function dpFunnel(f){ const el=document.getElementById('dp-funnel'); const total
 function dpCourier(rows){ const el=document.getElementById('dp-courier'); if(!rows||!rows.length){ el.innerHTML='<div class="text-slate-400 text-sm py-6 text-center">No data in range</div>'; return; }
     const max=Math.max(...rows.map(r=>r.rto),1);
     // Bar LENGTH = RTO volume; bar/figure COLOR = RTO-rate severity (green ok · amber watch · red high).
-    const sev=rate=> rate>=25?{bar:'#ef4444',fig:'text-red-600',pill:'bg-red-50 text-red-600'}
-                    : rate>=15?{bar:'#f59e0b',fig:'text-amber-600',pill:'bg-amber-50 text-amber-600'}
-                    :          {bar:'#10b981',fig:'text-emerald-600',pill:'bg-emerald-50 text-emerald-600'};
+    const sev=rate=> rate>=25?{bar:'#ef4444',fig:'text-red-600'}
+                    : rate>=15?{bar:'#f59e0b',fig:'text-amber-600'}
+                    :          {bar:'#10b981',fig:'text-emerald-600'};
+    // COMPACT LAYOUT. Rows were ~40px tall — 11 couriers filled a whole screen for what is a glanceable
+    // ranking. Now ~22px: a 14px bar instead of 24px, and the "of N" total sits INLINE beside the rate
+    // pill rather than on a second line (that wrap was half the row height on its own).
+    // ⚠️ Dimensions are inline styles, not Tailwind utilities. Tailwind here is PREBUILT and this chart
+    // was already relying on classes absent from it — text-[10px], min-w-[56px], px-1.5, mt-0.5, py-0.5
+    // all resolve to nothing, so the "small" text was never small and the pill had no padding.
+    const LBL = 128, RATE = 104;   // px — courier column / rate column
     el.innerHTML =
-      `<div class="flex items-center gap-2 text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-2 px-1">
-         <span class="w-40 shrink-0">Courier</span><span class="flex-1">Returns</span><span class="w-24 text-right shrink-0">RTO&nbsp;rate</span>
+      `<div class="flex items-center" style="gap:8px;margin-bottom:6px;padding:0 4px;font-size:10px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.04em">
+         <span style="width:${LBL}px;flex:none">Courier</span><span style="flex:1">Returns</span><span style="width:${RATE}px;flex:none;text-align:right">RTO&nbsp;rate</span>
        </div>`+
       rows.map((r,i)=>{ const w=Math.max(3, Math.round(r.rto/max*100)); const s=sev(r.rtoRate); const inside=w>=14;
-        return `<div class="dp-cr flex items-center gap-3 py-1 px-1 -mx-1 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer" data-i="${i}" title="Filter dashboard to ${r.courier||''}">
-          <div class="w-40 shrink-0 text-sm text-slate-700 truncate" title="${r.courier||''}">${r.courier||'—'}</div>
-          <div class="flex-1 relative h-6 bg-slate-100 rounded-md overflow-hidden min-w-[56px]">
-            <div class="absolute inset-y-0 left-0 rounded-md flex items-center justify-end pr-2 transition-all" style="width:${w}%;background:${s.bar}">${inside?`<span class="text-[11px] font-bold text-white tabular-nums">${r.rto}</span>`:''}</div>
-            ${inside?'':`<span class="absolute inset-y-0 flex items-center text-[11px] font-bold text-slate-600 tabular-nums" style="left:calc(${w}% + 6px)">${r.rto}</span>`}
+        return `<div class="dp-cr flex items-center cursor-pointer" style="gap:8px;padding:2px 4px;border-radius:6px" data-i="${i}" title="Filter dashboard to ${r.courier||''}">
+          <div class="truncate" style="width:${LBL}px;flex:none;font-size:12px;color:#334155" title="${r.courier||''}">${r.courier||'—'}</div>
+          <div class="relative overflow-hidden" style="flex:1;min-width:56px;height:14px;background:#f1f5f9;border-radius:4px">
+            <div class="absolute flex items-center justify-end transition-all" style="top:0;bottom:0;left:0;width:${w}%;background:${s.bar};border-radius:4px;padding-right:5px">${inside?`<span style="font-size:10px;font-weight:700;color:#fff;font-variant-numeric:tabular-nums">${r.rto}</span>`:''}</div>
+            ${inside?'':`<span class="absolute flex items-center" style="top:0;bottom:0;left:calc(${w}% + 5px);font-size:10px;font-weight:700;color:#475569;font-variant-numeric:tabular-nums">${r.rto}</span>`}
           </div>
-          <div class="w-24 shrink-0 text-right leading-tight">
-            <span class="inline-block px-1.5 py-0.5 rounded-md text-xs font-bold tabular-nums ${s.pill}">${r.rtoRate}%</span>
-            <div class="text-[11px] text-slate-400 tabular-nums mt-0.5">of ${r.total}</div>
+          <div class="${s.fig}" style="width:${RATE}px;flex:none;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap">
+            <b>${r.rtoRate}%</b><span style="color:#94a3b8;font-weight:400"> of ${r.total}</span>
           </div>
         </div>`; }).join('');
     el.querySelectorAll('.dp-cr').forEach(rc=>{ rc.addEventListener('mousemove',e=>{const r=rows[+rc.dataset.i];dpShow(`<b>${r.courier}</b> · ${r.rto} RTO of ${r.total} (${r.rtoRate}%)`,e.clientX,e.clientY);}); rc.addEventListener('mouseleave',dpHide);
@@ -9325,6 +9551,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     });
 
+    navSearchInit();
     document.querySelectorAll('.nav-section-header').forEach(header => {
         header.addEventListener('click', () => {
             const targetId = header.dataset.target;
