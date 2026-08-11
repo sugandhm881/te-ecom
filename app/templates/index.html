@@ -1704,12 +1704,17 @@
                 </div>
                 <div class="flex flex-wrap items-center gap-2">
                     <select id="sup-f-notes" class="filter-select"><option value="all">All notes</option><option value="with">With notes</option><option value="none">No notes</option></select>
-                    <input id="sup-f-notesearch" type="text" placeholder="Search latest note…" class="filter-input w-48">
+                    <input id="sup-f-notesearch" type="text" placeholder="Order, AWB, phone, name, note…" class="filter-input w-64" title="Searches the order number, AWB, phone, email, customer name, courier and the latest note">
                     <select id="sup-f-age" class="filter-select"><option value="any">Any age</option><option value="lt1">&lt; 1 day</option><option value="1-3">1–3 days</option><option value="3-7">3–7 days</option><option value="gt7">&gt; 7 days</option></select>
                     <select id="sup-f-hold" class="filter-select"><option value="all">All holds</option><option value="held">On hold</option><option value="notheld">Not held</option></select>
                     <select id="sup-f-pay" class="filter-select"><option value="all">All payments</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select>
                     <!-- Courier platform (aggregator). Hidden on the Repeat tab — those orders haven't shipped yet, so they carry no platform. -->
                     <select id="sup-f-platform" class="filter-select"><option value="all">All platforms</option><option value="rapidshyp">RapidShyp</option><option value="docpharma">DocPharma</option><option value="kwikship">KwikShip</option><option value="none">No platform</option></select>
+                    <!-- Latest courier status. Options are built at render time from the statuses actually
+                         present, so a new courier state appears here without a code change. -->
+                    <select id="sup-f-status" class="filter-select"><option value="all">All statuses</option></select>
+                    <!-- Raised-with-courier state. Hidden on Repeat (pre-dispatch orders are never raised). -->
+                    <select id="sup-f-raised" class="filter-select"><option value="all">All raised</option><option value="none">Not raised</option><option value="any">Raised (any)</option><option value="raised">Raised</option><option value="raised_voc">Raised with VOC</option></select>
                     <button id="sup-f-clear" class="filter-btn" style="display:none">Clear</button>
                     <span id="sup-queue-count" class="text-sm text-slate-400 ml-auto"></span>
                 </div>

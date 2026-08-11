@@ -4276,9 +4276,9 @@ function supQueueInit(){
   supRenderRange('sup-range-queue', supLoadQueue);
   if(!_supQueueWired){ _supQueueWired=true;
     document.querySelectorAll('.sup-tab').forEach(b=>b.addEventListener('click',()=>{ _supTab=b.dataset.tab; supTabPaint(); supLoadQueue(); }));
-    ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay','sup-f-platform'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
+    ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay','sup-f-platform','sup-f-raised','sup-f-status'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
     document.getElementById('sup-f-notesearch')?.addEventListener('input', debounce(supQueueTable,250));
-    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay','sup-f-platform'].forEach((id,i)=>{ const el=document.getElementById(id); if(el) el.value=['all','any','all','all','all'][i]; }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
+    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay','sup-f-platform','sup-f-raised','sup-f-status'].forEach((id,i)=>{ const el=document.getElementById(id); if(el) el.value=['all','any','all','all','all','all','all'][i]; }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
     document.getElementById('sup-refresh')?.addEventListener('click', supRefreshTracking);
   }
   supTabPaint(); supLoadQueue();
@@ -4320,6 +4320,74 @@ function supPlatformTag(p){
   const m=SUP_PLATFORM_META[String(p||'').toLowerCase()]; if(!m) return '';
   return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border ${m[1]} whitespace-nowrap" title="Shipped through ${m[0]} — use this partner for tracking / escalation">${m[0]}</span>`;
 }
+// Latest courier status, humanised. The feed mixes casings and separators for the same state —
+// "Undelivered" / "undelivered", "OUT_FOR_DELIVERY" / "Out for Delivery" — so normalise before showing,
+// or the column reads like three different statuses. Colour marks what needs action.
+// The label the chip shows AND the value the filter matches — one function, so a status can never be
+// offered in the dropdown under a name the column doesn't use.
+function supStatusText(r){
+  const raw=String(r.tracking_status||'').trim();
+  return raw ? raw.replace(/[_-]+/g,' ').toLowerCase().replace(/\b\w/g,c=>c.toUpperCase()) : '';
+}
+// Options come from the statuses PRESENT in the current tab, with counts. A hardcoded list would go
+// stale the moment a courier introduces a status, and would offer choices that match nothing.
+// Rebuilt only when the option set actually changes, so it never clobbers a selection mid-use.
+function supSyncStatusOptions(rows){
+  const sel=document.getElementById('sup-f-status'); if(!sel) return;
+  const tally={}; rows.forEach(r=>{ const t=supStatusText(r); if(t) tally[t]=(tally[t]||0)+1; });
+  const opts=Object.keys(tally).sort((a,b)=>tally[b]-tally[a]||a.localeCompare(b));
+  const sig=opts.map(o=>o+':'+tally[o]).join('|');
+  if(sel.dataset.sig===sig) return;
+  const keep=sel.value;
+  sel.dataset.sig=sig;
+  sel.innerHTML='<option value="all">All statuses</option>'+opts.map(o=>`<option value="${escapeHtml(o)}">${escapeHtml(o)} (${tally[o]})</option>`).join('');
+  sel.value=opts.includes(keep)?keep:'all';
+}
+function supStatusChip(r){
+  const t=supStatusText(r);
+  if(!t) return '<span class="text-slate-300">—</span>';
+  const raw=String(r.tracking_status||'');
+  const l=t.toLowerCase();
+  const cls = /undeliver|exception|lost|damag|misrout/.test(l) ? 'bg-rose-100 text-rose-700'
+            : /out for delivery/.test(l)                        ? 'bg-emerald-100 text-emerald-700'
+            : /delay/.test(l)                                   ? 'bg-amber-100 text-amber-700'
+            :                                                     'bg-slate-100 text-slate-600';
+  return `<span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold ${cls} whitespace-nowrap" title="${escapeHtml(raw)}">${escapeHtml(t)}</span>`;
+}
+// "Raised to the courier" — was only ever a free-text note ("raised", "raised with VOC"), so it could
+// not be filtered, sorted or counted. Now a stored mark with its own date.
+const SUP_RAISE_LABEL={ raised:'Raised', raised_voc:'Raised · VOC' };
+function supRaisedCell(r){
+  if(!r.raised_kind) return '<span class="text-slate-300">—</span>';
+  const cls = r.raised_kind==='raised_voc' ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700';
+  const by = r.raised_by ? ' by '+supPrettyUser(r.raised_by) : '';
+  return `<span class="inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold ${cls} whitespace-nowrap" title="Raised${escapeHtml(by)} on ${r.raised_at?new Date(r.raised_at).toLocaleString():''}">${SUP_RAISE_LABEL[r.raised_kind]||'Raised'}</span>
+    <div class="text-[10px] text-slate-400 mt-0.5 tabular-nums">${r.raised_at?_dmy(r.raised_at):''}</div>`;
+}
+// Native <select> rather than a hand-rolled menu: no popup positioning to get wrong inside a scrolling
+// table, and it works on touch. Resets to the placeholder after each choice so it reads as an action.
+function supRaiseControl(r){
+  const k=r.raised_kind||'';
+  return `<select class="sup-raise filter-select" style="height:30px;font-size:11px;padding:0 6px" data-oname="${escapeHtml(r.order_name||'')}" title="Record that this was raised with the courier partner">
+      <option value="" ${k?'':'selected'}>${k?'Change…':'Raise ▾'}</option>
+      <option value="raised" ${k==='raised'?'selected':''}>Raised</option>
+      <option value="raised_voc" ${k==='raised_voc'?'selected':''}>Raised with VOC</option>
+      ${k?'<option value="__clear">Clear</option>':''}
+    </select>`;
+}
+async function supDoRaise(orderName, value, sel){
+  if(!value) return;
+  const kind = value==='__clear' ? null : value;
+  sel.disabled=true;
+  try{
+    const d=await supFetch('/api/support/raise',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ orderName, kind }) });
+    // Update the row in place — a full reload would lose the agent's scroll position mid-queue.
+    const row=(_supQueueRows||[]).find(x=>String(x.order_name||'').replace('#','').trim()===String(orderName).replace('#','').trim());
+    if(row){ row.raised_kind=d.raised?d.raised.kind:null; row.raised_at=d.raised?d.raised.at:null; row.raised_by=d.raised?d.raised.by:null; }
+    showNotification(kind?`Marked ${SUP_RAISE_LABEL[kind]} — ${orderName}`:`Cleared raised — ${orderName}`);
+    supQueueTable();
+  }catch(e){ showNotification(e.message,true); sel.disabled=false; sel.value=''; }
+}
 function supReasonChips(r){
   if(!r.reasons||!r.reasons.length) return '';
   return r.reasons.map(k=>{ const m=SUP_REASON_META[k]; if(!m) return '';
@@ -4327,7 +4395,7 @@ function supReasonChips(r){
 }
 // Column comparator for header-click sorting. Time columns (created_at / last_scan_at) compare by epoch
 // with empty values ALWAYS last (regardless of direction); other columns are case-insensitive strings.
-function _supSortCmp(k,d){ const isTime=(k==='created_at'||k==='last_scan_at');
+function _supSortCmp(k,d){ const isTime=(k==='created_at'||k==='last_scan_at'||k==='raised_at');
   return (a,b)=>{ if(isTime){ const x=a[k]?new Date(a[k]).getTime():null, y=b[k]?new Date(b[k]).getTime():null;
       if(x===null&&y===null) return 0; if(x===null) return 1; if(y===null) return -1; return d*(x-y); }
     return d*String(a[k]||'').toLowerCase().localeCompare(String(b[k]||'').toLowerCase()); }; }
@@ -4343,11 +4411,35 @@ function supQueueTable(){
   const platSel=document.getElementById('sup-f-platform'), platOn=_supTab!=='repeat';
   if(platSel){ platSel.style.display=platOn?'':'none'; if(!platOn) platSel.value='all'; }
   const fL=platOn?(platSel?.value||'all'):'all';
-  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fH!=='all'||fP!=='all'||fL!=='all'||_supSort)?'':'none';
+  // Status options are derived from the rows this tab actually holds — populate before reading the value.
+  const statusSel=document.getElementById('sup-f-status');
+  if(statusSel){ statusSel.style.display=platOn?'':'none'; if(!platOn) statusSel.value='all'; }
+  if(platOn) supSyncStatusOptions(_supQueueRows);
+  const fS=platOn?(statusSel?.value||'all'):'all';
+  const raisedSel=document.getElementById('sup-f-raised');
+  if(raisedSel){ raisedSel.style.display=platOn?'':'none'; if(!platOn) raisedSel.value='all'; }
+  const fR=platOn?(raisedSel?.value||'all'):'all';
+  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fH!=='all'||fP!=='all'||fL!=='all'||fR!=='all'||fS!=='all'||_supSort)?'':'none';
   let list=_supQueueRows.slice();
   if(fN==='with') list=list.filter(r=>r.note_count>0);
   if(fN==='none') list=list.filter(r=>!r.note_count);
-  if(fQ) list=list.filter(r=>(r.latest_note||'').toLowerCase().includes(fQ));
+  // One box, every identifier an agent actually has to hand: order no, AWB, phone, email, name, note.
+  // Digits are matched separately so a pasted "+91 72475 71477" finds the stored "7247571477" — the
+  // formats differ per order, which is why a plain substring test on the raw phone kept missing.
+  if(fQ){
+    const qDigits=fQ.replace(/\D/g,'');
+    list=list.filter(r=>{
+      const hay=[r.order_name,r.order_id,r.awb_number,r.customer_name,r.email,r.latest_note,r.courier]
+        .filter(Boolean).join(' ').toLowerCase();
+      if(hay.includes(fQ)) return true;
+      if(qDigits.length>=4){
+        const phone=String(r.phone||'').replace(/\D/g,'');
+        const awb=String(r.awb_number||'').replace(/\D/g,'');
+        if(phone.includes(qDigits)||awb.includes(qDigits)) return true;
+      }
+      return false;
+    });
+  }
   if(fA!=='any') list=list.filter(r=>{ const dAge=(Date.now()-new Date(r.created_at))/86400000;
     return fA==='lt1'?dAge<1:fA==='1-3'?(dAge>=1&&dAge<3):fA==='3-7'?(dAge>=3&&dAge<7):dAge>=7; });
   if(fH!=='all'){ const isHeld=r=>(r.shopify_hold&&r.shopify_hold.status==='held')||r.ee_hold; list=list.filter(r=>fH==='held'?isHeld(r):!isHeld(r)); }
@@ -4355,6 +4447,9 @@ function supQueueTable(){
   // 'none' = the server couldn't resolve a platform (no journey row yet, no usable partner/courier) —
   // worth being able to isolate, since those are the rows whose tracking nobody is syncing.
   if(fL!=='all') list=list.filter(r=>{ const p=String(r.platform||'').toLowerCase(); return fL==='none'?!p:p===fL; });
+  // Raised filter — the point of storing it rather than leaving it in a note.
+  if(fR!=='all') list=list.filter(r=> fR==='none' ? !r.raised_kind : fR==='any' ? !!r.raised_kind : r.raised_kind===fR);
+  if(fS!=='all') list=list.filter(r=>supStatusText(r)===fS);
   if(_supSort&&_supSort.k) list.sort(_supSortCmp(_supSort.k,_supSort.d));   // else keep the server order (confirmed → oldest)
   const cnt=document.getElementById('sup-queue-count'); if(cnt) cnt.textContent=`${list.length} shown`;
   document.querySelector(`.sup-tab[data-tab="${_supTab}"] .sup-tab-count`).textContent=`(${list.length})`;
@@ -4370,7 +4465,13 @@ function supQueueTable(){
   const showPay=_supTab!=='repeat';
   // Courier-platform tag — only the shipped panels carry one (Repeat orders are pre-dispatch, no shipment yet).
   const showPlat=_supTab!=='repeat';
-  const COLS=[{h:'Order',k:'order_name',d:1},{h:'Customer',k:null},...(showBucket?[{h:'Bucket',k:'bucket',d:1}]:[]),...(showPay?[{h:'Payment',k:'payment',d:1}]:[]),{h:'Age',k:'created_at',d:1},{h:'Courier',k:'courier',d:1},...(showScan?[{h:'Last scan',k:'last_scan_at',d:-1}]:[]),{h:'Actions',k:null}];
+  // On the shipped tabs the Bucket column said "Undelivered" on every single row — the tab already tells
+  // you that. It now shows the order's LATEST COURIER STATUS, which is the thing that actually differs.
+  const COLS=[{h:'Order',k:'order_name',d:1},{h:'Customer',k:null},
+    ...(showBucket?[showPlat?{h:'Status',k:'tracking_status',d:1}:{h:'Bucket',k:'bucket',d:1}]:[]),
+    ...(showPay?[{h:'Payment',k:'payment',d:1}]:[]),{h:'Age',k:'created_at',d:1},{h:'Courier',k:'courier',d:1},
+    ...(showScan?[{h:'Last scan',k:'last_scan_at',d:-1}]:[]),
+    ...(showPlat?[{h:'Raised',k:'raised_at',d:-1}]:[]),{h:'Actions',k:null}];
   const thHtml=COLS.map(col=>{ if(!col.k) return `<th class="${TH}">${col.h}</th>`;
     const on=_supSort&&_supSort.k===col.k; const car=on?(_supSort.d===1?'▲':'▼'):'<span class="text-slate-300">↕</span>';
     return `<th class="${TH} cursor-pointer select-none hover:text-indigo-600 ${on?'text-indigo-600':''}" data-sort="${col.k}" data-dir="${col.d}" title="Sort by ${col.h}">${col.h} <span class="text-[9px]">${car}</span></th>`; }).join('');
@@ -4389,14 +4490,15 @@ function supQueueTable(){
         </div>
         ${_supTab==='repeat'&&r.reasons&&r.reasons.length?`<div class="flex items-center gap-1 flex-wrap mt-1">${supReasonChips(r)}</div>`:''}
       </td>
-      ${showBucket?`<td class="${TD}">${supBadge(r.bucket)}</td>`:''}
+      ${showBucket?`<td class="${TD}">${showPlat?supStatusChip(r):supBadge(r.bucket)}</td>`:''}
       ${showPay?`<td class="${TD}">${supPayChip(r)}</td>`:''}
       <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
       <td class="${TD}"><div class="flex items-center gap-1.5 flex-wrap">${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}${showPlat?supPlatformTag(r.platform):''}</div>${r.awb_number?`<div class="text-[10px] mt-0.5">${supAwbLink(r.awb_number,r.order_name,r.courier)}</div>`:''}</td>
       ${showScan?`<td class="${TD} whitespace-nowrap">${r.last_scan_at?`<span class="text-slate-500" title="Latest AWB scan by courier: ${new Date(r.last_scan_at).toLocaleString()}">🛰 ${supRelTime(r.last_scan_at)}</span>`:'<span class="text-slate-300">—</span>'}</td>`:''}
+      ${showPlat?`<td class="${TD} whitespace-nowrap">${supRaisedCell(r)}</td>`:''}
       <td class="${TD}"><div class="flex items-start gap-2">
         <div class="flex-1 min-w-0 space-y-1.5">
-          <div class="flex items-center gap-1.5 flex-wrap">${supHoldControl(r)}</div>
+          <div class="flex items-center gap-1.5 flex-wrap">${supHoldControl(r)}${showPlat?supRaiseControl(r):''}</div>
           ${r.latest_note?`<div class="min-w-0 border-l-2 border-slate-200 pl-2">
             <div class="text-xs text-slate-500 italic truncate max-w-[260px]" title="${escapeHtml(r.latest_note)}">“${escapeHtml(r.latest_note)}”</div>
             <div class="text-[10px] text-slate-400 truncate">${escapeHtml(r.latest_note_by||'')}${r.latest_note_by&&r.latest_note_at?' · ':''}${r.latest_note_at?supRelTime(r.latest_note_at):''}</div></div>`:''}
@@ -4414,6 +4516,10 @@ function supQueueTable(){
   c.querySelectorAll('.sup-cancel-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoCancel(b.dataset.oid,b.dataset.oname,b); }));
   c.querySelectorAll('.sup-eehold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoEeHold(b.dataset.oid,b.dataset.oname,b); }));
   c.querySelectorAll('.sup-eeunhold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoEeUnhold(b.dataset.oid,b.dataset.oname,b); }));
+  c.querySelectorAll('.sup-raise').forEach(sel=>{
+    sel.addEventListener('click',e=>e.stopPropagation());          // don't open the order modal
+    sel.addEventListener('change',e=>{ e.stopPropagation(); supDoRaise(sel.dataset.oname, sel.value, sel); });
+  });
 }
 // "🔓 Unheld by <user> · <ago>" history chip — shown when a hold was placed then RELEASED by a human,
 // so an agent can see who released it (and when) instead of assuming it was never held. `by` is the

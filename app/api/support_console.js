@@ -124,10 +124,36 @@ async function notesByOrder(orderIds, keep) {
 async function scanTimesByOrder(orderIds) {
     if (!orderIds.length) return {};
     const rows = await chunkedIn('order_tracking', 'order_id, status_updated_at, last_tracked_at, updated_at', 'order_id', orderIds);
+    // FALLBACK ONLY — used when the journey has no recorded scan (see overlayJourneyScans).
+    // ⚠️ Ordered by TRUSTWORTHINESS, not recency. `status_updated_at` is a real courier status change;
+    // `last_tracked_at` / `updated_at` are OUR write times, so a sync that touched the row an hour ago
+    // makes them look like fresh activity. Taking the newest of the three was exactly that mistake —
+    // it reported "10h ago" (the last sync) on a parcel whose real last scan was four days earlier.
     const best = r => r.status_updated_at || r.last_tracked_at || r.updated_at || null;
     const map = {};
     rows.forEach(r => { const t = best(r); if (!t) return; if (!map[r.order_id] || new Date(t) > new Date(map[r.order_id])) map[r.order_id] = t; });
     return map;
+}
+// Overlay the journey's REAL newest scan on top of the order_tracking estimate.
+// `order_tracking` is written by the nightly syncs, but the journey is updated in real time by the
+// courier webhooks — so between runs the tracking row is hours stale. TE25-41004 had an Out-for-delivery
+// scan at 11 Aug 09:17 IST while the queue showed "10h ago", which was simply the last time the sync had
+// run. `last_scan_at` is the newest timestamp in the actual scan log, so it beats both.
+async function overlayJourneyScans(rows, scans) {
+    const awbs = [...new Set(rows.map(r => String(r.awb_number || '').trim()).filter(Boolean))];
+    if (!awbs.length) return scans;
+    const jr = await chunkedIn('shipment_journey_ecom', 'awb, last_scan_at', 'awb', awbs);
+    const byAwb = {}; jr.forEach(j => { if (j.last_scan_at) byAwb[j.awb] = j.last_scan_at; });
+    // ⚠️ AUTHORITATIVE — NOT "whichever is newer". `last_scan_at` is the newest entry in the actual scan
+    // log; everything else is an estimate. Taking the later of the two looked safe but is precisely
+    // wrong for a STALLED parcel: TE25-40300's last real scan was 07 Aug 18:23, while its tracking row
+    // had been rewritten by a sync 10 hours ago — so max chose the sync and reported activity that never
+    // happened. A shipment sitting still must LOOK like it is sitting still; that is the whole signal.
+    rows.forEach(r => {
+        const t = byAwb[String(r.awb_number || '').trim()];
+        if (t) scans[r.order_id] = t;
+    });
+    return scans;
 }
 // Courier PLATFORM (the aggregator the parcel shipped through) per order — RapidShyp / DocPharma / KwikShip.
 // `order_buckets.partner` looks like the obvious source but is NOT trustworthy for this: KwikShip shipments
@@ -137,6 +163,39 @@ async function scanTimesByOrder(orderIds) {
 // partner / courier / AWB prefix are fallbacks only, for orders with no journey row yet.
 const PLATFORM_KEYS = new Set(['rapidshyp', 'docpharma', 'kwikship']);
 const _pk = n => String(n || '').replace('#', '').trim();
+// Customer name per order. `order_buckets` carries phone and email but no name, so the queue could only
+// ever be searched by number — and agents look people up by name as often as by phone.
+// Junk placeholders are dropped rather than shown: EasyEcom writes a literal "DUMMY" customer_name on
+// some rows, and a queue full of "Dummy" is worse than a blank.
+const JUNK_NAME = /^(dummy|test|testing|n\.?\/?a|na|none|guest|customer|xxx+|\.+|-+)$/i;
+async function namesByOrder(orderIds) {
+    if (!orderIds.length) return {};
+    const rows = await chunkedIn('order_shipping_addresses', 'order_id, name, first_name, last_name', 'order_id', orderIds);
+    const map = {};
+    rows.forEach(a => {
+        const n = String(a.name || [a.first_name, a.last_name].filter(Boolean).join(' ') || '').trim();
+        if (n && !JUNK_NAME.test(n)) map[String(a.order_id)] = n;
+    });
+    return map;
+}
+
+// ── "Raised to courier" ──────────────────────────────────────────────────────────────────────────
+// The team was recording this in free-text notes ("raised", "raised with VOC"), so it could not be
+// filtered, sorted or counted, and the date it happened was only whatever the note timestamp said.
+// Stored as an `order_marks_ecom` mark: one per order (the table is unique on order_name+mark_type),
+// `note` holds WHICH kind, `created_at` is the raised date. Re-raising with the other kind updates in
+// place rather than stacking marks — an order is either raised or not, not raised twice.
+const RAISE_KINDS = { raised: 'Raised', raised_voc: 'Raised with VOC' };
+async function raisedByOrder(names) {
+    const uniq = [...new Set((names || []).map(n => String(n || '').replace('#', '').trim()).filter(Boolean))];
+    if (!uniq.length) return {};
+    const rows = await chunkedIn('order_marks_ecom', 'order_name, note, created_by, created_at', 'order_name', uniq,
+        q => q.eq('mark_type', 'courier_raised'));
+    const map = {};
+    rows.forEach(m => { map[String(m.order_name).replace('#', '').trim()] = { kind: m.note || 'raised', at: m.created_at, by: m.created_by || null }; });
+    return map;
+}
+
 // Shipments that have REACHED A TERMINAL OUTCOME per the courier journey — delivered / RTO / lost.
 // The `order_buckets` view decides "undelivered" from `rapidshyp_tracking_ecom.raw_status` and
 // `order_tracking.tracking_status`; both are periodic snapshots, so when a parcel moves on to RTO or is
@@ -148,9 +207,26 @@ const _pk = n => String(n || '').replace('#', '').trim();
 const TERMINAL_OUTCOMES = new Set(['delivered', 'rto', 'lost']);
 async function terminalByAwb(rows) {
     const awbs = [...new Set(rows.map(r => String(r.awb_number || '').trim()).filter(Boolean))];
-    if (!awbs.length) return new Set();
-    const jr = await chunkedIn('shipment_journey_ecom', 'awb, outcome', 'awb', awbs);
-    return new Set(jr.filter(j => TERMINAL_OUTCOMES.has(String(j.outcome || ''))).map(j => j.awb));
+    const names = [...new Set(rows.map(r => String(r.order_name || '').replace('#', '').trim()).filter(Boolean))];
+    const done = new Set();
+    if (awbs.length) {
+        const jr = await chunkedIn('shipment_journey_ecom', 'awb, outcome', 'awb', awbs);
+        jr.filter(j => TERMINAL_OUTCOMES.has(String(j.outcome || ''))).forEach(j => done.add(j.awb));
+    }
+    // ⚠️ DOCPHARMA ORDERS OFTEN HAVE NO JOURNEY ROW AT ALL, so the check above cannot see them — the
+    // partner portal showed TE25-37876 delivered on 27 Jul while the panel still listed it as
+    // "partially-delivered". `docpharma_orders` is DocPharma's own status, synced from their portal, and
+    // is authoritative for their shipments. 6 of 168 undelivered rows had no journey row and every one
+    // of them was already delivered per this table.
+    if (names.length) {
+        const dp = await chunkedIn('docpharma_orders', 'partner_order_id, order_status, awb', 'partner_order_id', names);
+        const finished = /^(delivered|rto|returned|return|cancelled|canceled|lost)/i;
+        const byName = {};
+        rows.forEach(r => { byName[String(r.order_name || '').replace('#', '').trim()] = String(r.awb_number || '').trim(); });
+        dp.filter(d => finished.test(String(d.order_status || '')))
+            .forEach(d => { const awb = byName[d.partner_order_id] || d.awb; if (awb) done.add(awb); });
+    }
+    return done;
 }
 
 async function platformByOrder(rows) {
@@ -371,6 +447,31 @@ router.post('/support/shopify-unhold', async (req, res) => {
 // Cancel a held order on Shopify (restock, no customer email) + refund any online-captured amount
 // (COD fee/advance) + release the hold + log the reason & who. DESTRUCTIVE — cancels the real customer
 // order. Gated by the dedicated `support-cancel-order` capability (admins pass via '*').
+// ── POST /support/raise — mark an order raised with the courier (or clear it) ────────────────────
+// { orderName, kind: 'raised' | 'raised_voc' | null }. Anyone who can work the queue can record this;
+// it is a note about our own action, not a change to the order.
+router.post('/support/raise', async (req, res) => {
+    try {
+        const name = String((req.body && req.body.orderName) || '').replace('#', '').trim();
+        const kind = (req.body && req.body.kind) || null;
+        if (!name) return res.status(400).json({ success: false, error: 'orderName is required.' });
+        if (kind && !RAISE_KINDS[kind]) return res.status(400).json({ success: false, error: 'kind must be raised or raised_voc.' });
+        if (!kind) {   // clear — raised by mistake
+            await supabase.from('order_marks_ecom').delete().eq('order_name', name).eq('mark_type', 'courier_raised');
+            return res.json({ success: true, raised: null });
+        }
+        const now = new Date().toISOString();
+        // ⚠️ created_at is the RAISED DATE and is deliberately rewritten when the kind changes: switching
+        // "Raised" → "Raised with VOC" is a fresh escalation, and the column must show when that happened.
+        const { error } = await supabase.from('order_marks_ecom').upsert({
+            order_name: name, mark_type: 'courier_raised', note: kind,
+            created_by: (req.user && req.user.sub) || null, created_at: now, updated_at: now,
+        }, { onConflict: 'order_name,mark_type' });
+        if (error) throw new Error(error.message);
+        res.json({ success: true, raised: { kind, at: now, by: (req.user && req.user.sub) || null } });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 router.post('/support/cancel-order', requirePermission('support-cancel-order'), async (req, res) => {
     try {
         const { orderId, orderName, reason } = req.body || {};
@@ -446,16 +547,29 @@ router.get('/support/queue', async (req, res) => {
                 ? new Date(n.created_at) >= new Date(since)
                 : new Date(n.created_at) < new Date(since);
         };
-        const [notes, scans] = await Promise.all([
+        const [notes, scansRaw, names] = await Promise.all([
             notesByOrder(orderIds, keepNote),
             scanTimesByOrder(orderIds),
+            namesByOrder(orderIds),
         ]);
+        rows.forEach(r => { r.customer_name = names[String(r.order_id)] || null; });
+        // Real-time courier scans beat the nightly tracking snapshot — see overlayJourneyScans().
+        const scans = await overlayJourneyScans(rows, scansRaw);
         rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; r.last_scan_at = scans[r.order_id] || null; });
         // Courier platform — only for the shipped panels. Repeat-tab orders are still pre-dispatch (no AWB,
         // no journey row), so the lookup would cost a query and return nothing but nulls.
         if (isUndPanel && rows.length) {
-            const plat = await platformByOrder(rows);
-            rows.forEach(r => { r.platform = plat[r.order_id] || null; });
+            const [plat, raised] = await Promise.all([
+                platformByOrder(rows),
+                raisedByOrder(rows.map(r => r.order_name)),
+            ]);
+            rows.forEach(r => {
+                r.platform = plat[r.order_id] || null;
+                const rz = raised[String(r.order_name || '').replace('#', '').trim()];
+                r.raised_kind = rz ? rz.kind : null;      // 'raised' | 'raised_voc'
+                r.raised_at = rz ? rz.at : null;          // sortable/filterable date
+                r.raised_by = rz ? rz.by : null;
+            });
         }
         // Payment type (COD vs Prepaid) — `order_buckets` carries no payment column, so read
         // `orders.financial_status`. Same rule as the Orders dashboard: fully-settled = Prepaid;

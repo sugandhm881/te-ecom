@@ -150,6 +150,9 @@ function parseRapidshypJourney(scans, currentStatus, courier, zone, statusCode, 
         // RTO'd but the courier NEVER went Out for Delivery (no OFD scan) → a "silent RTO" returned
         // without ever attempting delivery. Flagged for the "RTO without attempt" report.
         rto_no_attempt: rto && !seenOFD,
+        // Newest scan in the log — see the note in kwikship_sync: a milestone is the FIRST time a state
+        // was reached, so it under-reports the latest activity on any reattempted shipment.
+        last_scan_at: evts.map(e => e.at).filter(Boolean).sort().pop() || null,
         // ⚠️ NEVER FINALIZE A DELIVERY WITHOUT EVIDENCE. This is the guard that makes the whole class of
         // bug self-healing. A wrong `outcome` is recoverable — the next sync overwrites it. A wrong
         // `is_final` is NOT: the sync SKIPS final shipments by design, so the row is locked out of every
@@ -237,6 +240,7 @@ async function saveJourney(awb, orderName, source, journey, orderDate, raw, paym
     if (journey.status_code) row.status_code = journey.status_code;
     if (journey.first_edd) row.first_edd = journey.first_edd;   // trigger keeps the earliest value
     if (journey.dispatched_at) row.dispatched_at = journey.dispatched_at;  // conditional — don't wipe on partial webhook
+    if (journey.last_scan_at) row.last_scan_at = journey.last_scan_at;     // newest courier scan (Call Queue "Last scan")
     if (journey.zone) row.zone = journey.zone;
     const { error } = await supabase.from('shipment_journey_ecom').upsert(row, { onConflict: 'awb' });
     if (error) console.error('[Journey] save error:', error.message);

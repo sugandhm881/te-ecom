@@ -118,6 +118,10 @@ function parseKwikshipJourney(statusHistory, currentStatus, courier, zone) {
         first_edd: null,                       // filled from estimated_delivery_date below
         // RTO'd but the courier NEVER went out for delivery → a silent RTO (returned without any attempt).
         rto_no_attempt: rto && !seenOFD,
+        // THE NEWEST SCAN IN THE TIMELINE — the only truthful "last scan". Milestones cannot stand in for
+        // it: a parcel reattempted after an NDR has a NEWER out-for-delivery scan than the FIRST one
+        // stored in out_for_delivery_at (TE25-41004: first OFD 10 Aug, latest OFD 11 Aug 09:17).
+        last_scan_at: evts.map(e => e.at).filter(Boolean).sort().pop() || null,
         is_final: delivered || rto || lost,
     };
 }
@@ -226,7 +230,10 @@ async function updateKwikshipJourney(awb, orderName, courier, orderDate, payment
     const raw = j.rto_no_attempt ? { status_history: timeline, status: curStatus, captured_at: new Date().toISOString() } : null;
     await saveJourney(awb, orderName, 'kwikship', j, orderDate, raw, paymentMode);
     // Feed the bucket engine too — without this the order never leaves `order_to_dispatch`.
-    await mirrorKwikshipToOrderTracking(awb, orderName, j, j.status_code);
+    const lastScanAt = timeline
+        .map(h => parseKwikDate(h.status_datetime || h.datetime || h.date || h.timestamp || h.creation_datetime))
+        .filter(Boolean).sort().pop() || null;
+    await mirrorKwikshipToOrderTracking(awb, orderName, j, j.status_code, lastScanAt);
     // If this order was re-allocated to Kwikship from another aggregator, drop the stale (non-final) old row.
     if (orderName) await supersedeStaleJourneys(orderName, awb);
     return true;
@@ -263,7 +270,7 @@ function ksTrackingStatus(outcome, statusCode) {
     const code = String(statusCode || '').toLowerCase().trim();
     return KS_TRACKING_STATUS[code] || code || null;
 }
-async function mirrorKwikshipToOrderTracking(awb, orderName, j, statusCode) {
+async function mirrorKwikshipToOrderTracking(awb, orderName, j, statusCode, lastScanAt) {
     const name = String(orderName || '').replace('#', '').trim();
     if (!name) return false;
     try {
@@ -285,7 +292,16 @@ async function mirrorKwikshipToOrderTracking(awb, orderName, j, statusCode) {
             status_updated_at: j.dispatched_at || j.out_for_delivery_at || null,
             delivered_date: j.delivered_at || null,
             edd: j.first_edd || null,
-            last_tracked_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            // ⚠️ `last_tracked_at` must be the newest COURIER EVENT, not the sync time — the Call Queue's
+            // "Last scan" column reads it. It was `now()`, and because `status_updated_at` holds the
+            // DISPATCH moment (above), every Kwikship row reported its pickup time as the last scan:
+            // 724 of 724 rows had status_updated_at === dispatched_at. Prefer the true newest scan from
+            // the timeline when the caller has it; otherwise the newest milestone we know, which is still
+            // a real event rather than the clock.
+            last_tracked_at: lastScanAt
+                || [j.delivered_at, j.rto_at, j.out_for_delivery_at, j.dispatched_at].filter(Boolean).sort().pop()
+                || new Date().toISOString(),
+            updated_at: new Date().toISOString(),
         }, { onConflict: 'order_id' });
         if (error) { console.error('[Kwikship→tracking]', awb, error.message); return false; }
         return true;

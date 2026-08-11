@@ -101,6 +101,9 @@ function parseKwikshipJourney(statusHistory: any[], currentStatus: string, couri
     out_for_delivery_at: outForDeliveryAt, delivered_at: deliveredAt, rto_at: rtoAt,
     dispatched_at: pickedUpAt, zone: zone || null, status_code: currentStatus || null,
     rto_no_attempt: rto && !seenOFD,
+    // Newest scan in the timeline — the Call Queue's "Last scan" reads this. A milestone is the FIRST
+    // time a state was reached, so it under-reports any reattempted shipment.
+    last_scan_at: evts.map((e: any) => e.at).filter(Boolean).sort().pop() || null,
     is_final: delivered || rto || lost,
   };
 }
@@ -258,6 +261,7 @@ Deno.serve(async (req) => {
     if (j.status_code) row.status_code = j.status_code;
     if (detail?.edd) row.first_edd = detail.edd;          // DB trigger keeps the earliest
     if (j.dispatched_at) row.dispatched_at = j.dispatched_at;
+    if (j.last_scan_at) row.last_scan_at = j.last_scan_at;   // conditional — a partial payload must not blank it
     if (j.zone) row.zone = j.zone;
     if (j.rto_no_attempt) row.raw = { status_history: statusHistory, status: curStatus, captured_at: now };
 

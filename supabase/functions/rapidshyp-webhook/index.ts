@@ -119,6 +119,9 @@ function parseRapidshypJourney(scans: any[], currentStatus: string, courier: str
     dispatched_at: pickedUpAt, zone: zone || null, status_code: statusCode || null,
     first_edd: parseScanDate(edd) || null,
     rto_no_attempt: rto && !seenOFD,
+    // Newest scan in the timeline — the Call Queue's "Last scan" reads this. A milestone is the FIRST
+    // time a state was reached, so it under-reports any reattempted shipment.
+    last_scan_at: evts.map((e: any) => e.at).filter(Boolean).sort().pop() || null,
     // ⚠️ NEVER FINALIZE A DELIVERY WITHOUT EVIDENCE (mirrors the Node parser — keep both in step).
     // A wrong `outcome` self-corrects on the next sync; a wrong `is_final` does NOT, because the sync
     // skips final shipments. Finality therefore requires a DEL code or a real delivered scan. With this
@@ -186,6 +189,7 @@ Deno.serve(async (req) => {
       if (j.status_code) row.status_code = j.status_code;
       if (j.first_edd) row.first_edd = j.first_edd;        // DB trigger keeps the earliest
       if (j.dispatched_at) row.dispatched_at = j.dispatched_at;
+      if (j.last_scan_at) row.last_scan_at = j.last_scan_at;   // conditional — a partial payload must not blank it
       if (j.zone) row.zone = j.zone;
 
       const { error } = await supabase.from("shipment_journey_ecom").upsert(row, { onConflict: "awb" });
