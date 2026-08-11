@@ -672,20 +672,27 @@ const PLATFORM_LABEL = { rapidshyp: 'RapidShyp', docpharma: 'DocPharma', kwikshi
 // three times over, and again for every report added later. Blocking at the send path makes a blocked
 // courier silent by default — a new report cannot forget it.
 // To resume mail to a courier: remove it from this set. One line, one place.
+//
+// ⚠️ THE DEFAULT IS "AUTOMATIC". A sender is treated as unattended unless the caller explicitly says
+// `manual: true`, which only the dashboard's own /send routes do. The first version had this the other
+// way round — crons opted IN with `auto: true` — and it failed exactly as an opt-in scheme does: the
+// Intransit-Late cron was added to that list by nobody, so it kept mailing RapidShyp daily after the
+// other three were stopped. Fail safe: a NEW cron is silent to a blocked courier without anyone
+// remembering to wire it up.
 const AUTO_MAIL_BLOCKED = new Set(['rapidshyp']);
-const autoBlocked = (platform, auto) => !!auto && AUTO_MAIL_BLOCKED.has(platform);
+const autoBlocked = (platform, manual) => !manual && AUTO_MAIL_BLOCKED.has(platform);
 
 // Send a delivery report as SEPARATE emails per platform — RapidShyp rows go to the RapidShyp recipients,
 // DocPharma rows to the DocPharma recipients (each configured in Settings → Email & Reports). `source`
 // restricts to one platform; otherwise BOTH are attempted. A platform is skipped when it has no matching
 // rows OR no recipient configured. fetchFn(fromISO,toISO,platform,extra) → rows; buildFn(rows,rangeLabel,
 // platform,extra) → { subject, html }. Returns { ok, skipped?, reason?, to, count, results }.
-async function sendReportPerPlatform({ fetchFn, buildFn, rg, source, extra, exclude, auto, dryRun }) {
+async function sendReportPerPlatform({ fetchFn, buildFn, rg, source, extra, exclude, manual, dryRun }) {
     const skip = new Set(exclude || []);
     const platforms = (source ? [source] : ['rapidshyp', 'docpharma', 'kwikship']).filter(p => !skip.has(p));
     const results = [];
     for (const p of platforms) {
-        if (autoBlocked(p, auto)) { results.push({ platform: p, count: 0, skipped: true, reason: `${PLATFORM_LABEL[p] || p}: automatic mail disabled` }); continue; }
+        if (autoBlocked(p, manual)) { results.push({ platform: p, count: 0, skipped: true, reason: `${PLATFORM_LABEL[p] || p}: automatic mail disabled` }); continue; }
         const rows = await fetchFn(rg.fromISO, rg.toISO, p, extra);
         if (!rows.length) { results.push({ platform: p, count: 0, skipped: true, reason: `${PLATFORM_LABEL[p] || p}: none in range` }); continue; }
         const rcpt = await recipientsFor(p);
@@ -747,7 +754,7 @@ async function sendSilentRtoReport(opts = {}) {
     // This report is RapidShyp-only and addresses them directly (it never goes through
     // sendReportPerPlatform), so the blocklist has to be applied here too — this is the weekly mail that
     // kept going after the daily one was stopped.
-    if (autoBlocked('rapidshyp', opts.auto)) return { ok: false, skipped: true, reason: 'RapidShyp: automatic mail disabled' };
+    if (autoBlocked('rapidshyp', opts.manual)) return { ok: false, skipped: true, reason: 'RapidShyp: automatic mail disabled' };
     const rg = opts.fromISO ? opts : rangeEndingYesterday(opts.days || 7);
     const rows = await fetchSilentRto(rg.fromISO, rg.toISO);          // RapidShyp-only by design
     if (!rows.length) return { ok: false, skipped: true, reason: 'No silent-RTO shipments in the selected range.' };
@@ -813,7 +820,7 @@ function buildLateMail(rows, rangeLabel, platform) {
 }
 async function sendLateDeliveriesReport(opts = {}) {
     const rg = opts.fromISO ? opts : rangeEndingYesterday(opts.days || 30);
-    return sendReportPerPlatform({ fetchFn: fetchLateDeliveries, buildFn: buildLateMail, rg, source: opts.source, auto: opts.auto, dryRun: opts.dryRun });
+    return sendReportPerPlatform({ fetchFn: fetchLateDeliveries, buildFn: buildLateMail, rg, source: opts.source, manual: opts.manual, dryRun: opts.dryRun });
 }
 
 // ── In-transit but PAST promise date: overdue shipments not yet delivered/RTO (proactive chase list).
@@ -866,7 +873,7 @@ function buildIntransitMail(rows, rangeLabel, platform) {
 }
 async function sendIntransitLateReport(opts = {}) {
     const rg = opts.fromISO ? opts : resolveRange({ from: null, to: null }, 30);
-    return sendReportPerPlatform({ fetchFn: fetchIntransitLate, buildFn: buildIntransitMail, rg, source: opts.source });
+    return sendReportPerPlatform({ fetchFn: fetchIntransitLate, buildFn: buildIntransitMail, rg, source: opts.source, manual: opts.manual, dryRun: opts.dryRun });
 }
 
 // ── First-OFD Late (RTO / SLA claim): the courier's FIRST out-for-delivery scan happened AFTER the
@@ -927,7 +934,7 @@ function buildFirstOfdMail(rows, rangeLabel, platform) {
 }
 async function sendFirstOfdReport(opts = {}) {
     const rg = opts.fromISO ? opts : rangeEndingYesterday(opts.days || 30);
-    return sendReportPerPlatform({ fetchFn: fetchFirstOfdLate, buildFn: buildFirstOfdMail, rg, source: opts.source, exclude: opts.exclude, auto: opts.auto, dryRun: opts.dryRun });
+    return sendReportPerPlatform({ fetchFn: fetchFirstOfdLate, buildFn: buildFirstOfdMail, rg, source: opts.source, exclude: opts.exclude, manual: opts.manual, dryRun: opts.dryRun });
 }
 
 // Shared email chrome — a titled card with a striped table; `rightCols` are right-aligned header cells.
@@ -953,7 +960,7 @@ router.get('/silent-rto-claims', async (req, res) => {
 router.post('/silent-rto-claims/send', requireEmailSender, async (req, res) => {
     try {
         const rg = resolveRange(req.body || {});
-        const out = await sendSilentRtoReport({ ...rg });   // recipient comes from Settings (RapidShyp email), not req.body
+        const out = await sendSilentRtoReport({ ...rg, manual: true });   // recipient comes from Settings (RapidShyp email), not req.body
         if (out.skipped) return res.status(400).json({ success: false, message: out.reason });
         res.json({ success: true, message: `Sent ${out.count} claim(s) to ${out.to.join(', ')}` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -968,7 +975,7 @@ router.get('/late-deliveries', async (req, res) => {
 router.post('/late-deliveries/send', requireEmailSender, async (req, res) => {
     try {
         const rg = resolveRange(req.body || {});
-        const out = await sendLateDeliveriesReport({ ...rg, source: (req.body && req.body.source) || undefined });
+        const out = await sendLateDeliveriesReport({ ...rg, source: (req.body && req.body.source) || undefined, manual: true });
         if (out.skipped) return res.status(400).json({ success: false, message: out.reason });
         res.json({ success: true, message: `Sent ${out.count} row(s) to ${out.to.join(', ')}` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -983,7 +990,7 @@ router.get('/intransit-late', async (req, res) => {
 router.post('/intransit-late/send', requireEmailSender, async (req, res) => {
     try {
         const rg = resolveRange(req.body || {});
-        const out = await sendIntransitLateReport({ ...rg, source: (req.body && req.body.source) || undefined });
+        const out = await sendIntransitLateReport({ ...rg, source: (req.body && req.body.source) || undefined, manual: true });
         if (out.skipped) return res.status(400).json({ success: false, message: out.reason });
         res.json({ success: true, message: `Sent ${out.count} row(s) to ${out.to.join(', ')}` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -999,7 +1006,7 @@ router.get('/first-ofd-late', async (req, res) => {
 router.post('/first-ofd-late/send', requireEmailSender, async (req, res) => {
     try {
         const rg = resolveRange(req.body || {});
-        const out = await sendFirstOfdReport({ ...rg, source: (req.body && req.body.source) || undefined });
+        const out = await sendFirstOfdReport({ ...rg, source: (req.body && req.body.source) || undefined, manual: true });
         if (out.skipped) return res.status(400).json({ success: false, message: out.reason });
         res.json({ success: true, message: `Sent ${out.count} row(s) to ${out.to.join(', ')}` });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }

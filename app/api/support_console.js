@@ -137,6 +137,22 @@ async function scanTimesByOrder(orderIds) {
 // partner / courier / AWB prefix are fallbacks only, for orders with no journey row yet.
 const PLATFORM_KEYS = new Set(['rapidshyp', 'docpharma', 'kwikship']);
 const _pk = n => String(n || '').replace('#', '').trim();
+// Shipments that have REACHED A TERMINAL OUTCOME per the courier journey — delivered / RTO / lost.
+// The `order_buckets` view decides "undelivered" from `rapidshyp_tracking_ecom.raw_status` and
+// `order_tracking.tracking_status`; both are periodic snapshots, so when a parcel moves on to RTO or is
+// finally delivered, the bucket keeps saying "undelivered" until the next sync writes the new text.
+// `shipment_journey_ecom.outcome` is the courier-derived truth and updates in real time from the
+// webhooks — 21 RTO and 9 delivered orders were sitting on the Undelivered call list because of that lag.
+// ⚠️ `in_transit` is deliberately NOT terminal: a parcel reattempting after a failed delivery reads
+// in_transit while its NDR is still open and genuinely does need the call.
+const TERMINAL_OUTCOMES = new Set(['delivered', 'rto', 'lost']);
+async function terminalByAwb(rows) {
+    const awbs = [...new Set(rows.map(r => String(r.awb_number || '').trim()).filter(Boolean))];
+    if (!awbs.length) return new Set();
+    const jr = await chunkedIn('shipment_journey_ecom', 'awb, outcome', 'awb', awbs);
+    return new Set(jr.filter(j => TERMINAL_OUTCOMES.has(String(j.outcome || ''))).map(j => j.awb));
+}
+
 async function platformByOrder(rows) {
     const names = [...new Set(rows.map(r => _pk(r.order_name)).filter(Boolean))];
     const jr = names.length ? await chunkedIn('shipment_journey_ecom', 'order_name, source', 'order_name', names) : [];
@@ -380,6 +396,11 @@ router.get('/support/queue', async (req, res) => {
                 .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true })
                 .order('order_id', { ascending: true })
                 .range(f, t));
+            // Drop anything the courier has already finished with — a delivered or returned parcel is not
+            // a call to make. Done BEFORE the undelivered_tracking upsert below so a terminal order still
+            // gets remembered for the Status-changed tab, which is exactly where it belongs now.
+            const done = await terminalByAwb(rows);
+            if (done.size) rows = rows.filter(r => !done.has(String(r.awb_number || '').trim()));
             // Remember every order ever seen undelivered — powers the Status-changed tab.
             if (rows.length) {
                 const now = new Date().toISOString();
@@ -393,7 +414,13 @@ router.get('/support/queue', async (req, res) => {
                 .order('last_seen_at', { ascending: false }).order('order_id', { ascending: true }).range(f, t), 3000);
             const ids = tracked.map(t => t.order_id);
             const all = ids.length ? await chunkedIn('order_buckets', SEL, 'order_id', ids) : [];
+            // ⚠️ APPLY THE DATE RANGE. This tab ignored the picker entirely — it listed every order ever
+            // seen undelivered, so the range control above it did nothing and the list only grew. The
+            // window is filtered here rather than in the query because the candidate ids come from
+            // `undelivered_tracking`, which has no order date of its own.
+            const fromMs = new Date(fromISO).getTime(), toMs = new Date(toISO).getTime();
             rows = all.filter(r => !UNDELIVERED_BUCKETS.includes(r.bucket))
+                .filter(r => { const t = new Date(r.created_at).getTime(); return t >= fromMs && t <= toMs; })
                 .sort((a, b) => (b.msg91_confirmed === true) - (a.msg91_confirmed === true) || new Date(a.created_at) - new Date(b.created_at));
         } else { // repeat — reason-tagged COD/pre-pickup base (see findRepeatCandidates); shown/filtered below.
             rows = await findRepeatCandidates({ fromISO, toISO, skipDispatchFilter: true, anyReason: true });
