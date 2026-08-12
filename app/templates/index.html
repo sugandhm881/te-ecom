@@ -281,6 +281,16 @@
     #ops-control-view #ops-tabs button.bg-indigo-600 { box-shadow:0 1px 3px rgba(79,70,229,.35); }
     #ops-control-view table tbody tr { transition: background .12s; }
     #ops-control-view table tbody tr:hover { background:#f8fafc; }
+    /* Rate Watch diverging bars. Real CSS — tailwind.css is PREBUILT, so arbitrary values like
+       w-[120px] / left-[50%] resolve to nothing and would collapse these rows to bare text. */
+    .rw-row { display:flex; align-items:center; gap:10px; padding:3px 2px; border-radius:6px; }
+    .rw-row:hover { background:#f8fafc; }
+    .rw-lbl { flex:none; font-size:12px; color:#334155; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .rw-track { position:relative; flex:1; height:14px; min-width:80px; background:#f1f5f9; border-radius:4px; overflow:hidden; }
+    .rw-mid { position:absolute; left:50%; top:0; bottom:0; width:1px; background:#cbd5e1; }
+    .rw-bar { position:absolute; top:0; bottom:0; border-radius:3px; transition:width .2s ease; }
+    .rw-val { flex:none; width:86px; text-align:right; font-size:11px; font-weight:700; font-variant-numeric:tabular-nums; }
+    .rw-up { color:#e11d48; } .rw-down { color:#059669; }
     #ops-control-view th[data-k] { cursor:pointer; user-select:none; white-space:nowrap; transition:color .12s; }
     #ops-control-view th[data-k]:hover { color:#4f46e5; }
     #ops-control-view th .arw { font-size:9px; margin-left:2px; }
@@ -390,6 +400,17 @@
     .filter-input::placeholder { color: #94a3b8; }
     .filter-btn { height: 38px; padding: 0 1rem; border: 1px solid #e2e8f0; border-radius: 0.6rem; background: #fff; color: #64748b; font-size: 0.875rem; font-weight: 500; cursor: pointer; transition: all .15s ease; }
     .filter-btn:hover { border-color: #c7d2fe; color: #4f46e5; background: #eef2ff; }
+    /* Confirming action in a filter row (Apply). Same 38px height so the row stays on one baseline. */
+    .filter-btn-primary { height: 38px; padding: 0 1rem; border: 1px solid #1e293b; border-radius: 0.6rem; background: #1e293b; color: #fff; font-size: 0.875rem; font-weight: 600; cursor: pointer; transition: all .15s ease; }
+    .filter-btn-primary:hover { background: #334155; border-color: #334155; }
+    /* ── Segmented toggle (All / COD / Prepaid …) — the app-wide pill switch ──────────────────────
+       Was previously an ID LIST (#dp-source, #dp-payment, …) that every new dashboard had to be added
+       to by hand; miss it and the control renders ~34px tall beside 38px dropdowns and the whole filter
+       row loses its baseline. This class is the reusable form — put `seg-toggle` on the wrapper. */
+    .seg-toggle { padding: 3px; gap: 2px; border-radius: .7rem; background: #f1f5f9; border: 1px solid #e2e8f0; height: 38px; display: flex; align-items: center; overflow: visible; }
+    .seg-toggle button { border-radius: .5rem; font-weight: 600; padding: 4px 12px; font-size: .875rem; transition: all .15s ease; color: #64748b; white-space: nowrap; }
+    .seg-toggle button:hover { color: #4f46e5; }
+    .seg-toggle button.bg-indigo-600 { color: #fff; box-shadow: 0 1px 3px rgba(79,70,229,.35); }
     /* Expanded order-detail: soft fade+slide so open/close feels smooth, not jumpy. */
     @keyframes ord-fade-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
     .ord-detail-fade { animation: ord-fade-in .18s ease; }
@@ -765,6 +786,10 @@
                     <a href="#" id="nav-ops-control" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                         <span class="ml-3 text-sm font-medium">Ops Control</span>
+                    </a>
+                    <a href="#" id="nav-last-mile" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Last-Mile Funnel</span>
                     </a>
                     <a href="#" id="nav-amazon-fba" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9"></path></svg>
@@ -2514,6 +2539,102 @@
           </div>
         </div><!-- /delivery-perf-view -->
 
+        <!-- ── LAST-MILE FUNNEL ────────────────────────────────────────────────────────────────────
+             What happens AFTER the courier takes a parcel out for delivery. Deliberately built on the
+             Delivery Performance shell (same header, KPI grid, chart cards, explorer) so it reads as a
+             sibling rather than a different app. -->
+        <div id="last-mile-view" class="view-hidden">
+          <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h1 class="text-xl font-bold text-slate-800">Last-Mile Funnel</h1>
+              <p class="text-sm text-slate-400 mt-0.5" id="lm-range">Out for delivery → Delivered · RTO · never attempted</p>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="seg-toggle" id="lm-source">
+                <button data-s="all" class="px-3 py-1.5 bg-indigo-600 text-white">All</button>
+                <button data-s="rapidshyp" class="px-3 py-1.5 text-slate-600">RapidShyp</button>
+                <button data-s="kwikship" class="px-3 py-1.5 text-slate-600">KwikShip</button>
+              </div>
+              <div class="seg-toggle" id="lm-payment">
+                <button data-p="all" class="px-3 py-1.5 bg-indigo-600 text-white">All</button>
+                <button data-p="COD" class="px-3 py-1.5 text-slate-600">COD</button>
+                <button data-p="prepaid" class="px-3 py-1.5 text-slate-600">Prepaid</button>
+              </div>
+              <!-- .filter-select / .date-input are the APP-WIDE standard: ecEnhanceFilterSelects() upgrades
+                   every .filter-select into the custom .csel dropdown so the OPEN option list matches the
+                   app's panels. A native <select> cannot style its open list, which is why an ad-hoc
+                   Tailwind-styled select looks right closed and wrong the moment it is clicked. -->
+              <select id="lm-courier" class="filter-select"><option value="all">All couriers</option></select>
+              <select id="lm-zone" class="filter-select"><option value="all">All zones</option></select>
+              <select id="lm-preset" class="filter-select">
+                <option value="today">Today</option>
+                <option value="yesterday">Yesterday</option>
+                <option value="7" selected>Last 7 days</option>
+                <option value="custom">Custom</option>
+              </select>
+              <div id="lm-custom" class="hidden items-center gap-2">
+                <input type="date" id="lm-from" class="date-input">
+                <input type="date" id="lm-to" class="date-input">
+                <button id="lm-apply" class="filter-btn-primary">Apply</button>
+              </div>
+            </div>
+          </header>
+          <div class="p-8 space-y-6">
+            <div id="lm-note" class="hidden text-sm rounded-lg px-4 py-2.5" style="background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe"></div>
+            <div id="lm-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5"></div>
+            <div id="lm-funnel" class="card p-5"></div>
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <div class="card p-5 lg:col-span-2">
+                <h2 class="text-sm font-bold text-slate-700">Daily outcome of what went out</h2>
+                <p class="text-xs text-slate-400 mb-3">Each bar is one day's out-for-delivery parcels, split by where they ended up</p>
+                <div id="lm-trend"></div>
+              </div>
+              <div class="card p-5">
+                <h2 class="text-sm font-bold text-slate-700">Why they came back</h2>
+                <p class="text-xs text-slate-400 mb-3">Courier reasons on parcels that went out and still RTO'd</p>
+                <div id="lm-reasons"></div>
+              </div>
+            </div>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div class="card p-5">
+                <h2 class="text-sm font-bold text-slate-700">By courier</h2>
+                <p class="text-xs text-slate-400 mb-3">Delivery rate once the parcel is out — on resolved shipments</p>
+                <div id="lm-by-courier"></div>
+              </div>
+              <div class="card p-5">
+                <h2 class="text-sm font-bold text-slate-700">By zone &amp; state</h2>
+                <p class="text-xs text-slate-400 mb-3">Where the doorstep attempt fails most</p>
+                <div id="lm-by-geo"></div>
+              </div>
+            </div>
+            <div class="card p-5">
+              <div class="flex items-start justify-between gap-4 flex-wrap">
+                <div>
+                  <h2 class="text-sm font-bold text-slate-700">Returned without a delivery attempt</h2>
+                  <p class="text-xs text-slate-400 mb-3">In transit → RTO. The courier never took these to the door — the most claimable failure</p>
+                </div>
+                <span id="lm-na-count" class="text-xs text-slate-400 tabular-nums"></span>
+              </div>
+              <div id="lm-no-attempt"></div>
+            </div>
+            <div>
+              <div class="flex items-center gap-2 mb-3 flex-wrap">
+                <h2 class="text-sm font-bold text-slate-700 mr-1">Shipment explorer</h2>
+                <select id="lm-state" class="filter-select">
+                  <option value="all">All out-for-delivery</option>
+                  <option value="delivered">Delivered</option>
+                  <option value="rto">RTO</option>
+                  <option value="open">Still open</option>
+                  <option value="slow">Delivered &gt; 24h</option>
+                </select>
+                <input id="lm-search" type="text" placeholder="Search order / AWB…" class="filter-input w-48">
+                <span id="lm-count" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
+              </div>
+              <div class="card p-0 overflow-x-auto" id="lm-table"></div>
+            </div>
+          </div>
+        </div><!-- /last-mile-view -->
+
         <div id="ops-control-view" class="view-hidden">
           <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">
             <div>
@@ -2521,11 +2642,13 @@
               <p class="text-sm text-slate-400 mt-0.5">Act before it becomes RTO — recover, prevent, hold couriers accountable</p>
             </div>
             <div class="flex items-center gap-2 flex-wrap">
+              <!-- Rate Watch is the live tab. The original four (NDR Queue / Risk Orders / Claims &
+                   Recovery / Insights) are unused, so they moved WHOLESALE under "Archived" — nothing was
+                   deleted, every pane and endpoint still works, and they come back by promoting them out
+                   of OPS_ARCHIVED_SUBTABS in app.js. -->
               <div class="flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200" id="ops-tabs">
-                <button data-t="ndr" class="px-3 py-1.5 bg-indigo-600 text-white">NDR Queue</button>
-                <button data-t="risk" class="px-3 py-1.5 text-slate-600">Risk Orders</button>
-                <button data-t="recover" class="px-3 py-1.5 text-slate-600">Claims &amp; Recovery</button>
-                <button data-t="insights" class="px-3 py-1.5 text-slate-600">Insights</button>
+                <button data-t="rates" class="px-3 py-1.5 bg-indigo-600 text-white">Rate Watch</button>
+                <button data-t="archived" class="px-3 py-1.5 text-slate-600">Archived</button>
               </div>
               <button id="ops-refresh" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-600 hover:border-indigo-400 flex items-center gap-1.5">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
@@ -2535,8 +2658,51 @@
           </header>
           <div class="p-8 space-y-6">
             <div id="ops-subtabs" class="hidden mb-1"></div>
+
+            <!-- ── Rate Watch — shipping charge by Zone / State / City, this period vs the one before ── -->
+            <div id="ops-rates" class="ops-pane">
+              <div class="flex items-center gap-2 mb-4 flex-wrap">
+                <div class="seg-toggle" id="ops-rt-dim" title="Group the comparison by">
+                  <button data-d="zone" class="px-3 py-1.5 bg-indigo-600 text-white">Zone</button>
+                  <button data-d="state" class="px-3 py-1.5 text-slate-600">State</button>
+                  <button data-d="city" class="px-3 py-1.5 text-slate-600">City</button>
+                  <button data-d="courier" class="px-3 py-1.5 text-slate-600">Courier</button>
+                </div>
+                <select id="ops-rt-days" class="filter-select">
+                  <option value="7">Last 7 days vs prior 7</option>
+                  <option value="15">Last 15 days vs prior 15</option>
+                  <option value="30" selected>Last 30 days vs prior 30</option>
+                  <option value="60">Last 60 days vs prior 60</option>
+                  <option value="90">Last 90 days vs prior 90</option>
+                </select>
+                <select id="ops-rt-min" class="filter-select" title="Ignore rows with too few shipments to be meaningful">
+                  <option value="10" selected>≥10 shipments each period</option>
+                  <option value="25">≥25 shipments each period</option>
+                  <option value="50">≥50 shipments each period</option>
+                  <option value="1">No minimum</option>
+                </select>
+                <input id="ops-rt-search" type="text" placeholder="Search…" class="filter-input w-40">
+                <span id="ops-rt-count" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
+              </div>
+              <div id="ops-rt-note" class="hidden text-sm rounded-lg px-4 py-2.5 mb-4" style="background:#fffbeb;color:#92400e;border:1px solid #fde68a"></div>
+              <div id="ops-rt-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6"></div>
+              <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+                <div class="card p-5">
+                  <h2 class="text-sm font-bold text-slate-700">Rate movement</h2>
+                  <p class="text-xs text-slate-400 mb-3">Change in average charge per shipment — <span style="color:#dc2626">inflated</span> right, <span style="color:#059669">deflated</span> left</p>
+                  <div id="ops-rt-chart"></div>
+                </div>
+                <div class="card p-5">
+                  <h2 class="text-sm font-bold text-slate-700">Spend impact</h2>
+                  <p class="text-xs text-slate-400 mb-3">₹ the rate change added or saved this period, at current volume</p>
+                  <div id="ops-rt-impact"></div>
+                </div>
+              </div>
+              <div class="card p-0 overflow-x-auto" id="ops-rt-table"></div>
+            </div>
+
             <!-- NDR Action Queue -->
-            <div id="ops-ndr" class="ops-pane">
+            <div id="ops-ndr" class="ops-pane hidden">
               <div id="ops-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6"></div>
               <div class="flex items-center gap-2 mb-3 flex-wrap">
                 <h2 class="text-sm font-bold text-slate-700 mr-1">Call these customers before the courier returns them</h2>

@@ -100,6 +100,7 @@ const customerProfileRoutes = require('./app/api/customer_profile');
 const { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom, autoRouteHandledRejections } = require('./app/api/warehouse_slack_report');
 const deliveryReportsRoutes = require('./app/api/delivery_reports');
 const opsControlRoutes = require('./app/api/ops_control');
+const lastMileRoutes = require('./app/api/last_mile');
 const { router: amazonFbaRoutes, initFbaLocationCron } = require('./app/api/amazon_fba');
 const docpharmaReconRoutes = require('./app/api/docpharma_recon');
 const rapidshypReconRoutes = require('./app/api/rapidshyp_recon');
@@ -145,6 +146,7 @@ const _VIEW_PERMS = [
     [/^\/rapidshyp-(recon|payments)/i, 'rapidshyp-recon'],   // recon + its own payments ledger
     [/^\/fba\//i, 'amazon-fba'],
     [/^\/ops-control/i, 'ops-control'],
+    [/^\/last-mile/i, 'last-mile'],        // Last-Mile Funnel dashboard (OFD → delivered / RTO)
     [/^\/ndr-action/i, ['ops-control', 'delivery-perf']],   // NDR reattempt/return — both ops surfaces use it
     // Shared shipment-detail lookup — read-only courier tracking used by the Delivery Performance table, the
     // Silent-RTO & SLA rows, AND the Customer Support "click AWB → live tracking" modal, so allow those views'
@@ -288,6 +290,7 @@ app.use('/api', pincodeRoutes);
 app.use('/api', customerProfileRoutes);
 app.use('/api', deliveryReportsRoutes);
 app.use('/api', opsControlRoutes);
+app.use('/api', lastMileRoutes);
 app.use('/api', amazonFbaRoutes);
 app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll

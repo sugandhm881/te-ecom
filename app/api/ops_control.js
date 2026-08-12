@@ -33,6 +33,158 @@ router.use((req, res, next) => {
     next();
 });
 
+// ── RATE WATCH — is the courier charging us more than it did? ───────────────────────────────────
+// GET /api/ops-control/rate-watch?dim=zone|state|city|courier&days=30&min=10
+//
+// Compares the last `days` against the IMMEDIATELY PRECEDING `days` (same length, so seasonality and
+// volume growth cancel out) and reports, per group, how the average shipping charge moved.
+//
+// ⚠️ RAPIDSHYP ONLY, BY DATA NOT BY CHOICE. `freight_total` is written by the RapidShyp shipment-details
+// fetch; measured over 180 days it covers 95.1% of RapidShyp rows and **0 of 1,796 DocPharma and 0 of 974
+// Kwikship**. Rows without a charge are EXCLUDED rather than counted as ₹0 — averaging in zeros would
+// invent a rate cut every time KwikShip volume grew. The response says which couriers it could see so
+// the UI can state the scope instead of implying it covers everything.
+//
+// ⚠️ AVERAGE CHARGE MOVES FOR TWO DIFFERENT REASONS and they must not be confused: the courier changed
+// its rate card, or WE shipped heavier parcels. `applied_weight` is in GRAMS (median 80g, max 1030g), so
+// avg weight is returned alongside every row — a +10% charge with +10% weight is a mix change, not a
+// price rise. ₹/kg is also returned, but it is a weak normaliser here because courier pricing is
+// slab-based (everything under 500g pays the same), which is exactly why avg charge stays the headline.
+const RW_DIM = {
+    zone:    r => r.zone || null,
+    state:   r => (r.dest_state || '').trim() || null,
+    city:    r => (r.dest_city || '').trim() || null,
+    courier: r => (r.courier || '').trim() || null,
+};
+router.get('/ops-control/rate-watch', async (req, res) => {
+    try {
+        const dim = RW_DIM[req.query.dim] ? req.query.dim : 'zone';
+        const days = Math.min(365, Math.max(1, parseInt(req.query.days || '30', 10) || 30));
+        const minN = Math.max(1, parseInt(req.query.min || '10', 10) || 10);
+        const now = Date.now();
+        const DAY = 86400000;
+
+        // ⚠️⚠️ THE CURRENT WINDOW MUST NOT END TODAY — FREIGHT ARRIVES ~7 DAYS LATE.
+        // RapidShyp bills after the shipment settles, so `freight_total` backfills days afterwards.
+        // Measured 2026-08-12: coverage was 0–7% for the previous six days, 24% at day 6, 43% at day 7,
+        // 70% at day 8 and ≥87% from day 9 back. Ending "current" at today therefore compared 58 charged
+        // shipments against 922 — and worse, the few that HAVE settled early are a biased sample (the
+        // quickest deliveries), so even the AVERAGE would have been wrong, not just the volume.
+        // So: find the most recent day whose coverage is mature and end the current window THERE, with the
+        // previous window the same length immediately before it. Detected from the data, never hardcoded —
+        // the courier's billing lag can change and a magic "7" would rot silently.
+        const SCAN_DAYS = 30, MATURE = 0.7;
+        const scanFrom = new Date(now - SCAN_DAYS * DAY);
+        const oldestNeeded = new Date(Math.min(now - (2 * days + SCAN_DAYS) * DAY, scanFrom.getTime()));
+
+        const rows = [];
+        for (let off = 0; ; off += 1000) {
+            const { data, error } = await supabase.from('shipment_journey_ecom')
+                .select('order_date, source, courier, zone, dest_state, dest_city, freight_total, applied_weight, outcome')
+                .gte('order_date', oldestNeeded.toISOString())
+                .range(off, off + 999);
+            if (error) throw new Error(error.message);
+            rows.push(...(data || []));
+            if (!data || data.length < 1000) break;
+        }
+
+        // Per-day freight coverage over the scan window → the newest mature day.
+        const dayKeyOf = d => new Date(d).toISOString().slice(0, 10);
+        const cov = {};
+        for (const r of rows) {
+            const t = new Date(r.order_date).getTime();
+            if (isNaN(t) || t < scanFrom.getTime()) continue;
+            const k = dayKeyOf(r.order_date);
+            (cov[k] = cov[k] || { n: 0, f: 0 }).n++;
+            if (Number(r.freight_total) > 0) cov[k].f++;
+        }
+        const matureDays = Object.entries(cov).filter(([, v]) => v.n >= 5 && v.f / v.n >= MATURE).map(([k]) => k).sort();
+        // End of the newest mature day (UTC). Falls back to "now" only if nothing is mature at all, in
+        // which case `lagDays` tells the UI the comparison is not trustworthy yet.
+        const settledThrough = matureDays.length ? new Date(matureDays[matureDays.length - 1] + 'T23:59:59.999Z') : new Date(now);
+        const lagDays = Math.max(0, Math.round((now - settledThrough.getTime()) / DAY));
+
+        const curTo = settledThrough;
+        const curFrom = new Date(curTo.getTime() - days * DAY);
+        const prevFrom = new Date(curTo.getTime() - 2 * days * DAY);
+
+        const keyOf = RW_DIM[dim];
+        const g = {};
+        const seenCouriers = new Set();
+        let curTotal = 0, prevTotal = 0, curN = 0, prevN = 0, curWt = 0, prevWt = 0;
+        for (const r of rows) {
+            const f = Number(r.freight_total) || 0;
+            if (f <= 0) continue;                                   // no charge recorded → not a data point
+            const ts = new Date(r.order_date).getTime();
+            // Only the two comparison windows. The scan reached further back (to detect the billing lag)
+            // and further forward (unsettled days) than either window uses — those rows must not be counted.
+            if (isNaN(ts) || ts < prevFrom.getTime() || ts > curTo.getTime()) continue;
+            const k = keyOf(r); if (!k) continue;
+            const isCur = ts >= curFrom.getTime();
+            const w = Number(r.applied_weight) || 0;
+            if (r.source) seenCouriers.add(r.source);
+            const b = (g[k] = g[k] || { cur: 0, prev: 0, curSpend: 0, prevSpend: 0, curWt: 0, prevWt: 0, curWtN: 0, prevWtN: 0, curRto: 0, prevRto: 0 });
+            if (isCur) { b.cur++; b.curSpend += f; curN++; curTotal += f; if (w > 0) { b.curWt += w; b.curWtN++; curWt += w; } if (r.outcome === 'rto') b.curRto++; }
+            else       { b.prev++; b.prevSpend += f; prevN++; prevTotal += f; if (w > 0) { b.prevWt += w; b.prevWtN++; prevWt += w; } if (r.outcome === 'rto') b.prevRto++; }
+        }
+
+        const r2 = n => Math.round(n * 100) / 100;
+        const groups = Object.entries(g).map(([key, v]) => {
+            const curAvg = v.cur ? v.curSpend / v.cur : 0;
+            const prevAvg = v.prev ? v.prevSpend / v.prev : 0;
+            const curKg = v.curWt ? v.curSpend / (v.curWt / 1000) : 0;      // applied_weight is GRAMS
+            const prevKg = v.prevWt ? v.prevSpend / (v.prevWt / 1000) : 0;
+            const curW = v.curWtN ? v.curWt / v.curWtN : 0;
+            const prevW = v.prevWtN ? v.prevWt / v.prevWtN : 0;
+            return {
+                key, cur: v.cur, prev: v.prev,
+                curAvg: r2(curAvg), prevAvg: r2(prevAvg),
+                deltaAvg: r2(curAvg - prevAvg),
+                deltaPct: prevAvg > 0 ? r2(((curAvg - prevAvg) / prevAvg) * 100) : null,
+                curSpend: Math.round(v.curSpend), prevSpend: Math.round(v.prevSpend),
+                curKg: r2(curKg), prevKg: r2(prevKg),
+                kgDeltaPct: prevKg > 0 ? r2(((curKg - prevKg) / prevKg) * 100) : null,
+                curWeight: Math.round(curW), prevWeight: Math.round(prevW),
+                weightDeltaPct: prevW > 0 ? r2(((curW - prevW) / prevW) * 100) : null,
+                // What the rate change is COSTING (or saving) right now: the per-shipment move applied to
+                // this period's volume. A +₹2 move on 1,500 shipments is ₹3,000 — the number worth acting on,
+                // which a percentage alone never shows.
+                impact: Math.round((curAvg - prevAvg) * v.cur),
+                rtoPct: pct(v.curRto, v.cur),
+                // Enough evidence on BOTH sides to be worth reading.
+                thin: v.cur < minN || v.prev < minN,
+            };
+        }).sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact));
+
+        const solid = groups.filter(x => !x.thin);
+        const curAvgAll = curN ? curTotal / curN : 0, prevAvgAll = prevN ? prevTotal / prevN : 0;
+        res.json({
+            success: true, dim, days, min: minN,
+            range: { current: { from: curFrom.toISOString(), to: curTo.toISOString() },
+                     previous: { from: prevFrom.toISOString(), to: curFrom.toISOString() } },
+            // The UI states the real window and why it stops short of today, so nobody reads this as
+            // "up to this morning" and wonders where the last week went.
+            settlement: { settledThrough: curTo.toISOString(), lagDays, matureThreshold: MATURE,
+                note: lagDays > 0
+                    ? `Shipping charges arrive about ${lagDays} day${lagDays === 1 ? '' : 's'} after dispatch, so both periods end ${curTo.toISOString().slice(0, 10)} — the newest date with complete billing.`
+                    : 'Charges are up to date.' },
+            totals: {
+                curN, prevN, curSpend: Math.round(curTotal), prevSpend: Math.round(prevTotal),
+                curAvg: r2(curAvgAll), prevAvg: r2(prevAvgAll),
+                deltaPct: prevAvgAll > 0 ? r2(((curAvgAll - prevAvgAll) / prevAvgAll) * 100) : null,
+                curWeight: curN ? Math.round(curWt / curN) : 0, prevWeight: prevN ? Math.round(prevWt / prevN) : 0,
+                // Total ₹ the rate move added/saved across every group with evidence on both sides.
+                impact: solid.reduce((a, x) => a + x.impact, 0),
+                inflated: solid.filter(x => x.deltaPct > 0).length,
+                deflated: solid.filter(x => x.deltaPct < 0).length,
+            },
+            // Scope is stated, never implied — freight exists for RapidShyp only today.
+            coverage: { sources: [...seenCouriers].sort(), note: 'Shipping charges are only recorded for RapidShyp shipments; KwikShip and DocPharma record none, so they are excluded rather than counted as ₹0.' },
+            groups,
+        });
+    } catch (e) { console.error('[OpsControl RateWatch]', e.message); res.status(500).json({ success: false, error: e.message }); }
+});
+
 // GET /api/ops-control/ndr-queue?days=45
 router.get('/ops-control/ndr-queue', async (req, res) => {
     try {

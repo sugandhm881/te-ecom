@@ -1143,6 +1143,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('ops-control-view');
             if (typeof opsInit === 'function') opsInit();
             break;
+        case 'last-mile':
+            activeLinkElement = document.getElementById('nav-last-mile');
+            activeViewElement = document.getElementById('last-mile-view');
+            if (typeof lmInit === 'function') lmInit();
+            break;
         case 'docpharma-recon':
             activeLinkElement = document.getElementById('nav-docpharma-recon');
             activeViewElement = document.getElementById('docpharma-recon-view');
@@ -5421,7 +5426,7 @@ const NAV_HREF = {
     'nav-customer-segments': 'customer-segments', 'nav-returns-analysis': 'returns-analysis', 'nav-ad-ranking': 'ad-ranking',
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
-    'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon',
+    'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice',
@@ -5483,8 +5488,11 @@ function ecEnhanceSelect(sel) {
     } catch (e) { console.warn('[csel] enhance failed', e); }
 }
 function ecEnhanceFilterSelects() {
-    // Delivery / Ops / Fops selects don't carry .filter-select but should match too.
-    document.querySelectorAll('#delivery-perf-view header select, #ops-control-view select, #fulfillment-ops-view select').forEach(s => { if (!s.multiple) s.classList.add('filter-select'); });
+    // Delivery / Ops / Last-Mile / Fops selects don't carry .filter-select but should match too.
+    // ⚠️ A NEW DASHBOARD MUST BE ADDED HERE or its dropdowns render as raw OS selects — the open option
+    // list is the giveaway, since a native <select> cannot style it and it lands looking nothing like the
+    // rest of the app. That is exactly what happened to Last-Mile Funnel on first build.
+    document.querySelectorAll('#delivery-perf-view header select, #ops-control-view select, #last-mile-view select, #fulfillment-ops-view select').forEach(s => { if (!s.multiple) s.classList.add('filter-select'); });
     document.querySelectorAll('select.filter-select').forEach(ecEnhanceSelect);
 }
 (function () {
@@ -6155,7 +6163,7 @@ document.getElementById('nav-user-analytics')?.addEventListener('click', (e) => 
 
 // ═══════════════ USERS & PERMISSIONS (admin) ═══════════════
 const PERM_GROUPS = [
-  ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['amazon-fba','Amazon FBA']]],
+  ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['last-mile','Last-Mile Funnel'],['amazon-fba','Amazon FBA']]],
   // Reconciliation — one group per billing partner; each ledger stays SEPARATE (different money flows).
   ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
@@ -7155,7 +7163,9 @@ async function _fbaOrdClearDrafts(){
 }
 
 // ═══════════════ OPS CONTROL (NDR queue · Risk · Courier scorecard · Cost) ═══════════════
-let _opsData = null, _opsWired = false, _opsTab = 'ndr', _opsLoaded = {}, _opsRisk = null, _opsCourier = null, _opsCost = null, _opsCostPerRto = 150;
+let _opsData = null, _opsWired = false, _opsTab = 'rates', _opsLoaded = {}, _opsRisk = null, _opsCourier = null, _opsCost = null, _opsCostPerRto = 150;
+// Rate Watch state — dimension, window length, minimum sample, and the last response.
+let _opsRates = null, _rwDim = 'zone', _rwDays = 30, _rwMin = 10, _rwSort = { key:'impact', dir:'desc' };
 let _opsSortNdr={k:'daysInNdr',d:'desc'}, _opsSortRisk={k:'score',d:'desc'}, _opsSortCourier={k:'shipped',d:'desc'}, _opsSortCity={k:'rtoPct',d:'desc'}, _opsExc=null, _opsSortExc={k:'value',d:'desc'}, _opsPr=null, _opsSortPr={k:'risk',d:'desc'};
 const OPS_INR = n => '₹' + (Math.round(n||0)).toLocaleString('en-IN');
 // Generic sort: nulls/'—' sink to the bottom; strings use locale compare, numbers numeric.
@@ -7210,7 +7220,7 @@ function opsToolbar(tab,total,count){
     const hhCtl=hh?`<label class="text-slate-500 flex items-center gap-1.5 cursor-pointer select-none"><input type="checkbox" class="ops-hh w-3.5 h-3.5" data-tab="${tab}" ${_opsHideHandled[tab]?'checked':''}> Hide handled${handled>0?` (${handled})`:''}</label>`:'';
     return `<div class="flex items-center gap-3 flex-wrap px-3 py-2 border-b border-slate-100 bg-slate-50/40 text-xs">${dsel}${hhCtl}<button class="ops-export ml-auto px-2 py-1 rounded border border-slate-200 text-slate-600 hover:border-indigo-400 hover:text-indigo-600" data-tab="${tab}">⬇ Export CSV</button></div>`;
 }
-const _opsRerender = tab => ({ndr:opsTable,risk:opsRiskTable,courier:opsCourierTable,exceptions:opsExcTable,prepaidrisk:opsPrTable,cost:opsCitiesTable}[tab]||(()=>{}))();
+const _opsRerender = tab => ({rates:opsRatesTable,ndr:opsTable,risk:opsRiskTable,courier:opsCourierTable,exceptions:opsExcTable,prepaidrisk:opsPrTable,cost:opsCitiesTable}[tab]||(()=>{}))();
 function opsExport(tab){
     const C={
         ndr:[()=>_opsData&&_opsData.list,[['order','Order'],['awb','AWB'],['phone','Phone'],['value','Value'],['payment','Payment'],['type','Type'],['courier','Courier'],['zone','Zone'],['ndrs','NDRs'],['daysInNdr','Days in NDR'],['reasons','Reasons']]],
@@ -7233,8 +7243,23 @@ function opsKpiClick(containerId, idx, selId, val){
     card.onclick=()=>{ sel.value=val; sel.dispatchEvent(new Event('change',{bubbles:true})); };
 }
 function opsInit(){
+    // ── Archived tab is ADMIN-ONLY (2026-08-12, by request) ─────────────────────────────────────
+    // The four retired dashboards stay reachable for the master admin and are invisible to everyone
+    // else, so the team sees only the live tab. Decided on EVERY init, not once inside the _opsWired
+    // block below — the wiring runs a single time per page load, so a different user signing in without
+    // a full reload would otherwise inherit the previous user's tab set (the same trap as the ₹ toggle).
+    // ⚠️ This is a VISIBILITY change, not a security boundary: the archived panes call the same
+    // /ops-control/* endpoints, which remain open to anyone holding the `ops-control` permission.
+    const arch=document.querySelector('#ops-tabs button[data-t="archived"]');
+    const isMaster=!!(currentUser && currentUser.isAdmin);
+    if(arch) arch.classList.toggle('hidden', !isMaster);
+    // Never leave a non-admin stranded on a tab they can no longer reach (runs whether or not the button
+    // is in the DOM, so state can't survive as 'archived' by another route).
+    if(!isMaster && _opsTab==='archived'){ _opsTab='rates'; _opsSub.archived='ndr'; }
     if(!_opsWired){ _opsWired = true;
-        document.getElementById('ops-refresh')?.addEventListener('click', ()=>{ opsLoadActions().then(()=>{ const p=opsActivePane(); _opsLoaded[p]=false; opsSwitchTab(_opsTab); }); });
+        document.getElementById('ops-refresh')?.addEventListener('click', ()=>{ opsLoadActions().then(()=>{ const p=opsActivePane(); _opsLoaded[p]=false;
+            if(p==='rates'){ opsLoadRates(true); return; }   // force a recompute past the 5-min response cache
+            opsSwitchTab(_opsTab); }); });
         ['ops-search','ops-f-age','ops-f-pay','ops-f-type'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-search'?'input':'change', id==='ops-search'?debounce(()=>opsTable(),250):()=>opsTable()); });
         ['ops-risk-search','ops-rf-band','ops-rf-pay'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-risk-search'?'input':'change', id==='ops-risk-search'?debounce(()=>opsRiskTable(),250):()=>opsRiskTable()); });
         ['ops-exc-search','ops-ef-action','ops-ef-type'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener(id==='ops-exc-search'?'input':'change', id==='ops-exc-search'?debounce(()=>opsExcTable(),250):()=>opsExcTable()); });
@@ -7264,20 +7289,40 @@ function opsInit(){
             const hh=e.target.closest('.ops-hh'); if(hh){ _opsHideHandled[hh.dataset.tab]=hh.checked; _opsRerender(hh.dataset.tab); return; }
             const dd=e.target.closest('.ops-days'); if(dd){ _opsDays[dd.dataset.tab]=parseInt(dd.value,10)||_opsDays[dd.dataset.tab]; ({ndr:opsLoad,courier:opsLoadCourier,exceptions:opsLoadExceptions,cost:opsLoadCost}[dd.dataset.tab]||(()=>{}))(); return; }
         });
+        // ── Rate Watch controls. Dimension / window / minimum all REFETCH (the server does the pairing
+        // and the sample gate); search + sort are client-side over the rows already in hand.
+        document.getElementById('ops-rt-dim')?.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return;
+            [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
+            b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
+            _rwDim=b.dataset.d; opsLoadRates(); });
+        document.getElementById('ops-rt-days')?.addEventListener('change', e=>{ _rwDays=parseInt(e.target.value,10)||30; opsLoadRates(); });
+        document.getElementById('ops-rt-min')?.addEventListener('change', e=>{ _rwMin=parseInt(e.target.value,10)||1; opsLoadRates(); });
+        document.getElementById('ops-rt-search')?.addEventListener('input', debounce(()=>opsRatesTable(),250));
     }
     opsLoadActions().then(()=>_opsRerender(opsActivePane()));   // hide already-handled rows once actions arrive
-    opsSwitchTab('ndr');
+    opsSwitchTab(_opsTab);
 }
 // Merged tabs show ONE section at a time via a sub-toggle (no long scroll):
 //   'recover'  = Claims (exceptions) | Predicted prepaid loss (prepaidrisk)
 //   'insights' = Courier scorecard (courier) | Cost & hotspots (cost)
-const OPS_TAB_PANES={ ndr:['ndr'], risk:['risk'], recover:['exceptions','prepaidrisk'], insights:['courier','cost'] };
-const OPS_SUBTABS={
-    recover:  [['exceptions','Claims — courier owes you'], ['prepaidrisk','Predicted prepaid loss']],
-    insights: [['courier','Courier scorecard'], ['cost','Cost & hotspots']],
-};
-let _opsSub={ recover:'exceptions', insights:'courier' };
-const OPS_PANE_LOADER={ ndr:()=>opsLoad(), risk:()=>opsLoadRisk(), exceptions:()=>opsLoadExceptions(), prepaidrisk:()=>opsLoadPrepaidRisk(), courier:()=>opsLoadCourier(), cost:()=>opsLoadCost() };
+const OPS_TAB_PANES={ rates:['rates'], archived:['ndr','risk','exceptions','prepaidrisk','courier','cost'] };
+// Every pane id the view owns — used to hide-all-then-show-one, so a pane can never be left visible
+// behind another. Derived from OPS_TAB_PANES rather than hardcoded a second time.
+const OPS_ALL_PANES=[...new Set(Object.values(OPS_TAB_PANES).flat())];
+// ── ARCHIVED (2026-08-12) ────────────────────────────────────────────────────────────────────────
+// The original four Ops Control tabs — NDR Queue, Risk Orders, Claims & Recovery, Insights — went
+// unused, so they were folded WHOLESALE into a single "Archived" tab rather than deleted. Every pane,
+// loader, endpoint and sort still works untouched; they are one click away instead of four tabs wide.
+// TO BRING ONE BACK: move its entry out of OPS_ARCHIVED_SUBTABS into its own top-level tab here and add
+// a matching <button data-t="…"> in index.html. Nothing else needs restoring.
+const OPS_ARCHIVED_SUBTABS=[
+    ['ndr','NDR Queue'], ['risk','Risk Orders'],
+    ['exceptions','Claims — courier owes you'], ['prepaidrisk','Predicted prepaid loss'],
+    ['courier','Courier scorecard'], ['cost','Cost & hotspots'],
+];
+const OPS_SUBTABS={ archived: OPS_ARCHIVED_SUBTABS };
+let _opsSub={ archived:'ndr' };
+const OPS_PANE_LOADER={ rates:()=>opsLoadRates(), ndr:()=>opsLoad(), risk:()=>opsLoadRisk(), exceptions:()=>opsLoadExceptions(), prepaidrisk:()=>opsLoadPrepaidRisk(), courier:()=>opsLoadCourier(), cost:()=>opsLoadCost() };
 const opsActivePane=()=> OPS_SUBTABS[_opsTab] ? _opsSub[_opsTab] : _opsTab;
 function opsLoadPane(p){ if(_opsLoaded[p] && p!=='ndr') return; (OPS_PANE_LOADER[p]||(()=>{}))(); _opsLoaded[p]=true; }
 function opsRenderSubtabs(t){
@@ -7288,9 +7333,12 @@ function opsRenderSubtabs(t){
     bar.innerHTML=`<div class="inline-flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200">`+
         subs.map(([k,l])=>`<button data-sub="${k}" data-tab="${t}" class="px-3.5 py-1.5 transition-colors ${_opsSub[t]===k?'bg-white text-indigo-700 font-semibold shadow-sm':'text-slate-600 hover:text-slate-800'}">${l}</button>`).join('')+`</div>`;
 }
-function opsSwitchTab(t){ _opsTab=t;
+function opsSwitchTab(t){
+    // Belt-and-braces: the button is hidden for non-admins, but a stale hash/state must not open it either.
+    if(t==='archived' && !(currentUser && currentUser.isAdmin)) t='rates';
+    _opsTab=t;
     const active=OPS_SUBTABS[t]?_opsSub[t]:t;
-    ['ndr','risk','courier','exceptions','prepaidrisk','cost'].forEach(p=>document.getElementById('ops-'+p)?.classList.toggle('hidden', p!==active));
+    OPS_ALL_PANES.forEach(p=>document.getElementById('ops-'+p)?.classList.toggle('hidden', p!==active));
     opsRenderSubtabs(t);
     opsLoadPane(active);
 }
@@ -7300,6 +7348,144 @@ function opsSubSwitch(t, sub){
     (OPS_TAB_PANES[t]||[]).forEach(p=>document.getElementById('ops-'+p)?.classList.toggle('hidden', p!==sub));
     opsRenderSubtabs(t);
     opsLoadPane(sub);
+}
+// ── RATE WATCH ──────────────────────────────────────────────────────────────────────────────────
+// "Is the courier charging us more than it did?" — average shipping charge per shipment for the last N
+// days against the immediately preceding N days, cut by Zone / State / City / Courier.
+//
+// ⚠️ THE WEIGHT COLUMN IS NOT DECORATION. Average charge moves for two different reasons — the courier
+// repriced, or we shipped heavier parcels — and treating the second as the first is how you end up
+// arguing with a courier over a rate that never changed. Live proof from the first run: Zone A was
+// +17.7% on charge while its parcels got 28.6% LIGHTER (a real rate rise), whereas Andhra Pradesh was
+// +11.1% on charge with +13.2% weight (just a heavier mix). The UI therefore labels each row by what
+// actually happened rather than only showing the % move.
+const RW_INR = n => '₹' + Math.round(Number(n)||0).toLocaleString('en-IN');
+const RW_SIGN = n => (Number(n)>0?'+':'') + (Number(n)||0);
+// Verdict for one row: did the RATE move, or just the parcel mix? A charge change well inside the
+// weight change is mix; a charge change against the weight direction is unambiguous repricing.
+function rwVerdict(r){
+    const d=r.deltaPct, w=r.weightDeltaPct;
+    if(d==null) return { k:'na', label:'—', cls:'text-slate-400' };
+    if(Math.abs(d)<1.5) return { k:'flat', label:'Flat', cls:'text-slate-500' };
+    const up=d>0;
+    if(w!=null && Math.abs(w)>=1.5){
+        // Weight moved the SAME way and at least as much → the mix explains it.
+        if((up&&w>0||!up&&w<0) && Math.abs(w)>=Math.abs(d)*0.8)
+            return { k:'mix', label:up?'Heavier parcels':'Lighter parcels', cls:'text-slate-500' };
+        // Weight moved the OTHER way → charge and weight disagree, so the rate itself moved.
+        if((up&&w<0)||(!up&&w>0))
+            return up?{ k:'up', label:'Rate up', cls:'text-rose-600' }:{ k:'down', label:'Rate down', cls:'text-emerald-600' };
+    }
+    return up?{ k:'up', label:'Inflated', cls:'text-rose-600' }:{ k:'down', label:'Deflated', cls:'text-emerald-600' };
+}
+// `fresh` bypasses the router's 5-minute response cache — the Refresh button means "recompute", and
+// without it the button would appear to do nothing for up to five minutes.
+async function opsLoadRates(fresh){
+    const k=document.getElementById('ops-rt-kpis'); if(k) k.innerHTML=brandLoader('Loading shipping charges…');
+    try{
+        const r=await fetch(`/api/ops-control/rate-watch?dim=${_rwDim}&days=${_rwDays}&min=${_rwMin}`+(fresh?'&fresh=1':''), { headers:getAuthHeaders() });
+        const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
+        _opsRates=d; opsRatesRender(d);
+    }catch(e){ if(k) k.innerHTML='<div class="text-red-500 text-sm p-6">Error: '+escapeHtml(e.message)+'</div>'; }
+}
+function opsRatesRender(d){
+    const t=d.totals||{}, up=(t.deltaPct||0)>0;
+    // Scope is STATED, not implied — freight is recorded for RapidShyp only, so a reader must not take
+    // these totals for the whole shipping bill.
+    const note=document.getElementById('ops-rt-note');
+    if(note){ note.classList.remove('hidden');
+        const src=(d.coverage&&d.coverage.sources||[]).map(s=>({rapidshyp:'RapidShyp',kwikship:'KwikShip',docpharma:'DocPharma'}[s]||s)).join(', ')||'no';
+        const st=d.settlement||{};
+        const win=d.range?`${d.range.previous.from.slice(0,10)} → ${d.range.previous.to.slice(0,10)}  vs  ${d.range.current.from.slice(0,10)} → ${d.range.current.to.slice(0,10)}`:'';
+        // Both facts stated plainly: what is covered, and why the window stops short of today. Without
+        // the second the reader assumes "last 30 days" means up to this morning and mistrusts the page.
+        note.innerHTML=`<b>${win}</b><br>Covers ${escapeHtml(src)} shipments only — ${escapeHtml(d.coverage?d.coverage.note:'')} ${escapeHtml(st.note||'')}`; }
+    document.getElementById('ops-rt-kpis').innerHTML =
+        opsKpi('Avg charge / shipment', up?'#e11d48':'#059669', up?'#fff1f2':'#ecfdf5', DP_ICONS.hash,
+            RW_INR(t.curAvg), `was ${RW_INR(t.prevAvg)} · ${RW_SIGN(t.deltaPct)}%`)+
+        opsKpi('Rate impact this period', (t.impact||0)>0?'#e11d48':'#059669', (t.impact||0)>0?'#fff1f2':'#ecfdf5', DP_ICONS.bolt,
+            ((t.impact||0)>0?'+':'−')+RW_INR(Math.abs(t.impact||0)).slice(1).replace(/^/,'₹'),
+            (t.impact||0)>0?'extra spend at this volume':'saved at this volume')+
+        opsKpi('Shipping spend', '#4f46e5', '#eef2ff', DP_ICONS.uturn,
+            RW_INR(t.curSpend), `${(t.curN||0).toLocaleString('en-IN')} shipments · was ${RW_INR(t.prevSpend)}`)+
+        opsKpi('Avg parcel weight', '#0891b2', '#ecfeff', DP_ICONS.refresh,
+            (t.curWeight||0)+'g', `was ${t.prevWeight||0}g — moves the charge without a rate change`);
+    opsRatesChart(); opsRatesImpact(); opsRatesTable();
+}
+// Diverging bar: deflated left of centre, inflated right. Only rows with evidence on both sides.
+function opsRatesChart(){
+    const el=document.getElementById('ops-rt-chart'); const d=_opsRates; if(!el||!d) return;
+    const rows=(d.groups||[]).filter(g=>!g.thin && g.deltaPct!=null)
+        .sort((a,b)=>Math.abs(b.deltaPct)-Math.abs(a.deltaPct)).slice(0,12);
+    if(!rows.length){ el.innerHTML='<div class="text-slate-400 text-sm py-8 text-center">Not enough shipments in both periods to compare</div>'; return; }
+    const max=Math.max(...rows.map(r=>Math.abs(r.deltaPct)),1);
+    const LBL=120;
+    el.innerHTML=rows.map(r=>{
+        const v=rwVerdict(r), w=Math.min(50, Math.abs(r.deltaPct)/max*50), pos=r.deltaPct>0;
+        const bar=pos?'#e11d48':'#059669';
+        return `<div class="rw-row" title="${escapeHtml(String(r.key))}: ${RW_INR(r.prevAvg)} → ${RW_INR(r.curAvg)} (${RW_SIGN(r.deltaPct)}%) · weight ${r.prevWeight}g → ${r.curWeight}g · ${v.label}">
+          <span class="rw-lbl" style="width:${LBL}px">${escapeHtml(String(r.key))}</span>
+          <span class="rw-track">
+            <span class="rw-mid"></span>
+            <span class="rw-bar" style="left:${pos?50:50-w}%;width:${w}%;background:${bar}"></span>
+          </span>
+          <span class="rw-val ${pos?'rw-up':'rw-down'}">${RW_SIGN(r.deltaPct)}%</span>
+        </div>`; }).join('');
+}
+// Where the money actually went — ₹ added/saved, which a percentage alone never shows.
+function opsRatesImpact(){
+    const el=document.getElementById('ops-rt-impact'); const d=_opsRates; if(!el||!d) return;
+    const rows=(d.groups||[]).filter(g=>!g.thin && g.impact)
+        .sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,12);
+    if(!rows.length){ el.innerHTML='<div class="text-slate-400 text-sm py-8 text-center">No measurable spend impact</div>'; return; }
+    const max=Math.max(...rows.map(r=>Math.abs(r.impact)),1);
+    el.innerHTML=rows.map(r=>{
+        const pos=r.impact>0, w=Math.max(2,Math.round(Math.abs(r.impact)/max*100));
+        return `<div class="rw-row" title="${escapeHtml(String(r.key))}: ${pos?'extra':'saved'} ${RW_INR(Math.abs(r.impact))} on ${r.cur} shipments">
+          <span class="rw-lbl" style="width:120px">${escapeHtml(String(r.key))}</span>
+          <span class="rw-track"><span class="rw-bar" style="left:0;width:${w}%;background:${pos?'#e11d48':'#059669'}"></span></span>
+          <span class="rw-val ${pos?'rw-up':'rw-down'}">${pos?'+':'−'}${RW_INR(Math.abs(r.impact))}</span>
+        </div>`; }).join('');
+}
+function opsRatesTable(){
+    const c=document.getElementById('ops-rt-table'); const d=_opsRates; if(!c||!d) return;
+    const q=(document.getElementById('ops-rt-search')?.value||'').trim().toLowerCase();
+    let list=(d.groups||[]).filter(g=>!g.thin);
+    const thin=(d.groups||[]).length-list.length;
+    if(q) list=list.filter(g=>String(g.key).toLowerCase().includes(q));
+    const dir=_rwSort.dir==='asc'?1:-1, sk=_rwSort.key;
+    list=list.slice().sort((a,b)=>{ const va=sk==='key'?String(a.key).toLowerCase():(a[sk]??0), vb=sk==='key'?String(b.key).toLowerCase():(b[sk]??0);
+        return va<vb?-dir:va>vb?dir:0; });
+    const cnt=document.getElementById('ops-rt-count');
+    if(cnt) cnt.textContent=`${list.length} ${_rwDim}${list.length===1?'':'s'}${thin?` · ${thin} hidden (under ${_rwMin} shipments)`:''}`;
+    if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-6">Nothing with enough shipments in both periods — lower the minimum to see more.</div>'; return; }
+    const th='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
+    const td='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
+    const cols=[['key',({zone:'Zone',state:'State',city:'City',courier:'Courier'})[_rwDim],0],['prevAvg','Was',1],['curAvg','Now',1],
+        ['deltaPct','Change',1],['impact','₹ impact',1],['curWeight','Weight',1],['weightDeltaPct','Wt Δ',1],
+        ['curKg','₹/kg',1],['cur','Shipments',1],[null,'Verdict',0]];
+    const head=cols.map(([k,l,a])=>{ const al=a?' text-right':'';
+        if(!k) return `<th class="${th}${al}">${l}</th>`;
+        const act=sk===k, arrow=act?`<span class="text-indigo-500">${_rwSort.dir==='asc'?'↑':'↓'}</span>`:'<span class="text-slate-300">↕</span>';
+        return `<th class="${th}${al} rw-sort cursor-pointer select-none hover:text-slate-600 ${act?'text-slate-600':''}" data-k="${k}">${l} ${arrow}</th>`; }).join('');
+    const rows=list.map(r=>{ const v=rwVerdict(r), pos=(r.deltaPct||0)>0;
+        return `<tr class="hover:bg-slate-50">
+          <td class="${td} font-semibold text-slate-800">${escapeHtml(String(r.key))}</td>
+          <td class="${td} text-right tabular-nums text-slate-500">${RW_INR(r.prevAvg)}</td>
+          <td class="${td} text-right tabular-nums font-semibold">${RW_INR(r.curAvg)}</td>
+          <td class="${td} text-right tabular-nums font-bold ${r.deltaPct==null?'text-slate-400':pos?'text-rose-600':'text-emerald-600'}">${r.deltaPct==null?'—':RW_SIGN(r.deltaPct)+'%'}</td>
+          <td class="${td} text-right tabular-nums ${r.impact>0?'text-rose-600':r.impact<0?'text-emerald-600':'text-slate-400'}">${r.impact?((r.impact>0?'+':'−')+RW_INR(Math.abs(r.impact))):'—'}</td>
+          <td class="${td} text-right tabular-nums text-slate-500">${r.curWeight}g</td>
+          <td class="${td} text-right tabular-nums ${r.weightDeltaPct==null?'text-slate-400':'text-slate-500'}">${r.weightDeltaPct==null?'—':RW_SIGN(r.weightDeltaPct)+'%'}</td>
+          <td class="${td} text-right tabular-nums text-slate-500">${RW_INR(r.curKg)}</td>
+          <td class="${td} text-right tabular-nums text-slate-500">${r.cur} <span class="text-slate-300">/ ${r.prev}</span></td>
+          <td class="${td} font-semibold ${v.cls}">${v.label}</td>
+        </tr>`; }).join('');
+    c.innerHTML=`<table class="w-full border-collapse"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+    c.querySelectorAll('.rw-sort').forEach(h=>h.addEventListener('click',()=>{ const k=h.dataset.k;
+        if(_rwSort.key===k) _rwSort.dir=_rwSort.dir==='asc'?'desc':'asc';
+        else _rwSort={key:k, dir:k==='key'?'asc':'desc'};
+        opsRatesTable(); }));
 }
 async function opsLoad(){
     const kpi=document.getElementById('ops-kpis'); if(kpi) kpi.innerHTML=brandLoader('Loading NDR queue…');
@@ -15293,4 +15479,281 @@ function rsreCsv() {
   a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' }));
   a.download = `rapidshyp-recon-${d.range.from}_to_${d.range.to}.csv`;
   a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// LAST-MILE FUNNEL — what happens after the courier takes the parcel out for delivery.
+//
+// Deliberately reuses Delivery Performance's building blocks (the KPI card shape, the SVG chart idiom,
+// the explorer table) so the two pages feel like one product. Three transitions:
+//   OFD → Delivered · OFD → RTO · In-Transit → RTO (never attempted)
+//
+// ⚠️ TWO RULES THIS PAGE EXISTS TO HONOUR — both learned from live data, both easy to get wrong:
+//  1. RATES ARE ON RESOLVED, NEVER ON THE WHOLE COHORT. A parcel that went out this morning has not had
+//     its chance yet — on 12 Aug, 130 of 241 (54%) were still open. Dividing by the cohort would have
+//     reported a 39% delivery rate on a day that was going fine. "Still open" is its own slice, and the
+//     page states how much of the cohort is still in flight.
+//  2. DOCPHARMA IS EXCLUDED (server-side). It has no scan log, so it has no out-for-delivery event at
+//     all; counting it would report all 216 of its RTOs as "never attempted" against a true figure of 18.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+let _lmData = null, _lmWired = false, _lmFrom = null, _lmTo = null, _lmPreset = '7',
+    _lmSource = 'all', _lmPayment = 'all', _lmCourier = 'all', _lmZone = 'all',
+    _lmSort = { key: 'ofd_at', dir: 'desc' };
+
+const LM_OUTCOME_BADGE = {
+    delivered:   ['Delivered', 'bg-emerald-100 text-emerald-700'],
+    rto:         ['RTO', 'bg-red-100 text-red-700'],
+    ndr_pending: ['NDR pending', 'bg-amber-100 text-amber-700'],
+    in_transit:  ['Still out', 'bg-slate-100 text-slate-600'],
+    lost:        ['Lost', 'bg-rose-200 text-rose-800'],
+};
+// Preset → {from,to}. Uses _ymd (LOCAL date): toISOString() is UTC and between 00:00–05:30 IST returns
+// YESTERDAY, which would silently shift every preset back a day for early-morning users.
+function lmPresetRange(p){
+    const t = new Date();
+    if(p === 'today') return { from:_ymd(t), to:_ymd(t) };
+    if(p === 'yesterday'){ const y = new Date(); y.setDate(t.getDate()-1); return { from:_ymd(y), to:_ymd(y) }; }
+    const n = parseInt(p,10) || 7; const f = new Date(); f.setDate(t.getDate()-(n-1));
+    return { from:_ymd(f), to:_ymd(t) };
+}
+function lmInit(){
+    if(!_lmFrom){ const r = lmPresetRange('7'); _lmFrom = r.from; _lmTo = r.to; }
+    const fEl = document.getElementById('lm-from'), tEl = document.getElementById('lm-to');
+    if(fEl) fEl.value = _lmFrom; if(tEl) tEl.value = _lmTo;
+    if(!_lmWired){
+        _lmWired = true;
+        document.getElementById('lm-preset')?.addEventListener('change', e => {
+            const v = e.target.value, cust = document.getElementById('lm-custom');
+            cust.classList.toggle('hidden', v !== 'custom'); cust.classList.toggle('flex', v === 'custom');
+            _lmPreset = v; if(v === 'custom') return;                       // wait for Apply
+            const r = lmPresetRange(v); _lmFrom = r.from; _lmTo = r.to;
+            document.getElementById('lm-from').value = _lmFrom; document.getElementById('lm-to').value = _lmTo; lmLoad(); });
+        document.getElementById('lm-apply')?.addEventListener('click', () => {
+            _lmFrom = document.getElementById('lm-from').value; _lmTo = document.getElementById('lm-to').value; lmLoad(); });
+        const seg = (id, prop, setter) => document.getElementById(id)?.addEventListener('click', e => {
+            const b = e.target.closest('button'); if(!b) return;
+            [...b.parentElement.children].forEach(x => { x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
+            b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
+            setter(b.dataset[prop]); lmLoad(); });
+        seg('lm-source','s', v => _lmSource = v);
+        seg('lm-payment','p', v => _lmPayment = v);
+        document.getElementById('lm-courier')?.addEventListener('change', e => { _lmCourier = e.target.value; lmLoad(); });
+        document.getElementById('lm-zone')?.addEventListener('change', e => { _lmZone = e.target.value; lmLoad(); });
+        document.getElementById('lm-state')?.addEventListener('change', () => lmTable());
+        document.getElementById('lm-search')?.addEventListener('input', debounce(() => lmTable(), 250));
+    }
+    lmLoad();
+}
+async function lmLoad(){
+    const k = document.getElementById('lm-kpis'); if(k) k.innerHTML = brandLoader('Loading last-mile data…');
+    try{
+        const qs = `from=${_lmFrom}&to=${_lmTo}&source=${_lmSource}&payment=${_lmPayment}`
+                 + `&courier=${encodeURIComponent(_lmCourier)}&zone=${encodeURIComponent(_lmZone)}`;
+        const r = await fetch('/api/last-mile?' + qs, { headers: getAuthHeaders() });
+        const d = await r.json(); if(!d.success) throw new Error(d.error || 'failed');
+        _lmData = d; lmRender(d);
+    }catch(e){ if(k) k.innerHTML = '<div class="text-red-500 text-sm p-6">Error: ' + escapeHtml(e.message) + '</div>'; }
+}
+// Δ vs the previous equal-length window.
+function lmDelta(cur, prev, higherBetter){
+    if(prev == null || !isFinite(prev) || !isFinite(cur)) return '';
+    const d = Math.round((cur - prev) * 10) / 10;
+    if(d === 0) return '<span class="inline-flex items-center px-2 py-0.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-400">—</span>';
+    const good = higherBetter ? d > 0 : d < 0, cls = good ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700';
+    return `<span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-lg text-xs font-bold ${cls}" title="vs ${prev} previous period">${d > 0 ? '▲' : '▼'} ${Math.abs(d)}</span>`;
+}
+function lmKpiCard(c){
+    return `<div class="dp-kpi card p-5" style="--accent:${c.accent}">
+        <div class="flex items-start justify-between">
+          <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background:${c.tint};color:${c.accent}">${c.icon}</div>
+          ${c.delta || ''}
+        </div>
+        <div class="text-[2rem] leading-none font-extrabold text-slate-800 tracking-tight tabular-nums mt-4">${c.val}</div>
+        <div class="text-sm font-semibold text-slate-600 mt-1.5">${c.label}</div>
+        <div class="text-xs text-slate-400 mt-0.5">${c.foot}</div>
+    </div>`;
+}
+function lmRender(d){
+    const s = d.summary, p = d.previous;
+    document.getElementById('lm-range').textContent =
+        `${d.range.from} → ${d.range.to} · ${s.ofd} parcels went out for delivery · ${s.resolved} resolved, ${s.open} still open`
+        + `  ·  vs ${d.previousRange.from} → ${d.previousRange.to} (${p.ofd} out)`;
+    const note = document.getElementById('lm-note');
+    if(note && d.coverage){ note.classList.remove('hidden'); note.textContent = d.coverage.note; }
+
+    // Option lists come from the UNFILTERED window so choosing one never empties the others.
+    const fill = (id, opts, cur, allLabel) => { const el = document.getElementById(id); if(!el) return;
+        el.innerHTML = `<option value="all">${allLabel}</option>`
+            + (opts || []).map(o => `<option value="${escapeHtml(String(o.key))}">${escapeHtml(String(o.key))} (${o.count})</option>`).join('');
+        el.value = cur;
+        if(el.value !== cur){ if(id === 'lm-courier') _lmCourier = 'all'; else _lmZone = 'all'; el.value = 'all'; } };
+    fill('lm-courier', d.couriers, _lmCourier, 'All couriers');
+    fill('lm-zone', d.zones, _lmZone, 'All zones');
+
+    document.getElementById('lm-kpis').innerHTML = [
+        { label:'OFD → Delivered', accent:'#059669', tint:'#ecfdf5', icon:DP_ICONS.bolt,
+          val:s.deliveredRate + '%', foot:`${s.delivered} of ${s.resolved} resolved · ${s.open} still open`,
+          delta:lmDelta(s.deliveredRate, p.deliveredRate, true) },
+        { label:'OFD → RTO', accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn,
+          val:s.rtoRate + '%', foot:`${s.rto} came back after reaching the door`,
+          delta:lmDelta(s.rtoRate, p.rtoRate, false) },
+        { label:'In Transit → RTO', accent:'#b45309', tint:'#fffbeb', icon:DP_ICONS.refresh,
+          val:d.noAttempt.count, foot:`returned with NO delivery attempt${d.noAttempt.prevCount != null ? ` · was ${d.noAttempt.prevCount}` : ''}`,
+          delta:lmDelta(d.noAttempt.count, d.noAttempt.prevCount, false) },
+        { label:'Median time to deliver', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.hash,
+          val:(s.medianHrsToDeliver != null ? s.medianHrsToDeliver + 'h' : '—'),
+          foot:`90th pct ${s.p90HrsToDeliver != null ? s.p90HrsToDeliver + 'h' : '—'} · ${s.sameDayRate}% land within 24h`,
+          delta:lmDelta(s.medianHrsToDeliver, p.medianHrsToDeliver, false) },
+    ].map(lmKpiCard).join('');
+
+    lmFunnel(d); lmTrend(d); lmReasons(d);
+    lmBars('lm-by-courier', d.byCourier.slice(0, 10));
+    lmBars('lm-by-geo', [...d.byZone.map(z => ({ ...z, key:'Zone ' + z.key })), ...d.byState.slice(0, 6)]);
+    lmNoAttempt(d); lmTable();
+}
+// Funnel strip — Delivered / RTO / Still open, partitioning the OFD cohort exactly.
+function lmFunnel(d){
+    const el = document.getElementById('lm-funnel'); if(!el) return;
+    const s = d.summary, tot = s.ofd || 0;
+    if(!tot){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">No parcels went out for delivery in this window</div>'; return; }
+    const segs = [['Delivered', s.delivered, '#059669'], ['RTO', s.rto, '#e11d48'], ['Still open', s.open, '#94a3b8']];
+    const bar = segs.filter(x => x[1] > 0)
+        .map(([l, v, c]) => `<span class="dp-seg" style="width:${v / tot * 100}%;background:${c}" title="${l}: ${v} (${Math.round(v / tot * 1000) / 10}%)"></span>`).join('');
+    const keys = segs.map(([l, v, c]) => `<span class="dp-segkey"><i style="background:${c}"></i>${l} <b class="tabular-nums">${v}</b> <em class="tabular-nums">${tot ? Math.round(v / tot * 1000) / 10 : 0}%</em></span>`).join('');
+    el.innerHTML = `<div class="flex items-baseline justify-between flex-wrap gap-2 mb-3">
+        <h2 class="text-sm font-bold text-slate-700">What happened to the ${tot} parcels that went out</h2>
+        <span class="text-xs text-slate-400">${s.openRate}% of this cohort is still in flight — the rates above are on the ${s.resolved} that resolved</span>
+      </div><div class="dp-splitbar">${bar}</div><div class="dp-splitkeys">${keys}</div>`;
+}
+// Daily stacked bars — one column per IST day, split delivered / RTO / open.
+function lmTrend(d){
+    const el = document.getElementById('lm-trend'); const rows = d.trend || [];
+    if(!el) return;
+    if(!rows.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-8 text-center">No data</div>'; return; }
+    const W = 640, H = 220, p = { l:34, r:12, t:12, b:28 }, iw = W - p.l - p.r, ih = H - p.t - p.b;
+    const max = Math.max(...rows.map(r => r.ofd), 1);
+    const bw = Math.max(4, Math.min(38, iw / rows.length - 6));
+    const x = i => p.l + (rows.length === 1 ? iw / 2 - bw / 2 : i * (iw / rows.length) + (iw / rows.length - bw) / 2);
+    const y = v => p.t + ih - (v / max) * ih;
+    let grid = '';
+    for(let t = 0; t <= 4; t++){ const v = Math.round(max * t / 4);
+        grid += `<line x1="${p.l}" y1="${y(v)}" x2="${W - p.r}" y2="${y(v)}" stroke="#e2e8f0"/><text x="${p.l - 6}" y="${y(v) + 3}" text-anchor="end" fill="#94a3b8" font-size="11">${v}</text>`; }
+    const bars = rows.map((r, i) => { const X = x(i); let acc = 0, out = '';
+        [['#059669', r.delivered], ['#e11d48', r.rto], ['#94a3b8', r.open]].forEach(([c, v]) => {
+            if(v <= 0) return;
+            const h = (v / max) * ih, Y = p.t + ih - h - acc; acc += h;
+            out += `<rect x="${X}" y="${Y}" width="${bw}" height="${Math.max(1, h)}" fill="${c}" data-i="${i}"/>`; });
+        return out; }).join('');
+    const step = Math.ceil(rows.length / 8);
+    const xl = rows.map((r, i) => i % step === 0
+        ? `<text x="${x(i) + bw / 2}" y="${H - 8}" text-anchor="middle" fill="#94a3b8" font-size="11">${r.date.slice(5)}</text>` : '').join('');
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%">${grid}${bars}${xl}</svg>
+      <div class="dp-splitkeys" style="margin-top:6px"><span class="dp-segkey"><i style="background:#059669"></i>Delivered</span><span class="dp-segkey"><i style="background:#e11d48"></i>RTO</span><span class="dp-segkey"><i style="background:#94a3b8"></i>Still open</span></div>`;
+    el.querySelectorAll('rect').forEach(b => {
+        b.addEventListener('mousemove', e => { const r = rows[+b.dataset.i];
+            dpShow(`<b>${r.date}</b> · ${r.ofd} out → ${r.delivered} delivered · ${r.rto} RTO · ${r.open} open`, e.clientX, e.clientY); });
+        b.addEventListener('mouseleave', dpHide); });
+}
+function lmReasons(d){
+    const el = document.getElementById('lm-reasons'); const rows = d.rtoReasons || []; if(!el) return;
+    if(!rows.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-8 text-center">No reasons recorded</div>'; return; }
+    const max = Math.max(...rows.map(r => r.count), 1);
+    el.innerHTML = rows.map(r => `<div class="rw-row" title="${escapeHtml(r.reason)}: ${r.count}">
+        <span class="rw-lbl" style="width:150px">${escapeHtml(r.reason)}</span>
+        <span class="rw-track"><span class="rw-bar" style="left:0;width:${Math.max(3, Math.round(r.count / max * 100))}%;background:#e11d48"></span></span>
+        <span class="rw-val" style="width:44px;color:#475569">${r.count}</span></div>`).join('');
+}
+// Delivery-rate bars. Length = share delivered, colour = severity of that group's RTO rate.
+function lmBars(id, rows){
+    const el = document.getElementById(id); if(!el) return;
+    rows = (rows || []).filter(r => r.resolved > 0);
+    if(!rows.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">Not enough resolved shipments</div>'; return; }
+    el.innerHTML = rows.map(r => {
+        const col = r.rtoRate >= 30 ? '#ef4444' : r.rtoRate >= 20 ? '#f59e0b' : '#10b981';
+        return `<div class="rw-row" title="${escapeHtml(String(r.key))}: ${r.delivered} delivered / ${r.rto} RTO of ${r.resolved} resolved · ${r.open} still open${r.medianHrs != null ? ` · median ${r.medianHrs}h` : ''}">
+          <span class="rw-lbl" style="width:132px">${escapeHtml(String(r.key))}</span>
+          <span class="rw-track"><span class="rw-bar" style="left:0;width:${Math.max(3, r.deliveredRate)}%;background:${col}"></span></span>
+          <span class="rw-val" style="width:96px"><b style="color:#334155">${r.deliveredRate}%</b><span style="color:#94a3b8;font-weight:400"> of ${r.resolved}</span></span>
+        </div>`; }).join('');
+}
+function lmNoAttempt(d){
+    const el = document.getElementById('lm-no-attempt'), cnt = document.getElementById('lm-na-count');
+    const na = d.noAttempt || { count:0, list:[] }; if(!el) return;
+    if(cnt) cnt.textContent = `${na.count} in this window${na.prevCount != null ? ` · ${na.prevCount} in the previous one` : ''}`;
+    if(!na.count){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">None — every return in this window had at least one delivery attempt.</div>'; return; }
+    const th = 'px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+    const td = 'px-3 py-2 text-sm text-slate-700 border-b border-slate-100 whitespace-nowrap';
+    const rows = (na.list || []).slice(0, 50).map(r => `<tr class="hover:bg-slate-50">
+        <td class="${td} font-semibold text-slate-800">${escapeHtml(r.order || '—')}<div class="text-[11px] text-slate-400 font-normal">${escapeHtml(r.awb || '')}</div></td>
+        <td class="${td} text-slate-600">${escapeHtml(r.courier || '—')}</td>
+        <td class="${td} text-slate-500">${escapeHtml(r.city || '')}${r.state ? ', ' + escapeHtml(r.state) : ''}</td>
+        <td class="${td} text-center text-slate-500">${escapeHtml(r.zone || '—')}</td>
+        <td class="${td} text-slate-500">${r.payment && /cod/i.test(r.payment) ? 'COD' : 'Prepaid'}</td>
+        <td class="${td} text-slate-500 tabular-nums">${r.rto_at ? dpFmtTs(r.rto_at) : '—'}</td></tr>`).join('');
+    el.innerHTML = `<div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr>
+        <th class="${th}">Order / AWB</th><th class="${th}">Courier</th><th class="${th}">Destination</th>
+        <th class="${th} text-center">Zone</th><th class="${th}">Payment</th><th class="${th}">RTO at</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>`
+      + (na.count > 50 ? `<div class="text-xs text-slate-400 p-3 text-center">Showing 50 of ${na.count}</div>` : '');
+}
+function lmSortVal(r, k){ switch(k){
+    case 'hrs': return r.hrs == null ? -1 : r.hrs;
+    case 'attempts': return r.attempts || 0;
+    case 'ndr_count': return r.ndr_count || 0;
+    case 'ofd_at': return r.ofd_at || '';
+    case 'order': return (r.order || '').toLowerCase();
+    case 'courier': return (r.courier || '').toLowerCase();
+    case 'outcome': return r.outcome || '';
+    default: return ''; } }
+function lmTable(){
+    const c = document.getElementById('lm-table'); const d = _lmData; if(!c || !d) return;
+    const f = document.getElementById('lm-state')?.value || 'all';
+    const q = (document.getElementById('lm-search')?.value || '').trim().toLowerCase();
+    let list = (d.shipments || []).slice();
+    if(f === 'delivered') list = list.filter(r => r.outcome === 'delivered');
+    else if(f === 'rto') list = list.filter(r => r.outcome === 'rto');
+    else if(f === 'open') list = list.filter(r => r.outcome !== 'delivered' && r.outcome !== 'rto');
+    else if(f === 'slow') list = list.filter(r => r.outcome === 'delivered' && r.hrs != null && r.hrs > 24);
+    if(q) list = list.filter(r => (r.order || '').toLowerCase().includes(q) || (r.awb || '').toLowerCase().includes(q));
+    const cnt = document.getElementById('lm-count');
+    if(cnt) cnt.textContent = `${list.length} shown`
+        + (d.shipmentsTotal > (d.shipments || []).length ? ` · capped at ${(d.shipments || []).length} of ${d.shipmentsTotal}` : '');
+    if(!list.length){ c.innerHTML = '<div class="text-slate-400 text-sm p-6">No shipments match this filter</div>'; return; }
+    const dir = _lmSort.dir === 'asc' ? 1 : -1;
+    list = list.sort((a, b) => { const va = lmSortVal(a, _lmSort.key), vb = lmSortVal(b, _lmSort.key); return va < vb ? -dir : va > vb ? dir : 0; });
+    const th = 'px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
+    const td = 'px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
+    const cols = [['order','Order / AWB',0],['outcome','Outcome',0],['courier','Courier',0],[null,'Destination',0],
+        [null,'Zone',1],[null,'Pay',0],['ofd_at','Went out',0],['hrs','OFD → outcome',1],
+        ['attempts','Att',1],['ndr_count','NDR',1],[null,'Reasons',0]];
+    const head = cols.map(([k, l, a]) => { const al = a ? ' text-right' : '';
+        if(!k) return `<th class="${th}${al}">${l}</th>`;
+        const act = _lmSort.key === k, ar = act ? `<span class="text-indigo-500">${_lmSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="text-slate-300">↕</span>';
+        return `<th class="${th}${al} lm-sort cursor-pointer select-none hover:text-slate-600 ${act ? 'text-slate-600' : ''}" data-k="${k}">${l} ${ar}</th>`; }).join('');
+    const rows = list.slice(0, 500).map(r => {
+        const b = LM_OUTCOME_BADGE[r.outcome] || ['—', 'bg-slate-100 text-slate-600'];
+        // Duration is only meaningful once the parcel resolved. An open one shows a dash, never a running
+        // clock — that would read as a slow delivery when it is simply still out.
+        const dur = (r.outcome === 'delivered' || r.outcome === 'rto') && r.hrs != null
+            ? (r.hrs < 48 ? `${Math.round(r.hrs * 10) / 10}h` : `${Math.round(r.hrs / 24 * 10) / 10}d`) : '—';
+        const slow = r.outcome === 'delivered' && r.hrs != null && r.hrs > 24;
+        return `<tr class="hover:bg-slate-50">
+          <td class="${td}"><div class="font-semibold text-slate-800 leading-tight">${escapeHtml(r.order || '—')}</div><div class="text-[11px] text-slate-400 leading-tight">${escapeHtml(r.awb || '')}</div></td>
+          <td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${b[1]}">${b[0]}</span></td>
+          <td class="${td} text-slate-600"><div class="truncate" style="max-width:130px" title="${escapeHtml(r.courier || '')}">${escapeHtml(r.courier || '—')}</div></td>
+          <td class="${td} text-slate-500"><div class="truncate" style="max-width:150px">${escapeHtml(r.city || '')}${r.state ? ', ' + escapeHtml(r.state) : ''}</div></td>
+          <td class="${td} text-center text-slate-500">${escapeHtml(r.zone || '—')}</td>
+          <td class="${td}">${r.payment ? `<span class="px-1.5 py-0.5 rounded text-[11px] font-medium ${/cod/i.test(r.payment) ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700'}">${/cod/i.test(r.payment) ? 'COD' : 'Prepaid'}</span>` : '<span class="text-slate-300">—</span>'}</td>
+          <td class="${td} text-slate-500 tabular-nums">${r.ofd_at ? dpFmtTs(r.ofd_at) : '—'}</td>
+          <td class="${td} text-right tabular-nums ${slow ? 'text-amber-600 font-semibold' : 'text-slate-600'}">${dur}</td>
+          <td class="${td} text-right tabular-nums ${r.attempts > 1 ? 'text-slate-800 font-medium' : 'text-slate-400'}">${r.attempts}</td>
+          <td class="${td} text-right tabular-nums ${r.ndr_count > 0 ? 'text-rose-600 font-medium' : 'text-slate-400'}">${r.ndr_count}</td>
+          <td class="px-3 py-2.5 text-sm border-b border-slate-100"><div class="truncate text-xs text-slate-500" style="max-width:220px" title="${escapeHtml((r.reasons || []).join(' · '))}">${escapeHtml((r.reasons || []).join(' · ')) || '—'}</div></td>
+        </tr>`; }).join('');
+    c.innerHTML = `<div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`
+      + (list.length > 500 ? `<div class="text-xs text-slate-400 p-3 text-center border-t border-slate-100">Showing first 500 of ${list.length} — narrow with search or filters</div>` : '');
+    c.querySelectorAll('.lm-sort').forEach(h => h.addEventListener('click', () => { const k = h.dataset.k;
+        if(_lmSort.key === k) _lmSort.dir = _lmSort.dir === 'asc' ? 'desc' : 'asc';
+        else _lmSort = { key:k, dir:['hrs','attempts','ndr_count','ofd_at'].includes(k) ? 'desc' : 'asc' };
+        lmTable(); }));
 }
