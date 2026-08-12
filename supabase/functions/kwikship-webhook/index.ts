@@ -108,6 +108,62 @@ function parseKwikshipJourney(statusHistory: any[], currentStatus: string, couri
   };
 }
 
+// ── Mirror the journey into `order_tracking` (port of kwikship_sync.js mirrorKwikshipToOrderTracking) ──
+// ⚠️ THIS FUNCTION IS WHY KWIKSHIP APPEARS ANYWHERE IN THE DASHBOARD. The `order_buckets` view — the
+// Undelivered panel, the Call Queue, the buckets, delivery performance and RTO% — is built ONLY from
+// `order_tracking`, never from `shipment_journey_ecom`. Writing the journey alone updates the Live
+// Tracking modal and NOTHING else.
+//
+// It was missing here for the function's whole life, and the damage compounded because the webhook also
+// sets `is_final`: the nightly cron SKIPS finals, so once this function recorded a delivery the cron
+// would never revisit the AWB and `order_tracking` froze at whatever the last cron run happened to see.
+// 240 shipments were stranded that way (183 delivered, 57 RTO) — TE25-40173 delivered 10 Aug still read
+// "undelivered" two days later. The faster the webhook fired, the more certain the freeze.
+const KS_TRACKING_STATUS: Record<string, string> = {
+  new: "manifested", out_for_pickup: "out for pickup", pickup_completed: "pickup completed",
+};
+const KS_OUTCOME_STATUS: Record<string, string> = {
+  delivered: "delivered", rto: "rto", ndr_pending: "undelivered", lost: "lost",
+};
+// OUTCOME decides the text, NOT the raw code — the view matches on the text, and several Kwikship codes
+// carry neither word while still being that outcome (`reached_at_seller_city` IS an RTO leg; an NDR
+// shipment often still reads `out_for_delivery`).
+function ksTrackingStatus(outcome: string, statusCode: string | null): string | null {
+  const byOutcome = KS_OUTCOME_STATUS[String(outcome || "")];
+  if (byOutcome) return byOutcome;
+  const code = String(statusCode || "").toLowerCase().trim();
+  return KS_TRACKING_STATUS[code] || code || null;
+}
+async function mirrorToOrderTracking(supabase: any, awb: string, orderName: string | null, j: any, edd: string | null) {
+  const name = String(orderName || "").replace("#", "").trim();
+  if (!name) return false;
+  try {
+    const { data: o } = await supabase.from("orders").select("id, name").in("name", [name, "#" + name]).limit(1).maybeSingle();
+    if (!o) return false;
+    // `order_tracking.order_id` is UNIQUE (one row per order) — never clobber another platform's row.
+    const { data: ex } = await supabase.from("order_tracking").select("order_id, source, awb_number").eq("order_id", o.id).maybeSingle();
+    if (ex && ex.source !== "kwikship" && String(ex.awb_number || "") !== String(awb)) return false;
+    const status = ksTrackingStatus(j.outcome, j.status_code);
+    if (!status) return false;
+    const { error } = await supabase.from("order_tracking").upsert({
+      order_id: String(o.id), order_name: name, awb_number: awb, source: "kwikship",
+      courier_name: j.courier || null, tracking_status: status,
+      // The view derives dispatch from MIN(status_updated_at); with one row per order that IS this value,
+      // so it must be the real dispatch moment, not the latest scan.
+      status_updated_at: j.dispatched_at || j.out_for_delivery_at || null,
+      delivered_date: j.delivered_at || null,
+      edd: edd || null,
+      // The Call Queue's "Last scan" column reads this — it must be the newest COURIER EVENT, never now().
+      last_tracked_at: j.last_scan_at
+        || [j.delivered_at, j.rto_at, j.out_for_delivery_at, j.dispatched_at].filter(Boolean).sort().pop()
+        || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "order_id" });
+    if (error) { console.error(`[kwikship-webhook→tracking] ${awb}: ${error.message}`); return false; }
+    return true;
+  } catch (e: any) { console.error(`[kwikship-webhook→tracking] ${awb}: ${e.message}`); return false; }
+}
+
 // Fetch authoritative shipment detail from Kwikship. Returns null if creds missing or not found.
 // ── Kwikship PUBLIC tracking (v2) — no auth, no credentials ──────────────────────────────────────
 // GET /track/v2/public?order_code=<awb>   (merchant_id is accepted but ignored)
@@ -267,6 +323,12 @@ Deno.serve(async (req) => {
 
     const { error } = await supabase.from("shipment_journey_ecom").upsert(row, { onConflict: "awb" });
     if (error) { console.error(`[kwikship-webhook] upsert ${awb}: ${error.message}`); await logHit("error", { awb, order_name: eo?.reference_code, cur_status: curStatus, outcome: j.outcome }); return new Response(JSON.stringify({ error: error.message }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }); }
+
+    // Feed the bucket engine. Without this the journey is correct but every dashboard surface that reads
+    // `order_buckets` (Undelivered panel, Call Queue, delivery performance, RTO%) stays on the stale row —
+    // permanently, because `is_final` above makes the nightly cron skip this AWB from now on.
+    const mirrored = await mirrorToOrderTracking(supabase, awb, eo?.reference_code || null, j, detail?.edd || null);
+    if (!mirrored) console.warn(`[kwikship-webhook] ${awb}: order_tracking NOT mirrored — dashboards will lag until the cron reconciles.`);
 
     // Re-allocation cleanup: if this order came to Kwikship from another aggregator, drop the stale
     // (non-final) journey row keyed on the old AWB so the order isn't double-counted in the dashboard.

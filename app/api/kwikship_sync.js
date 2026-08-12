@@ -316,6 +316,60 @@ async function mirrorKwikshipToOrderTracking(awb, orderName, j, statusCode, last
 // Deliberately light: it selects only rows whose reasons look like courier codes (28 of 271 today, the
 // rest have no NDR at all), so it is a few dozen calls, not a full re-sync. Nothing else on the row is
 // touched — outcome/attempts/ndr_count are already correct and must not move.
+// ── Self-heal: make `order_tracking` agree with the journey for FINAL shipments ──────────────────
+// The safety net for the whole Kwikship path. `shipment_journey_ecom` is the truth (the Live Tracking
+// modal reads it); `order_tracking` is what every dashboard surface actually reads via `order_buckets`.
+// Anything that writes one without the other silently splits them, and once `is_final` is set the nightly
+// sync stops fetching that AWB, so the split never heals on its own.
+//
+// This compares the two and rewrites ONLY the rows that disagree. No courier API calls — it works purely
+// from journey rows we already store, so it is safe to run on every sync and cheap enough to leave in.
+// Pass a list of AWBs, or omit to sweep every final Kwikship shipment.
+async function reconcileKwikshipTracking(awbList = null) {
+    const journeys = [];
+    if (Array.isArray(awbList)) {
+        for (let i = 0; i < awbList.length; i += 200) {
+            const { data } = await supabase.from('shipment_journey_ecom')
+                .select('awb, order_name, courier, outcome, status_code, dispatched_at, out_for_delivery_at, delivered_at, rto_at, first_edd, last_scan_at')
+                .eq('source', 'kwikship').in('awb', awbList.slice(i, i + 200));
+            journeys.push(...(data || []));
+        }
+    } else {
+        for (let f = 0; ; f += 1000) {                       // Supabase caps a select at 1000 rows
+            const { data, error } = await supabase.from('shipment_journey_ecom')
+                .select('awb, order_name, courier, outcome, status_code, dispatched_at, out_for_delivery_at, delivered_at, rto_at, first_edd, last_scan_at')
+                .eq('source', 'kwikship').eq('is_final', true).order('awb', { ascending: true }).range(f, f + 999);
+            if (error) { console.error('[Kwikship reconcile] select:', error.message); break; }
+            journeys.push(...(data || []));
+            if (!data || data.length < 1000) break;
+        }
+    }
+    if (!journeys.length) return { checked: 0, repaired: 0 };
+
+    // Current bucket-engine status for those AWBs, in batches (the `in` filter is also 1000-capped).
+    const seen = new Map();
+    const keys = journeys.map(j => j.awb);
+    for (let i = 0; i < keys.length; i += 200) {
+        const { data } = await supabase.from('order_tracking').select('awb_number, tracking_status').in('awb_number', keys.slice(i, i + 200));
+        (data || []).forEach(r => seen.set(String(r.awb_number), String(r.tracking_status || '')));
+    }
+
+    let repaired = 0, drift = [];
+    for (const j of journeys) {
+        const want = ksTrackingStatus(j.outcome, j.status_code);
+        if (!want) continue;
+        const have = seen.get(String(j.awb));
+        if (have === undefined) continue;                    // no tracking row yet — the backfill owns that case
+        if (String(have).toLowerCase() === want.toLowerCase()) continue;
+        if (await mirrorKwikshipToOrderTracking(j.awb, j.order_name, j, j.status_code, j.last_scan_at)) {
+            repaired++;
+            if (drift.length < 10) drift.push(`${j.order_name || j.awb} ${have} → ${want}`);
+        }
+    }
+    if (repaired) console.warn(`[Kwikship reconcile] repaired ${repaired} row(s) where order_tracking disagreed with the journey — e.g. ${drift.join(' · ')}`);
+    return { checked: journeys.length, repaired };
+}
+
 // ── One-off backfill: give every EXISTING Kwikship journey its `order_tracking` row ─────────────
 // The mirror above only fires on the next sync/webhook for a shipment, and a FINAL shipment (delivered /
 // RTO) may never be touched again — so without this the historical rows stay stuck in order_to_dispatch
@@ -423,6 +477,14 @@ async function syncKwikship({ days = 30, concurrency = 3, sleepMs = 300 } = {}) 
         (data || []).forEach(r => finalSet.add(r.awb));
     }
     const todo = list.filter(o => !finalSet.has(o.awb_number));
+
+    // …but "skip" must mean "make no API call", NOT "ignore". Finalizing an AWB used to remove it from this
+    // cron's sight forever, so ANY divergence that existed at that moment became permanent — which is exactly
+    // how 239 shipments (183 delivered, 56 RTO) came to read `in_transit` / `undelivered` in every dashboard
+    // while their journey said delivered: the webhook recorded the delivery, set is_final, and never wrote
+    // `order_tracking`. Reconciling here closes that hole for good and for ANY cause (edge-function drift, a
+    // failed write, a race) — it is pure DB work against rows we already have, and costs ZERO courier calls.
+    await reconcileKwikshipTracking([...finalSet]);
     console.log(`[Kwikship] ${list.length} Kwikship orders (last ${days}d) · ${finalSet.size} already final · ${todo.length} to fetch (concurrency ${concurrency})…`);
     if (!todo.length) return { processed: 0, updated: 0, total: list.length };
 
@@ -443,7 +505,7 @@ async function syncKwikship({ days = 30, concurrency = 3, sleepMs = 300 } = {}) 
     return { processed: todo.length, updated, none, total: list.length };
 }
 
-module.exports = { classifyKwikStatus, kwikOutcome, parseKwikDate, parseKwikshipJourney, fetchKwikshipShipment, fetchKwikshipPublic, updateKwikshipJourney, syncKwikship, backfillKwikshipNdrReasons, mirrorKwikshipToOrderTracking, backfillKwikshipOrderTracking };
+module.exports = { classifyKwikStatus, kwikOutcome, parseKwikDate, parseKwikshipJourney, fetchKwikshipShipment, fetchKwikshipPublic, updateKwikshipJourney, syncKwikship, backfillKwikshipNdrReasons, mirrorKwikshipToOrderTracking, backfillKwikshipOrderTracking, reconcileKwikshipTracking };
 
 // CLI: node app/api/kwikship_sync.js sync [days] [concurrency]
 if (require.main === module && process.argv[2] === 'sync') {
