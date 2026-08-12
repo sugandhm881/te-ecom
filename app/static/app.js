@@ -6166,7 +6166,7 @@ const PERM_GROUPS = [
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
   // Capabilities (not dashboard views) — granted per-user by the admin. Server enforces each one too.
-  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)']]]
+  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)'],['delivery-perf-revenue','See ₹ revenue on Delivery Performance (order values)']]]
 ];
 const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
 const PERM_TOTAL = PERM_CATALOG.length;
@@ -8679,6 +8679,38 @@ async function dprePayDelete(id){ if(!confirm('Delete this payment?'))return;
 
 // ─── Delivery Performance (RTO / NDR / FASR) ─────────────────────────────────
 let _dpFrom = null, _dpTo = null, _dpData = null, _dpWired = false, _dpSource = 'all', _dpPayment = 'all', _dpZone = [], _dpState = [], _dpCourier = 'all', _dpOrderType = 'all', _dpCompare = false, _dpTatFilter = null;
+// ── Revenue lens ────────────────────────────────────────────────────────────────────────────────
+// 'count' = every metric weighted 1 per shipment (the original behaviour, and the default).
+// 'value' = every metric weighted by the order's ₹ value. The server sends BOTH for every figure, so
+// flipping this is a pure re-render — no refetch, and the count numbers are never recomputed or lost.
+let _dpMode = 'count';
+// Order value is commercially sensitive, so the ₹ lens is a granted capability — admin, or
+// `delivery-perf-revenue` from the Users page. The SERVER strips every ₹ field for anyone else (it
+// doesn't even read the prices), so this is the convenience half of the gate, not the enforcement.
+function canSeeRevenue(){ return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions||[]).includes('delivery-perf-revenue'))); }
+// ⚠️ The permission is checked HERE, in the one place every ₹ decision funnels through — not at each
+// call site. If the capability is ever missing, `_dpMode` cannot take effect no matter how it was set
+// (stale state, an old response, a hand-edited DOM), and the whole page falls back to counts.
+const dpIsVal = () => _dpMode === 'value' && canSeeRevenue() && !!(_dpData ? _dpData.revenueAllowed : true);
+// ₹ formatting. Indian grouping (1,23,456 not 123,456) and lakh/crore short forms, because a KPI card
+// has room for "₹6.98L" but not "₹698,271" at 2rem.
+function dpMoney(n, compact){
+    const v = Math.round(Number(n) || 0);
+    if(compact!==false){
+        const a = Math.abs(v);
+        if(a >= 1e7) return '₹' + (v/1e7).toFixed(2).replace(/\.00$/,'') + 'Cr';
+        if(a >= 1e5) return '₹' + (v/1e5).toFixed(2).replace(/\.00$/,'') + 'L';
+        if(a >= 1e3) return '₹' + (v/1e3).toFixed(1).replace(/\.0$/,'') + 'k';
+    }
+    return '₹' + v.toLocaleString('en-IN');
+}
+// Full-precision ₹ for tooltips — the compact form above rounds, and an agent checking a number by hand
+// needs the exact rupees.
+const dpMoneyFull = n => '₹' + Math.round(Number(n)||0).toLocaleString('en-IN');
+// Format a magnitude in the current mode: 1,234 shipments  |  ₹1.23L
+const dpAmt = n => dpIsVal() ? dpMoney(n) : Number(n||0).toLocaleString('en-IN');
+const dpAmtFull = n => dpIsVal() ? dpMoneyFull(n) : Number(n||0).toLocaleString('en-IN');
+const dpNoun = (n) => dpIsVal() ? '' : (n === 1 ? ' shipment' : ' shipments');
 // Order→Dispatch TAT buckets (must mirror BUCKETS_HRS in delivery_reports.js). [borderColor, rowTint].
 const DP_TAT_BUCKETS = [
   { label: '0-12',  max: 12,       color: '#22c55e', tint: '#f0fdf4' },
@@ -8698,6 +8730,7 @@ const DP_MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov',
 function dpShortDate(ymd){ if(!ymd) return '—'; const p=String(ymd).split('-'); if(p.length<3) return ymd; return `${+p[2]} ${DP_MON[(+p[1])-1]||''}`; }
 function dpSortVal(r,key){ switch(key){
   case 'attempts': return r.attempts||0; case 'ndr_count': return r.ndr_count||0;
+  case 'value': return Number(r.value)||0;
   case 'otdHrs': return r.otdHrs==null?-1:r.otdHrs;
   case 'order_date': return r.ts&&r.ts.order?r.ts.order:'';
   case 'order': return (r.order||'').toLowerCase(); case 'state': return r.state||'';
@@ -8715,6 +8748,12 @@ function dpInit(){
     if(!_dpFrom){ _dpFrom = dpDaysAgo(30); _dpTo = _ymd(new Date()); }
     const fEl=document.getElementById('dp-from'), tEl=document.getElementById('dp-to');
     if(fEl) fEl.value=_dpFrom; if(tEl) tEl.value=_dpTo;
+    // ₹ toggle visibility is decided on EVERY init, not once inside the _dpWired block below — the
+    // wiring runs a single time per page load, so a different user signing in without a full reload
+    // would otherwise inherit whatever the previous user was allowed to see. Hidden (not disabled), so
+    // the page reads as having no revenue view rather than a locked one.
+    const modeEl=document.getElementById('dp-mode');
+    if(modeEl){ const allowed=canSeeRevenue(); modeEl.classList.toggle('hidden', !allowed); if(!allowed) _dpMode='count'; }
     if(!_dpWired){
         _dpWired = true;
         document.getElementById('dp-range-preset')?.addEventListener('change', e=>{
@@ -8754,7 +8793,20 @@ function dpInit(){
                 _dpMultiSearch[key]=e.target.value; dpMultiFilter(panel, e.target.value); });
         });
         document.addEventListener('click',()=>document.querySelectorAll('#delivery-perf-view .dp-multi-panel').forEach(p=>p.classList.add('hidden')));
-        document.getElementById('dp-courier-filter')?.addEventListener('change', e=>{ _dpCourier=e.target.value; dpTableRender(); });
+        // COURIER IS A DASHBOARD-LEVEL FILTER (changed 2026-08-12), not a table filter. It used to call
+        // dpTableRender(), so picking a courier narrowed only the shipment list while FASR, NDR Recovery,
+        // RTO Rate, the funnel, TAT and the trend all kept showing every courier — the one question the
+        // control looked like it answered was the one it didn't. dpLoad() sends `courier=` to the API,
+        // which already supported it, so every figure on the page now reflects the selection.
+        // ⚠️ The API deliberately builds the courier LIST from the unfiltered window, so the dropdown keeps
+        // showing all couriers after one is chosen (otherwise it would collapse to the current selection).
+        document.getElementById('dp-courier-filter')?.addEventListener('change', e=>{ _dpCourier=e.target.value; dpLoad(); });
+        // ₹ / # lens — pure re-render from the data already in hand, no refetch.
+        document.getElementById('dp-mode')?.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return;
+            if(!canSeeRevenue()) return;
+            [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
+            b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
+            _dpMode=b.dataset.m; if(_dpData) dpRender(_dpData); });
         document.getElementById('dp-ordertype')?.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return;
             [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
             b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
@@ -8767,7 +8819,7 @@ function dpInit(){
 async function dpLoad(){
     const kpi=document.getElementById('dp-kpis'); if(kpi) kpi.innerHTML=brandLoader('Loading delivery data…');
     try{
-        const r=await fetch(`/api/delivery-performance?from=${_dpFrom}&to=${_dpTo}&source=${_dpSource}&payment=${_dpPayment}&zone=${encodeURIComponent(_dpZone.join(','))}&state=${encodeURIComponent(_dpState.join(','))}&order_type=${_dpOrderType}&compare=1`, { headers: getAuthHeaders() });
+        const r=await fetch(`/api/delivery-performance?from=${_dpFrom}&to=${_dpTo}&source=${_dpSource}&payment=${_dpPayment}&zone=${encodeURIComponent(_dpZone.join(','))}&state=${encodeURIComponent(_dpState.join(','))}&courier=${encodeURIComponent(_dpCourier)}&order_type=${_dpOrderType}&compare=1`, { headers: getAuthHeaders() });
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         await eeHoldRefresh();
         _dpData=d; dpRender(d);
@@ -8794,6 +8846,15 @@ function dpNumDelta(cur,prev,unit){ if(prev==null||!isFinite(prev)||!isFinite(cu
     const d=Math.round((cur-prev)*100)/100, up=d>0;
     if(d===0) return `<div class="text-[11px] text-slate-400 mt-0.5">— vs ${prev}${unit} prev</div>`;
     return `<div class="text-[11px] font-bold mt-0.5 ${up?'text-emerald-600':'text-rose-600'}">${up?'▲':'▼'} ${Math.abs(d)}${unit} <span class="text-slate-400 font-normal">vs ${prev}${unit} prev</span></div>`; }
+// Segmented bar under a KPI headline. `segs` = [{label, count, pct, color}] and MUST partition the
+// card's cohort — the point of showing it is that the parts add up to the whole on screen.
+function dpKpiSplit(segs){
+    const shown = segs.filter(s => s.count > 0);
+    if(!shown.length) return '';
+    const bar = shown.map(s => `<span class="dp-seg" style="width:${Math.max(s.pct,1.5)}%;background:${s.color}" title="${escapeHtml(s.label)}: ${dpAmtFull(s.count)}${dpNoun(s.count)} · ${s.pct}%"></span>`).join('');
+    const keys = shown.map(s => `<span class="dp-segkey"><i style="background:${s.color}"></i>${escapeHtml(s.label)} <b class="tabular-nums">${dpAmt(s.count)}</b> <em class="tabular-nums">${s.pct}%</em></span>`).join('');
+    return `<div class="dp-splitbar mt-3">${bar}</div><div class="dp-splitkeys">${keys}</div>`;
+}
 function dpKpiCard(cfg){
     const hasPrev = cfg.prev!=null;
     return `<div class="dp-kpi card p-5" style="--accent:${cfg.accent}">
@@ -8804,19 +8865,56 @@ function dpKpiCard(cfg){
         <div class="text-[2rem] leading-none font-extrabold text-slate-800 tracking-tight tabular-nums mt-4">${cfg.val}</div>
         <div class="text-sm font-semibold text-slate-600 mt-1.5">${cfg.label}</div>
         <div class="text-xs text-slate-400 mt-0.5">${cfg.foot}</div>
+        ${cfg.split?dpKpiSplit(cfg.split):''}
         ${hasPrev?`<div class="text-[11px] text-slate-400 mt-2 pt-2 border-t border-slate-100">vs <span class="tabular-nums">${cfg.prev}${cfg.unit}</span> previous period</div>`:''}
     </div>`;
 }
 function dpRender(d){
     const k=d.kpis, c=d.compare&&d.compare.kpis;
-    document.getElementById('dp-range').textContent=`${d.range.from} → ${d.range.to} · ${k.totalShipments} tracked = ${k.resolved} shipped (delivered+RTO) + ${k.pending} NDR-pending + ${k.inTransit} in-transit${k.lost?` + ${k.lost} lost`:''}`+(c?`  ·  vs prev ${d.compare.range.from} → ${d.compare.range.to} (${c.totalShipments} tracked)`:'');
+    const V=dpIsVal(), R=k.rev||{}, CR=(c&&c.rev)||null;
+    const courierNote = _dpCourier!=='all' ? `  ·  courier: ${_dpCourier}` : '';
+    // Never let the ₹ view present an understated total as if it were the truth.
+    const vc=d.valueCoverage;
+    const warnEl=document.getElementById('dp-value-warn');
+    if(warnEl){
+        const bad = V && vc && (!vc.complete || (vc.total && vc.matched/vc.total < 0.9));
+        warnEl.classList.toggle('hidden', !bad);
+        if(bad) warnEl.textContent = !vc.complete
+            ? `Revenue figures are incomplete — ${vc.failedBatches} order-value lookup(s) failed, so totals are understated. Counts are unaffected.`
+            : `Revenue covers ${vc.matched} of ${vc.total} shipments — ${vc.total-vc.matched} have no matching Shopify order, so ₹ totals are understated.`;
+    }
+    document.getElementById('dp-range').textContent=`${d.range.from} → ${d.range.to} · ${k.totalShipments} tracked = ${k.resolved} shipped (delivered+RTO) + ${k.pending} NDR-pending + ${k.inTransit} in-transit${k.lost?` + ${k.lost} lost`:''}`+(V?`  ·  ${dpMoneyFull(R.tracked)} order value`:'')+courierNote+(c?`  ·  vs prev ${d.compare.range.from} → ${d.compare.range.to} (${c.totalShipments} tracked)`:'');
+    // NDR cohort split — the four ways an NDR shipment ends. They partition ndrTotal exactly.
+    const nT = V?R.ndrTotal:k.ndrTotal;
+    const seg = (label,val,color)=>({label,count:val,pct:nT>0?Math.round((val/nT)*1000)/10:0,color});
+    const ndrSplit = [
+        seg('Recovered', V?R.ndrRecovered:k.ndrRecovered, '#059669'),
+        seg('RTO',       V?R.ndrRtoCount:k.ndrRtoCount,   '#e11d48'),
+        seg('Pending',   V?R.ndrPendingCount:k.ndrPendingCount, '#f59e0b'),
+        seg('Lost',      V?R.ndrLostCount:k.ndrLostCount, '#64748b'),
+    ];
     document.getElementById('dp-kpis').innerHTML = [
-        {label:'First-Attempt Strike Rate', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.bolt,   val:k.fasr+'%',            foot:`${k.fasrNumerator} of ${k.totalShipments} tracked on 1st attempt`, cur:k.fasr,            prev:c?c.fasr:null,            better:true,  unit:'pp'},
-        {label:'NDR Recovery',            accent:'#059669', tint:'#ecfdf5', icon:DP_ICONS.refresh, val:k.ndrRecoveryRate+'%', foot:`${k.ndrRecovered} of ${k.ndrTotal} NDRs recovered`,      cur:k.ndrRecoveryRate, prev:c?c.ndrRecoveryRate:null, better:true,  unit:'pp'},
+        {label:'First-Attempt Strike Rate', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.bolt,   val:(V?R.fasr:k.fasr)+'%',
+            foot:`${dpAmt(V?R.firstAttempt:k.fasrNumerator)} of ${dpAmt(V?R.tracked:k.totalShipments)} tracked on 1st attempt`,
+            cur:V?R.fasr:k.fasr, prev:c?(V?(CR&&CR.fasr):c.fasr):null, better:true,  unit:'pp'},
+        // NDR Recovery now shows the WHOLE cohort, not just the recovered slice (added 2026-08-12).
+        // Recovery alone told a third of the story: on the live window 60.4% of NDRs RTO'd against 28.4%
+        // recovered, and 11% were still open — none of which the single percentage revealed.
+        {label:'NDR Recovery',            accent:'#059669', tint:'#ecfdf5', icon:DP_ICONS.refresh, val:(V?R.ndrRecoveryRate:k.ndrRecoveryRate)+'%',
+            foot:`${dpAmt(V?R.ndrRecovered:k.ndrRecovered)} of ${dpAmt(nT)} NDR${V?' by value':'s'} recovered`,
+            cur:V?R.ndrRecoveryRate:k.ndrRecoveryRate, prev:c?(V?(CR&&CR.ndrRecoveryRate):c.ndrRecoveryRate):null, better:true, unit:'pp', split:ndrSplit},
         // Denominator is `resolved` (delivered + RTO), NOT totalShipments — an in-transit parcel hasn't had
         // its chance to come back yet. The caption names the base so the number can be checked by hand.
-        {label:'RTO Rate',                accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn,   val:k.rtoRate+'%',         foot:`${k.rto} of ${k.resolved} shipped (delivered + RTO)`,    cur:k.rtoRate,         prev:c?c.rtoRate:null,         better:false, unit:'pp'},
-        {label:'Avg Delivery Attempts',   accent:'#0891b2', tint:'#ecfeff', icon:DP_ICONS.hash,    val:k.avgAttempts,         foot:`across ${k.resolved} resolved`,                          cur:k.avgAttempts,     prev:c?c.avgAttempts:null,     better:false, unit:''},
+        {label:'RTO Rate',                accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn,   val:(V?R.rtoRate:k.rtoRate)+'%',
+            foot:`${dpAmt(V?R.rto:k.rto)} of ${dpAmt(V?R.resolved:k.resolved)} shipped (delivered + RTO)`,
+            cur:V?R.rtoRate:k.rtoRate, prev:c?(V?(CR&&CR.rtoRate):c.rtoRate):null, better:false, unit:'pp'},
+        // Attempts have no rupee analogue, so in ₹ mode this slot becomes the number the page could never
+        // show before: value that has not landed yet and can still go either way (open NDR + in transit).
+        V ? {label:'Revenue at Risk',      accent:'#b45309', tint:'#fffbeb', icon:DP_ICONS.hash,    val:dpMoney(R.atRisk),
+            foot:`${dpMoney(R.ndrPending)} on open NDRs + ${dpMoney(R.inTransit)} in transit`,
+            cur:null, prev:null, better:false, unit:''}
+          : {label:'Avg Delivery Attempts', accent:'#0891b2', tint:'#ecfeff', icon:DP_ICONS.hash,    val:k.avgAttempts,
+            foot:`across ${k.resolved} resolved`, cur:k.avgAttempts, prev:c?c.avgAttempts:null, better:false, unit:''},
     ].map(dpKpiCard).join('');
     dpStatus(d.statusBreakdown, c);
     dpRto(d.rtoBreakdown, c);
@@ -8853,7 +8951,12 @@ function dpCouriers(couriers){ const sel=document.getElementById('dp-courier-fil
     let html='<option value="all">All couriers</option>';
     // DocPharma is a shipping platform, not a courier — it's covered by the Shipping Platform toggle above.
     (couriers||[]).filter(c=>String(c.courier||'').toLowerCase()!=='docpharma').forEach(c=>{ const nm=(c.courier||'').replace(/"/g,'&quot;'); html+=`<option value="${nm}">${c.courier} (${c.count})</option>`; });
-    sel.innerHTML=html; sel.value=cur; if(sel.value!==cur){ _dpCourier='all'; sel.value='all'; }
+    sel.innerHTML=html; sel.value=cur;
+    // The selected courier is no longer in range (usually the date window moved). Reset to All AND
+    // RELOAD — the reset alone would leave the dropdown reading "All couriers" while the KPIs on screen
+    // were still fetched with courier=<the vanished one>, i.e. the control and the numbers disagreeing.
+    // Safe from looping: the reload sends courier=all, which is always present in the list.
+    if(sel.value!==cur){ _dpCourier='all'; sel.value='all'; if(cur!=='all') dpLoad(); }
 }
 // TAT Dashboard — two cards: Order→Dispatch and Dispatch→Delivery, avg + bucket bars (0-1/1-3/3-5/5+).
 function dpTatCard(title,sub,t,prevAvg,filterable){ if(!t){ return ''; }
@@ -8896,43 +8999,56 @@ function dpTat(t,c){ const el=document.getElementById('dp-tat'); if(!el) return;
 function dpStatusChip(dot,label,val,total,state,prevShare,opts){ opts=opts||{};
     const p = opts.pct!=null ? opts.pct : (total?Math.round(val/total*1000)/10:0);
     const prev = opts.prevPct!=null ? opts.prevPct : prevShare;
-    const tip = `${val} of ${opts.base||(total+' tracked')} = ${p}%`;
-    return `<button data-state="${state||''}" title="${tip}" class="dp-chip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-indigo-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${val}</b><span class="text-slate-400 text-xs tabular-nums">${p}%</span>${dpPP(p,prev)}</button>`; }
+    const tip = `${dpAmtFull(val)} of ${opts.base||(dpAmtFull(total)+(dpIsVal()?' order value':' tracked'))} = ${p}%`;
+    return `<button data-state="${state||''}" title="${tip}" class="dp-chip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-indigo-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${dpAmt(val)}</b><span class="text-slate-400 text-xs tabular-nums">${p}%</span>${dpPP(p,prev)}</button>`; }
 // RTO rate from the status counts — the SAME formula the backend uses for the KPI card
 // (RTO ÷ (delivered 1st attempt + delivered after NDR + RTO)), so the chip and the card can't drift.
 function dpRtoRate(s){ const resolved=(s.firstAttempt||0)+(s.deliveredMulti||0)+(s.rto||0);
     return resolved ? Math.round((s.rto/resolved)*1000)/10 : 0; }
 function dpStatus(s,c){ const el=document.getElementById('dp-status'); if(!s){ el.innerHTML=''; return; }
-    const t=s.total||0, pt=c?c.totalShipments:0;
+    // In ₹ mode every figure switches to its *Value twin. The chips still PARTITION the whole, so the
+    // strip reconciles in either unit — that is the property worth protecting here.
+    const V=dpIsVal(), cr=(c&&c.rev)||null;
+    const g=(k)=> V ? (s[k+'Value']||0) : (s[k]||0);
+    const t = V ? (s.totalValue||0) : (s.total||0);
+    const pt = c ? (V ? (cr&&cr.tracked||0) : c.totalShipments) : 0;
+    const pv=(k,ck)=> c ? (V ? (cr?cr[k]:null) : c[ck||k]) : null;
     const ps=v=> (c&&pt&&v!=null)? Math.round(v/pt*1000)/10 : null;   // previous-period share %
     el.innerHTML =
-        `<span class="inline-flex items-center px-3 py-1.5 bg-slate-800 text-white rounded-lg font-semibold tabular-nums">${t} tracked</span>`+
-        dpStatusChip('bg-indigo-500','Delivered · 1st attempt', s.firstAttempt, t, 'delivered_first', ps(c&&c.firstAttempt))+
-        dpStatusChip('bg-sky-500','Delivered · after NDR', s.deliveredMulti, t, 'delivered_ndr', ps(c&&c.deliveredMulti))+
+        `<span class="inline-flex items-center px-3 py-1.5 bg-slate-800 text-white rounded-lg font-semibold tabular-nums" title="${dpAmtFull(t)}">${dpAmt(t)}${V?' order value':' tracked'}</span>`+
+        dpStatusChip('bg-indigo-500','Delivered · 1st attempt', g('firstAttempt'), t, 'delivered_first', ps(pv('firstAttempt')))+
+        dpStatusChip('bg-sky-500','Delivered · after NDR', g('deliveredMulti'), t, 'delivered_ndr', ps(pv('deliveredMulti')))+
         // RTO shows the RATE (÷ shipped = delivered + RTO), matching the RTO Rate card — the chip used to
         // show its share of tracked (735/3808 = 19.3%) directly under a card reading 24.6%, which looked
         // like one of the two was broken. Its delta comes from the same coreStats rate, so both sides of
         // the comparison use one base. The COUNT is unchanged, so the strip still adds up to tracked.
-        dpStatusChip('bg-red-500','RTO', s.rto, t, 'rto', null,
-            { pct: dpRtoRate(s), prevPct: (c && c.rtoRate!=null) ? c.rtoRate : null, base: (s.firstAttempt+s.deliveredMulti+s.rto)+' shipped (delivered + RTO)' })+
-        (s.lost>0 ? dpStatusChip('bg-rose-800','Lost', s.lost, t, 'lost', ps(c&&c.lost)) : '')+
-        dpStatusChip('bg-amber-500','NDR pending', s.ndrPending, t, 'ndr_pending', ps(c&&c.ndrPending))+
-        dpStatusChip('bg-slate-400','In-transit', s.inTransit, t, 'in_transit', ps(c&&c.inTransit))+
-        `<span class="inline-flex items-center gap-1 text-xs text-slate-400 ml-1" title="The COUNTS add up to tracked. Percentages are each chip's share of tracked — except RTO, which shows the RTO rate over shipped (delivered + RTO) so it matches the card above.">counts sum to tracked</span>`;
+        dpStatusChip('bg-red-500','RTO', g('rto'), t, 'rto', null,
+            { pct: dpRtoRate(V?{firstAttempt:s.firstAttemptValue,deliveredMulti:s.deliveredMultiValue,rto:s.rtoValue}:s),
+              prevPct: c ? (V ? (cr?cr.rtoRate:null) : (c.rtoRate!=null?c.rtoRate:null)) : null,
+              base: dpAmtFull(g('firstAttempt')+g('deliveredMulti')+g('rto'))+' shipped (delivered + RTO)' })+
+        (s.lost>0 ? dpStatusChip('bg-rose-800','Lost', g('lost'), t, 'lost', ps(pv('lost'))) : '')+
+        dpStatusChip('bg-amber-500','NDR pending', g('ndrPending'), t, 'ndr_pending', ps(pv('ndrPending')))+
+        dpStatusChip('bg-slate-400','In-transit', g('inTransit'), t, 'in_transit', ps(pv('inTransit')))+
+        `<span class="inline-flex items-center gap-1 text-xs text-slate-400 ml-1" title="The ${V?'values':'counts'} add up to ${V?'total order value':'tracked'}. Percentages are each chip's share of that total — except RTO, which shows the RTO rate over shipped (delivered + RTO) so it matches the card above.">${V?'values sum to total':'counts sum to tracked'}</span>`;
     el.querySelectorAll('.dp-chip').forEach(b=>b.addEventListener('click',()=>{ const st=b.dataset.state||'all';
         const sel=document.getElementById('dp-state'); if(sel){ sel.value=st; } dpTableRender();
         document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }));
 }
 // RTO composition — total RTO = attempted-then-returned + silent (never attempted). Both drill into the explorer.
 function dpRto(b,c){ const el=document.getElementById('dp-rto'); if(!el) return; if(!b||!b.total){ el.innerHTML=''; return; }
-    const cShare=v=> Math.round(v/b.total*1000)/10;              // share of current RTO
-    const pShare=v=> (c&&c.rto&&v!=null)? Math.round(v/c.rto*1000)/10 : null;
-    const chip=(state,dot,label,val,cur,prev)=>`<button data-state="${state}" class="dp-rchip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-red-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${val}</b>${dpPP(cur,prev)}</button>`;
+    const V=dpIsVal(), cr=(c&&c.rev)||null;
+    const tot = V ? (b.totalValue||0) : b.total;
+    const att = V ? (b.attemptedValue||0) : b.attempted;
+    const sil = V ? (b.silentValue||0) : b.silent;
+    const pTot = c ? (V ? (cr?cr.rto:0) : c.rto) : 0;
+    const cShare=v=> tot? Math.round(v/tot*1000)/10 : 0;          // share of current RTO
+    const pShare=v=> (pTot&&v!=null)? Math.round(v/pTot*1000)/10 : null;
+    const chip=(state,dot,label,val,cur,prev)=>`<button data-state="${state}" title="${dpAmtFull(val)}" class="dp-rchip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-red-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${dpAmt(val)}</b>${dpPP(cur,prev)}</button>`;
     el.innerHTML =
-        `<span class="text-slate-500 mr-1">RTO <b class="text-slate-800">${b.total}</b> =</span>`+
-        chip('rto_attempted','bg-red-500','after ≥1 attempt', b.attempted, cShare(b.attempted), pShare(c&&c.rtoAttempted))+
+        `<span class="text-slate-500 mr-1">RTO <b class="text-slate-800">${dpAmt(tot)}</b> =</span>`+
+        chip('rto_attempted','bg-red-500','after ≥1 attempt', att, cShare(att), pShare(c&&(V?(cr?cr.ndrRtoCount:null):c.rtoAttempted)))+
         `<span class="text-slate-400">+</span>`+
-        chip('rto_silent','bg-rose-300','silent · no attempt', b.silent, cShare(b.silent), pShare(c&&c.rtoSilent));
+        chip('rto_silent','bg-rose-300','silent · no attempt', sil, cShare(sil), pShare(c&&(V?(cr?(cr.rto-cr.ndrRtoCount):null):c.rtoSilent)));
     el.querySelectorAll('.dp-rchip').forEach(x=>x.addEventListener('click',()=>{ const sel=document.getElementById('dp-state'); if(sel) sel.value=x.dataset.state; dpTableRender();
         document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }));
 }
@@ -8943,26 +9059,35 @@ function dpFasr(rows){ const el=document.getElementById('dp-fasr'); if(!rows||!r
     const W=640,H=220,p={l:32,r:14,t:12,b:26}, iw=W-p.l-p.r, ih=H-p.t-p.b;
     const xs=rows.map((_,i)=>p.l+(rows.length===1?iw/2:i/(rows.length-1)*iw)); const y=v=>p.t+ih-(v/100)*ih;
     let g=''; for(let t=0;t<=100;t+=25){ g+=`<line x1="${p.l}" y1="${y(t)}" x2="${W-p.r}" y2="${y(t)}" stroke="#e2e8f0"/><text x="${p.l-6}" y="${y(t)+3}" text-anchor="end" fill="#94a3b8" font-size="11">${t}</text>`; }
-    const pts=rows.map((r,i)=>`${xs[i]},${y(r.fasr)}`).join(' ');
-    const dots=rows.map((r,i)=>`<circle cx="${xs[i]}" cy="${y(r.fasr)}" r="4" fill="#4f46e5" data-i="${i}"/>`).join('');
+    // ₹ mode plots the value-weighted FASR for the same day — a day where the misses were all high-value
+    // orders reads worse here than in count mode, which is the entire reason for having the lens.
+    const V=dpIsVal();
+    const fv=r=> V ? (r.fasrValue||0) : (r.fasr||0);
+    const fnum=r=> V ? (r.firstValue||0) : (r.first||0);
+    const fden=r=> V ? (r.reachedValue||0) : (r.reached||0);
+    const pts=rows.map((r,i)=>`${xs[i]},${y(fv(r))}`).join(' ');
+    const dots=rows.map((r,i)=>`<circle cx="${xs[i]}" cy="${y(fv(r))}" r="4" fill="#4f46e5" data-i="${i}"/>`).join('');
     const step=Math.ceil(rows.length/7); const xl=rows.map((r,i)=>i%step===0?`<text x="${xs[i]}" y="${H-8}" text-anchor="middle" fill="#94a3b8" font-size="11">${r.date.slice(5)}</text>`:'').join('');
     // Weighted-average line = Σfirst / Σresolved — this equals the FASR card value (period average).
-    const sumF=rows.reduce((a,r)=>a+(r.first||0),0), sumR=rows.reduce((a,r)=>a+(r.reached||0),0);
+    const sumF=rows.reduce((a,r)=>a+fnum(r),0), sumR=rows.reduce((a,r)=>a+fden(r),0);
     const avg=sumR?Math.round(sumF/sumR*1000)/10:0; const ay=y(avg);
     const avgLine=`<line x1="${p.l}" y1="${ay}" x2="${W-p.r}" y2="${ay}" stroke="#4f46e5" stroke-width="1.5" stroke-dasharray="5 4" opacity="0.6"/><text x="${W-p.r}" y="${ay-5}" text-anchor="end" fill="#4f46e5" font-size="11" font-weight="600">avg ${avg}%</text>`;
     el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%">${g}${avgLine}<polyline points="${pts}" fill="none" stroke="#4f46e5" stroke-width="2" stroke-linejoin="round"/>${dots}${xl}</svg>`;
-    el.querySelectorAll('circle').forEach(c=>{ c.addEventListener('mousemove',e=>{const r=rows[+c.dataset.i];dpShow(`<b>${r.date}</b> · FASR ${r.fasr}% (${r.first}/${r.reached})`,e.clientX,e.clientY);}); c.addEventListener('mouseleave',dpHide); });
+    el.querySelectorAll('circle').forEach(c=>{ c.addEventListener('mousemove',e=>{const r=rows[+c.dataset.i];dpShow(`<b>${r.date}</b> · FASR ${fv(r)}% (${dpAmtFull(fnum(r))}/${dpAmtFull(fden(r))})`,e.clientX,e.clientY);}); c.addEventListener('mouseleave',dpHide); });
 }
 // #1 — FASR vs NDR by payment mode (Prepaid vs COD), side-by-side metric bars.
 function dpPaymentSplit(bp){ const el=document.getElementById('dp-payment-split'); if(!el) return;
   if(!bp){ el.innerHTML='<div class="text-slate-400 text-sm py-6 text-center">No data</div>'; return; }
+  const V=dpIsVal();
+  // In ₹ mode each rate reads its *Value twin — same metric, value-weighted.
   const metrics=[['First-attempt (FASR)','fasr','#16a34a'],['NDR rate','ndrRate','#d97706'],['RTO rate','rtoRate','#dc2626'],['NDR recovery','ndrRecoveryRate','#4f46e5']];
   const col=(label,s)=>{
     if(!s||!s.tracked) return `<div><div class="flex items-center justify-between mb-3"><span class="text-sm font-bold text-slate-700">${label}</span><span class="text-xs text-slate-400">no shipments</span></div></div>`;
-    const rows=metrics.map(([lab,key,c])=>{ const v=s[key]||0;
+    const rows=metrics.map(([lab,key,c])=>{ const v=(V?s[key+'Value']:s[key])||0;
       return `<div class="mb-2.5"><div class="flex items-center justify-between text-xs mb-1"><span class="text-slate-500">${lab}</span><b class="tabular-nums text-slate-700">${v}%</b></div>
         <div class="h-1.5 rounded-full bg-slate-100 overflow-hidden"><div class="h-full rounded-full" style="width:${Math.min(100,v)}%;background:${c}"></div></div></div>`; }).join('');
-    return `<div><div class="flex items-center justify-between mb-3"><span class="text-sm font-bold text-slate-700">${label}</span><span class="text-xs text-slate-400 tabular-nums">${s.tracked} tracked · ${s.deliveredRate}% delivered</span></div>${rows}</div>`;
+    const head = V ? `${dpMoney(s.trackedValue)} value · ${s.deliveredRateValue}% delivered` : `${s.tracked} tracked · ${s.deliveredRate}% delivered`;
+    return `<div><div class="flex items-center justify-between mb-3"><span class="text-sm font-bold text-slate-700">${label}</span><span class="text-xs text-slate-400 tabular-nums" title="${V?dpMoneyFull(s.trackedValue):s.tracked+' tracked'}">${head}</span></div>${rows}</div>`;
   };
   el.innerHTML=`<div class="grid grid-cols-1 sm:grid-cols-2 gap-6">${col('Prepaid',bp.Prepaid)}${col('COD',bp.COD)}</div>`;
 }
@@ -9168,21 +9293,31 @@ async function dpLoadLikelyFake(){
 }
 // (Global "latest escalation replies" list removed — each order's mail thread shows inside its
 //  expanded row instead, auto-loaded on expand.)
-function dpFunnel(f){ const el=document.getElementById('dp-funnel'); const total=f&&f.total||0;
+function dpFunnel(f){ const el=document.getElementById('dp-funnel'); const V=dpIsVal();
+    const total = f ? (V ? (f.totalValue||0) : (f.total||0)) : 0;
     if(!total){ el.innerHTML='<div class="text-slate-400 text-sm py-8 text-center">No NDR shipments in range</div>'; return; }
-    const seg=[['Recovered → Delivered',f.recovered,'#16a34a'],['Lost → RTO',f.lost,'#dc2626'],['Still pending',f.pending,'#d97706']];
+    const g=(k)=> V ? (f[k+'Value']||0) : (f[k]||0);
+    const seg=[['Recovered → Delivered',g('recovered'),'#16a34a'],['Lost → RTO',g('lost'),'#dc2626'],['Still pending',g('pending'),'#d97706']];
     const W=380,BH=26; let bar='',x=0,rows='';
     seg.forEach(([lab,v,c])=>{ const w=v/total*W; if(w>0){ bar+=`<rect x="${x}" y="0" width="${Math.max(0,w-2)}" height="${BH}" rx="4" fill="${c}"/>`; x+=w; }
-      rows+=`<div class="flex items-center gap-2 mt-2 text-sm text-slate-700"><span class="w-2.5 h-2.5 rounded-full" style="background:${c}"></span><span class="flex-1">${lab}</span><b>${v}</b><span class="text-slate-400">${Math.round(v/total*1000)/10}%</span></div>`; });
+      rows+=`<div class="flex items-center gap-2 mt-2 text-sm text-slate-700" title="${dpAmtFull(v)}"><span class="w-2.5 h-2.5 rounded-full" style="background:${c}"></span><span class="flex-1">${lab}</span><b>${dpAmt(v)}</b><span class="text-slate-400">${Math.round(v/total*1000)/10}%</span></div>`; });
     // Reconcile the cohort's RTO (f.lost) to the dashboard's TOTAL RTO via "silent" RTOs (no failed attempt).
-    const dr=f.directRto||0, totalRto=f.totalRto!=null?f.totalRto:(f.lost+dr);
+    const dr=g('directRto'), totalRto=(V?f.totalRtoValue:f.totalRto)!=null?(V?f.totalRtoValue:f.totalRto):(g('lost')+dr);
+    const noun=V?' of order value':' shipments';
     const recon = dr>0
-      ? `<div class="text-xs text-slate-400 mt-3 leading-relaxed">${total} shipments had ≥1 failed delivery attempt.<br>RTO here (${f.lost}) + ${dr} silent RTO (returned with no delivery attempt) = <b class="text-slate-500">${totalRto} total RTO</b>.</div>`
-      : `<div class="text-xs text-slate-400 mt-3">${total} shipments had ≥1 failed delivery attempt · all ${totalRto} RTO had an attempt.</div>`;
+      ? `<div class="text-xs text-slate-400 mt-3 leading-relaxed">${dpAmt(total)}${noun} had ≥1 failed delivery attempt.<br>RTO here (${dpAmt(g('lost'))}) + ${dpAmt(dr)} silent RTO (returned with no delivery attempt) = <b class="text-slate-500">${dpAmt(totalRto)} total RTO</b>.</div>`
+      : `<div class="text-xs text-slate-400 mt-3">${dpAmt(total)}${noun} had ≥1 failed delivery attempt · all ${dpAmt(totalRto)} RTO had an attempt.</div>`;
     el.innerHTML=`<svg viewBox="0 0 ${W} ${BH}" style="width:100%;height:26px">${bar}</svg><div class="mt-1">${rows}</div>${recon}`;
 }
 function dpCourier(rows){ const el=document.getElementById('dp-courier'); if(!rows||!rows.length){ el.innerHTML='<div class="text-slate-400 text-sm py-6 text-center">No data in range</div>'; return; }
-    const max=Math.max(...rows.map(r=>r.rto),1);
+    // ₹ mode ranks by RETURNED VALUE, not return count — the courier that sends back 20 cheap parcels and
+    // the one that sends back 5 expensive ones are not the same problem, and only this view separates them.
+    const V=dpIsVal();
+    const rv=r=> V ? (r.rtoValue||0) : (r.rto||0);
+    const tv=r=> V ? (r.totalValue||0) : (r.total||0);
+    const rt=r=> V ? (r.rtoRateValue||0) : (r.rtoRate||0);
+    rows = V ? rows.slice().sort((a,b)=>rv(b)-rv(a)) : rows;
+    const max=Math.max(...rows.map(rv),1);
     // Bar LENGTH = RTO volume; bar/figure COLOR = RTO-rate severity (green ok · amber watch · red high).
     const sev=rate=> rate>=25?{bar:'#ef4444',fig:'text-red-600'}
                     : rate>=15?{bar:'#f59e0b',fig:'text-amber-600'}
@@ -9198,19 +9333,22 @@ function dpCourier(rows){ const el=document.getElementById('dp-courier'); if(!ro
       `<div class="flex items-center" style="gap:8px;margin-bottom:6px;padding:0 4px;font-size:10px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.04em">
          <span style="width:${LBL}px;flex:none">Courier</span><span style="flex:1">Returns</span><span style="width:${RATE}px;flex:none;text-align:right">RTO&nbsp;rate</span>
        </div>`+
-      rows.map((r,i)=>{ const w=Math.max(3, Math.round(r.rto/max*100)); const s=sev(r.rtoRate); const inside=w>=14;
+      rows.map((r,i)=>{ const w=Math.max(3, Math.round(rv(r)/max*100)); const s=sev(rt(r)); const inside=w>=14;
+        const barLbl=dpAmt(rv(r));
         return `<div class="dp-cr flex items-center cursor-pointer" style="gap:8px;padding:2px 4px;border-radius:6px" data-i="${i}" title="Filter dashboard to ${r.courier||''}">
           <div class="truncate" style="width:${LBL}px;flex:none;font-size:12px;color:#334155" title="${r.courier||''}">${r.courier||'—'}</div>
           <div class="relative overflow-hidden" style="flex:1;min-width:56px;height:14px;background:#f1f5f9;border-radius:4px">
-            <div class="absolute flex items-center justify-end transition-all" style="top:0;bottom:0;left:0;width:${w}%;background:${s.bar};border-radius:4px;padding-right:5px">${inside?`<span style="font-size:10px;font-weight:700;color:#fff;font-variant-numeric:tabular-nums">${r.rto}</span>`:''}</div>
-            ${inside?'':`<span class="absolute flex items-center" style="top:0;bottom:0;left:calc(${w}% + 5px);font-size:10px;font-weight:700;color:#475569;font-variant-numeric:tabular-nums">${r.rto}</span>`}
+            <div class="absolute flex items-center justify-end transition-all" style="top:0;bottom:0;left:0;width:${w}%;background:${s.bar};border-radius:4px;padding-right:5px">${inside?`<span style="font-size:10px;font-weight:700;color:#fff;font-variant-numeric:tabular-nums">${barLbl}</span>`:''}</div>
+            ${inside?'':`<span class="absolute flex items-center" style="top:0;bottom:0;left:calc(${w}% + 5px);font-size:10px;font-weight:700;color:#475569;font-variant-numeric:tabular-nums">${barLbl}</span>`}
           </div>
           <div class="${s.fig}" style="width:${RATE}px;flex:none;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap">
-            <b>${r.rtoRate}%</b><span style="color:#94a3b8;font-weight:400"> of ${r.total}</span>
+            <b>${rt(r)}%</b><span style="color:#94a3b8;font-weight:400"> of ${dpAmt(tv(r))}</span>
           </div>
         </div>`; }).join('');
-    el.querySelectorAll('.dp-cr').forEach(rc=>{ rc.addEventListener('mousemove',e=>{const r=rows[+rc.dataset.i];dpShow(`<b>${r.courier}</b> · ${r.rto} RTO of ${r.total} (${r.rtoRate}%)`,e.clientX,e.clientY);}); rc.addEventListener('mouseleave',dpHide);
-        rc.addEventListener('click',()=>{ const r=rows[+rc.dataset.i]; if(!r||!r.courier) return; _dpCourier=r.courier; const sel=document.getElementById('dp-courier-filter'); if(sel) sel.value=r.courier; dpHide(); dpTableRender();
+    el.querySelectorAll('.dp-cr').forEach(rc=>{ rc.addEventListener('mousemove',e=>{const r=rows[+rc.dataset.i];dpShow(`<b>${r.courier}</b> · ${dpAmtFull(rv(r))} RTO of ${dpAmtFull(tv(r))} (${rt(r)}%)`,e.clientX,e.clientY);}); rc.addEventListener('mouseleave',dpHide);
+        // Clicking a courier now filters the WHOLE dashboard (dpLoad), matching the dropdown — it used to
+        // call dpTableRender(), which moved the table but left every KPI above showing all couriers.
+        rc.addEventListener('click',()=>{ const r=rows[+rc.dataset.i]; if(!r||!r.courier) return; _dpCourier=r.courier; const sel=document.getElementById('dp-courier-filter'); if(sel) sel.value=r.courier; dpHide(); dpLoad();
             document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }); });
 }
 const DP_STATE_BADGE={
@@ -9233,18 +9371,25 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
     else if(state==='rto_attempted') list=list.filter(r=>r.state==='rto' && (r.ndr_count||0)>0);
     else if(state==='rto_silent') list=list.filter(r=>r.state==='rto' && (r.ndr_count||0)===0);
     else if(state!=='all') list=list.filter(r=>r.state===state);
-    if(_dpCourier!=='all') list=list.filter(r=>(r.courier||'Unknown')===_dpCourier);
+    // ⚠️ NO courier filter here any more. Courier is a DASHBOARD-level filter — the server has already
+    // excluded other couriers from `d.shipments`, so filtering again would be a second, independent copy
+    // of the same rule that could silently disagree with the KPIs above it.
     if(_dpTatFilter!=null) list=list.filter(r=>dpOtdBucket(r.otdHrs)===_dpTatFilter);   // Order→Dispatch TAT bucket
     if(q) list=list.filter(r=>(r.order||'').toLowerCase().includes(q)||(r.awb||'').toLowerCase().includes(q));
     const cnt=document.getElementById('dp-count');
-    if(cnt) cnt.textContent=`${list.length} shown${_dpTatFilter!=null?` · O→Dispatch ${DP_TAT_BUCKETS[_dpTatFilter].label}h`:''}${d.shipmentsTruncated?` · list capped at ${all.length} of ${d.shipmentsTotal}`:''}`;
+    const shownVal=list.reduce((a,r)=>a+(Number(r.value)||0),0);
+    if(cnt) cnt.textContent=`${list.length} shown${dpIsVal()?` · ${dpMoneyFull(shownVal)}`:''}${_dpCourier!=='all'?` · ${_dpCourier}`:''}${_dpTatFilter!=null?` · O→Dispatch ${DP_TAT_BUCKETS[_dpTatFilter].label}h`:''}${d.shipmentsTruncated?` · list capped at ${all.length} of ${d.shipmentsTotal}`:''}`;
     if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-6">No shipments match this filter</div>'; return; }
     // ── sort (click a header to change) ──
     const dir=_dpSort.dir==='asc'?1:-1;
     list=list.slice().sort((a,b)=>{ const va=dpSortVal(a,_dpSort.key), vb=dpSortVal(b,_dpSort.key); return va<vb?-dir:va>vb?dir:0; });
     const th='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
     const td='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
+    // The Value column is part of the ₹ capability — without it the server sends no `value` at all, so
+    // the column would render a row of dashes and advertise data the user may not have.
+    const showVal=canSeeRevenue() && d.revenueAllowed!==false;
     const cols=[{k:'order',l:'Order / AWB'},{k:'state',l:'State'},{k:'type',l:'Type'},{k:'courier',l:'Courier'},
+        ...(showVal?[{k:'value',l:'Value',a:1}]:[]),
         {k:'attempts',l:'Att',a:1},{k:'ndr_count',l:'NDR',a:1},{k:null,l:'Pay'},{k:null,l:'Zone',c:1},
         {k:'order_date',l:'Ordered'},{k:'edd',l:'Promise'},{k:'otdHrs',l:'O→Disp'},{k:null,l:'NDR reasons'}];
     const head=cols.map(col=>{ const al=col.a?' text-right':col.c?' text-center':'';
@@ -9266,6 +9411,7 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
           `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${b[1]}">${b[0]}</span>${r.marked_fake?' <span title="Marked likely-fake">🚩</span>':''}${r.mail_sent?' <span title="Critical mail sent">✉️</span>':''}</td>`+
           `<td class="${td}">${typ}</td>`+
           `<td class="${td} text-slate-600"><div class="truncate max-w-[130px]" title="${r.courier||''}">${r.courier||'—'}</div></td>`+
+          (showVal?`<td class="${td} text-right tabular-nums ${dpIsVal()?'text-slate-800 font-semibold':'text-slate-500'}" title="${dpMoneyFull(r.value)}">${r.value?dpMoney(r.value):'<span class="text-slate-300">—</span>'}</td>`:'')+
           `<td class="${td} text-right tabular-nums ${r.attempts>1?'text-slate-800 font-medium':'text-slate-400'}">${r.attempts}</td>`+
           `<td class="${td} text-right tabular-nums ${r.ndr_count>0?'text-rose-600 font-medium':'text-slate-400'}">${r.ndr_count}</td>`+
           `<td class="${td}">${pay}</td>`+
@@ -9275,13 +9421,13 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
           `<td class="${td}">${otdCell}</td>`+
           `<td class="px-3 py-2.5 text-sm border-b border-slate-100 align-middle"><div class="truncate max-w-[240px] text-xs text-slate-500" title="${reasons.replace(/"/g,'&quot;')}">${reasons||'—'}</div></td>`+
         `</tr>`;
-        if(open) out+=dpRenderDetail(r,td);
+        if(open) out+=dpRenderDetail(r,td,cols.length);
         return out; }).join('');
     const more=list.length>500?`<div class="text-xs text-slate-400 p-3 text-center border-t border-slate-100">Showing first 500 of ${list.length} — narrow with search or filters</div>`:'';
     c.innerHTML=`<div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>${more}`;
     c.querySelectorAll('.dp-sort').forEach(h=>h.addEventListener('click',()=>{ const k=h.dataset.k;
         if(_dpSort.key===k) _dpSort.dir=_dpSort.dir==='asc'?'desc':'asc';
-        else _dpSort={key:k, dir:(['attempts','ndr_count','otdHrs','order_date'].includes(k)?'desc':'asc')};
+        else _dpSort={key:k, dir:(['attempts','ndr_count','otdHrs','order_date','value'].includes(k)?'desc':'asc')};
         dpTableRender(); }));
     c.querySelectorAll('.dp-row').forEach(row=>row.addEventListener('click',()=>{ const awb=row.dataset.awb; if(!awb) return;
         _dpOpenAwb=(_dpOpenAwb===awb)?null:awb; dpTableRender();
@@ -9345,7 +9491,7 @@ function dpBasketRenderBar() {
     document.getElementById('dp-basket-clear').addEventListener('click', dpBasketClear);
 }
 
-function dpRenderDetail(r,td){ const ts=r.ts||{};
+function dpRenderDetail(r,td,ncols){ const ts=r.ts||{};
     const sc=_dpScanCache[r.awb];
     const eddVal=ts.edd||(sc&&sc.edd)||null;   // fall back to the live DocPharma promise EDD
     const step=(label,iso,color)=>{ const on=!!iso; return `<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:${on?color:'#cbd5e1'}"></span><span class="w-28 text-slate-500">${label}</span><span class="tabular-nums ${on?'text-slate-700 font-medium':'text-slate-300'}">${dpFmtTs(iso)}</span></div>`; };
@@ -9408,7 +9554,10 @@ function dpRenderDetail(r,td){ const ts=r.ts||{};
         ${(r.state==='ndr_pending'&&r.awb)?`<button class="dp-ndr-action px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100" data-awb="${ecEsc(r.awb)}" data-order="${ecEsc(r.order||'')}">🔁 NDR action (reattempt / return)</button>`:''}
         <span class="dp-action-status text-xs"></span>
       </div>`;
-    return `<tr class="dp-detail"><td colspan="12" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
+    // colspan MUST equal the header column count, which now VARIES: 13 with the ₹ Value column, 12 for a
+    // user without the revenue capability. Passed in rather than hardcoded — a fixed number would leave
+    // the expanded panel short of the table's right edge for one of the two audiences.
+    return `<tr class="dp-detail"><td colspan="${ncols||13}" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
         <div class="grid md:grid-cols-2 gap-6">
           <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Date log</div>${timeline}${meta}${chargeHtml}</div>
           <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log</div>${scanHtml}</div>

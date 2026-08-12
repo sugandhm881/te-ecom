@@ -48,6 +48,96 @@ const STATE_LABEL = {
 // selects them itself and can fetch live), so pulling 7 more columns for every one of ~5.5k rows would
 // be paid on every page load and never used.
 const _JOURNEY_COLS = 'awb, order_name, source, courier, outcome, attempts, ndr_count, reached_delivery, first_attempt_success, ndr_reasons, out_for_delivery_at, delivered_at, rto_at, dispatched_at, order_date, first_edd, status_code, payment_mode, zone, order_type, dest_state, dest_city, dest_pincode';
+// ── Who may see ₹ on Delivery Performance ───────────────────────────────────────────────────────
+// Order value is commercially sensitive — a support agent needs the delivery numbers but not what the
+// business bills. Gated on the `delivery-perf-revenue` capability (granted per user on the Users page).
+//
+// ⚠️ ENFORCED HERE, NOT ONLY IN THE UI. Hiding the toggle stops the button being clicked; it does not
+// stop anyone reading the JSON straight off the endpoint they already have `delivery-perf` access to.
+// When this returns false the value lookup is SKIPPED ENTIRELY — no order price is read from the
+// database, let alone serialised — so there is nothing to leak rather than something hidden.
+//
+// A legacy token carries neither `role` nor `permissions` (bootstrap env-admin) → full access, matching
+// applyPermissions() on the client.
+function canSeeRevenue(req) {
+    const u = req.user || {};
+    if (u.role === undefined && u.permissions === undefined) return true;   // legacy bootstrap admin
+    if (u.role === 'admin') return true;
+    const perms = Array.isArray(u.permissions) ? u.permissions : [];
+    return perms.includes('*') || perms.includes('delivery-perf-revenue');
+}
+
+// ── Order value for the REVENUE lens on Delivery Performance ────────────────────────────────────
+// Attaches `order_value` (₹, gross Shopify order total) to each journey row, in place.
+//
+// ⚠️ IT MUST COME FROM `orders.total_price`, NOT `shipment_journey_ecom.shipment_value`. That column is
+// populated by the RapidShyp freight fetch ONLY — measured over the last 30 days it covers 79.4% of
+// RapidShyp rows and **0% of Kwikship and 0% of DocPharma** (0 of 1,799). A revenue view built on it
+// would silently report ₹0 for ~46% of shipments and understate every total. The Shopify order covers
+// 99.9% / 99.6% / 100% across the three sources, so that is the honest base.
+//
+// Deliberately NOT denormalised onto the journey row: that would be a fourth field the webhook and the
+// cron must both remember to write, which is exactly the drift that froze 240 shipments on 2026-08-12.
+// This derives it at read time from the one source of truth instead. Batched (Supabase caps any response
+// at 1000 rows) and issued in parallel; ~6 extra queries for a 30-day window.
+async function attachOrderValue(rows) {
+    const EMPTY = { total: 0, matched: 0, failedBatches: 0, complete: true };
+    if (!rows || !rows.length) return EMPTY;
+    const names = [...new Set(rows.map(r => String(r.order_name || '').trim()).filter(Boolean))];
+    if (!names.length) return EMPTY;
+    // ⚠️ NEEDS `idx_orders_name` (migration add_orders_name_index). Without it each batch seq-scans all
+    // ~41k orders and a 90-day window blew the statement timeout — and because the error is caught below,
+    // the failure was SILENT: the ₹ view would have rendered 0 for whole batches instead of erroring.
+    // Shopify stores every name '#'-prefixed (40,891 of 40,891 checked) while the journey stores it bare,
+    // so '#'+name is the match that actually fires; the bare form is kept only as a cheap safety net.
+    const price = new Map();
+    let failed = 0, pageCount = 0;
+    // Ask for the '#'-prefixed form ONLY, so a chunk of 900 names returns at most 900 rows and stays under
+    // the 1000-row cap. Sending both spellings halved the usable chunk and tripled the round trips (50 for
+    // a 90-day window). A second pass below covers the handful that don't match, so nothing is lost.
+    const CHUNK = 900;
+    const collect = async (reqs) => {
+        const pages = await Promise.all(reqs);
+        pageCount += pages.length;
+        for (const p of pages) {
+            if (p.error) { failed++; console.error('[DeliveryPerf] order value:', p.error.message); continue; }
+            (p.data || []).forEach(o => {
+                const key = String(o.name || '').replace(/^#/, '').trim();
+                const v = Number(o.total_price);
+                if (key && isFinite(v)) price.set(key, v);
+            });
+        }
+    };
+    const reqs = [];
+    for (let i = 0; i < names.length; i += CHUNK) {
+        reqs.push(supabase.from('orders').select('name, total_price')
+            .in('name', names.slice(i, i + CHUNK).map(n => '#' + n)));
+    }
+    await collect(reqs);
+    // Safety net for any order stored WITHOUT the '#' (none today — 40,891 of 40,891 have it — but the
+    // fallback costs one query only when something actually missed, so it can never silently drop value).
+    const missed = names.filter(n => !price.has(n));
+    if (missed.length) {
+        const back = [];
+        for (let i = 0; i < missed.length; i += CHUNK) back.push(supabase.from('orders').select('name, total_price').in('name', missed.slice(i, i + CHUNK)));
+        await collect(back);
+    }
+    // Unmatched rows get 0, never null — a missing price must not poison a SUM or an average.
+    // ⚠️ ROUNDED TO WHOLE RUPEES HERE, ONCE. Shopify totals carry paise, and rounding each GROUP instead
+    // let the parts disagree with the whole: the status strip summed to ₹46,60,506 against a stated total
+    // of ₹46,60,507. A reconciliation strip that is off by ₹1 reads as broken, and "the parts add up" is
+    // the entire promise of that strip — so every row is made an integer at the source and every sum
+    // downstream is then exact by construction, in every section, forever.
+    rows.forEach(r => { r.order_value = Math.round(price.get(String(r.order_name || '').trim()) || 0); });
+    // Report coverage so the UI can SAY the ₹ figures are incomplete rather than quietly under-report.
+    const matched = rows.filter(r => r.order_value > 0).length;
+    if (failed) console.error(`[DeliveryPerf] order value: ${failed}/${pageCount} batch(es) FAILED — revenue figures are understated`);
+    return { total: rows.length, matched, failedBatches: failed, complete: failed === 0 };
+}
+// Sum of order value over a row set (the revenue counterpart of `arr.length`). No rounding here — the
+// inputs are already whole rupees (see above), so sums stay exact and partitions reconcile.
+const sumV = arr => (arr || []).reduce((a, r) => a + (Number(r.order_value) || 0), 0);
+
 async function fetchJourneys(fromISO, toISO, source, payment, zone, courier, orderType, state) {
     const PAGE = 1000;
     // One filtered page query. `withCount` (page 0 only) makes Postgres return the TOTAL match count so the
@@ -117,6 +207,8 @@ function summarizeAll(rows) {
     const avgAttempts = attemptsArr.length ? Math.round((attemptsArr.reduce((a, b) => a + b, 0) / attemptsArr.length) * 100) / 100 : 0;
     const otd = tatSummary(rows.map(r => diff(r.order_date, r.dispatched_at, 'hrs')), BUCKETS_HRS, 'hrs');
     const dtd = tatSummary(delivered.map(r => diff(r.dispatched_at, r.delivered_at, 'days')), BUCKETS_DAYS, 'days');
+    const ndrPendingCohort = ndr.filter(r => r.outcome === 'ndr_pending');
+    const ndrLostCohort = ndr.filter(r => r.outcome === 'lost');
     return {
         totalShipments: tracked, resolved, delivered: delivered.length, rto: rto.length, lost: lost.length,
         inTransit: inTransit.length, ndrPending: pending.length,
@@ -126,6 +218,36 @@ function summarizeAll(rows) {
         fasr: pct(firstAttempt.length, tracked), rtoRate: pct(rto.length, resolved),
         deliveredRate: pct(delivered.length, tracked), ndrRecoveryRate: pct(ndrDelivered.length, ndr.length),
         avgAttempts, otdAvg: otd.avg, dtdAvg: dtd.avg,
+        // NDR cohort split — the four outcomes an NDR shipment can end in. They sum to ndrTotal exactly,
+        // which is the point: the recovery card shows all of them so the numbers reconcile on screen.
+        ndrRtoCount: ndrRto.length, ndrPendingCount: ndrPendingCohort.length, ndrLostCount: ndrLostCohort.length,
+        // ── Revenue lens (₹). Parallel to every count above; nothing here replaces a count field. ──
+        rev: revSummary({ tracked: rows, delivered, rto, lost, inTransit, pending, firstAttempt,
+            ndr, ndrDelivered, ndrRto, ndrPendingCohort, ndrLostCohort, resolvedRows: [...delivered, ...rto] }),
+    };
+}
+
+// Revenue-weighted counterpart of the count metrics. Same definitions, same denominators — the only
+// change is that each shipment contributes its order value instead of 1. Kept in ONE function so a
+// rate can never be defined two different ways between the count view and the ₹ view.
+function revSummary(g) {
+    const trackedV = sumV(g.tracked), deliveredV = sumV(g.delivered), rtoV = sumV(g.rto);
+    const resolvedV = deliveredV + rtoV;
+    const firstV = sumV(g.firstAttempt), ndrV = sumV(g.ndr), ndrRecoveredV = sumV(g.ndrDelivered);
+    const ndrRtoV = sumV(g.ndrRto), ndrPendingV = sumV(g.ndrPendingCohort), ndrLostV = sumV(g.ndrLostCohort);
+    const pendingV = sumV(g.pending), inTransitV = sumV(g.inTransit), lostV = sumV(g.lost);
+    return {
+        tracked: trackedV, resolved: resolvedV, delivered: deliveredV, rto: rtoV, lost: lostV,
+        inTransit: inTransitV, ndrPending: pendingV,
+        firstAttempt: firstV, deliveredMulti: deliveredV - firstV,
+        ndrTotal: ndrV, ndrRecovered: ndrRecoveredV,
+        ndrRtoCount: ndrRtoV, ndrPendingCount: ndrPendingV, ndrLostCount: ndrLostV,
+        fasr: pct(firstV, trackedV), rtoRate: pct(rtoV, resolvedV),
+        deliveredRate: pct(deliveredV, trackedV), ndrRecoveryRate: pct(ndrRecoveredV, ndrV),
+        // Money that has NOT yet landed and still could go either way — open NDRs + everything in transit.
+        // This is the card that replaces "Avg Delivery Attempts" in ₹ mode, which has no rupee analogue.
+        atRisk: pendingV + inTransitV,
+        avgOrderValue: g.tracked.length ? Math.round(trackedV / g.tracked.length) : 0,
     };
 }
 
@@ -143,11 +265,18 @@ function paymentSplit(rows) {
         const rto = arr.filter(r => r.outcome === 'rto');
         const ndr = arr.filter(r => (r.ndr_count || 0) > 0);
         const ndrDelivered = ndr.filter(r => r.outcome === 'delivered');
+        const trackedV = sumV(arr), deliveredV = sumV(delivered), rtoV = sumV(rto);
+        const ndrV = sumV(ndr), firstV = sumV(first), ndrDeliveredV = sumV(ndrDelivered);
         return {
             tracked, delivered: delivered.length, ndrTotal: ndr.length, rto: rto.length,
             fasr: pct(first.length, tracked), ndrRate: pct(ndr.length, tracked),
             ndrRecoveryRate: pct(ndrDelivered.length, ndr.length), rtoRate: pct(rto.length, delivered.length + rto.length),
             deliveredRate: pct(delivered.length, tracked),
+            // ₹ lens — same definitions, value-weighted
+            trackedValue: trackedV, deliveredValue: deliveredV, rtoValue: rtoV, ndrValue: ndrV,
+            fasrValue: pct(firstV, trackedV), ndrRateValue: pct(ndrV, trackedV),
+            ndrRecoveryRateValue: pct(ndrDeliveredV, ndrV), rtoRateValue: pct(rtoV, deliveredV + rtoV),
+            deliveredRateValue: pct(deliveredV, trackedV),
         };
     };
     return { COD: stat(groups.COD), Prepaid: stat(groups.Prepaid) };
@@ -191,6 +320,13 @@ router.get('/delivery-performance', async (req, res) => {
             fetchJourneys(fromISO, toISO, source, payment, 'all', 'all', orderType, 'all'),
             prevWin ? fetchJourneys(prevWin.fromISO, prevWin.toISO, source, payment, 'all', 'all', orderType, 'all') : Promise.resolve(null),
         ]);
+        // Attach ₹ order value for the revenue lens (both windows, in parallel). Additive: every count
+        // metric below is unchanged whether this succeeds or not — a failed lookup just leaves values at 0.
+        // Skipped outright for users without `delivery-perf-revenue`, so no price is ever read for them.
+        const revAllowed = canSeeRevenue(req);
+        const [valueStat] = revAllowed
+            ? await Promise.all([attachOrderValue(allRows), prevRowsRaw ? attachOrderValue(prevRowsRaw) : Promise.resolve(null)])
+            : [null];
         const courierCount = {}, stateCount = {}, stateDisp = {}, zoneCount = {};
         allRows.forEach(r => {
             const c = r.courier || 'Unknown'; courierCount[c] = (courierCount[c] || 0) + 1;
@@ -227,6 +363,7 @@ router.get('/delivery-performance', async (req, res) => {
         const pending     = rows.filter(r => r.outcome === 'ndr_pending');   // reached delivery, NDR, not yet resolved
         const resolved    = delivered.length + rto.length;                    // "Total Shipped" for the rates
         const firstAttempt   = delivered.filter(r => r.first_attempt_success);
+        const deliveredMultiRows = delivered.filter(r => !r.first_attempt_success);  // same set, kept for ₹ sums
         const deliveredMulti = delivered.length - firstAttempt.length;        // Rest − First-Attempt (delivered after ≥1 NDR)
 
         // NDR cohort = shipments with ≥1 failed attempt, split by outcome (recovered vs lost vs pending)
@@ -234,6 +371,7 @@ router.get('/delivery-performance', async (req, res) => {
         const ndrDelivered = ndr.filter(r => r.outcome === 'delivered');
         const ndrRto = ndr.filter(r => r.outcome === 'rto');
         const ndrPending = ndr.filter(r => r.outcome === 'ndr_pending');
+        const ndrLostCohort = ndr.filter(r => r.outcome === 'lost');   // rare, but must be shown or the split won't sum
         // "Silent" RTOs — returned WITHOUT a recorded failed delivery attempt (RTO'd at pickup /
         // undeliverable pre-dispatch / cancelled in transit). These are in total RTO but NOT the NDR cohort.
         const directRto = rto.length - ndrRto.length;
@@ -270,6 +408,17 @@ router.get('/delivery-performance', async (req, res) => {
             ndrLost: ndrRto.length,
             ndrPending: ndrPending.length,
             ndrRecoveryRate: pct(ndrDelivered.length, ndr.length),   // recovered ÷ all-NDR (your 100/300)
+            // ── NDR cohort, fully partitioned (added 2026-08-12) ──────────────────────────────────
+            // The card used to show recovery alone; recovery without the other three is only a third of
+            // the story — on the live 30-day window 60.4% of the NDR cohort RTO'd against 28.4% recovered.
+            // These four sum to ndrTotal EXACTLY, so the split can be read off the card and checked.
+            ndrRtoCount: ndrRto.length, ndrRtoRate: pct(ndrRto.length, ndr.length),
+            ndrPendingCount: ndrPending.length, ndrPendingRate: pct(ndrPending.length, ndr.length),
+            ndrLostCount: ndrLostCohort.length, ndrLostRate: pct(ndrLostCohort.length, ndr.length),
+            // ── Revenue lens (₹) — parallel to every count above, replaces nothing ──
+            rev: revSummary({ tracked: rows, delivered, rto, lost, inTransit, pending, firstAttempt,
+                ndr, ndrDelivered, ndrRto, ndrPendingCohort: ndrPending, ndrLostCohort,
+                resolvedRows: [...delivered, ...rto] }),
         };
 
         // Detailed status breakdown — a TRUE PARTITION: the five states sum to `total` (tracked).
@@ -283,15 +432,22 @@ router.get('/delivery-performance', async (req, res) => {
             lost: lost.length,
             inTransit: inTransit.length,
             ndrPending: pending.length,
+            // ₹ counterparts of every count above — same sets, summed by order value.
+            firstAttemptValue: sumV(firstAttempt), deliveredMultiValue: sumV(deliveredMultiRows),
+            deliveredValue: sumV(delivered), rtoValue: sumV(rto), lostValue: sumV(lost),
+            inTransitValue: sumV(inTransit), ndrPendingValue: sumV(pending),
             // explicit partition (each shipment counted once) for the reconciliation strip
+            // `value` mirrors `count` for the ₹ lens — the partition sums to totalValue exactly as the
+            // counts sum to total, so the reconciliation strip stays honest in either mode.
             partition: [
-                { key: 'delivered_first', label: STATE_LABEL.delivered_first, count: firstAttempt.length },
-                { key: 'delivered_ndr',   label: STATE_LABEL.delivered_ndr,   count: deliveredMulti },
-                { key: 'rto',             label: STATE_LABEL.rto,             count: rto.length },
-                { key: 'lost',            label: STATE_LABEL.lost,            count: lost.length },
-                { key: 'ndr_pending',     label: STATE_LABEL.ndr_pending,     count: pending.length },
-                { key: 'in_transit',      label: STATE_LABEL.in_transit,      count: inTransit.length },
+                { key: 'delivered_first', label: STATE_LABEL.delivered_first, count: firstAttempt.length, value: sumV(firstAttempt) },
+                { key: 'delivered_ndr',   label: STATE_LABEL.delivered_ndr,   count: deliveredMulti,      value: sumV(deliveredMultiRows) },
+                { key: 'rto',             label: STATE_LABEL.rto,             count: rto.length,          value: sumV(rto) },
+                { key: 'lost',            label: STATE_LABEL.lost,            count: lost.length,         value: sumV(lost) },
+                { key: 'ndr_pending',     label: STATE_LABEL.ndr_pending,     count: pending.length,      value: sumV(pending) },
+                { key: 'in_transit',      label: STATE_LABEL.in_transit,      count: inTransit.length,    value: sumV(inTransit) },
             ].filter(p => p.key !== 'lost' || p.count > 0),   // hide Lost bucket when there are none
+            totalValue: sumV(rows), resolvedValue: sumV([...delivered, ...rto]),
         };
 
         // ── FASR trend (by day) — % of that day's TRACKED shipments delivered on the first attempt.
@@ -300,20 +456,30 @@ router.get('/delivery-performance', async (req, res) => {
         const byDay = {};
         rows.forEach(r => {
             const k = dayKey(r.order_date); if (!k) return;
-            (byDay[k] = byDay[k] || { tracked: 0, first: 0 });
-            byDay[k].tracked++; if (r.outcome === 'delivered' && r.first_attempt_success) byDay[k].first++;
+            (byDay[k] = byDay[k] || { tracked: 0, first: 0, trackedV: 0, firstV: 0 });
+            const v = Number(r.order_value) || 0;
+            byDay[k].tracked++; byDay[k].trackedV += v;
+            if (r.outcome === 'delivered' && r.first_attempt_success) { byDay[k].first++; byDay[k].firstV += v; }
         });
-        const fasrTrend = Object.keys(byDay).sort().map(k => ({ date: k, reached: byDay[k].tracked, first: byDay[k].first, fasr: pct(byDay[k].first, byDay[k].tracked) }));
+        const fasrTrend = Object.keys(byDay).sort().map(k => ({
+            date: k, reached: byDay[k].tracked, first: byDay[k].first, fasr: pct(byDay[k].first, byDay[k].tracked),
+            // ₹ lens: same day, same definition, value-weighted
+            reachedValue: byDay[k].trackedV, firstValue: byDay[k].firstV,   // already whole rupees
+            fasrValue: pct(byDay[k].firstV, byDay[k].trackedV),
+        }));
 
         // ── RTO by courier (% of that courier's RESOLVED shipments) ──
         const courierMap = {};
         [...delivered, ...rto].forEach(r => {
             const c = r.courier || 'Unknown';
-            (courierMap[c] = courierMap[c] || { total: 0, rto: 0 });
-            courierMap[c].total++; if (r.outcome === 'rto') courierMap[c].rto++;
+            (courierMap[c] = courierMap[c] || { total: 0, rto: 0, totalV: 0, rtoV: 0 });
+            const v = Number(r.order_value) || 0;
+            courierMap[c].total++; courierMap[c].totalV += v;
+            if (r.outcome === 'rto') { courierMap[c].rto++; courierMap[c].rtoV += v; }
         });
         const rtoByCourier = Object.entries(courierMap)
-            .map(([courier, v]) => ({ courier, total: v.total, rto: v.rto, rtoRate: pct(v.rto, v.total) }))
+            .map(([courier, v]) => ({ courier, total: v.total, rto: v.rto, rtoRate: pct(v.rto, v.total),
+                totalValue: v.totalV, rtoValue: v.rtoV, rtoRateValue: pct(v.rtoV, v.totalV) }))
             .sort((a, b) => b.rto - a.rto).slice(0, 12);
 
         // ── TAT (Turn-Around-Time) — Order→Dispatch and Dispatch→Delivery, in day buckets ──
@@ -349,6 +515,7 @@ router.get('/delivery-performance', async (req, res) => {
             .map(r => ({
                 order: r.order_name, awb: r.awb, source: r.source, courier: r.courier,
                 state: stateOf(r), outcome: r.outcome,
+                value: Number(r.order_value) || 0,        // ₹ order total — powers the revenue lens + table column
                 attempts: r.attempts || 0, ndr_count: r.ndr_count || 0,
                 payment: r.payment_mode || null, zone: r.zone || null, order_type: r.order_type || null,
                 dest_state: r.dest_state || null, dest_city: r.dest_city || null, dest_pincode: r.dest_pincode || null,
@@ -369,19 +536,43 @@ router.get('/delivery-performance', async (req, res) => {
             .sort((a, b) => (b.order_date || '').localeCompare(a.order_date || ''));
         const shipmentsTruncated = shipments.length > CAP;
 
-        res.json({
+        // Strip EVERY ₹ field for users without the capability. The lookup was already skipped so these
+        // are all zeros rather than real prices, but shipping a zeroed shadow of a restricted metric is
+        // still confusing — and deleting by SHAPE (`rev`, `*Value`, `value`) means any revenue field added
+        // to this payload in future is withheld automatically, instead of leaking until someone remembers
+        // to add it to a list. Scoped to this response object only, which contains no other such keys.
+        const stripRevenue = (o) => {
+            if (Array.isArray(o)) { o.forEach(stripRevenue); return o; }
+            if (!o || typeof o !== 'object') return o;
+            for (const k of Object.keys(o)) {
+                if (k === 'rev' || k === 'value' || k === 'valueCoverage' || /Value$/.test(k)) { delete o[k]; continue; }
+                stripRevenue(o[k]);
+            }
+            return o;
+        };
+        const payload = {
             success: true,
             range: { from: fmtLocal(from), to: fmtLocal(to) }, source, payment, courier, orderType, zone: zoneSel, state: stateSel,
             compare: compareOut,
             kpis, statusBreakdown, tat, zones, states, couriers,
+            // Coverage of the ₹ lens. `complete:false` means a lookup batch failed and the revenue
+            // figures are UNDERSTATED — the UI says so rather than presenting a confident wrong total.
+            valueCoverage: valueStat || { total: 0, matched: 0, failedBatches: 0, complete: true },
             // Total RTO split by whether the courier ever attempted delivery — the 340/73 breakdown.
-            rtoBreakdown: { attempted: ndrRto.length, silent: directRto, total: rto.length },
+            rtoBreakdown: { attempted: ndrRto.length, silent: directRto, total: rto.length,
+                attemptedValue: sumV(ndrRto), silentValue: sumV(rto) - sumV(ndrRto), totalValue: sumV(rto) },
             // NDR funnel is the cohort with ≥1 failed attempt; directRto reconciles it to TOTAL RTO.
-            ndrFunnel: { total: ndr.length, recovered: ndrDelivered.length, lost: ndrRto.length, pending: ndrPending.length, directRto, totalRto: rto.length },
+            ndrFunnel: { total: ndr.length, recovered: ndrDelivered.length, lost: ndrRto.length, pending: ndrPending.length, directRto, totalRto: rto.length,
+                totalValue: sumV(ndr), recoveredValue: sumV(ndrDelivered), lostValue: sumV(ndrRto),
+                pendingValue: sumV(ndrPending), directRtoValue: sumV(rto) - sumV(ndrRto), totalRtoValue: sumV(rto) },
             fasrTrend, rtoByCourier,
             byPayment: paymentSplit(rows),   // #1 — Prepaid vs COD FASR/NDR/RTO comparison
             shipments: shipments.slice(0, CAP), shipmentsTruncated, shipmentsTotal: shipments.length,
-        });
+            // The client hides the ₹ toggle and the Value column on this, and also treats a missing flag
+            // as "not allowed" — but the stripping above is what actually enforces it.
+            revenueAllowed: revAllowed,
+        };
+        res.json(revAllowed ? payload : stripRevenue(payload));
     } catch (e) {
         console.error('[DeliveryPerf] error:', e.message);
         res.status(500).json({ success: false, error: e.message });

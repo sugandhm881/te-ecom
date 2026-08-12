@@ -202,10 +202,21 @@
     #delivery-perf-view input[type=date] { border-radius:.6rem; }
     #delivery-perf-view input[type=date]:hover { border-color:#c7d2fe; }
     /* Segmented pill groups (source / payment / new-repeat) — soft inset track + elevated active */
-    #dp-source, #dp-payment, #dp-ordertype { padding:3px; gap:2px; border-radius:.7rem; background:#f1f5f9; border-color:#e2e8f0; overflow:visible; height:38px; align-items:center; }
-    #dp-source button, #dp-payment button, #dp-ordertype button { border-radius:.5rem; font-weight:600; padding:4px 12px; transition:all .15s ease; color:#64748b; }
-    #dp-source button:hover, #dp-payment button:hover, #dp-ordertype button:hover { color:#4f46e5; }
-    #dp-source button.bg-indigo-600, #dp-payment button.bg-indigo-600, #dp-ordertype button.bg-indigo-600 { box-shadow:0 1px 3px rgba(79,70,229,.35); }
+    #dp-source, #dp-payment, #dp-ordertype, #dp-mode { padding:3px; gap:2px; border-radius:.7rem; background:#f1f5f9; border-color:#e2e8f0; overflow:visible; height:38px; align-items:center; }
+    #dp-source button, #dp-payment button, #dp-ordertype button, #dp-mode button { border-radius:.5rem; font-weight:600; padding:4px 12px; transition:all .15s ease; color:#64748b; }
+    #dp-source button:hover, #dp-payment button:hover, #dp-ordertype button:hover, #dp-mode button:hover { color:#4f46e5; }
+    #dp-source button.bg-indigo-600, #dp-payment button.bg-indigo-600, #dp-ordertype button.bg-indigo-600, #dp-mode button.bg-indigo-600 { box-shadow:0 1px 3px rgba(79,70,229,.35); }
+    /* NDR-cohort split bar under a KPI headline. Real CSS, NOT Tailwind utilities — tailwind.css here is
+       PREBUILT, so arbitrary values (text-[10px], h-[6px]) resolve to nothing and would silently collapse
+       this to an unstyled row. */
+    .dp-splitbar { display:flex; width:100%; height:6px; border-radius:999px; overflow:hidden; background:#f1f5f9; }
+    .dp-splitbar .dp-seg { display:block; height:100%; }
+    .dp-splitbar .dp-seg + .dp-seg { box-shadow:inset 1px 0 0 rgba(255,255,255,.75); }
+    .dp-splitkeys { display:flex; flex-wrap:wrap; gap:4px 12px; margin-top:8px; }
+    .dp-segkey { display:inline-flex; align-items:center; gap:5px; font-size:11px; color:#64748b; line-height:1.4; white-space:nowrap; }
+    .dp-segkey i { width:7px; height:7px; border-radius:999px; flex:none; }
+    .dp-segkey b { color:#334155; font-weight:700; font-variant-numeric:tabular-nums; }
+    .dp-segkey em { font-style:normal; color:#94a3b8; font-variant-numeric:tabular-nums; }
     /* Zone / State multi-select dropdowns */
     #delivery-perf-view .dp-multi { position:relative; }
     #delivery-perf-view .dp-multi-btn { height:38px; min-width:130px; text-align:left; font-size:.875rem; padding:0 .8rem; border:1px solid #e2e8f0; border-radius:.6rem; background:#fff; color:#334155; display:flex; align-items:center; justify-content:space-between; gap:.4rem; cursor:pointer; transition:border-color .15s; white-space:nowrap; }
@@ -2411,6 +2422,17 @@
                 <button data-o="new" class="px-3 py-1.5 text-slate-600">New</button>
                 <button data-o="repeat" class="px-3 py-1.5 text-slate-600">Repeat</button>
               </div>
+              <!-- Courier lives in the HEADER because it filters the whole dashboard, not just the table.
+                   It used to sit in the shipment-explorer toolbar, where it looked like a table control
+                   and narrowed only the list while every KPI above kept showing all couriers. -->
+              <select id="dp-courier-filter" class="text-sm px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-700">
+                <option value="all">All couriers</option>
+              </select>
+              <!-- ₹ / # lens — reinterprets every metric on the page by order value instead of count. -->
+              <div class="flex bg-slate-100 rounded-lg overflow-hidden text-sm border border-slate-200" id="dp-mode" title="Measure the dashboard by shipment count or by order value">
+                <button data-m="count" class="px-3 py-1.5 bg-indigo-600 text-white">#&nbsp;Orders</button>
+                <button data-m="value" class="px-3 py-1.5 text-slate-600">₹&nbsp;Revenue</button>
+              </div>
               <div id="dp-zone-multi" class="dp-multi">
                 <button type="button" class="dp-multi-btn"><span class="text-slate-400">All zones</span> <span class="text-slate-400">▾</span></button>
                 <div class="dp-multi-panel hidden"></div>
@@ -2435,6 +2457,7 @@
             </div>
           </header>
           <div class="p-8 space-y-6">
+            <div id="dp-value-warn" class="hidden text-sm rounded-lg px-4 py-2.5" style="background:#fffbeb;color:#92400e;border:1px solid #fde68a"></div>
             <div id="dp-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5"></div>
             <div id="dp-status" class="flex flex-wrap gap-2 text-sm"></div>
             <div id="dp-rto" class="flex flex-wrap items-center gap-2 text-sm"></div>
@@ -2482,9 +2505,6 @@
                   <option value="ndr_pending">NDR pending</option>
                   <option value="in_transit">In-transit</option>
                   <option value="ndr_cohort">NDR cohort (≥1 failed attempt)</option>
-                </select>
-                <select id="dp-courier-filter" class="filter-select">
-                  <option value="all">All couriers</option>
                 </select>
                 <input id="dp-search" type="text" placeholder="Search order / AWB…" class="filter-input w-48">
                 <span id="dp-count" class="text-xs text-slate-400 ml-auto tabular-nums"></span>
