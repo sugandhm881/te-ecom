@@ -108,9 +108,14 @@ function parseRapidshypJourney(scans, currentStatus, courier, zone, statusCode, 
 
     let attempts = 0, ndr_count = 0, outForDeliveryAt = null, deliveredAt = null, rtoAt = null, pickedUpAt = null, lostAt = null, seenOFD = false;
     const ndr_reasons = [];
+    // ⚠️ EVERY out-for-delivery timestamp, not just the first — see the block comment on `ofd_dates`.
+    // Keeping only the first is what hid 388 of 2,798 delivered RapidShyp parcels (13.9%) from any
+    // date window after their first trip. THE SAME FOUR LINES EXIST IN kwikship_sync.js AND IN BOTH
+    // EDGE FUNCTIONS; they must be changed together or the sources drift apart again.
+    const ofdDates = [];
     for (const e of evts) {
         if (e.type === 'pickup') { if (!pickedUpAt) pickedUpAt = e.at; }
-        else if (e.type === 'attempt') { attempts++; seenOFD = true; if (!outForDeliveryAt) outForDeliveryAt = e.at; }
+        else if (e.type === 'attempt') { attempts++; seenOFD = true; if (e.at) ofdDates.push(e.at); if (!outForDeliveryAt) outForDeliveryAt = e.at; }
         else if (e.type === 'ndr') {
             // Only a FAILED DELIVERY ATTEMPT (an NDR after the shipment went Out for Delivery) counts.
             // A "Bad/Incomplete Address" logged at pickup is a pre-dispatch flag, not a delivery attempt.
@@ -141,6 +146,9 @@ function parseRapidshypJourney(scans, currentStatus, courier, zone, statusCode, 
         first_attempt_success: delivered && ndr_count === 0,   // 0 failed attempts before delivery
         ndr_reasons: [...new Set(ndr_reasons)].slice(0, 10),
         out_for_delivery_at: outForDeliveryAt,
+        // Every door trip, chronological. ofd_dates[0] === out_for_delivery_at by construction.
+        ofd_dates: ofdDates.length ? ofdDates.slice().sort() : (outForDeliveryAt ? [outForDeliveryAt] : null),
+        last_ofd_at: ofdDates.length ? ofdDates.slice().sort().pop() : outForDeliveryAt,
         delivered_at: deliveredAt,
         rto_at: rtoAt,
         dispatched_at: pickedUpAt,          // Order→Dispatch TAT boundary (first pickup scan)
@@ -242,6 +250,12 @@ async function saveJourney(awb, orderName, source, journey, orderDate, raw, paym
     if (journey.dispatched_at) row.dispatched_at = journey.dispatched_at;  // conditional — don't wipe on partial webhook
     if (journey.last_scan_at) row.last_scan_at = journey.last_scan_at;     // newest courier scan (Call Queue "Last scan")
     if (journey.zone) row.zone = journey.zone;
+    // Conditional, like the fields above: a partial webhook payload with no scan log must not blank an
+    // array a full sync already built. (The DB trigger is the backstop if both are ever absent.)
+    if (journey.ofd_dates && journey.ofd_dates.length) {
+        row.ofd_dates = journey.ofd_dates;
+        row.last_ofd_at = journey.last_ofd_at || journey.ofd_dates[journey.ofd_dates.length - 1];
+    }
     const { error } = await supabase.from('shipment_journey_ecom').upsert(row, { onConflict: 'awb' });
     if (error) console.error('[Journey] save error:', error.message);
     return !error;

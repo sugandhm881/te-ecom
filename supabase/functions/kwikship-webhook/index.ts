@@ -78,9 +78,15 @@ function parseKwikshipJourney(statusHistory: any[], currentStatus: string, couri
   let attempts = 0, ndr_count = 0, outForDeliveryAt: any = null, deliveredAt: any = null, rtoAt: any = null,
     pickedUpAt: any = null, lostAt: any = null, seenOFD = false;
   const ndr_reasons: string[] = [];
+  // ⚠️ EVERY out-for-delivery timestamp, not just the first. Keeping only the first hid a parcel from
+  // every date window after its first trip; 20.7% of Kwikship parcels go to the door more than once.
+  // THE SAME LINES EXIST IN app/api/kwikship_sync.js, app/api/delivery_journey.js AND the rapidshyp
+  // webhook. This file is a HAND-PORT of the Node parser and has drifted from it three times before —
+  // change all four together.
+  const ofdDates: any[] = [];
   for (const e of evts) {
     if (e.type === "pickup") { if (!pickedUpAt) pickedUpAt = e.at; }
-    else if (e.type === "attempt") { attempts++; seenOFD = true; if (!outForDeliveryAt) outForDeliveryAt = e.at; }
+    else if (e.type === "attempt") { attempts++; seenOFD = true; if (e.at) ofdDates.push(e.at); if (!outForDeliveryAt) outForDeliveryAt = e.at; }
     else if (e.type === "ndr") { if (seenOFD) { ndr_count++; if (e.desc) ndr_reasons.push(e.desc); } }
     else if (e.type === "delivered" && !deliveredAt) deliveredAt = e.at;
     else if (e.type === "rto" && !rtoAt) rtoAt = e.at;
@@ -98,7 +104,11 @@ function parseKwikshipJourney(statusHistory: any[], currentStatus: string, couri
     attempts: attempts || (delivered ? 1 : 0), ndr_count, reached_delivery,
     first_attempt_success: delivered && ndr_count === 0,
     ndr_reasons: [...new Set(ndr_reasons)].slice(0, 10),
-    out_for_delivery_at: outForDeliveryAt, delivered_at: deliveredAt, rto_at: rtoAt,
+    out_for_delivery_at: outForDeliveryAt,
+    // Every door trip, chronological. ofd_dates[0] === out_for_delivery_at by construction.
+    ofd_dates: ofdDates.length ? [...ofdDates].sort() : (outForDeliveryAt ? [outForDeliveryAt] : null),
+    last_ofd_at: ofdDates.length ? [...ofdDates].sort().pop() : outForDeliveryAt,
+    delivered_at: deliveredAt, rto_at: rtoAt,
     dispatched_at: pickedUpAt, zone: zone || null, status_code: currentStatus || null,
     rto_no_attempt: rto && !seenOFD,
     // Newest scan in the timeline — the Call Queue's "Last scan" reads this. A milestone is the FIRST
@@ -319,6 +329,12 @@ Deno.serve(async (req) => {
     if (j.dispatched_at) row.dispatched_at = j.dispatched_at;
     if (j.last_scan_at) row.last_scan_at = j.last_scan_at;   // conditional — a partial payload must not blank it
     if (j.zone) row.zone = j.zone;
+    // Conditional for the same reason: a partial payload with no timeline must not blank an array the
+    // cron already built. (The DB trigger backfills a single-trip array if both are ever absent.)
+    if (j.ofd_dates && j.ofd_dates.length) {
+      row.ofd_dates = j.ofd_dates;
+      row.last_ofd_at = j.last_ofd_at || j.ofd_dates[j.ofd_dates.length - 1];
+    }
     if (j.rto_no_attempt) row.raw = { status_history: statusHistory, status: curStatus, captured_at: now };
 
     const { error } = await supabase.from("shipment_journey_ecom").upsert(row, { onConflict: "awb" });

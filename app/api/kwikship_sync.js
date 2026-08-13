@@ -81,9 +81,13 @@ function parseKwikshipJourney(statusHistory, currentStatus, courier, zone) {
     let attempts = 0, ndr_count = 0, outForDeliveryAt = null, deliveredAt = null, rtoAt = null,
         pickedUpAt = null, lostAt = null, seenOFD = false;
     const ndr_reasons = [];
+    // ⚠️ EVERY out-for-delivery timestamp, not just the first. Keeping only the first hid a parcel from
+    // every date window after its first trip; 20.7% of Kwikship parcels go to the door more than once.
+    // THE SAME FOUR LINES EXIST IN delivery_journey.js AND IN BOTH EDGE FUNCTIONS — change them together.
+    const ofdDates = [];
     for (const e of evts) {
         if (e.type === 'pickup') { if (!pickedUpAt) pickedUpAt = e.at; }
-        else if (e.type === 'attempt') { attempts++; seenOFD = true; if (!outForDeliveryAt) outForDeliveryAt = e.at; }
+        else if (e.type === 'attempt') { attempts++; seenOFD = true; if (e.at) ofdDates.push(e.at); if (!outForDeliveryAt) outForDeliveryAt = e.at; }
         else if (e.type === 'ndr') {
             // Only a failed attempt AFTER the shipment went out for delivery counts as an NDR.
             if (seenOFD) { ndr_count++; if (e.desc) ndr_reasons.push(e.desc); }
@@ -110,6 +114,9 @@ function parseKwikshipJourney(statusHistory, currentStatus, courier, zone) {
         first_attempt_success: delivered && ndr_count === 0,
         ndr_reasons: [...new Set(ndr_reasons)].slice(0, 10),
         out_for_delivery_at: outForDeliveryAt,
+        // Every door trip, chronological. ofd_dates[0] === out_for_delivery_at by construction.
+        ofd_dates: ofdDates.length ? ofdDates.slice().sort() : (outForDeliveryAt ? [outForDeliveryAt] : null),
+        last_ofd_at: ofdDates.length ? ofdDates.slice().sort().pop() : outForDeliveryAt,
         delivered_at: deliveredAt,
         rto_at: rtoAt,
         dispatched_at: pickedUpAt,

@@ -1143,6 +1143,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('ops-control-view');
             if (typeof opsInit === 'function') opsInit();
             break;
+        case 'purchase-orders':
+            activeLinkElement = document.getElementById('nav-purchase-orders');
+            activeViewElement = document.getElementById('purchase-orders-view');
+            if (typeof poInit === 'function') poInit();
+            break;
         case 'last-mile':
             activeLinkElement = document.getElementById('nav-last-mile');
             activeViewElement = document.getElementById('last-mile-view');
@@ -3835,7 +3840,18 @@ const _claimsDetail = {};             // awb → { loading, journey, scans, dp, 
 const _claimsFilter = { q: '', platform: '', payment: '', courier: '', zone: '' };
 const _inr = n => '₹' + (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 // DD-MM-YYYY in IST (dashboard-wide date format for the new views).
-const _dmy = ts => { if(!ts) return ''; const s = new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); const p = s.split('-'); return p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : s; };
+// ⚠️ A bare 'YYYY-MM-DD' is REFORMATTED BY SLICING, never re-parsed. `new Date('2026-08-07')` is UTC
+// midnight, so any timezone conversion applied afterwards can land on the day before — and these strings
+// are ALREADY the IST calendar day the server computed. Slicing keeps the day the server meant.
+const _dmy = ts => {
+    if(!ts) return '';
+    const s0 = String(ts);
+    if(/^\d{4}-\d{2}-\d{2}$/.test(s0)) return `${s0.slice(8,10)}-${s0.slice(5,7)}-${s0.slice(0,4)}`;
+    const s = new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const p = s.split('-'); return p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : s;
+};
+// DD-MM — the compact form for chart axes, where the year is already given by the header range.
+const _dm = ts => { const s = _dmy(ts); return s ? s.slice(0, 5) : ''; };
 const _ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 function claimsInit(){
   // Seed each tab with its OWN default range (last 30 days) — date filter is per-tab, not shared.
@@ -5427,7 +5443,7 @@ const NAV_HREF = {
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon',
-    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
+    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
@@ -5482,17 +5498,24 @@ function ecEnhanceSelect(sel) {
         });
         document.addEventListener('click', e => { if (!wrap.contains(e.target)) close(); });
         sel.addEventListener('change', syncBtn);
+        // Setting `sel.value` IN CODE fires no 'change' AND does not touch the value *attribute*, so
+        // neither listener below sees it and the button keeps showing the old label. ecSyncSelect() is the
+        // supported way to repaint after a programmatic change without dispatching a real 'change' (which
+        // would re-enter the caller's own change handler and recurse).
+        sel.addEventListener('csel:sync', syncBtn);
         // Options populated later (dynamic filters) or value set programmatically → keep the label correct.
         try { new MutationObserver(syncBtn).observe(sel, { childList: true, attributes: true, attributeFilter: ['value'] }); } catch (_) {}
         syncBtn();
     } catch (e) { console.warn('[csel] enhance failed', e); }
 }
+// Repaint a .csel-enhanced <select> after its value was set programmatically. Safe on plain selects.
+function ecSyncSelect(sel) { try { if (sel) sel.dispatchEvent(new Event('csel:sync')); } catch (_) {} }
 function ecEnhanceFilterSelects() {
     // Delivery / Ops / Last-Mile / Fops selects don't carry .filter-select but should match too.
     // ⚠️ A NEW DASHBOARD MUST BE ADDED HERE or its dropdowns render as raw OS selects — the open option
     // list is the giveaway, since a native <select> cannot style it and it lands looking nothing like the
     // rest of the app. That is exactly what happened to Last-Mile Funnel on first build.
-    document.querySelectorAll('#delivery-perf-view header select, #ops-control-view select, #last-mile-view select, #fulfillment-ops-view select').forEach(s => { if (!s.multiple) s.classList.add('filter-select'); });
+    document.querySelectorAll('#delivery-perf-view header select, #ops-control-view select, #last-mile-view select, #purchase-orders-view select, #fulfillment-ops-view select').forEach(s => { if (!s.multiple) s.classList.add('filter-select'); });
     document.querySelectorAll('select.filter-select').forEach(ecEnhanceSelect);
 }
 (function () {
@@ -6170,11 +6193,11 @@ const PERM_GROUPS = [
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
   ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
-  ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)']]],
+  ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)'],['purchase-orders','Purchase Order (EasyEcom PO book)']]],
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
   // Capabilities (not dashboard views) — granted per-user by the admin. Server enforces each one too.
-  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)'],['delivery-perf-revenue','See ₹ revenue on Delivery Performance (order values)']]]
+  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)'],['delivery-perf-revenue','See ₹ revenue on Delivery Performance & Last-Mile Funnel (order values)'],['purchase-orders-write','Create purchase orders & change PO status (EasyEcom)']]]
 ];
 const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
 const PERM_TOTAL = PERM_CATALOG.length;
@@ -7396,7 +7419,7 @@ function opsRatesRender(d){
     if(note){ note.classList.remove('hidden');
         const src=(d.coverage&&d.coverage.sources||[]).map(s=>({rapidshyp:'RapidShyp',kwikship:'KwikShip',docpharma:'DocPharma'}[s]||s)).join(', ')||'no';
         const st=d.settlement||{};
-        const win=d.range?`${d.range.previous.from.slice(0,10)} → ${d.range.previous.to.slice(0,10)}  vs  ${d.range.current.from.slice(0,10)} → ${d.range.current.to.slice(0,10)}`:'';
+        const win=d.range?`${_dmy(d.range.previous.from.slice(0,10))} → ${_dmy(d.range.previous.to.slice(0,10))}  vs  ${_dmy(d.range.current.from.slice(0,10))} → ${_dmy(d.range.current.to.slice(0,10))}`:'';
         // Both facts stated plainly: what is covered, and why the window stops short of today. Without
         // the second the reader assumes "last 30 days" means up to this morning and mistrusts the page.
         note.innerHTML=`<b>${win}</b><br>Covers ${escapeHtml(src)} shipments only — ${escapeHtml(d.coverage?d.coverage.note:'')} ${escapeHtml(st.note||'')}`; }
@@ -9069,7 +9092,7 @@ function dpRender(d){
             ? `Revenue figures are incomplete — ${vc.failedBatches} order-value lookup(s) failed, so totals are understated. Counts are unaffected.`
             : `Revenue covers ${vc.matched} of ${vc.total} shipments — ${vc.total-vc.matched} have no matching Shopify order, so ₹ totals are understated.`;
     }
-    document.getElementById('dp-range').textContent=`${d.range.from} → ${d.range.to} · ${k.totalShipments} tracked = ${k.resolved} shipped (delivered+RTO) + ${k.pending} NDR-pending + ${k.inTransit} in-transit${k.lost?` + ${k.lost} lost`:''}`+(V?`  ·  ${dpMoneyFull(R.tracked)} order value`:'')+courierNote+(c?`  ·  vs prev ${d.compare.range.from} → ${d.compare.range.to} (${c.totalShipments} tracked)`:'');
+    document.getElementById('dp-range').textContent=`${_dmy(d.range.from)} → ${_dmy(d.range.to)} · ${k.totalShipments} tracked = ${k.resolved} shipped (delivered+RTO) + ${k.pending} NDR-pending + ${k.inTransit} in-transit${k.lost?` + ${k.lost} lost`:''}`+(V?`  ·  ${dpMoneyFull(R.tracked)} order value`:'')+courierNote+(c?`  ·  vs prev ${_dmy(d.compare.range.from)} → ${_dmy(d.compare.range.to)} (${c.totalShipments} tracked)`:'');
     // NDR cohort split — the four ways an NDR shipment ends. They partition ndrTotal exactly.
     const nT = V?R.ndrTotal:k.ndrTotal;
     const seg = (label,val,color)=>({label,count:val,pct:nT>0?Math.round((val/nT)*1000)/10:0,color});
@@ -9253,13 +9276,13 @@ function dpFasr(rows){ const el=document.getElementById('dp-fasr'); if(!rows||!r
     const fden=r=> V ? (r.reachedValue||0) : (r.reached||0);
     const pts=rows.map((r,i)=>`${xs[i]},${y(fv(r))}`).join(' ');
     const dots=rows.map((r,i)=>`<circle cx="${xs[i]}" cy="${y(fv(r))}" r="4" fill="#4f46e5" data-i="${i}"/>`).join('');
-    const step=Math.ceil(rows.length/7); const xl=rows.map((r,i)=>i%step===0?`<text x="${xs[i]}" y="${H-8}" text-anchor="middle" fill="#94a3b8" font-size="11">${r.date.slice(5)}</text>`:'').join('');
+    const step=Math.ceil(rows.length/7); const xl=rows.map((r,i)=>i%step===0?`<text x="${xs[i]}" y="${H-8}" text-anchor="middle" fill="#94a3b8" font-size="11">${_dm(r.date)}</text>`:'').join('');
     // Weighted-average line = Σfirst / Σresolved — this equals the FASR card value (period average).
     const sumF=rows.reduce((a,r)=>a+fnum(r),0), sumR=rows.reduce((a,r)=>a+fden(r),0);
     const avg=sumR?Math.round(sumF/sumR*1000)/10:0; const ay=y(avg);
     const avgLine=`<line x1="${p.l}" y1="${ay}" x2="${W-p.r}" y2="${ay}" stroke="#4f46e5" stroke-width="1.5" stroke-dasharray="5 4" opacity="0.6"/><text x="${W-p.r}" y="${ay-5}" text-anchor="end" fill="#4f46e5" font-size="11" font-weight="600">avg ${avg}%</text>`;
     el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%">${g}${avgLine}<polyline points="${pts}" fill="none" stroke="#4f46e5" stroke-width="2" stroke-linejoin="round"/>${dots}${xl}</svg>`;
-    el.querySelectorAll('circle').forEach(c=>{ c.addEventListener('mousemove',e=>{const r=rows[+c.dataset.i];dpShow(`<b>${r.date}</b> · FASR ${fv(r)}% (${dpAmtFull(fnum(r))}/${dpAmtFull(fden(r))})`,e.clientX,e.clientY);}); c.addEventListener('mouseleave',dpHide); });
+    el.querySelectorAll('circle').forEach(c=>{ c.addEventListener('mousemove',e=>{const r=rows[+c.dataset.i];dpShow(`<b>${_dmy(r.date)}</b> · FASR ${fv(r)}% (${dpAmtFull(fnum(r))}/${dpAmtFull(fden(r))})`,e.clientX,e.clientY);}); c.addEventListener('mouseleave',dpHide); });
 }
 // #1 — FASR vs NDR by payment mode (Prepaid vs COD), side-by-side metric bars.
 function dpPaymentSplit(bp){ const el=document.getElementById('dp-payment-split'); if(!el) return;
@@ -15489,23 +15512,72 @@ function rsreCsv() {
 //   OFD → Delivered · OFD → RTO · In-Transit → RTO (never attempted)
 //
 // ⚠️ TWO RULES THIS PAGE EXISTS TO HONOUR — both learned from live data, both easy to get wrong:
-//  1. RATES ARE ON RESOLVED, NEVER ON THE WHOLE COHORT. A parcel that went out this morning has not had
-//     its chance yet — on 12 Aug, 130 of 241 (54%) were still open. Dividing by the cohort would have
-//     reported a 39% delivery rate on a day that was going fine. "Still open" is its own slice, and the
-//     page states how much of the cohort is still in flight.
+//  1. THE HEADLINE RATES DIVIDE BY THE WHOLE COHORT (requested 2026-08-13: "OFD → Delivered = 755/1243").
+//     Delivered + RTO + Pending therefore sum to exactly 100%, which is ONLY honest because the Pending
+//     card sits beside them: a parcel that went out this morning has not had its chance yet — on 12 Aug,
+//     130 of 241 (54%) were still open, so this basis reported 39% delivered on a day that was going
+//     fine. Every card also footnotes the resolved-basis figure. Delete the Pending card or the footers
+//     and the headline silently becomes a lie about recent days.
 //  2. DOCPHARMA IS EXCLUDED (server-side). It has no scan log, so it has no out-for-delivery event at
 //     all; counting it would report all 216 of its RTOs as "never attempted" against a true figure of 18.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 let _lmData = null, _lmWired = false, _lmFrom = null, _lmTo = null, _lmPreset = '7',
     _lmSource = 'all', _lmPayment = 'all', _lmCourier = 'all', _lmZone = 'all',
+    _lmGeo = 'state',                       // destination chart dimension — state | zone
+    _lmMode = 'count',                      // measurement lens — count (orders) | value (₹)
+    _lmFocus = 'all',                       // the ONE explorer filter (dropdown and cards both write here)
+    _lmExpanded = new Set(),                // AWBs whose detail row is open — survives re-render/sort
+    _lmScanCache = {},                      // awb -> detail payload | {loading} | {error}
     _lmSort = { key: 'ofd_at', dir: 'desc' };
 
 const LM_OUTCOME_BADGE = {
-    delivered:   ['Delivered', 'bg-emerald-100 text-emerald-700'],
-    rto:         ['RTO', 'bg-red-100 text-red-700'],
-    ndr_pending: ['NDR pending', 'bg-amber-100 text-amber-700'],
-    in_transit:  ['Still out', 'bg-slate-100 text-slate-600'],
-    lost:        ['Lost', 'bg-rose-200 text-rose-800'],
+    delivered:      ['Delivered', 'bg-emerald-100 text-emerald-700'],
+    rto:            ['RTO', 'bg-red-100 text-red-700'],
+    rto_no_attempt: ['RTO · no attempt', 'bg-amber-100 text-amber-800'],
+    ndr_pending:    ['NDR pending', 'bg-amber-100 text-amber-700'],
+    in_transit:     ['Still out', 'bg-slate-100 text-slate-600'],
+    lost:           ['Lost', 'bg-rose-200 text-rose-800'],
+};
+
+// ── The ₹ lens ───────────────────────────────────────────────────────────────────────────────────
+// Triple-gated on purpose, and the order matters: the toggle must be ON, the user must hold the
+// capability, AND the payload must actually carry revenue. If any one is false the page falls back to
+// counts rather than rendering ₹0 — a confident zero is worse than an honest count.
+const lmIsVal = () => _lmMode === 'value' && canSeeRevenue() && !!(_lmData && _lmData.revenueAllowed);
+// Pull the right figure for the current lens out of a node that carries both shapes.
+// `rev` is absent entirely for an un-permissioned user, so the `|| {}` is a real guard, not defensive noise.
+const lmV = (node, key) => (lmIsVal() ? ((node && node.rev) || {})[key] : (node || {})[key]) || 0;
+// Format a measure for the current lens: money when ₹, a plain integer when orders.
+const lmNum = n => (lmIsVal() ? dpMoney(n) : Number(n || 0).toLocaleString('en-IN'));
+const lmNumFull = n => (lmIsVal() ? dpMoneyFull(n) : Number(n || 0).toLocaleString('en-IN'));
+const lmUnit = (n, one, many) => (lmIsVal() ? dpMoney(n) : `${Number(n || 0).toLocaleString('en-IN')} ${n === 1 ? one : many}`);
+
+// Attempt bucket for a row, matching the server's byAttempt() exactly (1, 2, 3-or-more).
+const lmAtt = r => { const n = r.attempts || 1; return n >= 3 ? 3 : n >= 1 ? n : 1; };
+const lmDone = r => r.outcome === 'delivered' || r.outcome === 'rto';
+
+// ── The explorer's single filter registry ────────────────────────────────────────────────────────
+// The dropdown and every clickable card write to _lmFocus, so the two can never disagree or silently
+// AND themselves down to an empty table. `src:'noAttempt'` swaps the SOURCE ARRAY rather than filtering:
+// those rows never entered the OFD cohort (they have no out-for-delivery event, which is their whole
+// point), so they cannot be reached by any predicate over `shipments`.
+// `inDropdown` marks the keys the <select> already shows — the rest surface as a dismissible chip.
+const LM_FOCUS = {
+    all:        { label: 'All out-for-delivery', inDropdown: true },
+    delivered:  { label: 'Delivered', inDropdown: true, test: r => r.outcome === 'delivered' },
+    rto:        { label: 'RTO', inDropdown: true, test: r => r.outcome === 'rto' },
+    open:       { label: 'Pending outcome', inDropdown: true, test: r => !lmDone(r) },
+    slow:       { label: 'Delivered > 24h', inDropdown: true, test: r => r.outcome === 'delivered' && r.hrs != null && r.hrs > 24 },
+    no_attempt: { label: 'Returned without an attempt', inDropdown: true, src: 'noAttempt' },
+    a1:  { label: 'Resolved on the 1st attempt',   test: r => lmAtt(r) === 1 && lmDone(r) },
+    a1d: { label: 'Delivered on the 1st attempt',  test: r => lmAtt(r) === 1 && r.outcome === 'delivered' },
+    a1r: { label: 'RTO after just 1 attempt',      test: r => lmAtt(r) === 1 && r.outcome === 'rto' },
+    a2:  { label: 'Resolved on the 2nd attempt',   test: r => lmAtt(r) === 2 && lmDone(r) },
+    a2d: { label: 'Delivered on the 2nd attempt',  test: r => lmAtt(r) === 2 && r.outcome === 'delivered' },
+    a2r: { label: 'RTO after 2 attempts',          test: r => lmAtt(r) === 2 && r.outcome === 'rto' },
+    a3:  { label: 'Resolved on the 3rd+ attempt',  test: r => lmAtt(r) === 3 && lmDone(r) },
+    a3d: { label: 'Delivered on the 3rd+ attempt', test: r => lmAtt(r) === 3 && r.outcome === 'delivered' },
+    a3r: { label: 'RTO after 3+ attempts',         test: r => lmAtt(r) === 3 && r.outcome === 'rto' },
 };
 // Preset → {from,to}. Uses _ymd (LOCAL date): toISOString() is UTC and between 00:00–05:30 IST returns
 // YESTERDAY, which would silently shift every preset back a day for early-morning users.
@@ -15530,22 +15602,63 @@ function lmInit(){
             document.getElementById('lm-from').value = _lmFrom; document.getElementById('lm-to').value = _lmTo; lmLoad(); });
         document.getElementById('lm-apply')?.addEventListener('click', () => {
             _lmFrom = document.getElementById('lm-from').value; _lmTo = document.getElementById('lm-to').value; lmLoad(); });
-        const seg = (id, prop, setter) => document.getElementById(id)?.addEventListener('click', e => {
+        // `local` = the toggle only re-renders what is already loaded. Source and payment are server-side
+        // filters and must refetch; the destination dimension is a pure view change over data in hand.
+        const seg = (id, prop, setter, local) => document.getElementById(id)?.addEventListener('click', e => {
             const b = e.target.closest('button'); if(!b) return;
             [...b.parentElement.children].forEach(x => { x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
             b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
-            setter(b.dataset[prop]); lmLoad(); });
+            setter(b.dataset[prop]); if(!local) lmLoad(); });
         seg('lm-source','s', v => _lmSource = v);
         seg('lm-payment','p', v => _lmPayment = v);
+        seg('lm-geo','g', v => { _lmGeo = v; if(_lmData) lmGeo(_lmData); }, true);
+        // Local too — the payload already carries both shapes, so switching lens is a re-render, not a refetch.
+        seg('lm-lens','m', v => { _lmMode = v; if(_lmData) lmRender(_lmData); }, true);
         document.getElementById('lm-courier')?.addEventListener('change', e => { _lmCourier = e.target.value; lmLoad(); });
         document.getElementById('lm-zone')?.addEventListener('change', e => { _lmZone = e.target.value; lmLoad(); });
-        document.getElementById('lm-state')?.addEventListener('change', () => lmTable());
+        document.getElementById('lm-state')?.addEventListener('change', e => lmSetFocus(e.target.value, false));
         document.getElementById('lm-search')?.addEventListener('input', debounce(() => lmTable(), 250));
+        // Cards → explorer. Delegated, because both grids are re-rendered on every load.
+        const cardClick = e => { const t = e.target.closest('[data-focus]'); if(!t) return; lmSetFocus(t.dataset.focus, true); };
+        document.getElementById('lm-kpis')?.addEventListener('click', cardClick);
+        document.getElementById('lm-attempts')?.addEventListener('click', cardClick);
+        // Only for the role="button" DIVs — a real <button> already fires click on Enter/Space, and
+        // handling it here too would run lmSetFocus twice per keypress.
+        const cardKey = e => { if(e.key !== 'Enter' && e.key !== ' ') return;
+            const t = e.target.closest('[data-focus]');
+            if(!t || t.tagName === 'BUTTON') return; e.preventDefault(); lmSetFocus(t.dataset.focus, true); };
+        document.getElementById('lm-kpis')?.addEventListener('keydown', cardKey);
+        document.getElementById('lm-attempts')?.addEventListener('keydown', cardKey);
+        document.getElementById('lm-focus')?.addEventListener('click', e => {
+            if(e.target.closest('button')) lmSetFocus('all', false); });
+        document.getElementById('lm-export')?.addEventListener('click', lmExportCsv);
     }
     lmLoad();
 }
+// The single entry point for changing what the explorer shows. `scroll` is true only for card clicks —
+// the table is far below the cards, so filtering without moving the viewport reads as "nothing happened".
+function lmSetFocus(key, scroll){
+    _lmFocus = LM_FOCUS[key] ? key : 'all';
+    const sel = document.getElementById('lm-state');
+    // Keep the <select> honest: it shows the focus when it can represent it, 'all' otherwise. The chip
+    // carries the rest, so the active filter is never invisible.
+    if(sel){ sel.value = (LM_FOCUS[_lmFocus] || {}).inDropdown ? _lmFocus : 'all'; ecSyncSelect(sel); }
+    const chip = document.getElementById('lm-focus');
+    if(chip){
+        const f = LM_FOCUS[_lmFocus];
+        const show = _lmFocus !== 'all' && !f.inDropdown;
+        chip.classList.toggle('hidden', !show);
+        chip.innerHTML = show ? `<span class="lm-chip">${escapeHtml(f.label)}<button type="button" title="Clear this filter" aria-label="Clear filter">&times;</button></span>` : '';
+    }
+    lmTable();
+    if(scroll) document.getElementById('lm-table')?.scrollIntoView({ behavior:'smooth', block:'center' });
+}
 async function lmLoad(){
     const k = document.getElementById('lm-kpis'); if(k) k.innerHTML = brandLoader('Loading last-mile data…');
+    // A new window is a different set of parcels — carrying open rows across would leave detail panels
+    // hanging off shipments that are no longer in the table. The scan CACHE is kept: it is keyed by AWB
+    // and never goes stale within a session, so re-opening the same shipment stays instant.
+    _lmExpanded.clear();
     try{
         const qs = `from=${_lmFrom}&to=${_lmTo}&source=${_lmSource}&payment=${_lmPayment}`
                  + `&courier=${encodeURIComponent(_lmCourier)}&zone=${encodeURIComponent(_lmZone)}`;
@@ -15563,23 +15676,85 @@ function lmDelta(cur, prev, higherBetter){
     return `<span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-lg text-xs font-bold ${cls}" title="vs ${prev} previous period">${d > 0 ? '▲' : '▼'} ${Math.abs(d)}</span>`;
 }
 function lmKpiCard(c){
-    return `<div class="dp-kpi card p-5" style="--accent:${c.accent}">
+    // A card with a `focus` becomes a filter control for the explorer below, so it gets the button
+    // semantics to match — keyboard reachable, announced as a button, and a hover hint that says so.
+    const attrs = c.focus
+        ? ` lm-click" data-focus="${escapeHtml(c.focus)}" role="button" tabindex="0" aria-label="Show these shipments in the explorer"`
+        : '"';
+    return `<div class="dp-kpi card p-5${attrs} style="--accent:${c.accent}">
         <div class="flex items-start justify-between">
           <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background:${c.tint};color:${c.accent}">${c.icon}</div>
           ${c.delta || ''}
         </div>
-        <div class="text-[2rem] leading-none font-extrabold text-slate-800 tracking-tight tabular-nums mt-4">${c.val}</div>
+        <div class="text-[2rem] leading-none font-extrabold text-slate-800 tracking-tight tabular-nums mt-4"${c.valTitle ? ` title="${escapeHtml(c.valTitle)}"` : ''}>${c.val}${
+            // The secondary figure rides alongside the headline instead of below it, so the pair reads as
+            // one measurement ("₹4.3k, which is 28.7%") rather than two competing numbers.
+            c.sub ? `<span class="lm-kpi-sub">${c.sub}</span>` : ''}</div>
         <div class="text-sm font-semibold text-slate-600 mt-1.5">${c.label}</div>
         <div class="text-xs text-slate-400 mt-0.5">${c.foot}</div>
+        ${c.focus ? '<div class="lm-cta mt-1.5">View shipments →</div>' : ''}
+    </div>`;
+}
+// Attempt-wise card: a headline delivery rate for the bucket, then two clickable halves.
+// ⚠️ The headline here divides by RESOLVED, not by the cohort — unlike the outcome cards above. Within
+// one attempt bucket the question is "delivered or RTO", and a parcel still in flight has not answered
+// it; the open count is stated on its own line so the difference is never hidden.
+function lmAttemptCard(b){
+    const ORD  = { 1:'1st attempt', 2:'2nd attempt', 3:'3rd attempt or more' };
+    const NOTE = { 1:'resolved on the first knock', 2:'needed a second visit', 3:'needed three or more visits' };
+    const B = lmIsVal() ? (b.rev || {}) : b;              // same bucket, other unit
+    const accent = B.deliveredRate >= 80 ? '#059669' : B.deliveredRate >= 60 ? '#d97706' : '#e11d48';
+    const tint   = B.deliveredRate >= 80 ? '#ecfdf5' : B.deliveredRate >= 60 ? '#fffbeb' : '#fff1f2';
+    if(!b.ofd) return `<div class="dp-kpi card p-5" style="--accent:#cbd5e1">
+        <div class="text-sm font-semibold text-slate-600">${ORD[b.attempt]}</div>
+        <div class="text-slate-400 text-sm mt-3">No parcels in this bucket</div></div>`;
+    return `<div class="dp-kpi card p-5" style="--accent:${accent}">
+        <div class="flex items-start justify-between gap-2">
+          <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background:${tint};color:${accent}">${DP_ICONS.refresh}</div>
+          <span class="text-xs text-slate-400 tabular-nums text-right">${lmUnit(B.ofd, 'parcel', 'parcels')}<br>${lmNum(B.open)} still open</span>
+        </div>
+        <div class="text-[2rem] leading-none font-extrabold text-slate-800 tracking-tight tabular-nums mt-4"${
+            lmIsVal() ? ` title="${dpMoneyFull(B.delivered)} delivered"` : ''}>${
+            // Same priority swap as the outcome cards: money leads in the ₹ lens, the share rides small.
+            lmIsVal() ? `${dpMoney(B.delivered)}<span class="lm-kpi-sub">${B.deliveredRate}%</span>` : `${B.deliveredRate}%`}</div>
+        <div class="text-sm font-semibold text-slate-600 mt-1.5">${ORD[b.attempt]}</div>
+        <div class="text-xs text-slate-400 mt-0.5">delivered, of the ${lmNum(B.resolved)} that ${NOTE[b.attempt]}</div>
+        <div class="lm-att-split">
+          <button type="button" class="lm-att-half lm-att-del" data-focus="a${b.attempt}d" title="Show these shipments in the explorer">
+            <b>${lmNum(B.delivered)}</b><span>Delivered</span></button>
+          <button type="button" class="lm-att-half lm-att-rto" data-focus="a${b.attempt}r" title="Show these shipments in the explorer">
+            <b>${lmNum(B.rto)}</b><span>RTO</span></button>
+        </div>
     </div>`;
 }
 function lmRender(d){
     const s = d.summary, p = d.previous;
+    // The lens control only exists for a user who may see ₹. If the capability is missing the toggle is
+    // hidden AND the mode is forced back, so a stale 'value' can never survive a permission change.
+    const lens = document.getElementById('lm-lens');
+    if(lens){ const ok = !!d.revenueAllowed && canSeeRevenue();
+        lens.classList.toggle('hidden', !ok); if(!ok) _lmMode = 'count'; }
+    const val = lmIsVal();
     document.getElementById('lm-range').textContent =
-        `${d.range.from} → ${d.range.to} · ${s.ofd} parcels went out for delivery · ${s.resolved} resolved, ${s.open} still open`
-        + `  ·  vs ${d.previousRange.from} → ${d.previousRange.to} (${p.ofd} out)`;
+        `${_dmy(d.range.from)} → ${_dmy(d.range.to)} · ${lmNumFull(val ? s.rev.ofd : s.ofd)}${val ? ' went out for delivery' : ' parcels went out for delivery'}`
+        + ` · ${lmNum(val ? s.rev.resolved : s.resolved)} resolved, ${lmNum(val ? s.rev.open : s.open)} still open`
+        + `  ·  vs ${_dmy(d.previousRange.from)} → ${_dmy(d.previousRange.to)} (${lmNum(val ? p.rev.ofd : p.ofd)} out)`;
+    // Which couriers this page covers, and why — permanent, unchanging, so it lives in the ⓘ on the
+    // source toggle rather than a banner that is re-read as noise on every load.
+    const covTip = document.getElementById('lm-cov-tip');
+    if(covTip && d.coverage && d.coverage.note) covTip.textContent = d.coverage.note;
+    // The strip is now a WARNING slot only. If a value lookup failed or some orders had no price, SAY the
+    // ₹ totals are short rather than quietly under-reporting them — but stay silent when they are fine,
+    // so that anything appearing here always means something needs attention.
     const note = document.getElementById('lm-note');
-    if(note && d.coverage){ note.classList.remove('hidden'); note.textContent = d.coverage.note; }
+    if(note){
+        const cov = d.valueCoverage;
+        const short = val && cov && (cov.matched < cov.total || !cov.complete);
+        note.classList.toggle('hidden', !short);
+        note.textContent = short
+            ? `⚠️ Revenue covers ${cov.matched} of ${cov.total} shipments — ₹ totals exclude ${cov.total - cov.matched} with no order value on file.`
+            : '';
+    }
 
     // Option lists come from the UNFILTERED window so choosing one never empties the others.
     const fill = (id, opts, cur, allLabel) => { const el = document.getElementById(id); if(!el) return;
@@ -15590,39 +15765,74 @@ function lmRender(d){
     fill('lm-courier', d.couriers, _lmCourier, 'All couriers');
     fill('lm-zone', d.zones, _lmZone, 'All zones');
 
+    // ⚠️ Headline = ÷ the whole cohort (deliveredRateAll), so these three sum to 100%. The footer carries
+    // the ÷ resolved figure, which is the one to trust on a cohort that is still maturing.
+    // ⚠️ Both lenses read the SAME partition — only the unit changes. The three shares still sum to
+    // exactly 100% in ₹ as well as in orders (the server derives the residual rather than rounding it).
+    const S = val ? s.rev : s, P = val ? p.rev : p;
+    // In the ₹ lens the MONEY is the headline and the share becomes the small secondary figure; in the
+    // orders lens the share stays the headline. Same three numbers either way — only which one leads
+    // changes, because "₹4.3k delivered" is the answer someone in revenue mode came for, and a 28.7%
+    // set in 2rem type buries it.
+    const headline = (money, share) => val
+        ? { val: dpMoney(money), sub: share + '%', valTitle: dpMoneyFull(money) }
+        : { val: share + '%', sub: null, valTitle: null };
     document.getElementById('lm-kpis').innerHTML = [
-        { label:'OFD → Delivered', accent:'#059669', tint:'#ecfdf5', icon:DP_ICONS.bolt,
-          val:s.deliveredRate + '%', foot:`${s.delivered} of ${s.resolved} resolved · ${s.open} still open`,
-          delta:lmDelta(s.deliveredRate, p.deliveredRate, true) },
-        { label:'OFD → RTO', accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn,
-          val:s.rtoRate + '%', foot:`${s.rto} came back after reaching the door`,
-          delta:lmDelta(s.rtoRate, p.rtoRate, false) },
-        { label:'In Transit → RTO', accent:'#b45309', tint:'#fffbeb', icon:DP_ICONS.refresh,
-          val:d.noAttempt.count, foot:`returned with NO delivery attempt${d.noAttempt.prevCount != null ? ` · was ${d.noAttempt.prevCount}` : ''}`,
-          delta:lmDelta(d.noAttempt.count, d.noAttempt.prevCount, false) },
+        { label:'OFD → Delivered', accent:'#059669', tint:'#ecfdf5', icon:DP_ICONS.bolt, focus:'delivered',
+          ...headline(S.delivered, S.deliveredRateAll),
+          foot:`${lmNum(S.delivered)} of ${lmNum(S.ofd)} sent out · ${S.deliveredRate}% of the ${lmNum(S.resolved)} resolved`,
+          delta:lmDelta(S.deliveredRateAll, P.deliveredRateAll, true) },
+        { label:'OFD → RTO', accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn, focus:'rto',
+          ...headline(S.rto, S.rtoRateAll),
+          foot:`${lmNum(S.rto)} of ${lmNum(S.ofd)} came back after reaching the door`,
+          delta:lmDelta(S.rtoRateAll, P.rtoRateAll, false) },
+        { label:'Pending outcome', accent:'#64748b', tint:'#f1f5f9', icon:DP_ICONS.hash, focus:'open',
+          ...headline(S.open, S.openRateAll),
+          foot:`${lmNum(S.open)} of ${lmNum(S.ofd)} still in flight — no outcome yet`,
+          delta:lmDelta(S.openRateAll, P.openRateAll, false) },
+        { label:'In Transit → RTO', accent:'#b45309', tint:'#fffbeb', icon:DP_ICONS.refresh, focus:'no_attempt',
+          val:val ? dpMoney(d.noAttempt.rev) : d.noAttempt.count,
+          valTitle:val ? dpMoneyFull(d.noAttempt.rev) : null,
+          foot:`returned with NO delivery attempt${val
+              ? (d.noAttempt.prevRev != null ? ` · was ${dpMoney(d.noAttempt.prevRev)}` : '')
+              : (d.noAttempt.prevCount != null ? ` · was ${d.noAttempt.prevCount}` : '')}`,
+          delta:val ? '' : lmDelta(d.noAttempt.count, d.noAttempt.prevCount, false) },
         { label:'Median time to deliver', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.hash,
           val:(s.medianHrsToDeliver != null ? s.medianHrsToDeliver + 'h' : '—'),
           foot:`90th pct ${s.p90HrsToDeliver != null ? s.p90HrsToDeliver + 'h' : '—'} · ${s.sameDayRate}% land within 24h`,
           delta:lmDelta(s.medianHrsToDeliver, p.medianHrsToDeliver, false) },
     ].map(lmKpiCard).join('');
 
-    lmFunnel(d); lmTrend(d); lmReasons(d);
+    const att = d.byAttempt || [];
+    document.getElementById('lm-attempts').innerHTML = att.map(lmAttemptCard).join('');
+    const attNote = document.getElementById('lm-att-note');
+    if(attNote) attNote.textContent = att.length
+        ? `${att.reduce((a, b) => a + b.ofd, 0)} parcels · average ${s.avgAttempts} attempts to resolve` : '';
+
+    lmFunnel(d); lmTrend(d); lmReasons(d); lmGeo(d);
     lmBars('lm-by-courier', d.byCourier.slice(0, 10));
-    lmBars('lm-by-geo', [...d.byZone.map(z => ({ ...z, key:'Zone ' + z.key })), ...d.byState.slice(0, 6)]);
-    lmNoAttempt(d); lmTable();
+    lmNoAttempt(d); lmSetFocus(_lmFocus, false);
+}
+// Destination chart — ONE dimension at a time, chosen by the State/Zone toggle. Previously both were
+// concatenated into a single list, which read as one ranking even though a state sits inside a zone.
+function lmGeo(d){
+    const rows = _lmGeo === 'zone'
+        ? (d.byZone || []).map(z => ({ ...z, key:'Zone ' + z.key }))
+        : (d.byState || []).slice(0, 12);
+    lmBars('lm-by-geo', rows);
 }
 // Funnel strip — Delivered / RTO / Still open, partitioning the OFD cohort exactly.
 function lmFunnel(d){
     const el = document.getElementById('lm-funnel'); if(!el) return;
-    const s = d.summary, tot = s.ofd || 0;
+    const S = lmIsVal() ? d.summary.rev : d.summary, tot = S.ofd || 0;
     if(!tot){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">No parcels went out for delivery in this window</div>'; return; }
-    const segs = [['Delivered', s.delivered, '#059669'], ['RTO', s.rto, '#e11d48'], ['Still open', s.open, '#94a3b8']];
+    const segs = [['Delivered', S.delivered, '#059669'], ['RTO', S.rto, '#e11d48'], ['Pending', S.open, '#94a3b8']];
     const bar = segs.filter(x => x[1] > 0)
-        .map(([l, v, c]) => `<span class="dp-seg" style="width:${v / tot * 100}%;background:${c}" title="${l}: ${v} (${Math.round(v / tot * 1000) / 10}%)"></span>`).join('');
-    const keys = segs.map(([l, v, c]) => `<span class="dp-segkey"><i style="background:${c}"></i>${l} <b class="tabular-nums">${v}</b> <em class="tabular-nums">${tot ? Math.round(v / tot * 1000) / 10 : 0}%</em></span>`).join('');
+        .map(([l, v, c]) => `<span class="dp-seg" style="width:${v / tot * 100}%;background:${c}" title="${l}: ${lmNumFull(v)} (${Math.round(v / tot * 1000) / 10}%)"></span>`).join('');
+    const keys = segs.map(([l, v, c]) => `<span class="dp-segkey"><i style="background:${c}"></i>${l} <b class="tabular-nums">${lmNum(v)}</b> <em class="tabular-nums">${tot ? Math.round(v / tot * 1000) / 10 : 0}%</em></span>`).join('');
     el.innerHTML = `<div class="flex items-baseline justify-between flex-wrap gap-2 mb-3">
-        <h2 class="text-sm font-bold text-slate-700">What happened to the ${tot} parcels that went out</h2>
-        <span class="text-xs text-slate-400">${s.openRate}% of this cohort is still in flight — the rates above are on the ${s.resolved} that resolved</span>
+        <h2 class="text-sm font-bold text-slate-700">What happened to the ${lmUnit(tot, 'parcel', 'parcels')} that went out</h2>
+        <span class="text-xs text-slate-400">The cards above divide by all ${lmNum(tot)} — so ${S.openRateAll}% still in flight holds the rates down until this cohort matures</span>
       </div><div class="dp-splitbar">${bar}</div><div class="dp-splitkeys">${keys}</div>`;
 }
 // Daily stacked bars — one column per IST day, split delivered / RTO / open.
@@ -15630,50 +15840,59 @@ function lmTrend(d){
     const el = document.getElementById('lm-trend'); const rows = d.trend || [];
     if(!el) return;
     if(!rows.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-8 text-center">No data</div>'; return; }
+    const V = lmIsVal(), pick = (r, k) => (V ? (r.rev || {})[k] : r[k]) || 0;
     const W = 640, H = 220, p = { l:34, r:12, t:12, b:28 }, iw = W - p.l - p.r, ih = H - p.t - p.b;
-    const max = Math.max(...rows.map(r => r.ofd), 1);
+    const max = Math.max(...rows.map(r => pick(r, 'ofd')), 1);
     const bw = Math.max(4, Math.min(38, iw / rows.length - 6));
     const x = i => p.l + (rows.length === 1 ? iw / 2 - bw / 2 : i * (iw / rows.length) + (iw / rows.length - bw) / 2);
     const y = v => p.t + ih - (v / max) * ih;
     let grid = '';
     for(let t = 0; t <= 4; t++){ const v = Math.round(max * t / 4);
-        grid += `<line x1="${p.l}" y1="${y(v)}" x2="${W - p.r}" y2="${y(v)}" stroke="#e2e8f0"/><text x="${p.l - 6}" y="${y(v) + 3}" text-anchor="end" fill="#94a3b8" font-size="11">${v}</text>`; }
+        grid += `<line x1="${p.l}" y1="${y(v)}" x2="${W - p.r}" y2="${y(v)}" stroke="#e2e8f0"/><text x="${p.l - 6}" y="${y(v) + 3}" text-anchor="end" fill="#94a3b8" font-size="11">${V ? dpMoney(v) : v}</text>`; }
     const bars = rows.map((r, i) => { const X = x(i); let acc = 0, out = '';
-        [['#059669', r.delivered], ['#e11d48', r.rto], ['#94a3b8', r.open]].forEach(([c, v]) => {
+        [['#059669', pick(r, 'delivered')], ['#e11d48', pick(r, 'rto')], ['#94a3b8', pick(r, 'open')]].forEach(([c, v]) => {
             if(v <= 0) return;
             const h = (v / max) * ih, Y = p.t + ih - h - acc; acc += h;
             out += `<rect x="${X}" y="${Y}" width="${bw}" height="${Math.max(1, h)}" fill="${c}" data-i="${i}"/>`; });
         return out; }).join('');
     const step = Math.ceil(rows.length / 8);
     const xl = rows.map((r, i) => i % step === 0
-        ? `<text x="${x(i) + bw / 2}" y="${H - 8}" text-anchor="middle" fill="#94a3b8" font-size="11">${r.date.slice(5)}</text>` : '').join('');
+        ? `<text x="${x(i) + bw / 2}" y="${H - 8}" text-anchor="middle" fill="#94a3b8" font-size="11">${_dm(r.date)}</text>` : '').join('');
     el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%">${grid}${bars}${xl}</svg>
       <div class="dp-splitkeys" style="margin-top:6px"><span class="dp-segkey"><i style="background:#059669"></i>Delivered</span><span class="dp-segkey"><i style="background:#e11d48"></i>RTO</span><span class="dp-segkey"><i style="background:#94a3b8"></i>Still open</span></div>`;
     el.querySelectorAll('rect').forEach(b => {
         b.addEventListener('mousemove', e => { const r = rows[+b.dataset.i];
-            dpShow(`<b>${r.date}</b> · ${r.ofd} out → ${r.delivered} delivered · ${r.rto} RTO · ${r.open} open`, e.clientX, e.clientY); });
+            dpShow(`<b>${_dmy(r.date)}</b> · ${lmNumFull(pick(r, 'ofd'))} out → ${lmNumFull(pick(r, 'delivered'))} delivered · ${lmNumFull(pick(r, 'rto'))} RTO · ${lmNumFull(pick(r, 'open'))} open`, e.clientX, e.clientY); });
         b.addEventListener('mouseleave', dpHide); });
 }
 function lmReasons(d){
     const el = document.getElementById('lm-reasons'); const rows = d.rtoReasons || []; if(!el) return;
     if(!rows.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-8 text-center">No reasons recorded</div>'; return; }
-    const max = Math.max(...rows.map(r => r.count), 1);
-    el.innerHTML = rows.map(r => `<div class="rw-row" title="${escapeHtml(r.reason)}: ${r.count}">
+    // In the ₹ lens this ranks VALUE EXPOSED to each reason. A parcel with several reasons contributes its
+    // full value to each, so the column deliberately does not partition RTO revenue — the tooltip says so.
+    const V = lmIsVal(), amt = r => (V ? (r.rev || 0) : r.count);
+    const max = Math.max(...rows.map(amt), 1);
+    el.innerHTML = rows.map(r => `<div class="rw-row" title="${escapeHtml(r.reason)}: ${r.count} parcel${r.count === 1 ? '' : 's'}${V ? ` · ${dpMoneyFull(r.rev)} of order value exposed (a parcel with several reasons counts in each, so these do not add to the RTO total)` : ''}">
         <span class="rw-lbl" style="width:150px">${escapeHtml(r.reason)}</span>
-        <span class="rw-track"><span class="rw-bar" style="left:0;width:${Math.max(3, Math.round(r.count / max * 100))}%;background:#e11d48"></span></span>
-        <span class="rw-val" style="width:44px;color:#475569">${r.count}</span></div>`).join('');
+        <span class="rw-track"><span class="rw-bar" style="left:0;width:${Math.max(3, Math.round(amt(r) / max * 100))}%;background:#e11d48"></span></span>
+        <span class="rw-val" style="width:${V ? 62 : 44}px;color:#475569">${V ? dpMoney(r.rev) : r.count}</span></div>`).join('');
 }
-// Delivery-rate bars. Length = share delivered, colour = severity of that group's RTO rate.
+// Delivery-rate bars. Length = share of the group's WHOLE cohort that was delivered, matching the cards
+// above — one denominator across the page, so a "78%" never means two different things on one screen.
+// Colour still comes from the RTO rate ON RESOLVED, because that is the group's true failure rate: a
+// group whose parcels are merely young should not be coloured green for having nothing decided yet.
+// The tooltip carries every number behind both, including how many are still open.
 function lmBars(id, rows){
     const el = document.getElementById(id); if(!el) return;
-    rows = (rows || []).filter(r => r.resolved > 0);
-    if(!rows.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">Not enough resolved shipments</div>'; return; }
+    rows = (rows || []).filter(r => r.ofd > 0);
+    if(!rows.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">No shipments in this window</div>'; return; }
     el.innerHTML = rows.map(r => {
-        const col = r.rtoRate >= 30 ? '#ef4444' : r.rtoRate >= 20 ? '#f59e0b' : '#10b981';
-        return `<div class="rw-row" title="${escapeHtml(String(r.key))}: ${r.delivered} delivered / ${r.rto} RTO of ${r.resolved} resolved · ${r.open} still open${r.medianHrs != null ? ` · median ${r.medianHrs}h` : ''}">
+        const G = lmIsVal() ? (r.rev || {}) : r;          // same group, other unit
+        const col = G.rtoRate >= 30 ? '#ef4444' : G.rtoRate >= 20 ? '#f59e0b' : '#10b981';
+        return `<div class="rw-row" title="${escapeHtml(String(r.key))}: ${lmNumFull(G.delivered)} delivered · ${lmNumFull(G.rto)} RTO · ${lmNumFull(G.open)} still open, of ${lmNumFull(G.ofd)} sent out&#10;${G.deliveredRate}% delivered of the ${lmNumFull(G.resolved)} resolved${r.medianHrs != null ? ` · median ${r.medianHrs}h` : ''}">
           <span class="rw-lbl" style="width:132px">${escapeHtml(String(r.key))}</span>
-          <span class="rw-track"><span class="rw-bar" style="left:0;width:${Math.max(3, r.deliveredRate)}%;background:${col}"></span></span>
-          <span class="rw-val" style="width:96px"><b style="color:#334155">${r.deliveredRate}%</b><span style="color:#94a3b8;font-weight:400"> of ${r.resolved}</span></span>
+          <span class="rw-track"><span class="rw-bar" style="left:0;width:${Math.max(3, G.deliveredRateAll)}%;background:${col}"></span></span>
+          <span class="rw-val" style="width:${lmIsVal() ? 116 : 96}px"><b style="color:#334155">${G.deliveredRateAll}%</b><span style="color:#94a3b8;font-weight:400"> of ${lmNum(G.ofd)}</span></span>
         </div>`; }).join('');
 }
 function lmNoAttempt(d){
@@ -15705,27 +15924,41 @@ function lmSortVal(r, k){ switch(k){
     case 'courier': return (r.courier || '').toLowerCase();
     case 'outcome': return r.outcome || '';
     default: return ''; } }
+// THE single definition of "what the explorer is currently showing" — filter, search and sort.
+// Both the table and the CSV export read it, so a download can never disagree with the screen it was
+// taken from. Anything that changes what is displayed belongs in here, not in lmTable().
+function lmFilteredRows(){
+    const d = _lmData; if(!d) return { list:[], focus:LM_FOCUS.all };
+    const F = LM_FOCUS[_lmFocus] || LM_FOCUS.all;
+    const q = (document.getElementById('lm-search')?.value || '').trim().toLowerCase();
+    // The never-attempted returns live in their OWN array — they have no out-for-delivery event, so no
+    // predicate over `shipments` can reach them. Swap the source rather than filter it.
+    const src = F.src === 'noAttempt' ? ((d.noAttempt || {}).list || []) : (d.shipments || []);
+    let list = src.slice();
+    if(F.test) list = list.filter(F.test);
+    if(q) list = list.filter(r => (r.order || '').toLowerCase().includes(q) || (r.awb || '').toLowerCase().includes(q));
+    const dir = _lmSort.dir === 'asc' ? 1 : -1;
+    list.sort((a, b) => { const va = lmSortVal(a, _lmSort.key), vb = lmSortVal(b, _lmSort.key); return va < vb ? -dir : va > vb ? dir : 0; });
+    return { list, focus:F, query:q };
+}
 function lmTable(){
     const c = document.getElementById('lm-table'); const d = _lmData; if(!c || !d) return;
-    const f = document.getElementById('lm-state')?.value || 'all';
-    const q = (document.getElementById('lm-search')?.value || '').trim().toLowerCase();
-    let list = (d.shipments || []).slice();
-    if(f === 'delivered') list = list.filter(r => r.outcome === 'delivered');
-    else if(f === 'rto') list = list.filter(r => r.outcome === 'rto');
-    else if(f === 'open') list = list.filter(r => r.outcome !== 'delivered' && r.outcome !== 'rto');
-    else if(f === 'slow') list = list.filter(r => r.outcome === 'delivered' && r.hrs != null && r.hrs > 24);
-    if(q) list = list.filter(r => (r.order || '').toLowerCase().includes(q) || (r.awb || '').toLowerCase().includes(q));
+    const { list, focus: F } = lmFilteredRows();
     const cnt = document.getElementById('lm-count');
     if(cnt) cnt.textContent = `${list.length} shown`
-        + (d.shipmentsTotal > (d.shipments || []).length ? ` · capped at ${(d.shipments || []).length} of ${d.shipmentsTotal}` : '');
+        + (lmIsVal() ? ` · ${dpMoneyFull(list.reduce((a, r) => a + (Number(r.value) || 0), 0))}` : '')
+        + (F.src !== 'noAttempt' && d.shipmentsTotal > (d.shipments || []).length ? ` · capped at ${(d.shipments || []).length} of ${d.shipmentsTotal}` : '');
+    const dl = document.getElementById('lm-export');
+    if(dl) dl.disabled = !list.length;      // a download button that yields an empty file is a bug report
     if(!list.length){ c.innerHTML = '<div class="text-slate-400 text-sm p-6">No shipments match this filter</div>'; return; }
-    const dir = _lmSort.dir === 'asc' ? 1 : -1;
-    list = list.sort((a, b) => { const va = lmSortVal(a, _lmSort.key), vb = lmSortVal(b, _lmSort.key); return va < vb ? -dir : va > vb ? dir : 0; });
     const th = 'px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
     const td = 'px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
+    // The value column appears only when the user may see ₹ — and the payload only carries it then.
+    const showVal = canSeeRevenue() && !!d.revenueAllowed;
     const cols = [['order','Order / AWB',0],['outcome','Outcome',0],['courier','Courier',0],[null,'Destination',0],
-        [null,'Zone',1],[null,'Pay',0],['ofd_at','Went out',0],['hrs','OFD → outcome',1],
-        ['attempts','Att',1],['ndr_count','NDR',1],[null,'Reasons',0]];
+        [null,'Zone',1],[null,'Pay',0]].concat(showVal ? [['value','Value',1]] : [])
+        .concat([['ofd_at','Counted on',0],['hrs','Out → outcome',1],
+        ['attempts','Att',1],['ndr_count','NDR',1],[null,'Reasons',0]]);
     const head = cols.map(([k, l, a]) => { const al = a ? ' text-right' : '';
         if(!k) return `<th class="${th}${al}">${l}</th>`;
         const act = _lmSort.key === k, ar = act ? `<span class="text-indigo-500">${_lmSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="text-slate-300">↕</span>';
@@ -15737,23 +15970,1085 @@ function lmTable(){
         const dur = (r.outcome === 'delivered' || r.outcome === 'rto') && r.hrs != null
             ? (r.hrs < 48 ? `${Math.round(r.hrs * 10) / 10}h` : `${Math.round(r.hrs / 24 * 10) / 10}d`) : '—';
         const slow = r.outcome === 'delivered' && r.hrs != null && r.hrs > 24;
-        return `<tr class="hover:bg-slate-50">
-          <td class="${td}"><div class="font-semibold text-slate-800 leading-tight">${escapeHtml(r.order || '—')}</div><div class="text-[11px] text-slate-400 leading-tight">${escapeHtml(r.awb || '')}</div></td>
+        const awb = r.awb || '', open = awb && _lmExpanded.has(awb);
+        const detail = open
+            ? `<tr class="lm-exp-row"><td class="lm-exp-cell" colspan="${cols.length}" data-awb="${escapeHtml(awb)}">${lmExpandHtml(awb)}</td></tr>` : '';
+        return `<tr class="lm-row${open ? ' is-open' : ''}" data-awb="${escapeHtml(awb)}">
+          <td class="${td}"><div class="font-semibold text-slate-800 leading-tight"><span class="lm-caret">▶</span>${escapeHtml(r.order || '—')}</div><div class="text-[11px] text-slate-400 leading-tight" style="padding-left:14px">${escapeHtml(awb)}</div></td>
           <td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${b[1]}">${b[0]}</span></td>
           <td class="${td} text-slate-600"><div class="truncate" style="max-width:130px" title="${escapeHtml(r.courier || '')}">${escapeHtml(r.courier || '—')}</div></td>
           <td class="${td} text-slate-500"><div class="truncate" style="max-width:150px">${escapeHtml(r.city || '')}${r.state ? ', ' + escapeHtml(r.state) : ''}</div></td>
           <td class="${td} text-center text-slate-500">${escapeHtml(r.zone || '—')}</td>
           <td class="${td}">${r.payment ? `<span class="px-1.5 py-0.5 rounded text-[11px] font-medium ${/cod/i.test(r.payment) ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700'}">${/cod/i.test(r.payment) ? 'COD' : 'Prepaid'}</span>` : '<span class="text-slate-300">—</span>'}</td>
-          <td class="${td} text-slate-500 tabular-nums">${r.ofd_at ? dpFmtTs(r.ofd_at) : '—'}</td>
+          ${showVal ? `<td class="${td} text-right tabular-nums ${r.value ? 'text-slate-700 font-medium' : 'text-slate-300'}" title="${r.value ? dpMoneyFull(r.value) : 'No order value on file'}">${r.value ? dpMoney(r.value) : '—'}</td>` : ''}
+          <td class="${td} text-slate-500 tabular-nums">${r.ofd_at ? dpFmtTs(r.ofd_at) : '—'}${
+            // Show the departure whenever it differs from the day the outcome landed — an overnight
+            // delivery is counted on the day it arrived, and the row must not look misplaced because of it.
+            r.last_trip_at && r.ofd_at && dpFmtTs(r.last_trip_at) !== dpFmtTs(r.ofd_at)
+              ? `<div class="text-[11px] text-slate-400 leading-tight" title="Counted on the date its outcome happened (${dpFmtTs(r.ofd_at)}). It last went out for delivery on ${dpFmtTs(r.last_trip_at)}${r.trips > 1 ? ` — ${r.trips} door trips in total, first on ${dpFmtTs(r.first_ofd_at)}` : ''}.">out ${dpFmtTs(r.last_trip_at)}${r.trips > 1 ? ` · ${r.trips} trips` : ''}</div>`
+              : (r.trips > 1 ? `<div class="text-[11px] text-indigo-500 leading-tight" title="Went to the door ${r.trips} times, first on ${r.first_ofd_at ? dpFmtTs(r.first_ofd_at) : '—'}.">${r.trips} door trips</div>` : '')}</td>
           <td class="${td} text-right tabular-nums ${slow ? 'text-amber-600 font-semibold' : 'text-slate-600'}">${dur}</td>
           <td class="${td} text-right tabular-nums ${r.attempts > 1 ? 'text-slate-800 font-medium' : 'text-slate-400'}">${r.attempts}</td>
           <td class="${td} text-right tabular-nums ${r.ndr_count > 0 ? 'text-rose-600 font-medium' : 'text-slate-400'}">${r.ndr_count}</td>
           <td class="px-3 py-2.5 text-sm border-b border-slate-100"><div class="truncate text-xs text-slate-500" style="max-width:220px" title="${escapeHtml((r.reasons || []).join(' · '))}">${escapeHtml((r.reasons || []).join(' · ')) || '—'}</div></td>
-        </tr>`; }).join('');
+        </tr>${detail}`; }).join('');
     c.innerHTML = `<div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`
       + (list.length > 500 ? `<div class="text-xs text-slate-400 p-3 text-center border-t border-slate-100">Showing first 500 of ${list.length} — narrow with search or filters</div>` : '');
     c.querySelectorAll('.lm-sort').forEach(h => h.addEventListener('click', () => { const k = h.dataset.k;
         if(_lmSort.key === k) _lmSort.dir = _lmSort.dir === 'asc' ? 'desc' : 'asc';
         else _lmSort = { key:k, dir:['hrs','attempts','ndr_count','ofd_at'].includes(k) ? 'desc' : 'asc' };
         lmTable(); }));
+    c.querySelectorAll('tr.lm-row').forEach(tr => tr.addEventListener('click', () => lmToggleRow(tr.dataset.awb)));
+}
+
+// ── CSV export — exactly what the explorer is showing ────────────────────────────────────────────
+// Reads lmFilteredRows(), the same function the table renders from, so the file always matches the
+// screen: active card/dropdown filter, search text and sort order. Note it exports EVERY matching row,
+// not just the 500 the table draws — the visible cap is a rendering limit, not a filter.
+function lmExportCsv(){
+    const d = _lmData; if(!d) return;
+    const { list, focus: F, query: q } = lmFilteredRows();
+    if(!list.length) return showNotification('Nothing to export — no shipments match this filter', true);
+    // Dates in the dashboard's DD-MM-YYYY form, so a row in the file is recognisable as the row on
+    // screen. (Export FILENAMES stay ISO, so downloads sort chronologically in a folder.)
+    // Order value is included whenever the user may see it, in BOTH lenses — the file is what gets taken
+    // into Excel to pivot on, so it should carry the number regardless of which toggle was on at the time.
+    // Written as a RAW INTEGER, not "₹1,234": a formatted string is text in Excel and will not SUM.
+    const withVal = canSeeRevenue() && !!d.revenueAllowed;
+    const cols = [
+        ['Order',            r => r.order],
+        ['AWB',              r => r.awb],
+        ['Source',           r => r.source],
+        ['Outcome',          r => (LM_OUTCOME_BADGE[r.outcome] || [r.outcome || ''])[0]],
+        ['Courier',          r => r.courier],
+        ['City',             r => r.city],
+        ['State',            r => r.state],
+        ['Zone',             r => r.zone],
+        ['Payment',          r => (r.payment ? (/cod/i.test(r.payment) ? 'COD' : 'Prepaid') : '')],
+        ['Order type',       r => r.order_type],
+        // Three distinct dates, kept separate on purpose: the one it is COUNTED on (outcome date), the
+        // departure that produced it, and the very first attempt. Collapsing them is what caused the
+        // "why is this in the wrong period" confusion in the first place.
+        ['Counted on',       r => (r.ofd_at ? dpFmtTs(r.ofd_at) : '')],
+        ['Last door trip',   r => (r.last_trip_at ? dpFmtTs(r.last_trip_at) : '')],
+        ['First door trip',  r => (r.first_ofd_at ? dpFmtTs(r.first_ofd_at) : '')],
+        ['Door trips',       r => r.trips || ''],
+        ['Delivered at',     r => (r.delivered_at ? dpFmtTs(r.delivered_at) : '')],
+        ['RTO at',           r => (r.rto_at ? dpFmtTs(r.rto_at) : '')],
+        // Hours from the trip that produced the outcome — the same number the table's column shows.
+        ['Hours to outcome', r => (r.hrs == null ? '' : Math.round(r.hrs * 10) / 10)],
+        ['Attempts',         r => r.attempts],
+        ['NDR count',        r => r.ndr_count],
+        ['NDR reasons',      r => (r.reasons || []).join('; ')],
+        ['Order date',       r => (r.order_date ? dpFmtTs(r.order_date) : '')],
+        ['Promised EDD',     r => (r.edd ? dpFmtTs(r.edd) : '')],
+    ].concat(withVal ? [['Order value (INR)', r => (r.value == null ? '' : Math.round(r.value))]] : []);
+    const cell = v => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const csv = '﻿' + [cols.map(c => cell(c[0])).join(',')]
+        .concat(list.map(r => cols.map(c => cell(c[1](r))).join(','))).join('\n');
+
+    // Filename carries the filter and the range, so two exports never overwrite each other in Downloads.
+    const slug = String(F.label || 'all').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const name = `last-mile-${slug}${q ? '-search' : ''}-${d.range.from}_to_${d.range.to}.csv`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type:'text/csv;charset=utf-8' }));
+    a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    // Say what was actually written — if the server capped the payload, the file is capped too and the
+    // user needs to know before treating it as a complete list.
+    const capped = F.src !== 'noAttempt' && d.shipmentsTotal > (d.shipments || []).length;
+    const val = withVal ? dpMoneyFull(list.reduce((a, r) => a + (Number(r.value) || 0), 0)) : null;
+    showNotification(`Exported ${list.length} shipment${list.length === 1 ? '' : 's'} · ${F.label}`
+        + (val ? ` · ${val}` : '')
+        + (capped ? ` — note: the window holds ${d.shipmentsTotal}, capped at ${(d.shipments || []).length}` : ''));
+}
+
+// ── Row expansion: the courier scan log behind one shipment ──────────────────────────────────────
+// Fetched lazily, once per AWB, and cached for the session. Loading it with the page would mean ~3,000
+// shipments × ~20 scans on a view that re-fetches on every filter change.
+function lmToggleRow(awb){
+    if(!awb) return;
+    if(_lmExpanded.has(awb)) _lmExpanded.delete(awb);
+    else { _lmExpanded.add(awb); lmFetchScan(awb); }
+    lmTable();
+}
+async function lmFetchScan(awb){
+    if(_lmScanCache[awb]) return;                       // cached, in flight, or previously errored
+    _lmScanCache[awb] = { loading:true };
+    try{
+        const r = await fetch('/api/last-mile/shipment/' + encodeURIComponent(awb), { headers:getAuthHeaders() });
+        const d = await r.json();
+        _lmScanCache[awb] = d.success ? d : { error: d.error || 'Could not load this shipment' };
+    }catch(e){ _lmScanCache[awb] = { error: e.message }; }
+    // Patch ONLY the open cell. Re-rendering the whole table here would throw away the user's scroll
+    // position and any other row they opened while this request was in flight.
+    document.querySelectorAll('#lm-table .lm-exp-cell').forEach(cell => {
+        if(cell.dataset.awb === awb) cell.innerHTML = lmExpandHtml(awb); });
+}
+// Colour the dot by what the scan means. Matched on the human label, since the status codes differ
+// between RapidShyp (SCB/OFD/DL) and KwikShip (out_for_delivery/rto_initiated) and would need two maps.
+function lmEvClass(ev){
+    const s = ((ev.label || '') + ' ' + (ev.code || '')).toLowerCase();
+    if(/deliver(ed)?\b|^dl$|delivery successful/.test(s) && !/out for deliver|undeliver/.test(s)) return 'is-good';
+    if(/rto|return|rts|undeliver|cancel|lost|refus/.test(s)) return 'is-bad';
+    if(/ndr|not attempt|pending|fail|hold|address|unavailable|reattempt/.test(s)) return 'is-warn';
+    return '';
+}
+function lmExpandHtml(awb){
+    const d = _lmScanCache[awb];
+    if(!d || d.loading) return `<div class="lm-exp" style="display:block"><div class="text-slate-400 text-sm py-3">Loading scan log…</div></div>`;
+    if(d.error) return `<div class="lm-exp" style="display:block"><div class="text-rose-500 text-sm py-3">${escapeHtml(d.error)}</div></div>`;
+    const s = d.shipment || {};
+    const money = v => (v == null || v === '' ? '—' : '₹' + Number(v).toLocaleString('en-IN', { maximumFractionDigits:2 }));
+    const facts = [
+        ['Order', s.order], ['AWB', s.awb],
+        ['Courier', s.courier], ['Source', s.source],
+        ['Destination', [s.city, s.state].filter(Boolean).join(', ') || '—'],
+        ['Pincode / zone', [s.pincode, s.zone].filter(Boolean).join(' · ') || '—'],
+        ['Payment', s.payment ? (/cod/i.test(s.payment) ? 'COD' : 'Prepaid') : '—'],
+        ['Order type', s.orderType || '—'],
+        ['Door trips', s.trips || s.attempts], ['NDRs raised', s.ndrCount],
+        ['Promised EDD', s.edd ? dpFmtTs(s.edd) : '—'],
+        ['OFD → outcome', s.hrsOfdToOutcome == null ? '—'
+            : (s.hrsOfdToOutcome < 48 ? Math.round(s.hrsOfdToOutcome * 10) / 10 + 'h' : Math.round(s.hrsOfdToOutcome / 24 * 10) / 10 + 'd')],
+        ['Freight', money(s.freightTotal)],
+        ['Applied weight', s.appliedWeight == null ? '—' : s.appliedWeight + ' kg'],
+    ].map(([k, v]) => `<div class="lm-fact"><dt>${escapeHtml(k)}</dt><dd title="${escapeHtml(String(v == null ? '—' : v))}">${escapeHtml(String(v == null || v === '' ? '—' : v))}</dd></div>`).join('');
+
+    // `scanSource` matters: KwikShip only stores a scan log for the ~8% of shipments its webhook has
+    // touched, so a parcel showing milestones must not be mistaken for one that never moved.
+    const courier = d.scanSource === 'courier';
+    const evs = (courier ? d.scans : d.milestones) || [];
+    const timeline = evs.length ? evs.map((ev, i) => `<div class="lm-ev ${i === 0 ? 'is-first ' : ''}${lmEvClass(ev)}">
+        <div class="lm-ev-t">${escapeHtml(ev.label || '—')}</div>
+        <div class="lm-ev-m">${dpFmtTs(ev.at)}${ev.location ? ' · ' + escapeHtml(ev.location) : ''}</div>
+        ${ev.note ? `<div class="lm-ev-n">${escapeHtml(ev.note)}</div>` : ''}
+      </div>`).join('') : '<div class="text-slate-400 text-sm">No events recorded</div>';
+    const reasons = (s.reasons || []).length
+        ? `<div style="margin-top:12px"><h4>Courier NDR reasons</h4><div class="text-xs text-slate-600" style="line-height:1.6">${(s.reasons || []).map(x => escapeHtml(String(x))).join('<br>')}</div></div>` : '';
+    // Spelling out every trip makes a parcel's presence in a date range self-explanatory, and marking the
+    // decisive one shows WHY it landed in this window rather than an earlier or later one.
+    const outAt = s.deliveredAt || s.rtoAt || null;
+    const decisive = (s.ofdDates || []).filter(t => !outAt || new Date(t) <= new Date(outAt)).pop()
+        || (s.ofdDates || [])[(s.ofdDates || []).length - 1];
+    const trips = (s.ofdDates || []).length > 1
+        ? `<div style="margin-top:12px"><h4>Went to the door ${s.ofdDates.length} times</h4><div class="text-xs text-slate-600" style="line-height:1.7">${
+            s.ofdDates.map((t, i) => `<span class="tabular-nums">${i + 1}. ${dpFmtTs(t)}${
+                t === decisive ? ' <b style="color:#4f46e5">← counted on this trip</b>' : ''}</span>`).join('<br>')}</div></div>` : '';
+
+    return `<div class="lm-exp">
+        <div><h4>Shipment detail</h4><div class="lm-facts">${facts}</div>${trips}${reasons}</div>
+        <div>
+          <div class="flex items-center justify-between gap-2 mb-2">
+            <h4 style="margin:0">${courier ? 'Courier scan log' : 'Journey milestones'}</h4>
+            <span class="lm-src ${courier ? 'lm-src-courier' : 'lm-src-ms'}">${courier ? evs.length + ' scans from the courier' : 'no courier scan log — showing our own timestamps'}</span>
+          </div>
+          <div class="lm-tl">${timeline}</div>
+        </div>
+      </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// PURCHASE ORDER (Inventory) — read-only view of EasyEcom's PO book.
+// Source: GET /api/purchase-orders → wraps EasyEcom /wms/V2/getPurchaseOrderDetails.
+//
+// ⚠️ "Open vs Received" is decided by PENDING QUANTITY, not by EasyEcom's `po_status_id`. That id is
+// undocumented — the labels shown next to it are inferred from live data — so anything that matters is
+// derived from a number that cannot be misread. The status chip is informational only.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+let _poData = null, _poWired = false, _poState = 'open', _poVendor = 'all', _poStatus = 'all',
+    _poOpen = new Set(), _poSort = { key: 'createdAt', dir: 'desc' },
+    // 'manual' by default — EasyEcom's own auto-reorder POs are 6 of 9 documents but only ₹2.06L of
+    // ₹10.02L, so they bury the POs a buyer actually raised. One click brings them back.
+    _poType = 'manual',
+    // Last 30 days + Open, by request (2026-08-13). ⚠️ Be aware of what this pair excludes: an OPEN PO
+    // raised more than 30 days ago is hidden by the window even though it is exactly the one worth
+    // chasing — on live data that is 4 POs, incl. an Approved one and one Pending dispatch on FF. The
+    // subtitle therefore calls out hidden OPEN POs specifically, so nothing outstanding disappears
+    // silently; one click on All time brings them back.
+    _poPreset = '30', _poFrom = null, _poTo = null;
+
+// A PO is "auto" when EasyEcom stamped its reference as "Auto PO"; a buyer-raised one has null or a
+// real reference. Matched loosely (case/spacing) rather than by exact string.
+const poIsAuto = p => /^auto\s*po$/i.test(String(p.ref || '').trim());
+function poPresetRange(v){
+    const t = new Date();
+    if(v === 'today') return { from:_ymd(t), to:_ymd(t) };
+    if(v === 'yesterday'){ const y = new Date(); y.setDate(t.getDate()-1); return { from:_ymd(y), to:_ymd(y) }; }
+    const n = parseInt(v, 10); if(!n) return null;
+    const f = new Date(); f.setDate(t.getDate()-(n-1));
+    return { from:_ymd(f), to:_ymd(t) };
+}
+
+const _poINR = n => '₹' + Math.round(Number(n) || 0).toLocaleString('en-IN');
+// Compact ₹ for KPI headlines — a card has room for ₹10.02L, not ₹10,01,811.
+function _poMoney(n){
+    const v = Math.round(Number(n) || 0), a = Math.abs(v);
+    if(a >= 1e7) return '₹' + (v/1e7).toFixed(2).replace(/\.00$/,'') + 'Cr';
+    if(a >= 1e5) return '₹' + (v/1e5).toFixed(2).replace(/\.00$/,'') + 'L';
+    if(a >= 1e3) return '₹' + (v/1e3).toFixed(1).replace(/\.0$/,'') + 'k';
+    return '₹' + v.toLocaleString('en-IN');
+}
+// 'YYYY-MM-DD HH:MM:SS' (EasyEcom's shape) → 'DD-MM-YYYY'. Sliced, never re-parsed — see _dmy.
+const _poDate = s => s ? _dmy(String(s).slice(0, 10)) : '—';
+const PO_STATUS_CLS = {
+    'Open': 'bg-amber-100 text-amber-700',
+    'Partially received': 'bg-sky-100 text-sky-700',
+    'Completed': 'bg-emerald-100 text-emerald-700',
+    'Cancelled': 'bg-slate-200 text-slate-600',
+    'Draft': 'bg-slate-100 text-slate-500',
+};
+function poInit(){
+    // Write controls appear only for holders of `purchase-orders-write` (admins always). Re-evaluated
+    // on every init — the wiring below runs once per page load, so deciding it there would let a
+    // different user signing in without a full reload inherit the previous user's buttons.
+    const nb = document.getElementById('po-new');
+    if(nb) nb.classList.toggle('hidden', !canWritePo());
+    // Seed the default window on first open (preset '30'); poPresetRange returns null for 'all'.
+    if(!_poFrom && !_poTo && _poPreset !== 'all' && _poPreset !== 'custom'){
+        const r = poPresetRange(_poPreset);
+        if(r){ _poFrom = r.from; _poTo = r.to;
+            const f = document.getElementById('po-from'), t = document.getElementById('po-to');
+            if(f) f.value = _poFrom; if(t) t.value = _poTo; }
+    }
+    if(!_poWired){
+        _poWired = true;
+        document.getElementById('po-state')?.addEventListener('click', e => { const b = e.target.closest('button'); if(!b) return;
+            [...b.parentElement.children].forEach(x => { x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
+            b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
+            _poState = b.dataset.st; poTable(); });
+        document.getElementById('po-type')?.addEventListener('click', e => { const b = e.target.closest('button'); if(!b) return;
+            [...b.parentElement.children].forEach(x => { x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
+            b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
+            _poType = b.dataset.ty; poRender(_poData); });
+        document.getElementById('po-preset')?.addEventListener('change', e => {
+            const v = e.target.value, cust = document.getElementById('po-custom');
+            cust.classList.toggle('hidden', v !== 'custom'); cust.classList.toggle('flex', v === 'custom');
+            _poPreset = v;
+            if(v === 'custom') return;                          // wait for Apply
+            if(v === 'all'){ _poFrom = _poTo = null; }
+            else { const r = poPresetRange(v); if(r){ _poFrom = r.from; _poTo = r.to;
+                const f = document.getElementById('po-from'), t = document.getElementById('po-to');
+                if(f) f.value = _poFrom; if(t) t.value = _poTo; } }
+            poRender(_poData); });
+        document.getElementById('po-apply')?.addEventListener('click', () => {
+            _poFrom = document.getElementById('po-from').value || null;
+            _poTo = document.getElementById('po-to').value || null;
+            poRender(_poData); });
+        document.getElementById('po-vendor')?.addEventListener('change', e => { _poVendor = e.target.value; poRender(_poData); });
+        document.getElementById('po-status')?.addEventListener('change', e => { _poStatus = e.target.value; poRender(_poData); });
+        document.getElementById('po-search')?.addEventListener('input', debounce(() => poTable(), 250));
+        document.getElementById('po-refresh')?.addEventListener('click', () => poLoad(true));
+        document.getElementById('po-new')?.addEventListener('click', poOpenCreate);
+    }
+    poLoad();
+}
+async function poLoad(fresh){
+    const k = document.getElementById('po-kpis'); if(k) k.innerHTML = brandLoader('Loading purchase orders…');
+    try{
+        const r = await fetch('/api/purchase-orders' + (fresh ? '?fresh=1' : ''), { headers: getAuthHeaders() });
+        const d = await r.json(); if(!d.success) throw new Error(d.error || 'failed');
+        _poData = d; poRender(d);
+    }catch(e){ if(k) k.innerHTML = '<div class="text-red-500 text-sm p-6">Error: ' + escapeHtml(e.message) + '</div>'; }
+}
+// The rows currently in scope for the vendor / status dropdowns (the Open|Received toggle and the search
+// box are applied later, in poTable, so the KPIs stay stable while you scan the list).
+// OUTER scope — PO type + date only. The vendor and status dropdowns are built from THIS, so their
+// counts describe what is actually on the page. Using the server's all-POs tally would advertise
+// "Vive Cosmetics (5)" while the default view shows 2 of them.
+function poBase(d){
+    // Date is compared on the PO's CREATED day as a plain YYYY-MM-DD string slice — no Date parsing, so
+    // no UTC-vs-IST day shift (EasyEcom sends 'YYYY-MM-DD HH:MM:SS' in local time already).
+    return (d.purchaseOrders || []).filter(p => {
+        if(_poType === 'manual' && poIsAuto(p)) return false;
+        if(_poType === 'auto' && !poIsAuto(p)) return false;
+        if(_poFrom || _poTo){
+            const day = String(p.createdAt || '').slice(0, 10);
+            if(!day) return false;
+            if(_poFrom && day < _poFrom) return false;
+            if(_poTo && day > _poTo) return false;
+        }
+        return true;
+    });
+}
+function poScope(d){
+    return poBase(d).filter(p =>
+        (_poVendor === 'all' || p.vendor === _poVendor) &&
+        (_poStatus === 'all' || p.status === _poStatus));
+}
+function poRender(d){
+    if(!d) return;
+    const rows = poScope(d);
+    const open = rows.filter(p => p.isOpen);
+    const sum = (arr, f) => arr.reduce((a, x) => a + f(x), 0);
+    const pendingValue = sum(open, p => p.items.reduce((a, i) => a + i.pending * i.price, 0));
+
+    // ⚠️ SAY WHAT IS BEING HELD BACK. The default view hides EasyEcom's auto POs — 6 of 9 documents on
+    // live data — and a page that quietly shows a third of the book while presenting confident totals is
+    // just a wrong page. The subtitle names the exclusion and how to undo it.
+    const all = d.purchaseOrders || [];
+    const hiddenAuto = _poType === 'manual' ? all.filter(poIsAuto).length : 0;
+    const outOfRange = (_poFrom || _poTo) ? all.length - all.filter(p => {
+        const day = String(p.createdAt || '').slice(0, 10);
+        return day && (!_poFrom || day >= _poFrom) && (!_poTo || day <= _poTo); }).length : 0;
+    // ⚠️ Count the OPEN ones hidden by the date window separately and name them first. "12 outside the
+    // window" is easy to skim past; "3 OPEN POs outside this window" is the sentence that stops a buyer
+    // forgetting an order that is still owed to them — and the default (Open + last 30 days) hides
+    // exactly those by construction.
+    const openHidden = (_poFrom || _poTo) ? all.filter(p => {
+        if(_poType === 'manual' && poIsAuto(p)) return false;
+        if(_poType === 'auto' && !poIsAuto(p)) return false;
+        if(!p.isOpen) return false;
+        const day = String(p.createdAt || '').slice(0, 10);
+        return !day || (_poFrom && day < _poFrom) || (_poTo && day > _poTo); }).length : 0;
+    const held = [];
+    if(openHidden) held.push(`⚠ ${openHidden} OPEN PO${openHidden === 1 ? '' : 's'} raised before this window — switch to All time to see them`);
+    if(hiddenAuto) held.push(`${hiddenAuto} auto PO${hiddenAuto === 1 ? '' : 's'} hidden — switch to Auto or All to see them`);
+    if(outOfRange) held.push(`${outOfRange} outside ${_poFrom ? _dmy(_poFrom) : '…'} → ${_poTo ? _dmy(_poTo) : '…'}`);
+    document.getElementById('po-sub').textContent =
+        `${rows.length} purchase order${rows.length === 1 ? '' : 's'} · ${open.length} open · ${_poINR(sum(rows, p => p.totalValue))} ordered`
+        + (held.length ? `  ·  ${held.join(' · ')}` : '')
+        + ` · fetched ${dpFmtTs(d.fetchedAt)}${d.cached ? ' (cached)' : ''}`;
+
+    // Loud about anything that would make the numbers untrustworthy, rather than quietly rendering them.
+    const warn = document.getElementById('po-warn');
+    if(warn){
+        const msgs = [];
+        if(d.truncated) msgs.push('EasyEcom returned more pages than the fetch cap — this list is INCOMPLETE.');
+        if(d.summary.mismatches) msgs.push(`${d.summary.mismatches} PO(s) where EasyEcom's header total disagrees with the sum of their line items — check those before relying on the value.`);
+        warn.classList.toggle('hidden', !msgs.length);
+        warn.textContent = msgs.join(' ');
+    }
+
+    const fill = (id, opts, cur, allLabel) => { const el = document.getElementById(id); if(!el) return;
+        el.innerHTML = `<option value="all">${allLabel}</option>`
+            + (opts || []).map(o => `<option value="${escapeHtml(String(o.key))}">${escapeHtml(String(o.key))} (${o.count})</option>`).join('');
+        el.value = cur; if(el.value !== cur){ if(id === 'po-vendor') _poVendor = 'all'; else _poStatus = 'all'; el.value = 'all'; } };
+    // Counted over the OUTER scope (type + date), not the whole book — see poBase().
+    const base = poBase(d);
+    const tally = f => { const c = {}; base.forEach(p => { const k = f(p); if(k) c[k] = (c[k] || 0) + 1; });
+        return Object.entries(c).map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count); };
+    fill('po-vendor', tally(p => p.vendor), _poVendor, 'All vendors');
+    fill('po-status', tally(p => p.status), _poStatus, 'All statuses');
+
+    document.getElementById('po-kpis').innerHTML = [
+        { label:'Purchase orders', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.hash,
+          val:rows.length, foot:`${sum(rows, p => p.lineCount)} line items · ${new Set(rows.map(p => p.vendor).filter(Boolean)).size} vendor${new Set(rows.map(p => p.vendor).filter(Boolean)).size === 1 ? '' : 's'}` },
+        // Two DIFFERENT questions, so two numbers rather than one that half-answers both:
+        // "awaiting approval" is EasyEcom's own status 2 and matches the portal's filter exactly, while
+        // "has units outstanding" also includes approved POs that are only partly received.
+        { label:'Waiting for approval', accent:'#b45309', tint:'#fffbeb', icon:DP_ICONS.refresh,
+          val:rows.filter(p => p.awaitingApproval).length,
+          foot:`${open.length} PO${open.length === 1 ? '' : 's'} with units outstanding · ${sum(open, p => p.pending).toLocaleString('en-IN')} units` },
+        { label:'Value still to arrive', accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn,
+          val:_poMoney(pendingValue), foot:'pending units at their line price' },
+        { label:'Total ordered', accent:'#059669', tint:'#ecfdf5', icon:DP_ICONS.bolt,
+          val:_poMoney(sum(rows, p => p.totalValue)), foot:`${sum(rows, p => p.qty).toLocaleString('en-IN')} units across all POs` },
+    ].map(c => `<div class="dp-kpi card p-5" style="--accent:${c.accent}">
+        <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background:${c.tint};color:${c.accent}">${c.icon}</div>
+        <div class="text-[2rem] leading-none font-extrabold text-slate-800 tracking-tight tabular-nums mt-4">${c.val}</div>
+        <div class="text-sm font-semibold text-slate-600 mt-1.5">${c.label}</div>
+        <div class="text-xs text-slate-400 mt-0.5">${c.foot}</div></div>`).join('');
+
+    poByVendor(rows); poPending(rows); poTable();
+}
+function poByVendor(rows){
+    const el = document.getElementById('po-by-vendor'); if(!el) return;
+    const g = {};
+    rows.forEach(p => { const k = p.vendor || 'Unknown';
+        (g[k] = g[k] || { value:0, pos:0, open:0 }); g[k].value += p.totalValue; g[k].pos++; if(p.isOpen) g[k].open++; });
+    const list = Object.entries(g).map(([key, v]) => ({ key, ...v })).sort((a, b) => b.value - a.value);
+    if(!list.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">No purchase orders</div>'; return; }
+    const max = Math.max(...list.map(x => x.value), 1);
+    el.innerHTML = list.map(v => `<div class="rw-row" title="${escapeHtml(v.key)}: ${_poINR(v.value)} across ${v.pos} PO(s), ${v.open} open">
+        <span class="rw-lbl" style="width:150px">${escapeHtml(v.key)}</span>
+        <span class="rw-track"><span class="rw-bar" style="left:0;width:${Math.max(3, Math.round(v.value / max * 100))}%;background:#4f46e5"></span></span>
+        <span class="rw-val" style="width:104px"><b style="color:#334155">${_poMoney(v.value)}</b><span style="color:#94a3b8;font-weight:400"> · ${v.pos}</span></span>
+      </div>`).join('');
+}
+// Only OPEN lines — a received line has nothing left to arrive, so including it would overstate the
+// inbound pipeline this panel exists to show.
+function poPending(rows){
+    const el = document.getElementById('po-pending'); if(!el) return;
+    const g = {};
+    rows.filter(p => p.isOpen).forEach(p => p.items.filter(i => i.pending > 0).forEach(i => {
+        const k = i.sku || '(no sku)';
+        (g[k] = g[k] || { units:0, value:0, pos:new Set() });
+        g[k].units += i.pending; g[k].value += i.pending * i.price; g[k].pos.add(p.poNumber); }));
+    const list = Object.entries(g).map(([key, v]) => ({ key, units:v.units, value:v.value, pos:v.pos.size }))
+        .sort((a, b) => b.units - a.units).slice(0, 12);
+    if(!list.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">Nothing outstanding — every ordered unit has been received.</div>'; return; }
+    const max = Math.max(...list.map(x => x.units), 1);
+    el.innerHTML = list.map(v => `<div class="rw-row" title="${escapeHtml(v.key)}: ${v.units} units pending (${_poINR(v.value)}) across ${v.pos} PO(s)">
+        <span class="rw-lbl" style="width:150px">${escapeHtml(v.key)}</span>
+        <span class="rw-track"><span class="rw-bar" style="left:0;width:${Math.max(3, Math.round(v.units / max * 100))}%;background:#f59e0b"></span></span>
+        <span class="rw-val" style="width:104px"><b style="color:#334155">${v.units.toLocaleString('en-IN')}</b><span style="color:#94a3b8;font-weight:400"> · ${_poMoney(v.value)}</span></span>
+      </div>`).join('');
+}
+function poSortVal(p, k){ switch(k){
+    case 'poNumber': return Number(p.poNumber) || 0;
+    case 'vendor': return String(p.vendor || '').toLowerCase();
+    case 'totalValue': return p.totalValue || 0;
+    case 'qty': return p.qty || 0;
+    case 'pending': return p.pending || 0;
+    case 'expectedAt': return p.expectedAt || '';
+    default: return p.createdAt || ''; } }
+function poTable(){
+    const c = document.getElementById('po-table'); const d = _poData; if(!c || !d) return;
+    const q = (document.getElementById('po-search')?.value || '').trim().toLowerCase();
+    let list = poScope(d);
+    if(_poState === 'open') list = list.filter(p => p.isOpen);
+    else if(_poState === 'closed') list = list.filter(p => !p.isOpen);
+    if(q) list = list.filter(p =>
+        String(p.poNumber).includes(q) || String(p.poId).includes(q) ||
+        (p.vendor || '').toLowerCase().includes(q) || (p.ref || '').toLowerCase().includes(q) ||
+        p.items.some(i => (i.sku || '').toLowerCase().includes(q) || (i.ean || '').toLowerCase().includes(q)));
+    const dir = _poSort.dir === 'asc' ? 1 : -1;
+    list = list.slice().sort((a, b) => { const va = poSortVal(a, _poSort.key), vb = poSortVal(b, _poSort.key); return va < vb ? -dir : va > vb ? dir : 0; });
+    const cnt = document.getElementById('po-count');
+    if(cnt) cnt.textContent = `${list.length} shown · ${_poINR(list.reduce((a, p) => a + p.totalValue, 0))}`;
+    if(!list.length){ c.innerHTML = '<div class="text-slate-400 text-sm p-6">No purchase orders match these filters</div>'; return; }
+    const th = 'px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
+    const td = 'px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
+    const cols = [['poNumber','PO',0],[null,'Status',0],['vendor','Vendor',0],[null,'Warehouse',0],
+        ['createdAt','Raised',0],['expectedAt','Expected',0],['qty','Units',1],['pending','Pending',1],['totalValue','Value',1],[null,'Lines',1]];
+    const head = cols.map(([k, l, a]) => { const al = a ? ' text-right' : '';
+        if(!k) return `<th class="${th}${al}">${l}</th>`;
+        const act = _poSort.key === k, ar = act ? `<span class="text-indigo-500">${_poSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="text-slate-300">↕</span>';
+        return `<th class="${th}${al} po-sort cursor-pointer select-none hover:text-slate-600 ${act ? 'text-slate-600' : ''}" data-k="${k}">${l} ${ar}</th>`; }).join('');
+    const rows = list.map(p => {
+        const isOpen = _poOpen.has(p.poId);
+        const cls = PO_STATUS_CLS[p.status] || 'bg-slate-100 text-slate-600';
+        let out = `<tr class="po-row cursor-pointer transition-colors ${isOpen ? 'bg-indigo-50/70' : 'hover:bg-slate-50'}" data-po="${p.poId}">
+          <td class="${td}"><div class="flex items-center gap-1.5"><span class="text-slate-300 text-xs w-3">${isOpen ? '▾' : '▸'}</span>
+            <div><div class="font-semibold text-slate-800 leading-tight">PO ${escapeHtml(String(p.poNumber))}</div>
+            <div class="text-[11px] text-slate-400 leading-tight">${escapeHtml(p.ref || ('#' + p.poId))}</div></div></div></td>
+          <td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${cls}" title="EasyEcom po_status_id ${p.statusId} — label inferred">${escapeHtml(p.status)}</span></td>
+          <td class="${td} text-slate-600"><div class="truncate" style="max-width:170px" title="${escapeHtml(p.vendor || '')}">${escapeHtml(p.vendor || '—')}</div></td>
+          <td class="${td} text-slate-500"><div class="truncate" style="max-width:170px" title="${escapeHtml(p.warehouse || '')}">${escapeHtml(p.warehouse || '—')}</div></td>
+          <td class="${td} text-slate-500 tabular-nums">${_poDate(p.createdAt)}</td>
+          <td class="${td} tabular-nums ${p.isOpen && p.expectedAt && String(p.expectedAt).slice(0,10) < new Date().toISOString().slice(0,10) ? 'text-rose-600 font-semibold' : 'text-slate-500'}"
+              title="${p.isOpen && p.expectedAt && String(p.expectedAt).slice(0,10) < new Date().toISOString().slice(0,10) ? 'Expected date has passed and units are still pending' : ''}">${_poDate(p.expectedAt)}</td>
+          <td class="${td} text-right tabular-nums text-slate-600">${p.qty.toLocaleString('en-IN')}</td>
+          <td class="${td} text-right tabular-nums ${p.pending > 0 ? 'text-amber-600 font-semibold' : 'text-slate-300'}">${p.pending ? p.pending.toLocaleString('en-IN') : '—'}</td>
+          <td class="${td} text-right tabular-nums font-semibold text-slate-800" title="${_poINR(p.totalValue)}${p.valueMismatch ? ' — disagrees with the sum of line items (' + _poINR(p.itemsValue) + ')' : ''}">${_poMoney(p.totalValue)}${p.valueMismatch ? ' <span class="text-rose-500" title="header total vs line items disagree">⚠</span>' : ''}</td>
+          <td class="${td} text-right tabular-nums text-slate-500">${p.lineCount}</td>
+        </tr>`;
+        if(isOpen) out += poDetailRow(p, cols.length);
+        return out; }).join('');
+    c.innerHTML = `<table class="w-full border-collapse"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+    c.querySelectorAll('.po-sort').forEach(h => h.addEventListener('click', e => { e.stopPropagation(); const k = h.dataset.k;
+        if(_poSort.key === k) _poSort.dir = _poSort.dir === 'asc' ? 'desc' : 'asc';
+        else _poSort = { key:k, dir:['totalValue','qty','pending','createdAt','expectedAt','poNumber'].includes(k) ? 'desc' : 'asc' };
+        poTable(); }));
+    c.querySelectorAll('.po-row').forEach(r => r.addEventListener('click', () => {
+        const id = Number(r.dataset.po);
+        if(_poOpen.has(id)) _poOpen.delete(id); else _poOpen.add(id);
+        poTable(); }));
+    // Status controls live inside the expanded row; their container stops click propagation so using
+    // them doesn't collapse the row out from under you.
+    c.querySelectorAll('.po-st-sel').forEach(el => { try { ecEnhanceSelect(el); } catch(_){} });
+    // Download goes through fetch rather than a plain link: the endpoint needs the Authorization header,
+    // which an <a href> cannot send. The blob is handed to a temporary anchor to trigger the save.
+    c.querySelectorAll('.po-dl').forEach(b => b.addEventListener('click', async e => { e.stopPropagation();
+        const id = b.dataset.po, no = b.dataset.no, was = b.textContent;
+        b.disabled = true; b.textContent = 'Preparing…';
+        try{
+            const r = await fetch(`/api/purchase-orders/${id}/pdf`, { headers: getAuthHeaders() });
+            if(!r.ok){ const d = await r.json().catch(() => ({})); throw new Error(d.error || `Download failed (${r.status})`); }
+            const blob = await r.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = `PO-${no}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 2000);
+            // Say WHICH document was served. EasyEcom builds its PO PDFs asynchronously, so a brand-new
+            // PO can still be queued after the retries — in that case this is our own copy, which looks
+            // different, and the buyer should know before sending it to a supplier.
+            if(r.headers.get('x-po-pdf-source') === 'generated')
+                showNotification(`PO ${no}: EasyEcom's document isn't ready yet (${r.headers.get('x-po-pdf-reason') || 'still generating'}) — downloaded our own copy instead. Try again shortly for the official one.`, true);
+        }catch(err){ showNotification(err.message, true); }
+        finally { b.disabled = false; b.textContent = was; } }));
+    c.querySelectorAll('.po-st-go').forEach(b => b.addEventListener('click', e => { e.stopPropagation();
+        const id = Number(b.dataset.po);
+        const sel = c.querySelector(`.po-st-sel[data-po="${id}"]`);
+        const mc = c.querySelector(`.po-st-mc[data-po="${id}"]`);
+        poChangeStatus(id, sel ? sel.value : null, mc ? mc.checked : false); }));
+}
+// Expanded line items for one PO.
+function poDetailRow(p, ncols){
+    const th = 'px-3 py-1.5 text-left text-[10px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap';
+    const td = 'px-3 py-1.5 text-sm text-slate-700 border-b border-slate-100 whitespace-nowrap';
+    const rows = p.items.map(i => `<tr>
+        <td class="${td} font-semibold text-slate-800">${escapeHtml(i.sku || '—')}</td>
+        <td class="${td} text-slate-500"><div class="truncate" style="max-width:280px" title="${escapeHtml(i.description || '')}">${escapeHtml(i.description || '—')}</div></td>
+        <td class="${td} text-slate-500">${escapeHtml(i.ean || '—')}</td>
+        <td class="${td} text-slate-500">${escapeHtml(i.hsn || '—')}</td>
+        <td class="${td} text-right tabular-nums">${i.qty.toLocaleString('en-IN')}</td>
+        <td class="${td} text-right tabular-nums ${i.received > 0 ? 'text-emerald-600' : 'text-slate-400'}">${i.received.toLocaleString('en-IN')}</td>
+        <td class="${td} text-right tabular-nums ${i.pending > 0 ? 'text-amber-600 font-semibold' : 'text-slate-300'}">${i.pending ? i.pending.toLocaleString('en-IN') : '—'}</td>
+        <td class="${td} text-right tabular-nums text-slate-600">${_poINR(i.price)}</td>
+        <td class="${td} text-right tabular-nums font-semibold">${_poINR(i.lineValue)}</td>
+      </tr>`).join('');
+    return `<tr class="po-detail"><td colspan="${ncols}" class="px-6 py-4 bg-slate-50 border-b border-slate-200">
+        <div class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Line items — PO ${escapeHtml(String(p.poNumber))}</div>
+        <div class="overflow-x-auto"><table class="w-full border-collapse bg-white rounded-lg"><thead><tr>
+          <th class="${th}">SKU</th><th class="${th}">Product</th><th class="${th}">EAN</th><th class="${th}">HSN</th>
+          <th class="${th} text-right">Ordered</th><th class="${th} text-right">Received</th><th class="${th} text-right">Pending</th>
+          <th class="${th} text-right">Unit price</th><th class="${th} text-right">Line value</th>
+        </tr></thead><tbody>${rows}</tbody></table></div>
+        <div class="text-xs text-slate-400 mt-2">Raised ${_poDate(p.createdAt)} · last updated ${_poDate(p.updatedAt)}${p.expectedAt ? ' · expected ' + _poDate(p.expectedAt) : ''}${p.expiresAt ? ' · expires ' + _poDate(p.expiresAt) : ''} · EasyEcom PO id ${p.poId}</div>
+        <div class="flex items-center gap-2 mt-3 flex-wrap" onclick="event.stopPropagation()">
+            <button class="filter-btn po-dl" data-po="${p.poId}" data-no="${escapeHtml(String(p.poNumber))}">⬇ Download PO</button>
+            <span class="text-xs text-slate-400">PDF with supplier, line items and totals</span>
+        </div>
+        ${canWritePo() ? `<div class="flex items-center gap-2 mt-3 flex-wrap" onclick="event.stopPropagation()">
+            <span class="text-xs font-semibold text-slate-500">Change status</span>
+            <select class="filter-select po-st-sel" data-po="${p.poId}">
+              ${PO_SETTABLE.map(([id, l]) => `<option value="${id}"${id === p.statusId ? ' selected' : ''}>${l}</option>`).join('')}
+            </select>
+            <label class="inline-flex items-center gap-1.5 text-xs text-slate-500" title="Close the PO even though some ordered quantity was never received">
+              <input type="checkbox" class="po-st-mc" data-po="${p.poId}"> mark complete</label>
+            <button class="filter-btn-primary po-st-go" data-po="${p.poId}">Apply</button>
+            <span class="text-xs text-slate-400">updates the live PO in EasyEcom</span>
+          </div>` : ''}
+      </td></tr>`;
+}
+
+// ── PURCHASE ORDER WRITES ────────────────────────────────────────────────────────────────────────
+// Create a PO, and change an existing PO's status. Both are REAL actions in EasyEcom — a created PO
+// commits the company to a purchase, and a status change can approve, reject or cancel a live order —
+// so both sit behind the `purchase-orders-write` capability (the server enforces it; this is the
+// convenience half) and both confirm before firing.
+function canWritePo(){ return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('purchase-orders-write'))); }
+
+// Only the statuses a human decides. EasyEcom's 11–16 describe what the fulfilment centre reports, not
+// what we choose, so setting them by hand would invent a state nothing else agrees with.
+const PO_SETTABLE = [
+    [1,'Open'], [2,'Waiting for approval'], [3,'Approved'], [4,'Rejected'], [5,'Completed'],
+    [6,'Pending on supplier'], [7,'Cancelled'], [8,'Payment pending'], [9,'Payment done'],
+];
+let _poLines = [];   // rows in the Create-PO builder
+// "1 units" reads as a bug even when the number is right.
+const units = n => Number(n) === 1 ? 'unit' : 'units';
+// A confirm button states the action it is about to take, not the state it produces — "Yes, cancelled
+// it" describes something that has already happened, which is precisely what the user has not agreed to yet.
+const VERB = { 4: 'reject', 7: 'cancel' };
+
+function poNewLine(){ return { sku:'', quantity:'', unitPrice:'', taxRate:'', batch_code:'', expiry_date:'' }; }
+// EasyEcom requires referenceCode but does not generate one, so the form arrives with a sensible unique
+// default the buyer can overwrite. Date + time keeps it readable and collision-free within a minute.
+function poDefaultRef(){
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    return `EC-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+// ── SKU picker ───────────────────────────────────────────────────────────────────────────────────
+// ⚠️ This started as a native <datalist>, which the browser renders as an OS dropdown — a full-height
+// black list that escaped the modal and matched nothing else in the app. Same lesson as the native
+// <select>: **the browser's own popup cannot be styled, so anything with a list needs a real panel.**
+// This one also earns its place: each row shows the product NAME and what we LAST paid, and choosing a
+// SKU pre-fills price and tax. A price that has moved since last time is then visible before the PO is
+// raised, rather than after the invoice arrives.
+function poSkuField(i, l){
+    const chosen = (_poData?.skuOptions || []).find(o => o.sku === l.sku);
+    const sub = chosen ? (chosen.name || `last ₹${chosen.lastPrice} excl. tax`) : '';
+    return `<div class="poc-sku-wrap" data-i="${i}">
+        <button type="button" class="poc-sku-btn${l.sku ? ' is-set' : ''}" data-i="${i}">
+          <span class="poc-sku-val">${l.sku ? escapeHtml(l.sku) : 'Choose SKU…'}${sub ? `<em>${escapeHtml(String(sub).slice(0, 38))}</em>` : ''}</span>
+          <svg class="csel-chev" viewBox="0 0 20 20" fill="none"><path d="M6 8l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="poc-sku-panel hidden">
+          <div class="poc-sku-head"><input type="text" class="poc-sku-search" placeholder="Search SKU or product…"></div>
+          <div class="poc-sku-list"></div>
+        </div>
+      </div>`;
+}
+function poSkuOptionsHtml(q){
+    const opts = (_poData?.skuOptions || []);
+    const needle = String(q || '').trim().toLowerCase();
+    const list = needle
+        ? opts.filter(o => o.sku.toLowerCase().includes(needle) || String(o.name || '').toLowerCase().includes(needle))
+        : opts;
+    if(!list.length) return '<div class="poc-sku-empty">No SKU matches</div>';
+    return list.map(o => `<div class="poc-sku-item" data-sku="${escapeHtml(o.sku)}">
+        <div class="poc-sku-code">${escapeHtml(o.sku)}</div>
+        ${o.name ? `<div class="poc-sku-name">${escapeHtml(o.name)}</div>` : ''}
+        <div class="poc-sku-meta">₹${o.lastPrice} excl. tax${o.lastGrossPrice && o.lastGrossPrice !== o.lastPrice ? ` (₹${o.lastGrossPrice} incl.)` : ''}${o.lastOrderedAt ? ' · ' + _dmy(o.lastOrderedAt) : ''}${o.suggestedTax != null ? ` · GST ${o.suggestedTax}%` : ''}</div>
+        ${o.prevPrice != null ? `<div class="poc-sku-move">was ₹${o.prevPrice}${o.prevPriceAt ? ' on ' + _dmy(o.prevPriceAt) : ''}</div>` : ''}
+      </div>`).join('');
+}
+// Place a fixed-position panel against its trigger: below by default, flipped above when the space below
+// is too tight, and clamped so it can never run off either edge of the viewport.
+function poPlaceSkuPanel(btn, panel){
+    const r = btn.getBoundingClientRect();
+    const GAP = 4, MARGIN = 8;
+    const below = window.innerHeight - r.bottom - GAP - MARGIN;
+    const above = r.top - GAP - MARGIN;
+    const flip = below < 200 && above > below;          // only flip when it genuinely helps
+    const h = Math.max(160, Math.min(320, flip ? above : below));
+    panel.style.height = h + 'px';
+    panel.style.top = (flip ? r.top - GAP - h : r.bottom + GAP) + 'px';
+    const w = panel.offsetWidth || 340;
+    panel.style.left = Math.round(Math.min(Math.max(MARGIN, r.left), window.innerWidth - w - MARGIN)) + 'px';
+}
+// ONE listener for the whole app, not one per picker per open. The line grid re-renders on every
+// keystroke, so per-instance window listeners would pile up referencing discarded DOM. This finds
+// whichever panel is currently open and re-places it — a no-op when none is.
+// `capture: true` on scroll because the modal body's own scroll event does not bubble to window.
+(function poSkuPanelTracker(){
+    const track = () => {
+        const panel = document.querySelector('.poc-sku-panel:not(.hidden)');
+        if(!panel) return;
+        const btn = panel.parentElement && panel.parentElement.querySelector('.poc-sku-btn');
+        if(btn) poPlaceSkuPanel(btn, panel);
+    };
+    window.addEventListener('resize', track);
+    window.addEventListener('scroll', track, true);
+    // Esc closes the picker before it reaches the modal, so one press does not shut the whole form.
+    document.addEventListener('keydown', e => {
+        if(e.key !== 'Escape') return;
+        const panel = document.querySelector('.poc-sku-panel:not(.hidden)');
+        if(panel){ e.stopPropagation(); panel.classList.add('hidden'); }
+    }, true);
+})();
+function poWireSkuPickers(root){
+    root.querySelectorAll('.poc-sku-wrap').forEach(wrap => {
+        const i = +wrap.dataset.i;
+        const btn = wrap.querySelector('.poc-sku-btn'), panel = wrap.querySelector('.poc-sku-panel');
+        const search = wrap.querySelector('.poc-sku-search'), list = wrap.querySelector('.poc-sku-list');
+        const close = () => panel.classList.add('hidden');
+        btn.addEventListener('click', e => { e.preventDefault(); e.stopPropagation();
+            const wasOpen = !panel.classList.contains('hidden');
+            root.querySelectorAll('.poc-sku-panel').forEach(p => p.classList.add('hidden'));
+            if(wasOpen) return;
+            list.innerHTML = poSkuOptionsHtml(''); search.value = '';
+            panel.classList.remove('hidden');
+            poPlaceSkuPanel(btn, panel);                 // measure AFTER unhiding — a hidden node has no size
+            search.focus(); });
+        search.addEventListener('input', () => { list.innerHTML = poSkuOptionsHtml(search.value); });
+        search.addEventListener('click', e => e.stopPropagation());
+        // Enter picks the only remaining match — the fast path once you've typed enough.
+        search.addEventListener('keydown', e => { if(e.key !== 'Enter') return; e.preventDefault();
+            const only = list.querySelectorAll('.poc-sku-item');
+            if(only.length === 1) only[0].click(); });
+        list.addEventListener('click', e => { const it = e.target.closest('.poc-sku-item'); if(!it) return;
+            const o = (_poData?.skuOptions || []).find(x => x.sku === it.dataset.sku);
+            _poLines[i].sku = it.dataset.sku;
+            // Auto-capture cost and GST, but never overwrite something the buyer already typed.
+            // ⚠️ Tax comes from the HSN chapter, NOT from PO history — EasyEcom returns tax_rate 0 on
+            // every line, so inheriting it would silently stamp 0% GST on new orders.
+            if(o && !_poLines[i].unitPrice) _poLines[i].unitPrice = o.lastPrice;
+            if(o && !_poLines[i].taxRate && o.suggestedTax != null) _poLines[i].taxRate = o.suggestedTax;
+            close(); poRenderLines(); });
+    });
+}
+function poLineTotal(l){ const q = Number(l.quantity) || 0, p = Number(l.unitPrice) || 0; return q * p; }
+const poSkuMeta = sku => (_poData?.skuOptions || []).find(o => o.sku === sku) || null;
+// Under the price box: what we last paid, and — if the buyer has typed something different — how far off
+// it is. Cost is NOT stable here (10 of 19 SKUs have moved), so an unremarked change is a real risk.
+function poCostHint(l){
+    const o = poSkuMeta(l.sku); if(!o) return '';
+    const typed = Number(l.unitPrice);
+    if(isFinite(typed) && typed > 0 && Math.abs(typed - o.lastPrice) > 0.005){
+        const pc = o.lastPrice > 0 ? Math.round(((typed - o.lastPrice) / o.lastPrice) * 1000) / 10 : null;
+        const up = typed > o.lastPrice;
+        return `<div class="poc-hint ${up ? 'is-up' : 'is-down'}">${up ? '▲' : '▼'} vs ₹${o.lastPrice} last (excl. tax)${pc != null ? ` ${pc > 0 ? '+' : ''}${pc}%` : ''}</div>`;
+    }
+    return `<div class="poc-hint">last ₹${o.lastPrice} excl. tax${o.lastOrderedAt ? ' · ' + _dmy(o.lastOrderedAt) : ''}</div>`;
+}
+// Under the tax box: where the suggested GST came from. An inherited rate must never look like a
+// confirmed one — the HSN is named so it can be checked or overridden.
+function poTaxHint(l){
+    const o = poSkuMeta(l.sku); if(!o) return '';
+    if(o.suggestedTax == null) return `<div class="poc-hint">no HSN on record — set GST manually</div>`;
+    const typed = Number(l.taxRate);
+    if(isFinite(typed) && String(l.taxRate) !== '' && typed !== o.suggestedTax)
+        return `<div class="poc-hint is-up">overridden · ${o.taxSource} suggests ${o.suggestedTax}%</div>`;
+    return `<div class="poc-hint">from ${o.taxSource}</div>`;
+}
+function poCartTotal(){ return _poLines.reduce((a, l) => a + poLineTotal(l), 0); }
+
+function poOpenCreate(){
+    if(!canWritePo()){ showNotification('You do not have permission to create purchase orders.', true); return; }
+    const d = _poData || {};
+    _poLines = [poNewLine()];
+    const vendors = d.vendorOptions || [];
+    const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 7);
+    const wrap = document.createElement('div');
+    wrap.id = 'po-create-modal';
+    wrap.className = 'fixed inset-0 z-50 flex items-start justify-center p-6 overflow-y-auto';
+    wrap.style.background = 'rgba(15,23,42,.45)';
+    wrap.innerHTML = `
+      <div class="card w-full my-4" style="background:#fff;max-width:1180px" onclick="event.stopPropagation()">
+        <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-bold text-slate-800">New purchase order</h2>
+            <p class="text-xs text-slate-400 mt-0.5">This creates a real PO in EasyEcom against the supplier you pick.</p>
+          </div>
+          <button class="po-x text-slate-400 hover:text-slate-700 text-xl leading-none px-2">&times;</button>
+        </div>
+        <div class="px-6 py-5 space-y-4">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            <label class="block"><span class="text-xs font-semibold text-slate-500">Supplier *</span>
+              <select id="poc-vendor" class="filter-select w-full mt-1">
+                <option value="">Select a supplier…</option>
+                ${vendors.map(v => `<option value="${v.id || ''}" data-code="${escapeHtml(v.code || '')}">${escapeHtml(v.name)}${v.orders ? ` (${v.orders} PO${v.orders === 1 ? '' : 's'})` : ' (new supplier)'}</option>`).join('')}
+              </select></label>
+            <label class="block"><span class="text-xs font-semibold text-slate-500">Expected delivery *</span>
+              <input type="date" id="poc-exp" class="date-input w-full mt-1" value="${_ymd(tomorrow)}"></label>
+            <label class="block"><span class="text-xs font-semibold text-slate-500">Reference code *</span>
+              <input type="text" id="poc-ref" class="filter-input w-full mt-1" value="${poDefaultRef()}" placeholder="required by EasyEcom"></label>
+            <label class="block"><span class="text-xs font-semibold text-slate-500">Doc number</span>
+              <input type="text" id="poc-doc" class="filter-input w-full mt-1" placeholder="optional"></label>
+            <label class="block"><span class="text-xs font-semibold text-slate-500">Shipping cost</span>
+              <input type="number" id="poc-ship" class="filter-input w-full mt-1" value="0" min="0" step="0.01"></label>
+            <label class="block sm:col-span-2 lg:col-span-1"><span class="text-xs font-semibold text-slate-500">Delivery address</span>
+              <input type="text" id="poc-addr" class="filter-input w-full mt-1" placeholder="optional"></label>
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs font-bold text-slate-500 uppercase tracking-wider">Line items</span>
+              <button id="poc-add" class="filter-btn text-xs">+ Add line</button>
+            </div>
+            <div class="overflow-x-auto"><table class="w-full border-collapse" id="poc-lines"></table></div>
+          </div>
+          <div id="poc-err" class="hidden text-sm rounded-lg px-4 py-2.5" style="background:#fef2f2;color:#991b1b;border:1px solid #fecaca"></div>
+        </div>
+        <div class="px-6 py-4 border-t border-slate-200 flex items-center justify-between gap-3 flex-wrap">
+          <div class="text-sm text-slate-500">Goods total <b class="text-slate-800 tabular-nums" id="poc-total">₹0</b>
+            <span class="text-slate-400">· tax and shipping are applied by EasyEcom</span></div>
+          <div class="flex items-center gap-2">
+            <button class="po-x filter-btn">Cancel</button>
+            <button id="poc-submit" class="filter-btn-primary">Create purchase order</button>
+          </div>
+        </div>
+      </div>`;
+    wrap.addEventListener('click', e => {
+        // A click on the backdrop closes the modal; a click anywhere else inside it closes any open SKU
+        // panel, so panels never stack or linger behind the next one.
+        if(e.target === wrap) return poCloseCreate();
+        if(!e.target.closest('.poc-sku-wrap')) wrap.querySelectorAll('.poc-sku-panel').forEach(p => p.classList.add('hidden'));
+    });
+    document.body.appendChild(wrap);
+    wrap.querySelectorAll('.po-x').forEach(b => b.addEventListener('click', poCloseCreate));
+    document.getElementById('poc-add').addEventListener('click', () => { _poLines.push(poNewLine()); poRenderLines(); });
+    document.getElementById('poc-submit').addEventListener('click', poSubmitCreate);
+    try { ecEnhanceSelect(document.getElementById('poc-vendor')); } catch(_){}
+    poRenderLines();
+}
+function poCloseCreate(){ document.getElementById('po-create-modal')?.remove(); }
+function poRenderLines(){
+    const t = document.getElementById('poc-lines'); if(!t) return;
+    const th = 'px-2 py-1.5 text-left text-[10px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200';
+    const td = 'px-2 py-1.5 border-b border-slate-100';
+    // Widths are explicit and generous. The first cut let the browser size these, and with the number
+    // spinners eating ~18px the Qty and Tax boxes were narrower than the values inside them.
+    t.innerHTML = `<thead><tr>
+        <th class="${th}" style="min-width:230px">SKU *</th><th class="${th}" style="width:96px">Qty *</th>
+        <th class="${th}" style="width:124px">Unit price *<div style="font-weight:400;text-transform:none;letter-spacing:0;color:#94a3b8">excl. tax</div></th><th class="${th}" style="width:96px">Tax %</th>
+        <th class="${th}" style="min-width:150px">Batch (opt)</th><th class="${th}" style="width:158px">Expiry (opt)</th>
+        <th class="${th} text-right" style="width:120px">Line total</th><th class="${th}" style="width:38px"></th>
+      </tr></thead><tbody>${_poLines.map((l, i) => `<tr>
+        <td class="${td}">${poSkuField(i, l)}</td>
+        <td class="${td}"><input type="number" min="1" step="1" inputmode="numeric" class="filter-input w-full poc-f poc-num" data-i="${i}" data-f="quantity" value="${escapeHtml(String(l.quantity))}" placeholder="0"></td>
+        <td class="${td}"><input type="number" min="0" step="0.01" inputmode="decimal" class="filter-input w-full poc-f poc-num" data-i="${i}" data-f="unitPrice" value="${escapeHtml(String(l.unitPrice))}" placeholder="0.00">${poCostHint(l)}</td>
+        <td class="${td}"><input type="number" min="0" step="0.01" inputmode="decimal" class="filter-input w-full poc-f poc-num" data-i="${i}" data-f="taxRate" value="${escapeHtml(String(l.taxRate))}" placeholder="0">${poTaxHint(l)}</td>
+        <td class="${td}"><input class="filter-input w-full poc-f" data-i="${i}" data-f="batch_code" value="${escapeHtml(l.batch_code)}" placeholder="optional"></td>
+        <td class="${td}"><input type="date" class="date-input w-full poc-f" data-i="${i}" data-f="expiry_date" value="${escapeHtml(l.expiry_date)}"></td>
+        <td class="${td} text-right tabular-nums font-semibold text-slate-700 poc-line-total" data-i="${i}">₹${Math.round(poLineTotal(l)).toLocaleString('en-IN')}</td>
+        <td class="${td} text-center">${_poLines.length > 1 ? `<button class="poc-del text-slate-300 hover:text-rose-600" data-i="${i}" title="Remove line">&times;</button>` : ''}</td>
+      </tr>`).join('')}</tbody>`;
+    // ⚠️ Update the edited ROW's own total too, not just the grand total. Without this the line read ₹0
+    // while the footer read ₹70 — two totals disagreeing on screen, which makes the whole form look
+    // broken. Deliberately NOT a full re-render: that would rebuild the inputs and throw away focus and
+    // caret position mid-typing.
+    t.querySelectorAll('.poc-f').forEach(el => el.addEventListener('input', e => {
+        const i = +e.target.dataset.i;
+        _poLines[i][e.target.dataset.f] = e.target.value;
+        const cell = t.querySelector(`.poc-line-total[data-i="${i}"]`);
+        if(cell) cell.textContent = '₹' + Math.round(poLineTotal(_poLines[i])).toLocaleString('en-IN');
+        // Refresh the cost / GST hints for this row so "▲ vs ₹94.4 last" appears as the number is typed,
+        // not only after a re-render. Replacing just the hint div keeps the input focused.
+        const f = e.target.dataset.f;
+        if(f === 'unitPrice' || f === 'taxRate'){
+            const hint = e.target.parentElement.querySelector('.poc-hint');
+            const html = f === 'unitPrice' ? poCostHint(_poLines[i]) : poTaxHint(_poLines[i]);
+            if(hint) hint.outerHTML = html || '';
+            else if(html) e.target.insertAdjacentHTML('afterend', html);
+        }
+        document.getElementById('poc-total').textContent = '₹' + Math.round(poCartTotal()).toLocaleString('en-IN'); }));
+    t.querySelectorAll('.poc-del').forEach(b => b.addEventListener('click', () => { _poLines.splice(+b.dataset.i, 1); poRenderLines(); }));
+    poWireSkuPickers(t);
+    document.getElementById('poc-total').textContent = '₹' + Math.round(poCartTotal()).toLocaleString('en-IN');
+}
+async function poSubmitCreate(){
+    const err = document.getElementById('poc-err');
+    const show = m => { err.classList.remove('hidden'); err.textContent = m; };
+    err.classList.add('hidden');
+    const vendorId = document.getElementById('poc-vendor').value;
+    const expDeliveryDate = document.getElementById('poc-exp').value;
+    const referenceCode = document.getElementById('poc-ref').value.trim();
+    const lines = _poLines.filter(l => String(l.sku).trim() || l.quantity || l.unitPrice);
+    // Client-side checks are a courtesy; the server validates the same rules before anything is sent on.
+    if(!vendorId) return show('Pick a supplier.');
+    if(!expDeliveryDate) return show('Set an expected delivery date.');
+    // ⚠️ EasyEcom REQUIRES referenceCode — undocumented, and it rejects with HTTP 200 + code 400
+    // ("referenceCode field is mandatory/cannot be left blank"). The field is now pre-filled and
+    // required here so the round trip is never spent discovering it.
+    if(!referenceCode) return show('Reference code is required — EasyEcom rejects a PO without one.');
+    if(!lines.length) return show('Add at least one line item.');
+    for(const [i, l] of lines.entries()){
+        if(!String(l.sku).trim()) return show(`Line ${i+1}: SKU is required.`);
+        if(!(Number(l.quantity) > 0)) return show(`Line ${i+1}: quantity must be greater than 0.`);
+        if(!(Number(l.unitPrice) >= 0)) return show(`Line ${i+1}: unit price is required.`);
+    }
+    const vendorOpt = document.getElementById('poc-vendor').selectedOptions[0];
+    const vendorName = vendorOpt?.textContent || vendorId;
+    // The code travels with the id as a fallback — EasyEcom resolves a vendor by EITHER, and some
+    // suppliers may lack one of the two.
+    const vendorCode = vendorOpt?.dataset.code || '';
+    // A PO is a commitment — confirm with the actual numbers, laid out so the total is the thing the eye
+    // lands on. Also surfaces any line priced away from what we last paid, since that is the mistake
+    // most worth catching before the order goes out.
+    const moved = lines.map((l, i) => { const o = poSkuMeta(l.sku); if(!o) return null;
+        const t = Number(l.unitPrice); if(!isFinite(t) || Math.abs(t - o.lastPrice) <= 0.005) return null;
+        const pc = o.lastPrice > 0 ? Math.round(((t - o.lastPrice) / o.lastPrice) * 1000) / 10 : null;
+        return `${l.sku} ₹${t} vs ₹${o.lastPrice} last${pc != null ? ` (${pc > 0 ? '+' : ''}${pc}%)` : ''}`; }).filter(Boolean);
+    const okGo = await ecConfirm({
+        title: 'Create this purchase order?',
+        intro: 'It will be raised in EasyEcom against the supplier below.',
+        rows: [
+            ['Supplier', vendorName],
+            ['Reference', referenceCode],
+            ['Line items', `${lines.length} · ${lines.reduce((a,l)=>a+Number(l.quantity||0),0).toLocaleString('en-IN')} units`],
+            ['Expected delivery', _dmy(expDeliveryDate)],
+            ['Goods total', '₹' + Math.round(poCartTotal()).toLocaleString('en-IN'), true],
+        ],
+        note: moved.length ? `Priced differently from last time — ${moved.join(' · ')}` : null,
+        confirmText: 'Create purchase order',
+    });
+    if(!okGo) return;
+    const btn = document.getElementById('poc-submit'); btn.disabled = true; btn.textContent = 'Creating…';
+    try{
+        const r = await fetch('/api/purchase-orders/create', { method:'POST',
+            headers:{ 'Content-Type':'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({ vendorId, vendorCode, expDeliveryDate,
+                referenceCode,
+                docNumber: document.getElementById('poc-doc').value,
+                address: document.getElementById('poc-addr').value,
+                shippingCost: document.getElementById('poc-ship').value,
+                updateTaxRate: 1,
+                items: lines.map((l, i) => ({ lineItemNumber: String(i+1), sku: String(l.sku).trim(),
+                    quantity: l.quantity, unitPrice: l.unitPrice,
+                    taxRate: l.taxRate, batch_code: l.batch_code, expiry_date: l.expiry_date })) }) });
+        const d = await r.json();
+        if(!r.ok || !d.success) throw new Error(d.error || 'Create failed');
+        poCloseCreate();
+        // ⚠️ The PO is created APPROVED by EasyEcom and then moved to "Waiting for approval". If that
+        // second step failed the order still exists — and approved — so say so loudly instead of
+        // reporting a clean success the buyer would never think to re-check.
+        // A toast is the wrong shape for this. Creating a PO is a commitment, and the thing the buyer
+        // most needs afterwards — the status EasyEcom ACTUALLY gave it, read back rather than assumed —
+        // is exactly what a three-second banner conveys worst. Show a result panel instead.
+        poResultModal(d, { vendorName, referenceCode, lines, total: poCartTotal(), expDeliveryDate });
+        poLoad(true);
+    }catch(e){ show(e.message); btn.disabled = false; btn.textContent = 'Create purchase order'; }
+}
+// Status change, offered inside an expanded PO row.
+async function poChangeStatus(poId, statusId, markComplete){
+    const label = (PO_SETTABLE.find(s => s[0] === Number(statusId)) || [,'?'])[1];
+    const po = (_poData?.purchaseOrders || []).find(p => p.poId === poId);
+    // Rejecting or cancelling ends the order — treated as destructive so it reads differently from
+    // routine approval, and the pending units are named because that is what is being written off.
+    const killing = [4, 7].includes(Number(statusId));
+    const okGo = await ecConfirm({
+        title: `Change PO ${po ? po.poNumber : poId} to "${label}"?`,
+        intro: 'This updates the live purchase order in EasyEcom.',
+        danger: killing,
+        rows: [
+            po ? ['Supplier', po.vendor || '—'] : null,
+            po ? ['Current status', po.status] : null,
+            ['New status', label, true],
+            po && po.pending > 0 ? ['Units outstanding', po.pending.toLocaleString('en-IN')] : null,
+            po ? ['PO value', '₹' + Math.round(po.totalValue).toLocaleString('en-IN')] : null,
+        ],
+        note: markComplete ? 'Also marking the PO complete even though some ordered quantity was never received.'
+            : (killing && po && po.pending > 0 ? `${po.pending.toLocaleString('en-IN')} ${units(po.pending)} still outstanding will no longer be treated as inbound stock.` : null),
+        // "Yes, cancelled it" was wrong — a button says what it is about to DO, not what it has done.
+        confirmText: killing ? `Yes, ${(VERB[Number(statusId)] || label.toLowerCase())} it` : 'Update status',
+    });
+    if(!okGo) return;
+    try{
+        const r = await fetch('/api/purchase-orders/status', { method:'POST',
+            headers:{ 'Content-Type':'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({ poId, status: Number(statusId), markComplete: markComplete ? 1 : 0 }) });
+        const d = await r.json();
+        if(!r.ok || !d.success) throw new Error(d.error || 'Update failed');
+        // State the outcome properly. EasyEcom refuses some transitions (Approved → Waiting for approval
+        // among them) and answers HTTP 200 while doing so, which is exactly why the result is shown as a
+        // panel with the resulting status rather than flashed as a toast.
+        await ecResult({
+            title: `PO ${po ? po.poNumber : poId} updated`,
+            intro: 'The change has been applied in EasyEcom.',
+            rows: [
+                po ? ['Supplier', po.vendor || '—'] : null,
+                po ? ['Was', po.status] : null,
+                ['Now', d.statusLabel || label, true],
+                markComplete ? ['Marked complete', 'Yes'] : null,
+            ],
+            note: killing && po && po.pending > 0
+                ? `${po.pending.toLocaleString('en-IN')} ${units(po.pending)} are no longer counted as inbound stock.` : null,
+            danger: killing,
+        });
+        poLoad(true);
+    }catch(e){
+        // A refused transition is not a crash — say what EasyEcom said, in the same panel shape.
+        await ecResult({ title: 'Status not changed', intro: `PO ${po ? po.poNumber : poId} is unchanged.`,
+            rows: [ po ? ['Current status', po.status] : null, ['Requested', label] ],
+            note: e.message, danger: true, okText: 'Close' });
+    }
+}
+
+// ── ecConfirm — app-styled confirmation dialog ───────────────────────────────────────────────────
+// Replaces window.confirm() for consequential actions. The native dialog cannot be styled, shows the
+// browser's own chrome ("localhost:5002 says"), collapses everything into one blob of text and gives no
+// way to emphasise the number that actually matters — so the thing a user must check hardest is the
+// thing rendered worst. This shows the facts as a labelled table with the headline figure called out.
+//
+// Returns a Promise<boolean>. Esc or the backdrop cancels; Enter confirms.
+// Generic on purpose — any destructive/committing action can use it.
+function ecConfirm(opts){
+    const o = opts || {};
+    return new Promise(resolve => {
+        const wrap = document.createElement('div');
+        wrap.className = 'ec-confirm-back';
+        const rows = (o.rows || []).filter(Boolean).map(([label, value, strong]) =>
+            `<div class="ec-confirm-row${strong ? ' is-strong' : ''}"><span>${escapeHtml(String(label))}</span><b>${escapeHtml(String(value))}</b></div>`).join('');
+        wrap.innerHTML = `
+          <div class="ec-confirm" role="dialog" aria-modal="true">
+            <div class="ec-confirm-head">
+              <!-- The app's mark rather than a glyph in a coloured circle: a bare "!" reads as an error
+                   even when nothing has gone wrong. Severity is carried by the confirm button and the
+                   note, which is where a reader actually looks for it. -->
+              <div class="ec-confirm-logo"><img src="/static/assets/ecom-logo.png" alt="Ecom Central"></div>
+              <div>
+                <h3>${escapeHtml(o.title || 'Are you sure?')}</h3>
+                ${o.intro ? `<p>${escapeHtml(o.intro)}</p>` : ''}
+              </div>
+            </div>
+            ${rows ? `<div class="ec-confirm-rows">${rows}</div>` : ''}
+            ${o.note ? `<div class="ec-confirm-note${o.danger ? ' is-danger' : ''}">${escapeHtml(o.note)}</div>` : ''}
+            <div class="ec-confirm-foot">
+              <button class="filter-btn ec-confirm-no">${escapeHtml(o.cancelText || 'Cancel')}</button>
+              <button class="${o.danger ? 'ec-confirm-danger' : 'filter-btn-primary'} ec-confirm-yes">${escapeHtml(o.confirmText || 'Confirm')}</button>
+            </div>
+          </div>`;
+        const done = (v) => { document.removeEventListener('keydown', onKey, true); wrap.remove(); resolve(v); };
+        const onKey = e => {
+            if(e.key === 'Escape'){ e.preventDefault(); e.stopPropagation(); done(false); }
+            // Enter confirms — but not while focus is in a field, where it would mean "submit that".
+            else if(e.key === 'Enter' && !/^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || '')){ e.preventDefault(); done(true); }
+        };
+        wrap.addEventListener('click', e => { if(e.target === wrap) done(false); });
+        wrap.querySelector('.ec-confirm-no').addEventListener('click', () => done(false));
+        wrap.querySelector('.ec-confirm-yes').addEventListener('click', () => done(true));
+        document.addEventListener('keydown', onKey, true);
+        document.body.appendChild(wrap);
+        wrap.querySelector('.ec-confirm-yes').focus();
+    });
+}
+
+// Result panel shown after a PO is created. Replaces a toast: a PO is a commitment, and the status
+// EasyEcom actually gave it — READ BACK from their API, never assumed — deserves to be stated plainly
+// with the download to hand, not flashed for three seconds in the corner.
+function poResultModal(d, ctx){
+    const c = ctx || {};
+    const wrap = document.createElement('div');
+    wrap.className = 'ec-confirm-back';
+    const row = (l, v, strong) => `<div class="ec-confirm-row${strong ? ' is-strong' : ''}"><span>${escapeHtml(l)}</span><b>${escapeHtml(String(v))}</b></div>`;
+    wrap.innerHTML = `
+      <div class="ec-confirm" style="max-width:520px" role="dialog" aria-modal="true">
+        <div class="ec-confirm-head">
+          <!-- The app's own mark, not a bare glyph. This panel confirms something the user just did
+               successfully; a red "!" read as an error at a glance. The approval caveat is carried by
+               the note below, which is where a warning belongs. -->
+          <div class="ec-confirm-logo"><img src="/static/assets/ecom-logo.png" alt="Ecom Central"></div>
+          <div>
+            <h3>Purchase order created</h3>
+            <p>EasyEcom PO id <b>${escapeHtml(String(d.poId))}</b>${d.statusLabel ? ` · currently <b>${escapeHtml(d.statusLabel)}</b>` : ''}</p>
+          </div>
+        </div>
+        <div class="ec-confirm-rows">
+          ${c.vendorName ? row('Supplier', c.vendorName) : ''}
+          ${c.referenceCode ? row('Reference', c.referenceCode) : ''}
+          ${c.lines ? row('Line items', `${c.lines.length} · ${c.lines.reduce((a,l)=>a+Number(l.quantity||0),0).toLocaleString('en-IN')} units`) : ''}
+          ${c.expDeliveryDate ? row('Expected delivery', _dmy(c.expDeliveryDate)) : ''}
+          ${c.total != null ? row('Goods total (excl. tax)', '₹' + Math.round(c.total).toLocaleString('en-IN'), true) : ''}
+        </div>
+        ${d.warning ? `<div class="ec-confirm-note is-danger">${escapeHtml(d.warning)}</div>` : ''}
+        <div class="ec-confirm-foot">
+          <button class="filter-btn po-res-dl">⬇ Download PO</button>
+          <button class="filter-btn-primary po-res-ok">Done</button>
+        </div>
+      </div>`;
+    const close = () => { document.removeEventListener('keydown', onKey, true); wrap.remove(); };
+    const onKey = e => { if(e.key === 'Escape' || e.key === 'Enter'){ e.preventDefault(); close(); } };
+    wrap.addEventListener('click', e => { if(e.target === wrap) close(); });
+    wrap.querySelector('.po-res-ok').addEventListener('click', close);
+    // Download straight from here — the moment you most want the document is right after raising it.
+    wrap.querySelector('.po-res-dl').addEventListener('click', async e => {
+        const b = e.currentTarget, was = b.textContent;
+        b.disabled = true; b.textContent = 'Preparing…';
+        try{
+            const r = await fetch(`/api/purchase-orders/${d.poId}/pdf`, { headers: getAuthHeaders() });
+            if(!r.ok){ const j = await r.json().catch(() => ({})); throw new Error(j.error || `Download failed (${r.status})`); }
+            const blob = await r.blob(), url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = `PO-${d.poId}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 2000);
+            if(r.headers.get('x-po-pdf-source') === 'generated')
+                showNotification("EasyEcom's document isn't ready yet — downloaded our own copy. Try again shortly for the official one.", true);
+        }catch(err){ showNotification(err.message, true); }
+        finally { b.disabled = false; b.textContent = was; }
+    });
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(wrap);
+    wrap.querySelector('.po-res-ok').focus();
+}
+
+// ── ecResult — app-styled outcome panel ──────────────────────────────────────────────────────────
+// The counterpart to ecConfirm: shown AFTER a consequential action, stating what actually happened.
+// A toast is wrong for anything the user may need to act on or quote later — it vanishes, cannot be
+// re-read, and puts the important figure in the corner of the screen. Returns a Promise that resolves
+// when dismissed, so callers can chain a refresh.
+function ecResult(opts){
+    const o = opts || {};
+    return new Promise(resolve => {
+        const wrap = document.createElement('div');
+        wrap.className = 'ec-confirm-back';
+        const rows = (o.rows || []).filter(Boolean).map(([label, value, strong]) =>
+            `<div class="ec-confirm-row${strong ? ' is-strong' : ''}"><span>${escapeHtml(String(label))}</span><b>${escapeHtml(String(value))}</b></div>`).join('');
+        wrap.innerHTML = `
+          <div class="ec-confirm" role="dialog" aria-modal="true">
+            <div class="ec-confirm-head">
+              <div class="ec-confirm-logo"><img src="/static/assets/ecom-logo.png" alt="Ecom Central"></div>
+              <div>
+                <h3>${escapeHtml(o.title || 'Done')}</h3>
+                ${o.intro ? `<p>${escapeHtml(o.intro)}</p>` : ''}
+              </div>
+            </div>
+            ${rows ? `<div class="ec-confirm-rows">${rows}</div>` : ''}
+            ${o.note ? `<div class="ec-confirm-note${o.danger ? ' is-danger' : ''}">${escapeHtml(o.note)}</div>` : ''}
+            <div class="ec-confirm-foot">
+              <button class="filter-btn-primary ec-result-ok">${escapeHtml(o.okText || 'Done')}</button>
+            </div>
+          </div>`;
+        const done = () => { document.removeEventListener('keydown', onKey, true); wrap.remove(); resolve(); };
+        const onKey = e => { if(e.key === 'Escape' || e.key === 'Enter'){ e.preventDefault(); done(); } };
+        wrap.addEventListener('click', e => { if(e.target === wrap) done(); });
+        wrap.querySelector('.ec-result-ok').addEventListener('click', done);
+        document.addEventListener('keydown', onKey, true);
+        document.body.appendChild(wrap);
+        wrap.querySelector('.ec-result-ok').focus();
+    });
 }
