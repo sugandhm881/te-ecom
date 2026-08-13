@@ -4387,27 +4387,72 @@ function supRaisedCell(r){
 }
 // Native <select> rather than a hand-rolled menu: no popup positioning to get wrong inside a scrolling
 // table, and it works on touch. Resets to the placeholder after each choice so it reads as an action.
-function supRaiseControl(r){
-  const k=r.raised_kind||'';
-  return `<select class="sup-raise filter-select" style="height:30px;font-size:11px;padding:0 6px" data-oname="${escapeHtml(r.order_name||'')}" title="Record that this was raised with the courier partner">
-      <option value="" ${k?'':'selected'}>${k?'Change…':'Raise ▾'}</option>
+// One definition of the option list, used by the initial render AND by the in-place patch below, so a
+// row that has just been marked offers exactly the same choices as one rendered fresh.
+function supRaiseOptions(k){
+  return `<option value="" ${k?'':'selected'}>${k?'Change…':'Raise ▾'}</option>
       <option value="raised" ${k==='raised'?'selected':''}>Raised</option>
       <option value="raised_voc" ${k==='raised_voc'?'selected':''}>Raised with VOC</option>
-      ${k?'<option value="__clear">Clear</option>':''}
+      ${k?'<option value="__clear">Clear</option>':''}`;
+}
+function supRaiseControl(r){
+  return `<select class="sup-raise filter-select" style="height:30px;font-size:11px;padding:0 6px" data-oname="${escapeHtml(r.order_name||'')}" title="Record that this was raised with the courier partner">
+      ${supRaiseOptions(r.raised_kind||'')}
     </select>`;
 }
+const _supKey = n => String(n||'').replace('#','').trim();
+// Repaint JUST this order's raised chip and its dropdown — never the table.
+//
+// ⚠️ The options are rewritten IN PLACE rather than by replacing the <select>. These selects are
+// upgraded by ecEnhanceSelect() into a .csel wrapper (button + panel are siblings of the real select);
+// swapping the element would leave the new one orphaned inside the old wrapper with a dead button.
+// ecSyncSelect() repaints that button, since setting .value in code fires no 'change' event.
+function supPatchRaise(orderName, pending){
+  const key=_supKey(orderName);
+  const row=(_supQueueRows||[]).find(x=>_supKey(x.order_name)===key);
+  if(!row) return;
+  document.querySelectorAll('#sup-queue-table .sup-raise').forEach(sel=>{
+    if(_supKey(sel.dataset.oname)!==key) return;
+    const tr=sel.closest('tr');
+    const cell=tr&&tr.querySelector('.sup-raised-cell');
+    if(cell){
+      cell.innerHTML=supRaisedCell(row);
+      // Half-opacity while the write is in flight: the mark is on screen instantly, but it is honest
+      // about not being saved yet, so a failure that reverts it is not a surprise.
+      cell.style.opacity = pending ? '.45' : '';
+    }
+    const k=row.raised_kind||'';
+    sel.innerHTML=supRaiseOptions(k);
+    sel.value=k||'';
+    sel.disabled=!!pending;
+    ecSyncSelect(sel);
+  });
+}
+// Optimistic: the chip changes the moment the agent chooses, not after the round-trip. An agent works
+// this queue row by row, and a control that does nothing for ~300ms gets clicked twice.
 async function supDoRaise(orderName, value, sel){
   if(!value) return;
   const kind = value==='__clear' ? null : value;
-  sel.disabled=true;
+  const row=(_supQueueRows||[]).find(x=>_supKey(x.order_name)===_supKey(orderName));
+  const prev = row ? { kind:row.raised_kind, at:row.raised_at, by:row.raised_by } : null;
+  if(row){
+    row.raised_kind=kind;
+    row.raised_at=kind?new Date().toISOString():null;
+    row.raised_by=kind?((typeof currentUser!=='undefined'&&currentUser&&currentUser.email)||row.raised_by||''):null;
+  }
+  supPatchRaise(orderName, true);
   try{
     const d=await supFetch('/api/support/raise',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ orderName, kind }) });
-    // Update the row in place — a full reload would lose the agent's scroll position mid-queue.
-    const row=(_supQueueRows||[]).find(x=>String(x.order_name||'').replace('#','').trim()===String(orderName).replace('#','').trim());
+    // Take the SERVER's values, not the guess — it owns the timestamp and the acting user.
     if(row){ row.raised_kind=d.raised?d.raised.kind:null; row.raised_at=d.raised?d.raised.at:null; row.raised_by=d.raised?d.raised.by:null; }
-    showNotification(kind?`Marked ${SUP_RAISE_LABEL[kind]} — ${orderName}`:`Cleared raised — ${orderName}`);
-    supQueueTable();
-  }catch(e){ showNotification(e.message,true); sel.disabled=false; sel.value=''; }
+    supPatchRaise(orderName, false);
+    showNotification(kind?`${SUP_RAISE_LABEL[kind]} saved — ${orderName}`:`Raised mark cleared — ${orderName}`);
+  }catch(e){
+    // Put the row back exactly as it was, so the screen never claims something that was not stored.
+    if(row&&prev){ row.raised_kind=prev.kind; row.raised_at=prev.at; row.raised_by=prev.by; }
+    supPatchRaise(orderName, false);
+    showNotification(`Could not save — ${orderName}: ${e.message}`, true);
+  }
 }
 function supReasonChips(r){
   if(!r.reasons||!r.reasons.length) return '';
@@ -4516,7 +4561,7 @@ function supQueueTable(){
       <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
       <td class="${TD}"><div class="flex items-center gap-1.5 flex-wrap">${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}${showPlat?supPlatformTag(r.platform):''}</div>${r.awb_number?`<div class="text-[10px] mt-0.5">${supAwbLink(r.awb_number,r.order_name,r.courier)}</div>`:''}</td>
       ${showScan?`<td class="${TD} whitespace-nowrap">${r.last_scan_at?`<span class="text-slate-500" title="Latest AWB scan by courier: ${new Date(r.last_scan_at).toLocaleString()}">🛰 ${supRelTime(r.last_scan_at)}</span>`:'<span class="text-slate-300">—</span>'}</td>`:''}
-      ${showPlat?`<td class="${TD} whitespace-nowrap">${supRaisedCell(r)}</td>`:''}
+      ${showPlat?`<td class="${TD} whitespace-nowrap sup-raised-cell">${supRaisedCell(r)}</td>`:''}
       <td class="${TD}"><div class="flex items-start gap-2">
         <div class="flex-1 min-w-0 space-y-1.5">
           <div class="flex items-center gap-1.5 flex-wrap">${supHoldControl(r)}${showPlat?supRaiseControl(r):''}</div>
@@ -4530,7 +4575,16 @@ function supQueueTable(){
     const k=th.dataset.sort, dd=parseInt(th.dataset.dir,10)||1;
     if(_supSort&&_supSort.k===k) _supSort.d*=-1; else _supSort={k,d:dd};   // toggle direction on the same column
     supQueueTable(); }));
-  c.querySelectorAll('.sup-row').forEach(row=>row.addEventListener('click',()=>supOrderModal(row.dataset.oid)));
+  // Clicking a row opens the order modal — but NEVER when the click landed on a control inside it.
+  // ⚠️ `.csel` is the one that actually bit: ecEnhanceSelect() moves the real <select> into a wrapper and
+  // puts the visible button and the option list BESIDE it as siblings, so a stopPropagation bound to the
+  // <select> never sees the click that really happened. Choosing "Raised" therefore saved the mark AND
+  // opened the order popup on top of the confirmation. Guarding on the ANCESTOR covers the button, the
+  // panel and every option row at once, and keeps working if the widget's internals ever change.
+  c.querySelectorAll('.sup-row').forEach(row=>row.addEventListener('click',e=>{
+    if(e.target.closest('.csel, select, button, a, input, label')) return;
+    supOrderModal(row.dataset.oid);
+  }));
   c.querySelectorAll('.sup-note-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supNotesModal(b.dataset.oid,b.dataset.oname); }));
   c.querySelectorAll('.sup-hold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoHold(b.dataset.oid,b.dataset.oname,b); }));
   c.querySelectorAll('.sup-unhold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoUnhold(b.dataset.oid,b.dataset.oname,b); }));
