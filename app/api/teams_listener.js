@@ -265,9 +265,13 @@ function parseApproval(raw) {
 // Routes an approval when a channel may serve BOTH the Amazon review batch and the Tally push. An
 // explicit target always wins; a bare yes/no goes to whichever flow is genuinely pending, and if BOTH
 // are pending it refuses to guess — approving the wrong one either spams customers or posts money.
+// Returns WHAT it actually did ('tally' | 'amazon' | 'ambiguous') or null when nothing fired.
+// ⚠️ The return value is load-bearing: callers use it to decide whether to tell the user anything.
+// Reporting "acted" merely because the text PARSED as an approval made the bot sit silent when
+// nothing was pending — after an explicit @mention that reads as a dead bot, not as "nothing to do".
 async function handleApproval(m, roles) {
     const cmd = parseApproval(m.text);
-    if (!cmd) return;
+    if (!cmd) return null;
     const isYes = cmd.verb === 'yes';
     // handleTeamsKeyword understands bare yes/no and "approve TB-…"/"reject TB-…".
     const tallyCmd = cmd.ref ? `${isYes ? 'approve' : 'reject'} ${cmd.ref}` : cmd.verb;
@@ -275,14 +279,14 @@ async function handleApproval(m, roles) {
     if (cmd.target === 'tally' && roles.has('finance')) {
         console.log(`[TeamsListener] Tally "${m.text}" from ${m.from}${DRYRUN() ? ' [dry-run]' : ''}`);
         if (!DRYRUN()) runTally(tallyCmd, m.from);
-        return;
+        return 'tally';
     }
     if (cmd.target === 'amazon' && roles.has('amazon')) {
         console.log(`[TeamsListener] Amazon "${m.text}" from ${m.from}${DRYRUN() ? ' [dry-run]' : ''}`);
         if (!DRYRUN()) runAmazon(isYes, m.from);
-        return;
+        return 'amazon';
     }
-    if (cmd.target) return;   // named a flow this channel doesn't serve — not ours to action
+    if (cmd.target) return null;   // named a flow this channel doesn't serve — not ours to action
 
     const tallyPending = roles.has('finance') ? await tallyBatchApi().hasPendingBatch().catch(() => null) : null;
     const amazonPending = roles.has('amazon') ? !!amazonApi().hasPendingReview() : false;
@@ -293,19 +297,22 @@ async function handleApproval(m, roles) {
             `⚠️ *Two things are waiting, so "${m.text}" is ambiguous — nothing has been actioned.*\n` +
             `· Tally batch *${tallyPending.ref}* (${tallyPending.voucher_count} voucher(s)) → reply *${isYes ? 'approve' : 'reject'} ${tallyPending.ref}*\n` +
             `· Amazon review batch → reply *amazon ${isYes ? 'yes' : 'no'}*`);
-        return;
+        return 'ambiguous';
     }
     if (tallyPending) {
         console.log(`[TeamsListener] Tally "${m.text}" from ${m.from}${DRYRUN() ? ' [dry-run]' : ''}`);
         if (!DRYRUN()) runTally(tallyCmd, m.from);
-        return;
+        return 'tally';
     }
     if (amazonPending) {
         console.log(`[TeamsListener] Amazon "${m.text}" from ${m.from}${DRYRUN() ? ' [dry-run]' : ''}`);
         if (!DRYRUN()) runAmazon(isYes, m.from);
-        return;
+        return 'amazon';
     }
-    // Nothing pending — stay silent. People hold ordinary conversations in these channels.
+    // Nothing pending. The POLLER should stay silent here — people hold ordinary conversations in
+    // these channels — but the BOT is only ever reached by an explicit @mention, so its caller turns
+    // this null into "nothing is pending". Same function, two audiences.
+    return null;
 }
 
 // Which flows a channel serves. A channel may serve more than one (Finance and Amazon share one here).
@@ -329,16 +336,20 @@ async function handleInboundMessage(m) {
     if (processedIds.size > 500) { const keep = [...processedIds].slice(-200); processedIds.clear(); keep.forEach(id => processedIds.add(id)); }
 
     const acted = [];
+    let recognised = false;   // a valid command that simply had nothing waiting for it
     if (roles.has('dp') && /(^|\b)rejected(\b|$)/i.test(m.text)) {
         console.log(`[TeamsListener] DP "rejected" from ${m.from}${DRYRUN() ? ' [dry-run]' : ''}`);
         if (!DRYRUN()) runDpCheck(m.from);
         acted.push('dp');
     }
     if (roles.has('amazon') || roles.has('finance')) {
-        if (parseApproval(m.text)) acted.push('approval');
-        await handleApproval(m, roles);
+        // Record what handleApproval ACTUALLY did, not merely that the text looked like a command —
+        // otherwise "yes" with nothing pending counts as handled and the bot answers with silence.
+        const did = await handleApproval(m, roles);
+        if (did) acted.push(did);
+        else if (parseApproval(m.text)) recognised = true;   // understood, but nothing to act on
     }
-    return { ok: true, acted, roles: [...roles] };
+    return { ok: true, acted, recognised, roles: [...roles] };
 }
 
 async function pollOnce() {

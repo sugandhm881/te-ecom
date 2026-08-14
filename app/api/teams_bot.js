@@ -226,11 +226,17 @@ router.post('/bot/messages', async (req, res) => {
 
     try {
         const r = await require('./teams_listener').handleInboundMessage({ id: a.id, text, from, channelId });
-        if (r.acted && r.acted.length) console.log(`[TeamsBot] "${text}" from ${from} → ${r.acted.join(', ')}`);
-        else if (!r.skipped) {
-            const why2 = r.ok ? 'nothing is pending, or that is not a command I recognise'
-                : 'this channel is not wired to an action';
-            await replyToActivity(a, `🤔 Ignored "${text}" — ${why2}. Try *yes*, *no*, or *rejected*.`);
+        if (r.acted && r.acted.length) {
+            console.log(`[TeamsBot] "${text}" from ${from} → ${r.acted.join(', ')}`);
+        } else if (!r.skipped) {
+            // Three different situations, three different answers. Collapsing them (or staying
+            // silent) is what made this look broken: after an explicit @mention, no reply is
+            // indistinguishable from a dead bot.
+            const why2 = !r.ok ? 'this channel is not wired to an action'
+                : r.recognised ? 'I understood it, but nothing is waiting for approval right now'
+                    : 'that is not a command I recognise';
+            const hint = r.recognised ? '' : ' Try *yes*, *no*, or *rejected*.';
+            await replyToActivity(a, `🤔 "${text}" — ${why2}.${hint}`);
         }
     } catch (e) { console.error('[TeamsBot] handler error:', e.message); }
 });
