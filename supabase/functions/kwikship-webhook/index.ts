@@ -59,6 +59,23 @@ function zoneFromState(state: string, city: string): string | null {
   return s ? "D" : null;
 }
 
+// KwikShip's OWN serviceability sheet (Admin → Zone Mapping) is the real answer — it is what they
+// bill on. zoneFromState above is only the fallback for a destination absent from the sheet.
+//
+// ⚠️ The lookup is NOT reimplemented here on purpose. This edge function and the Node cron have
+// silently drifted apart three times, so both call the SAME database function `zone_for_pincode()`;
+// there is no second copy of the rule to fall out of step. (This function is exactly why that
+// matters: before it was deployed, every webhook hit re-stamped the state-derived zone and undid the
+// imported mapping — 7 shipments reverted within 40 seconds of the first import.)
+async function zoneFromPincode(supabase: any, pincode: any): Promise<string | null> {
+  const pin = String(pincode ?? "").replace(/\D/g, "");
+  if (!/^[1-9][0-9]{5}$/.test(pin)) return null;
+  try {
+    const { data, error } = await supabase.rpc("zone_for_pincode", { p_pin: pin });
+    return error ? null : (data || null);
+  } catch (_) { return null; }   // a lookup failure must never drop the webhook
+}
+
 // Faithful port of Node parseKwikshipJourney().
 function parseKwikshipJourney(statusHistory: any[], currentStatus: string, courier: string | null, zone: string | null) {
   const status = String(currentStatus || "").toLowerCase().trim();
@@ -304,9 +321,11 @@ Deno.serve(async (req) => {
 
     // Enrich order_name / order_date / payment_mode + destination zone from the synced EasyEcom order.
     const { data: eo } = await supabase.from("b2c_order_easycom")
-      .select("reference_code, order_date, payment_mode, shipping_state, shipping_city")
+      .select("reference_code, order_date, payment_mode, shipping_state, shipping_city, shipping_pincode")
       .eq("awb_number", awb).limit(1).maybeSingle();
-    const zone = zoneFromState(detail?.state || eo?.shipping_state || "", detail?.city || eo?.shipping_city || "");
+    // Pincode sheet first, state-derived guess only as the fallback (same precedence as the Node cron).
+    const zone = (await zoneFromPincode(supabase, eo?.shipping_pincode))
+      || zoneFromState(detail?.state || eo?.shipping_state || "", detail?.city || eo?.shipping_city || "");
 
     const j = parseKwikshipJourney(statusHistory, curStatus, courier, zone);
 

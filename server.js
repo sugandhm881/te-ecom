@@ -25,6 +25,9 @@ app.use(cors({ origin: (origin, cb) => cb(null, !origin || CORS_ALLOW.includes(o
 app.use('/api/tally/bridge/books-xml', express.json({ limit: '64mb' }));
 app.use('/api/tally/bridge/masters-xml', express.json({ limit: '16mb' }));
 app.use('/api/tally/bank/parse', express.json({ limit: '32mb' }));   // statement upload (base64 in JSON)
+// Kwikship pincode→zone sheet (base64 in JSON). India has ~19k live pincodes and a courier's
+// serviceability export lists one row per pincode, so the whole file is a few MB.
+app.use('/api/zone-mapping/upload', express.json({ limit: '32mb' }));
 
 // Capture the raw body (used by the Shopify webhook HMAC check); does not change JSON parsing.
 // limit 5mb (default 100kb was too tight): the Ad-Set PDF/Excel download POSTs the full computed report JSON
@@ -304,6 +307,9 @@ app.use('/api', require('./app/api/inventory').router);       // Inventory Analy
 app.use('/api', require('./app/api/tally').router);           // Finance → Data Entry → Tally Prime (voucher queue + bridge)
 app.use('/api', require('./app/api/tally_batch').router);     // Finance → nightly batch push + Teams approval
 app.use('/api', require('./app/api/tally_bank').router);      // Finance → bank statement upload, ledger suggestion, draft creation
+// Admin → Zone Mapping: upload Kwikship's pincode→zone sheet and re-derive `zone` on Kwikship
+// shipments from it. The router gates itself with tokenRequired + requireAdmin.
+app.use('/api', require('./app/api/zone_mapping'));
 app.use('/api', docpharmaReconRoutes);
 app.use('/api', rapidshypReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
@@ -404,6 +410,15 @@ cronJob('Kwikship (0 2 * * *)', '0 2 * * *', async () => {
     console.log('[Kwikship] 2:00 AM IST — syncing tracking for Kwikship-allocated orders…');
     try { const r = await syncKwikship({ days: 30 }); console.log('[Kwikship]', r.skipped ? `skipped (${r.reason})` : `updated ${r.updated}/${r.processed} (of ${r.total} Kwikship orders)`); }
     catch (e) { console.error('[Kwikship] cron error:', e.message); }
+    // Cost the shipments against the KwikShip rate card (zone × weight slab + RTO leg + COD fee) into the
+    // same freight_* columns the RapidShyp freight lens reads. Pure SQL, no API calls. Runs AFTER the sync
+    // so tonight's new shipments — and any whose outcome just became delivered/RTO — are priced correctly;
+    // it is idempotent, so re-running only rewrites rows whose cost actually changed.
+    try {
+        const { data, error } = await supabase.rpc('apply_kwikship_charges');
+        if (error) console.error('[Kwikship] charge recalc error:', error.message);
+        else console.log('[Kwikship] charges:', JSON.stringify(data));
+    } catch (e) { console.error('[Kwikship] charge recalc error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
 // New/Repeat classification — re-tag journey rows from Shopify's "Repeat" order tag. Pure SQL (0 API),

@@ -536,11 +536,16 @@ function showApp() {
     if (loginView) loginView.style.display = 'none';
     if (appView) appView.style.display = 'flex';
     applyPermissions();
+    // Landing is decided in ONE place — loadInitialData() → navigate(viewFromHash() || 'home').
+    //
+    // ⚠️ There used to be a non-admin redirect here that fired immediately afterwards and sent every
+    // non-admin to Orders Dashboard, overriding it. Only admins ever saw Home, and — because the
+    // redirect ignored the hash — a non-admin could not open a bookmarked or shared #view either; they
+    // were bounced to Orders Dashboard whatever link they followed. It was a leftover from before Home
+    // existed. Home is now safe for everyone: `nav-home` is exempt from permission hiding, navigate()
+    // explicitly allows 'home' for non-admins, and homeCatalog() builds its cards from the
+    // PERMISSION-FILTERED nav, so a user only ever sees their own dashboards on it.
     loadInitialData();
-    if (currentUser && !currentUser.isAdmin) {
-        const target = canView('orders-dashboard') ? 'orders-dashboard' : (currentUser.permissions[0] || null);
-        if (target) navigate(target);
-    }
 }
 
 // --- API ---
@@ -639,8 +644,12 @@ function homeRender() {
     const greet = document.getElementById('home-greet');
     if (greet) greet.textContent = homeGreeting() + (pretty ? ', ' + pretty : '');
     const sub = document.getElementById('home-sub');
+    // A user with no dashboards granted yet lands here too (everyone lands on Home now). "0 dashboards
+    // available to you" reads like a fault in the app; say what actually happened and what to do.
     if (sub) sub.textContent = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
-        + ' · ' + total + (total === 1 ? ' dashboard' : ' dashboards') + ' available to you';
+        + ' · ' + (total
+            ? total + (total === 1 ? ' dashboard' : ' dashboards') + ' available to you'
+            : 'no dashboards assigned yet — ask an admin to grant access');
 
     // Drop history entries the user can no longer open (permission revoked, or a view that was removed).
     const recent = homeRead().filter(e => e && cat[e.view]).slice(0, HOME_MAX);
@@ -759,7 +768,7 @@ function applyPermissions() {
     try {
         document.querySelectorAll('#app-sidebar .sidebar-link').forEach(a => {
             if (a.id === 'nav-home') { a.style.display = ''; return; }   // landing page — always visible
-            if (a.id === 'nav-users' || a.id === 'nav-user-analytics') { a.style.display = isAdmin ? '' : 'none'; return; }
+            if (a.id === 'nav-users' || a.id === 'nav-user-analytics' || a.id === 'nav-zone-mapping') { a.style.display = isAdmin ? '' : 'none'; return; }
             const key = (typeof NAV_HREF !== 'undefined') ? NAV_HREF[a.id] : null;
             a.style.display = (isAdmin || (key && perms.has(key))) ? '' : 'none';
         });
@@ -1237,6 +1246,11 @@ function navigate(view) {
             activeLinkElement = document.getElementById('nav-user-analytics');
             activeViewElement = document.getElementById('user-analytics-view');
             if (typeof uaInit === 'function') uaInit();
+            break;
+        case 'zone-mapping':
+            activeLinkElement = document.getElementById('nav-zone-mapping');
+            activeViewElement = document.getElementById('zone-mapping-view');
+            if (typeof zmInit === 'function') zmInit();
             break;
     }
 
@@ -6237,6 +6251,311 @@ document.getElementById('nav-inventory-count-analysis')?.addEventListener('click
 document.getElementById('nav-home')?.addEventListener('click', (e) => { e.preventDefault(); navigate('home'); });
 document.getElementById('nav-users')?.addEventListener('click', (e) => { e.preventDefault(); navigate('users'); });
 document.getElementById('nav-user-analytics')?.addEventListener('click', (e) => { e.preventDefault(); navigate('user-analytics'); });
+document.getElementById('nav-zone-mapping')?.addEventListener('click', (e) => { e.preventDefault(); navigate('zone-mapping'); });
+
+// ═══════════════ ZONE MAPPING (admin) ═══════════════
+// KwikShip's serviceability sheet: one row per DESTINATION pincode. ⚠️ `Pin_code_From` is the PICKUP
+// pincode (constant, e.g. 122101 Gurgaon) and `Pin_code_To` is the destination — despite the names it
+// is NOT a From..To range. It can be imported straight into `zone_mapping_with_pincode` from Supabase
+// (the table's columns match the CSV headers exactly), or uploaded here. Either way "Re-apply to
+// shipments" re-derives `zone` on every KwikShip shipment. RapidShyp/DocPharma are never touched.
+const _zm = { bound: false, b64: null, filename: null };
+
+// Direct fetch (not supFetch): a failed header-detection returns 400 WITH the sheet's header row, and
+// supFetch collapses an error body down to its message, losing the columns we need for the picker.
+async function zmPost(url, body) {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify(body) });
+    const d = await r.json().catch(() => ({}));
+    return { ok: r.ok && d.success !== false, data: d };
+}
+
+function zmTile(label, value, sub) {
+    return `<div class="card p-4">
+        <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${escapeHtml(label)}</div>
+        <div class="text-2xl font-bold text-slate-800 mt-1 tabular-nums">${escapeHtml(value)}</div>
+        ${sub ? `<div class="text-xs text-slate-400 mt-0.5">${sub}</div>` : ''}
+    </div>`;
+}
+
+async function zmSummary() {
+    const host = document.getElementById('zm-kpis');
+    if (!host) return;
+    host.innerHTML = brandLoaderSm('Loading mapping…');
+    try {
+        const d = await supFetch('/api/zone-mapping/summary');
+        const zones = (d.zones || []).map(z => `${escapeHtml(z.zone)} ${z.count.toLocaleString('en-IN')}`).join(' &middot; ');
+        const kw = d.kwikship || { total: 0, mapped: 0 };
+        const pct = kw.total ? Math.round((kw.mapped / kw.total) * 100) : 0;
+        const org = (d.origins || []).map(o => escapeHtml(String(o.pincode))).join(', ');
+        host.innerHTML = [
+            zmTile('Destination pincodes', (d.destinations || 0).toLocaleString('en-IN'), d.total ? `${(d.total || 0).toLocaleString('en-IN')} rows in the sheet` : 'nothing imported yet'),
+            zmTile('Pickup pincode', org || '—', (d.origins || []).length > 1 ? '⚠️ more than one — two reports mixed?' : 'the origin this sheet is for'),
+            zmTile('Zones', String((d.zones || []).length), zones || '—'),
+            zmTile('Kwikship shipments', `${pct}%`, `${kw.mapped.toLocaleString('en-IN')} of ${kw.total.toLocaleString('en-IN')} on a listed pincode`),
+        ].join('');
+        zmRenderCharges(d);
+    } catch (e) {
+        host.innerHTML = `<div class="col-span-full text-sm bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2">${escapeHtml(e.message)}</div>`;
+    }
+}
+
+// Shipping cost estimated against the KwikShip rate card. Ex-GST is the headline because GST is
+// input-creditable; the gross is shown alongside since that is what actually leaves the bank.
+// Whole rupees — freight totals run to five figures, where paise are noise. (`_inr` above keeps
+// decimals for the finance screens that need them.)
+const _inr0 = n => '₹' + Math.round(Number(n) || 0).toLocaleString('en-IN');
+
+function zmRenderCharges(d) {
+    const host = document.getElementById('zm-charges');
+    if (!host) return;
+    const c = d.charges;
+    if (!c || !c.priced) { host.innerHTML = ''; return; }
+    const cfg = d.billing_config || {};
+
+    // Rate card pivoted to zone × rate-kind for display.
+    const ZONES = ['A', 'B', 'C', 'D', 'E'];
+    const KINDS = [
+        ['fwd_base_500', 'Forward 500 g'], ['fwd_add_500', 'Forward +500 g'], ['rto_base_500', 'RTO 500 g'],
+        ['fwd_base_2000', 'Forward 2 kg'], ['fwd_add_1000', 'Forward +1 kg'], ['rto_base_2000', 'RTO 2 kg'],
+    ];
+    const rc = {};
+    (d.rate_card || []).forEach(r => { rc[`${r.rate_kind}|${r.zone}`] = r.rate; });
+    // Zone C is priced by the card but absent from the serviceability sheet — mark it so the row isn't
+    // mistaken for live pricing.
+    const liveZones = new Set((d.zones || []).map(z => z.zone));
+
+    const cardRows = KINDS.map(([k, label]) => `<tr class="border-t border-slate-100">
+        <td class="px-3 py-2 text-slate-600">${label}</td>
+        ${ZONES.map(z => `<td class="px-3 py-2 text-right tabular-nums ${liveZones.has(z) ? 'text-slate-700' : 'text-slate-300'}">${rc[`${k}|${z}`] != null ? _inr0(rc[`${k}|${z}`]) : '—'}</td>`).join('')}
+    </tr>`).join('');
+
+    const byZone = (c.by_zone || []).map(z => `<tr class="border-t border-slate-100">
+        <td class="px-3 py-2 font-semibold">${escapeHtml(z.zone)}</td>
+        <td class="px-3 py-2 text-right tabular-nums">${z.shipments.toLocaleString('en-IN')}</td>
+        <td class="px-3 py-2 text-right tabular-nums">${_inr0(z.ex_gst)}</td>
+    </tr>`).join('');
+
+    host.innerHTML = `<div class="card p-6">
+      <div class="flex items-center justify-between flex-wrap gap-2 mb-4">
+        <div>
+          <h2 class="text-sm font-bold text-slate-700">Shipping cost &mdash; estimated against the KwikShip rate card</h2>
+          <p class="text-xs text-slate-400 mt-0.5">
+            ${c.priced.toLocaleString('en-IN')} shipments priced${c.unpriced ? ` &middot; <span class="text-amber-600">${c.unpriced.toLocaleString('en-IN')} could not be priced</span>` : ''}
+            &middot; RTO pays forward + RTO &middot; COD fee ${_inr0(cfg.cod_min)} or ${cfg.cod_pct}% (higher) on delivery only
+          </p>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
+        ${zmTile('Forward', _inr0(c.forward))}
+        ${zmTile('RTO', _inr0(c.rto))}
+        ${zmTile('COD fees', _inr0(c.cod_fee))}
+        ${zmTile('Total ex-GST', _inr0(c.ex_gst), 'the real cost (GST is creditable)')}
+        ${zmTile(`Incl. ${cfg.gst_pct || 18}% GST`, _inr0(c.incl_gst), 'what leaves the bank')}
+      </div>
+      <div class="grid lg:grid-cols-2 gap-6">
+        <div>
+          <h3 class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Cost by zone</h3>
+          <div class="overflow-x-auto border border-slate-100 rounded-lg">
+            <table class="w-full text-sm text-left border-collapse">
+              <thead class="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
+                <tr><th class="px-3 py-2">Zone</th><th class="px-3 py-2 text-right">Shipments</th><th class="px-3 py-2 text-right">Cost ex-GST</th></tr>
+              </thead>
+              <tbody>${byZone}</tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <h3 class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Rate card (surface, ex-GST)</h3>
+          <div class="overflow-x-auto border border-slate-100 rounded-lg">
+            <table class="w-full text-sm text-left border-collapse">
+              <thead class="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
+                <tr><th class="px-3 py-2">Slab</th>${ZONES.map(z => `<th class="px-3 py-2 text-right">${z}</th>`).join('')}</tr>
+              </thead>
+              <tbody>${cardRows}</tbody>
+            </table>
+          </div>
+          <p class="text-xs text-slate-400 mt-2">Greyed zones are priced by the card but never appear in KwikShip's serviceability sheet, so no shipment can be billed at them.</p>
+        </div>
+      </div>
+      <p class="text-xs text-slate-400 mt-4">These are <b>estimates against the contracted card</b>, not KwikShip invoice lines &mdash; weight is the EasyEcom package weight (dead weight; no dimensions are available, so volumetric weight is not applied). Costs recompute automatically whenever zones change and nightly after the 2 AM sync.</p>
+    </div>`;
+}
+
+function zmRenderReview(s) {
+    const host = document.getElementById('zm-review');
+    if (!host) return;
+    const warn = [];
+    if (s.badPin) warn.push(`<b>${s.badPin}</b> row(s) skipped — the destination pincode was not a valid 6-digit pincode.`);
+    if (s.missingZone) warn.push(`<b>${s.missingZone}</b> row(s) skipped — no zone value.`);
+    if (s.dupDest) warn.push(`<b>${s.dupDest}</b> repeat row(s) for a destination already listed — the first one is kept.`);
+    if (s.conflicts) warn.push(`⚠️ <b>${s.conflicts}</b> destination(s) appear twice with a <b>different</b> zone${s.conflictSample && s.conflictSample.length ? `, e.g. ${s.conflictSample.slice(0, 3).map(c => `${escapeHtml(c.pincode)} (${c.zones.map(escapeHtml).join(' vs ')})`).join(', ')}` : ''} — the first is used.`);
+    if ((s.origins || []).length > 1) warn.push(`⚠️ The file lists <b>${s.origins.length}</b> different pickup pincodes (${s.origins.slice(0, 5).map(escapeHtml).join(', ')}) — a serviceability report should cover ONE origin. Check you haven't merged two exports.`);
+    if (s.unknownColumns && s.unknownColumns.length) warn.push(`<b>${s.unknownColumns.length}</b> column(s) in the file have no matching column in the table and will NOT be stored: ${s.unknownColumns.slice(0, 8).map(escapeHtml).join(', ')}${s.unknownColumns.length > 8 ? '…' : ''}.`);
+
+    const zoneChips = (s.zones || []).map(z =>
+        `<span class="px-2 py-1 rounded bg-indigo-50 text-indigo-700 text-xs font-semibold">${escapeHtml(z.zone)} &middot; ${z.count.toLocaleString('en-IN')}</span>`).join(' ');
+
+    const sample = (s.sample || []).map(r => `<tr class="border-t border-slate-100">
+        <td class="px-3 py-2 font-mono text-xs">${escapeHtml(String(r.dest))}</td>
+        <td class="px-3 py-2 font-semibold">${escapeHtml(r.zone)}</td>
+        <td class="px-3 py-2 font-mono text-xs text-slate-400">${escapeHtml(String(r.from == null ? '—' : r.from))}</td>
+        <td class="px-3 py-2 text-slate-400 text-xs">${r.fields} fields</td>
+    </tr>`).join('');
+
+    host.innerHTML = `<div class="card p-6">
+        <div class="flex items-center justify-between flex-wrap gap-3 mb-4">
+            <div>
+                <h2 class="text-sm font-bold text-slate-700">Ready to import &mdash; ${escapeHtml(s.filename || 'sheet')}</h2>
+                <p class="text-xs text-slate-400 mt-0.5">
+                    <b>${s.destinations.toLocaleString('en-IN')}</b> destination pincodes
+                    ${(s.origins || []).length === 1 ? `from pickup <b>${escapeHtml(String(s.origins[0]))}</b>` : ''} &middot;
+                    ${s.matchedColumns} column(s) mapped &middot; header on row ${s.headerRow}
+                </p>
+            </div>
+            <div class="flex items-center gap-2">
+                <button id="zm-cancel" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 transition-colors">Cancel</button>
+                <button id="zm-commit" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 transition-colors">Import &amp; apply</button>
+            </div>
+        </div>
+        <div class="flex flex-wrap gap-2 mb-4">${zoneChips}</div>
+        ${warn.length ? `<div class="text-xs bg-amber-50 border border-amber-200 text-amber-700 rounded-lg px-3 py-2 mb-4 space-y-1">${warn.map(w => `<div>${w}</div>`).join('')}</div>` : ''}
+        <div class="overflow-x-auto border border-slate-100 rounded-lg">
+            <table class="w-full text-sm text-left border-collapse">
+                <thead class="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
+                    <tr><th class="px-3 py-2">Destination</th><th class="px-3 py-2">Zone</th><th class="px-3 py-2">Pickup</th><th class="px-3 py-2">Stored</th></tr>
+                </thead>
+                <tbody>${sample}</tbody>
+            </table>
+        </div>
+        <p class="text-xs text-slate-400 mt-3">Showing the first ${(s.sample || []).length} destinations. Importing rewrites the zone on Kwikship shipments delivering to a listed pincode; pincodes not in the sheet keep their current state-derived zone.</p>
+    </div>`;
+
+    document.getElementById('zm-cancel')?.addEventListener('click', () => { host.innerHTML = ''; document.getElementById('zm-status').innerHTML = ''; });
+    document.getElementById('zm-commit')?.addEventListener('click', zmCommit);
+}
+
+async function zmParse() {
+    const status = document.getElementById('zm-status');
+    if (!_zm.b64) return;
+    status.innerHTML = brandLoaderSm('Reading the sheet…');
+    const { ok, data } = await zmPost('/api/zone-mapping/upload', {
+        filename: _zm.filename, contentBase64: _zm.b64, dryRun: true,
+    });
+    if (!ok) {
+        status.innerHTML = `<div class="text-sm bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2">${escapeHtml(data.error || 'Could not read that file.')}</div>`;
+        return;
+    }
+    status.innerHTML = '';
+    zmRenderReview(data.summary);
+}
+
+async function zmCommit() {
+    const status = document.getElementById('zm-status');
+    const btn = document.getElementById('zm-commit');
+    if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+    status.innerHTML = brandLoaderSm('Importing and re-applying to Kwikship shipments…');
+    const { ok, data } = await zmPost('/api/zone-mapping/upload', {
+        filename: _zm.filename, contentBase64: _zm.b64, dryRun: false,
+        replace: !!(document.getElementById('zm-replace') || {}).checked,
+    });
+    if (!ok) {
+        status.innerHTML = `<div class="text-sm bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2">${escapeHtml(data.error || 'Import failed.')}</div>`;
+        if (btn) { btn.disabled = false; btn.textContent = 'Import & apply'; }
+        return;
+    }
+    const r = data.remap || {};
+    status.innerHTML = `<div class="text-sm bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg px-3 py-2">
+        Imported <b>${(data.written || 0).toLocaleString('en-IN')}</b> destination pincodes.
+        ${data.remap ? `Kwikship shipments: <b>${(r.matched || 0).toLocaleString('en-IN')}</b> matched, <b>${(r.changed || 0).toLocaleString('en-IN')}</b> zone(s) updated, ${(r.unmapped || 0).toLocaleString('en-IN')} kept their state-derived zone.` : ''}
+        ${data.remapError ? `<br>Mapping saved, but re-applying failed: ${escapeHtml(data.remapError)} — use “Re-apply to shipments”.` : ''}
+    </div>`;
+    document.getElementById('zm-review').innerHTML = '';
+    _zm.b64 = null;
+    zmSummary();
+}
+
+function zmRead(file) {
+    const status = document.getElementById('zm-status');
+    if (!/\.(csv|xlsx)$/i.test(file.name)) {
+        status.innerHTML = `<div class="text-sm bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2">Upload a .csv or .xlsx file. Old .xls must be re-saved from Excel first.</div>`;
+        return;
+    }
+    status.innerHTML = brandLoaderSm('Reading ' + file.name + '…');
+    const reader = new FileReader();
+    reader.onerror = () => { status.innerHTML = `<div class="text-sm bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2">Could not read that file.</div>`; };
+    reader.onload = () => {
+        _zm.b64 = String(reader.result).split(',')[1] || '';
+        _zm.filename = file.name;
+        zmParse();
+    };
+    reader.readAsDataURL(file);
+}
+
+async function zmLookup() {
+    const out = document.getElementById('zm-lookup-out');
+    const pin = String((document.getElementById('zm-pin') || {}).value || '').replace(/\D/g, '');
+    if (!/^[1-9]\d{5}$/.test(pin)) {
+        out.innerHTML = `<div class="text-sm bg-amber-50 border border-amber-200 text-amber-700 rounded-lg px-3 py-2">Enter a 6-digit pincode.</div>`;
+        return;
+    }
+    out.innerHTML = brandLoaderSm('Checking…');
+    try {
+        const d = await supFetch(`/api/zone-mapping/lookup?pincode=${pin}`);
+        const row = d.row;
+        out.innerHTML = d.found
+            ? `<div class="text-sm bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg px-3 py-2">
+                 <b>${escapeHtml(pin)}</b> → Zone <b>${escapeHtml(d.zone)}</b>
+                 ${row && row.Pin_code_From != null ? ` &middot; from pickup <span class="font-mono text-xs">${escapeHtml(String(row.Pin_code_From))}</span>` : ''}
+                 <span class="text-emerald-600">&middot; a Kwikship shipment here is zoned from the sheet</span>
+               </div>`
+            : `<div class="text-sm bg-amber-50 border border-amber-200 text-amber-700 rounded-lg px-3 py-2">
+                 <b>${escapeHtml(pin)}</b> is not in the sheet — a Kwikship shipment there keeps the state-derived zone.
+               </div>`;
+    } catch (e) {
+        out.innerHTML = `<div class="text-sm bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2">${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function zmRemap() {
+    const out = document.getElementById('zm-lookup-out');
+    const btn = document.getElementById('zm-remap');
+    if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+    out.innerHTML = brandLoaderSm('Re-applying zones to Kwikship shipments…');
+    try {
+        const d = await supFetch('/api/zone-mapping/remap', { method: 'POST', body: '{}' });
+        out.innerHTML = `<div class="text-sm bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg px-3 py-2">
+            <b>${(d.matched || 0).toLocaleString('en-IN')}</b> of ${(d.total || 0).toLocaleString('en-IN')} Kwikship shipments matched the sheet &middot;
+            <b>${(d.changed || 0).toLocaleString('en-IN')}</b> zone(s) updated &middot;
+            ${(d.unmapped || 0).toLocaleString('en-IN')} kept their state-derived zone.
+        </div>`;
+        zmSummary();
+    } catch (e) {
+        out.innerHTML = `<div class="text-sm bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2">${escapeHtml(e.message)}</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Re-apply to shipments'; }
+    }
+}
+
+function zmInit() {
+    zmSummary();
+    if (_zm.bound) return;
+    _zm.bound = true;
+    const drop = document.getElementById('zm-drop'), input = document.getElementById('zm-file');
+    if (drop && input) {
+        drop.addEventListener('click', () => input.click());
+        drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('border-indigo-400'); });
+        drop.addEventListener('dragleave', () => drop.classList.remove('border-indigo-400'));
+        drop.addEventListener('drop', e => {
+            e.preventDefault(); drop.classList.remove('border-indigo-400');
+            if (e.dataTransfer.files && e.dataTransfer.files[0]) zmRead(e.dataTransfer.files[0]);
+        });
+        // Reset value so re-picking the SAME file still fires change.
+        input.addEventListener('change', () => { if (input.files && input.files[0]) { zmRead(input.files[0]); input.value = ''; } });
+    }
+    document.getElementById('zm-lookup')?.addEventListener('click', zmLookup);
+    document.getElementById('zm-pin')?.addEventListener('keydown', e => { if (e.key === 'Enter') zmLookup(); });
+    document.getElementById('zm-remap')?.addEventListener('click', zmRemap);
+}
 
 // ═══════════════ USERS & PERMISSIONS (admin) ═══════════════
 const PERM_GROUPS = [

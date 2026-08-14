@@ -19,6 +19,10 @@ const axios = require('axios');
 const config = require('../../config');
 const { supabase } = require('../supabase');
 const { saveJourney, zoneFromState, supersedeStaleJourneys } = require('./delivery_journey');
+// Kwikship bills on THEIR pincode-level zone table, not our state-derived guess, so a Kwikship zone is
+// resolved from the uploaded sheet (Admin → Zone Mapping) whenever the pincode is in it. RapidShyp and
+// DocPharma are unaffected and keep using zoneFromState().
+const { zoneForPincode } = require('./zone_mapping');
 
 // ── Kwikship internal status → journey event type ───────────────────────────
 // Statuses are the documented "internal statuses" (Public API, Shipment Status Groups). Order matters:
@@ -204,8 +208,10 @@ async function fetchKwikshipShipment(awb, tries = 3) {
 }
 
 // Resolve + save ONE Kwikship order's journey. zoneHint = destination-derived zone from EasyEcom
-// address (used when the Kwikship detail response has no state/city). Returns true if saved.
-async function updateKwikshipJourney(awb, orderName, courier, orderDate, paymentMode, zoneHint) {
+// address (used when the Kwikship detail response has no state/city). destPincode = the EasyEcom
+// shipping pincode, which takes priority over every state-derived guess when the uploaded Kwikship
+// zone sheet covers it. Returns true if saved.
+async function updateKwikshipJourney(awb, orderName, courier, orderDate, paymentMode, zoneHint, destPincode) {
     // API BUDGET — v2 first, v1 only when we actually need it.
     // v2 (public, no auth) carries the whole timeline plus the NDR reason, and its newest scan IS the
     // current status. v1's unique contribution is identity: shipping address → zone, courier, EDD —
@@ -216,14 +222,18 @@ async function updateKwikshipJourney(awb, orderName, courier, orderDate, payment
     let known = null;
     if (pub.found) {
         const { data } = await supabase.from('shipment_journey_ecom')
-            .select('zone, courier, first_edd').eq('awb', awb).maybeSingle();
+            .select('zone, courier, first_edd, dest_pincode').eq('awb', awb).maybeSingle();
         known = data || null;
     }
     const needV1 = !pub.found || !known || !known.zone || !known.courier;
     const s = needV1 ? await fetchKwikshipShipment(awb) : { found: true, statusHistory: [], status: '', courier: null, state: null, city: null, edd: null };
     if (!s.found && !pub.found) return false;
 
-    const zone = zoneFromState(s.state, s.city) || (known && known.zone) || zoneHint || null;
+    // Zone precedence: Kwikship's own pincode→zone sheet wins outright — it is what they bill on. Only
+    // when the pincode is absent from the sheet (or we have no pincode at all) do we fall back to the
+    // state-derived guess, so a Kwikship row is never left without a zone.
+    const mappedZone = await zoneForPincode(destPincode || (known && known.dest_pincode));
+    const zone = mappedZone || zoneFromState(s.state, s.city) || (known && known.zone) || zoneHint || null;
     const timeline = (pub.found && pub.statusHistory.length) ? pub.statusHistory : s.statusHistory;
     if (!timeline.length) return false;
     // Current status: v1's top-level `status` when we fetched it, else the newest v2 scan — the two agree
@@ -465,7 +475,7 @@ async function syncKwikship({ days = 30, concurrency = 3, sleepMs = 300 } = {}) 
     for (let offset = 0; ; offset += PAGE) {
         const { data, error } = await supabase
             .from('b2c_order_easycom')
-            .select('reference_code, awb_number, order_date, courier_name, payment_mode, shipping_state, shipping_city')
+            .select('reference_code, awb_number, order_date, courier_name, payment_mode, shipping_state, shipping_city, shipping_pincode')
             .ilike('raw_data->>courier_aggregator_name', '%gokwik%')   // Kwikship / GoKwik allocation marker
             .gte('order_date', since)
             .not('awb_number', 'is', null)
@@ -500,7 +510,7 @@ async function syncKwikship({ days = 30, concurrency = 3, sleepMs = 300 } = {}) 
         while (idx < todo.length) {
             const o = todo[idx++];
             try {
-                const ok = await updateKwikshipJourney(o.awb_number, o.reference_code, o.courier_name, o.order_date, o.payment_mode, zoneFromState(o.shipping_state, o.shipping_city));
+                const ok = await updateKwikshipJourney(o.awb_number, o.reference_code, o.courier_name, o.order_date, o.payment_mode, zoneFromState(o.shipping_state, o.shipping_city), o.shipping_pincode);
                 if (ok) updated++; else none++;
             } catch (e) { none++; console.error('[Kwikship] sync error', o.awb_number, e.message); }
             if (++done % 50 === 0) console.log(`[Kwikship] ${done}/${todo.length} (updated ${updated} · no-data ${none})`);
