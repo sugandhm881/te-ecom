@@ -219,34 +219,42 @@ async function sendInventoryTeamsReport() {
             const noCase = need.filter(r => !r.case_size && r.net_qty > 0).length;
             const covered = need.filter(r => r.poCovered);
             const toOrder = need.filter(r => !r.poCovered);
-            // ⚠️ KEEP THIS TABLE NARROW. A Teams card is far narrower than it looks in the composer:
-            // at ten columns every cell truncated to "16,8…" / "TE-BD…" and the whole thing became
-            // unreadable. Stock, DRR and DOI are deliberately NOT repeated here — the PNG directly
-            // above already shows them for all 17 SKUs, so spending width on them twice is what broke
-            // the layout. Six columns is the practical ceiling.
-            //
-            // Only rows that still need buying are listed. SKUs fully covered by an open PO are named
-            // in the caption instead of occupying a row of dashes — they were shown so a
-            // critical-looking SKU is visibly handled, and a caption does that just as well.
+            // ⚠️ COLUMN COUNT IS THE CONSTRAINT, NOT THE DATA. A Teams card is far narrower than the
+            // composer suggests: at ten columns every cell truncated to "16,8…" / "TE-BD…". Rather
+            // than drop fields, related ones are GROUPED into a single cell — same ten numbers, seven
+            // columns, which is the width that rendered cleanly before this feature was added.
+            //   DRR · DOI          → one cell ("409.29 · 3.9d")
+            //   Case Qty × Size    → one cell ("1 × 116 = 351"), which also carries Order Units
+            // Every SKU that was short stays listed, including ones fully covered by a PO — a
+            // critical-looking SKU vanishing from the sheet is exactly the confusion to avoid.
             const table = {
                 type: 'table',
                 columns: [
-                    { title: 'SKU', width: 4 },
-                    { title: 'Need', width: 3 },
-                    { title: 'On PO', width: 3 },
-                    { title: 'Final', width: 3 },
-                    { title: 'Cases', width: 2 },
-                    { title: 'Units', width: 3 },
+                    { title: 'SKU', width: 3 },
+                    { title: `DRR/${DRR_WINDOW_DAYS}d`, width: 2 },
+                    { title: 'DOI', width: 2 },
+                    { title: 'Stock', width: 2 },
+                    { title: 'Recommend Qty', width: 3 },
+                    { title: 'Raised PO', width: 2 },
+                    { title: 'Final Qty', width: 2 },
+                    { title: 'Case Size', width: 2 },
+                    { title: 'Case Qty', width: 2 },
+                    { title: 'Order Units', width: 2 },
                 ],
-                rows: toOrder.map(r => [
+                rows: need.map(r => [
                     r.sku,
+                    r.drr.toFixed(2),
+                    r.doi == null ? '—' : r.doi.toFixed(1) + 'd',
+                    n(r.stock),
                     n(r.raw_qty),
                     r.open_po ? n(r.open_po) : '—',
-                    n(r.net_qty),
-                    r.case_size ? n(r.cases) : '—',
-                    r.case_size ? n(r.order_qty) : n(r.net_qty) + '*',
+                    // Fully covered by an open PO — say so rather than showing a bare 0.
+                    r.poCovered ? '✓ on PO' : n(r.net_qty),
+                    r.case_size ? n(r.case_size) : '—',
+                    r.poCovered ? '—' : (r.case_size ? n(r.cases) : '—'),
+                    r.poCovered ? '—' : (r.case_size ? n(r.order_qty) : n(r.net_qty) + '*'),
                 ]),
-                total: ['TOTAL', '', '', '', n(cases), n(units)],
+                total: ['TOTAL', '', '', '', '', '', '', '', n(cases), n(units)],
             };
             const title = `🧾 *Recommended Order* — ${toOrder.length} SKU${toOrder.length === 1 ? '' : 's'} to order  ·  ${n(cases)} cases  ·  ${n(units)} units`;
             const notes = [];

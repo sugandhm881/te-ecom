@@ -85,6 +85,39 @@ function tableToCard(b) {
         }),
     };
 }
+// Native Adaptive Card 1.5 `Table` — real cells with real grid lines.
+//
+// The ColumnSet version above exists only because the Workflows connector pins the card schema to
+// 1.4, where `Table` does not exist. EcomBot is not bound by that: a bot sends the card itself, so it
+// can declare 1.5 and get borders, proper cell padding and header styling for free. The ColumnSet
+// path is still used for the WEBHOOK fallback, which is still 1.4 — hence two renderers rather than
+// replacing one with the other.
+function tableToNativeCard(b) {
+    const cols = tableCols(b);
+    const cell = (txt, c, opts = {}) => ({
+        type: 'TableCell',
+        items: [{
+            type: 'TextBlock', text: mrkdwn(txt == null ? '' : String(txt)), wrap: false,
+            horizontalAlignment: c.align, size: 'Small',
+            weight: opts.weight, isSubtle: opts.isSubtle,
+        }],
+    });
+    const rows = (b.rows || []).map(r => ({
+        type: 'TableRow',
+        cells: cols.map((c, ci) => cell(r[ci], c, { weight: ci === 0 ? 'Bolder' : undefined })),
+    }));
+    if (b.total) rows.push({ type: 'TableRow', cells: cols.map((c, ci) => cell(b.total[ci], c, { weight: 'Bolder' })) });
+    return {
+        type: 'Table',
+        gridStyle: 'accent',
+        showGridLines: true,
+        firstRowAsHeaders: true,
+        columns: cols.map(c => ({ width: Number(c.width) || 2 })),
+        rows: [{ type: 'TableRow', style: 'accent',
+            cells: cols.map(c => cell(c.title, c, { weight: 'Bolder', isSubtle: true })) }, ...rows],
+    };
+}
+
 function tableToHtml(b) {
     const cols = tableCols(b);
     const th = 'padding:6px 14px;border-bottom:2px solid #cbd5e1;font-size:12px;color:#64748b';
@@ -102,7 +135,7 @@ function tableToHtml(b) {
         + `</tbody></table>`;
 }
 
-function slackToCardBody(payload) {
+function slackToCardBody(payload, rich = false) {
     const body = [];
     let pendingSep = false;
     const push = el => { if (pendingSep) { el.separator = true; pendingSep = false; } body.push(el); };
@@ -122,7 +155,7 @@ function slackToCardBody(payload) {
             }
             else if (b.type === 'context' && Array.isArray(b.elements)) push({ type: 'TextBlock', text: mrkdwn(b.elements.map(e => e.text || '').join('  ')), isSubtle: true, size: 'Small', wrap: true });
             else if (b.type === 'image' && b.image_url) push({ type: 'Image', url: b.image_url, altText: String(b.alt_text || ''), size: 'Stretch' });
-            else if (b.type === 'table' && Array.isArray(b.rows)) push(tableToCard(b));
+            else if (b.type === 'table' && Array.isArray(b.rows)) push(rich ? tableToNativeCard(b) : tableToCard(b));
             else if (b.type === 'divider') pendingSep = true;
         }
     } else if (payload.text) {
@@ -131,27 +164,34 @@ function slackToCardBody(payload) {
     return body;
 }
 
-// Slack URL buttons → Adaptive-Card OpenUrl actions (interactive Slack buttons have no URL → skipped).
-function slackToCardActions(payload) {
-    const actions = [];
-    (payload.blocks || []).forEach(b => {
-        if (b.type === 'actions' && Array.isArray(b.elements)) b.elements.forEach(el => {
-            if (el.type === 'button' && el.url) actions.push({ type: 'Action.OpenUrl', title: (el.text && el.text.text) || 'Open', url: el.url });
-        });
-    });
-    return actions;
-}
-
-// Build just the Adaptive Card object from a Slack-style payload. opts: { footer, actionUrl, actionTitle }
+// Build just the Adaptive Card object from a Slack-style payload. opts: { footer }
+//
+// ⚠️ NO BUTTONS ON TEAMS CARDS — by explicit instruction (2026-08-14). Reports used to carry an
+// "Open Inventory Dashboard" / "Open Voucher Register" / "Review & approve in dashboard" button.
+// They are suppressed HERE rather than at the three call sites so a newly-added report cannot
+// reintroduce one by passing actionUrl: the callers may still pass it, and it is simply ignored.
+// The Slack-blocks → OpenUrl converter was removed with them, so Slack-derived URL buttons do not
+// come back either. (If buttons are ever wanted again, re-enable in this one function.)
 function buildAdaptiveCard(payload, opts = {}) {
-    const body = slackToCardBody(payload);
+    // `rich` = sent by EcomBot, which can declare schema 1.5 and therefore use the native Table
+    // element with real grid lines. The webhook path must stay on 1.4 (the Workflows connector pins
+    // it) and falls back to the ColumnSet imitation.
+    const rich = !!opts.rich;
+    const body = slackToCardBody(payload, rich);
     if (opts.footer) body.push({ type: 'TextBlock', text: mrkdwn(opts.footer), isSubtle: true, size: 'Small', wrap: true, separator: true });
     if (!body.length) return null;
-    const actions = slackToCardActions(payload);
-    if (opts.actionUrl && opts.actionTitle) actions.push({ type: 'Action.OpenUrl', title: opts.actionTitle, url: opts.actionUrl });
-    const card = { type: 'AdaptiveCard', $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', version: '1.4', body };
-    if (actions.length) card.actions = actions;
-    return card;
+    return {
+        type: 'AdaptiveCard',
+        $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+        version: rich ? '1.5' : '1.4',
+        // ⚠️ WITHOUT THIS, TEAMS RENDERS EVERY CARD AT A NARROW FIXED WIDTH and leaves most of the
+        // message area blank — which is what squeezed the reorder table into "16,8…" / "TE-BD…"
+        // however few columns it had. `msteams.width: Full` is the only way to opt into the full
+        // width, and it is a Teams-specific extension the schema itself does not describe. Any
+        // future card with a table wants it.
+        msteams: { width: 'Full' },
+        body,
+    };
 }
 
 // Build the Teams message envelope (Adaptive Card attachment) — kept for compatibility.
@@ -176,6 +216,9 @@ function channelForWebhook(url) {
 // Post a Slack-style payload to a Teams Workflow webhook as a native Adaptive Card.
 // The Workflow's "Post card in a chat or channel" reads triggerBody()?['card'] — a JSON string of the card.
 async function postTeams(webhookUrl, payload, opts = {}) {
+    // Built twice on purpose, and only when needed: the bot gets the 1.5 card with real tables, the
+    // webhook fallback gets the 1.4 ColumnSet one. Building a single card for both would mean
+    // sending 1.5 markup down a 1.4 connector, where a `Table` renders as nothing at all.
     const card = buildAdaptiveCard(payload, opts);
     if (!card) return false;
 
@@ -195,9 +238,10 @@ async function postTeams(webhookUrl, payload, opts = {}) {
         try {
             const bot = require('./teams_bot');
             if (bot.botEnabled()) {
+                const richCard = buildAdaptiveCard(payload, { ...opts, rich: true }) || card;
                 await bot.sendToChannel(channelId, {
                     type: 'message',
-                    attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }],
+                    attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: richCard }],
                 });
                 return true;
             }

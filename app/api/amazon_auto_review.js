@@ -105,7 +105,10 @@ const { postTeams } = require('./teams');
 async function postToSlack(payload) {
     // Teams — approvals moved to the dashboard, so the card links there instead of asking for a yes/no reply.
     const teamsUrl = config.TEAMS_WEBHOOK_AMAZON;
-    if (teamsUrl) postTeams(teamsUrl, payload, { actionUrl: config.DASHBOARD_URL, actionTitle: 'Review & approve in dashboard', footer: '➡️ Approve & send review requests from the Amazon Review page in the dashboard (Teams can’t take a yes/no reply).' }).catch(() => {});
+    // Footer updated 2026-08-14: Teams CAN take the reply now. EcomBot (the Teams bot) reads
+    // @mentions in this channel, so the old "Teams can't take a yes/no reply" line was actively
+    // telling people to go somewhere they no longer need to go.
+    if (teamsUrl) postTeams(teamsUrl, payload, { footer: '➡️ Reply *@EcomBot yes* to approve and send, or *@EcomBot no* to cancel. (You can also approve from the Amazon Review page in the dashboard.)' }).catch(() => {});
     const token   = config.SLACK_BOT_TOKEN;
     const channel = config.SLACK_CHANNEL_ID;
     if (!token || !channel) {
