@@ -219,38 +219,40 @@ async function sendInventoryTeamsReport() {
             const noCase = need.filter(r => !r.case_size && r.net_qty > 0).length;
             const covered = need.filter(r => r.poCovered);
             const toOrder = need.filter(r => !r.poCovered);
+            // ⚠️ KEEP THIS TABLE NARROW. A Teams card is far narrower than it looks in the composer:
+            // at ten columns every cell truncated to "16,8…" / "TE-BD…" and the whole thing became
+            // unreadable. Stock, DRR and DOI are deliberately NOT repeated here — the PNG directly
+            // above already shows them for all 17 SKUs, so spending width on them twice is what broke
+            // the layout. Six columns is the practical ceiling.
+            //
+            // Only rows that still need buying are listed. SKUs fully covered by an open PO are named
+            // in the caption instead of occupying a row of dashes — they were shown so a
+            // critical-looking SKU is visibly handled, and a caption does that just as well.
             const table = {
                 type: 'table',
                 columns: [
                     { title: 'SKU', width: 4 },
-                    { title: `DRR/${DRR_WINDOW_DAYS}d`, width: 2 },
-                    { title: 'DOI', width: 2 },
-                    { title: 'Stock', width: 2 },
-                    { title: 'Recommend Qty', width: 3 },
-                    { title: 'Raised PO', width: 2 },
-                    { title: 'Final Qty', width: 2 },
-                    { title: 'Case Size', width: 2 },
-                    { title: 'Case Qty', width: 2 },
-                    { title: 'Order Units', width: 3 },
+                    { title: 'Need', width: 3 },
+                    { title: 'On PO', width: 3 },
+                    { title: 'Final', width: 3 },
+                    { title: 'Cases', width: 2 },
+                    { title: 'Units', width: 3 },
                 ],
-                rows: need.map(r => [
+                rows: toOrder.map(r => [
                     r.sku,
-                    r.drr.toFixed(2),
-                    r.doi == null ? '—' : r.doi.toFixed(1) + 'd',
-                    n(r.stock),
                     n(r.raw_qty),
                     r.open_po ? n(r.open_po) : '—',
-                    // Fully covered by an open PO — say so instead of showing a bare 0.
-                    r.poCovered ? '✓ on PO' : n(r.net_qty),
-                    r.case_size ? n(r.case_size) : '—',
-                    r.poCovered ? '—' : (r.case_size ? n(r.cases) : '—'),
-                    r.poCovered ? '—' : (r.case_size ? n(r.order_qty) : n(r.net_qty) + '*'),
+                    n(r.net_qty),
+                    r.case_size ? n(r.cases) : '—',
+                    r.case_size ? n(r.order_qty) : n(r.net_qty) + '*',
                 ]),
-                total: ['TOTAL', '', '', '', '', '', '', '', n(cases), n(units)],
+                total: ['TOTAL', '', '', '', n(cases), n(units)],
             };
             const title = `🧾 *Recommended Order* — ${toOrder.length} SKU${toOrder.length === 1 ? '' : 's'} to order  ·  ${n(cases)} cases  ·  ${n(units)} units`;
             const notes = [];
-            if (covered.length) notes.push(`_${covered.length} SKU${covered.length > 1 ? 's are' : ' is'} already fully covered by open POs (${n(covered.reduce((s, r) => s + r.open_po, 0))} units on order) — nothing to buy._`);
+            // Name the covered SKUs. "7 SKUs are covered" makes a buyer go hunting; the list answers
+            // "why isn't TE-BDR1 on the sheet when it shows 3.9 days of stock?" without them asking.
+            if (covered.length) notes.push(`_✅ Already on order — nothing to buy: *${covered.map(r => r.sku).join('*, *')}* (${n(covered.reduce((s, r) => s + r.open_po, 0))} units across ${covered.length} SKU${covered.length > 1 ? 's' : ''})._`);
             if (noCase) notes.push(`_* ${noCase} SKU${noCase > 1 ? 's have' : ' has'} no case size on file — raw quantity shown._`);
             if (poFailed) notes.push(`_⚠️ Open POs could not be read from EasyEcom — **Raised PO not subtracted**, quantities may be over-stated._`);
             orderBlocks = [
