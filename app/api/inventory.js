@@ -14,6 +14,10 @@ const router = express.Router();
 const config = require('../../config');
 const { supabase } = require('../supabase');
 const { postTeams } = require('./teams');
+// Units already on a live purchase order, so the reorder list never asks a buyer to re-order stock
+// that is already on its way. Lives in purchase_orders.js so the "which PO statuses count as inbound"
+// rule (Rejected/Cancelled keep a pending qty but are NOT coming) has exactly one definition.
+const { openPoQtyBySku } = require('./purchase_orders');
 
 const istDate = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });   // YYYY-MM-DD in IST
 
@@ -62,7 +66,14 @@ async function fetchCaseSizes() {
 }
 
 // One row per SKU with DRR, DOI, status and the recommended order quantity.
-function buildReorder(rows, caseSizes) {
+//
+// `openPo` = { SKU: units } already on a live purchase order (see purchase_orders.openPoQtyBySku).
+// Units already ordered are stock on its way, so they are SUBTRACTED from the recommendation —
+// otherwise the report tells a buyer to re-order something a PO is already covering. Measured on live
+// data the day this was added: 7 of the 9 recommended SKUs were already fully covered, TE-BDR1 by
+// 27,441 units against a 16,837 recommendation. Optional and defaults to {} so every existing caller
+// behaves exactly as before, which is also the safe degradation when EasyEcom is unreachable.
+function buildReorder(rows, caseSizes, openPo = {}) {
     return rows.map(r => {
         const stock = Number(r.available_quantity) || 0;
         const sold = Number(r[`units_sold_${DRR_WINDOW_DAYS}d`]) || 0;
@@ -76,16 +87,25 @@ function buildReorder(rows, caseSizes) {
         else if (doi <= TARGET_COVER_DAYS) status = 'Healthy';
         else status = 'Overstock';
         const rawQty = Math.max(0, Math.ceil(drr * TARGET_COVER_DAYS - stock));
+        // Units already on a live PO, and what is STILL needed once those are counted.
+        const poQty = Math.max(0, Number(openPo[r.sku]) || 0);
+        const netQty = Math.max(0, rawQty - poQty);
         const caseSize = caseSizes[r.sku] || null;
-        // Round UP to whole cases. Without a known case size we still surface the raw need rather than
-        // hiding the SKU — the UI flags that it couldn't be cased.
-        const orderQty = (caseSize && rawQty > 0) ? Math.ceil(rawQty / caseSize) * caseSize : rawQty;
+        // Round UP to whole cases — off the NET need, since you only buy what the open POs don't cover.
+        // Without a known case size we still surface the raw need rather than hiding the SKU — the UI
+        // flags that it couldn't be cased.
+        const orderQty = (caseSize && netQty > 0) ? Math.ceil(netQty / caseSize) * caseSize : netQty;
         return {
             sku: r.sku, product_name: r.product_name, category: r.category,
             warehouse: r.warehouse, location_id: r.location_id,
             stock, units_sold: sold, drr, doi, status,
             case_size: caseSize, raw_qty: rawQty, order_qty: orderQty,
+            open_po: poQty, net_qty: netQty,
+            // Fully covered by what is already on order — listed, but with nothing left to buy.
+            poCovered: rawQty > 0 && netQty === 0,
             cases: caseSize && orderQty > 0 ? Math.round(orderQty / caseSize) : 0,
+            // A SKU is still "needs order" if it was short at all — a covered one stays visible so the
+            // buyer can see WHY it is not being ordered, rather than it silently vanishing.
             needsOrder: rawQty > 0,
         };
     });
@@ -95,7 +115,13 @@ function buildReorder(rows, caseSizes) {
 router.get('/inventory/reorder', async (req, res) => {
     try {
         const [{ snapshot_date, rows }, caseSizes] = await Promise.all([loadLatestSnapshot(), fetchCaseSizes()]);
-        const all = buildReorder(rows, caseSizes)
+        // Same PO subtraction the Teams report uses, so the page and the report can never disagree.
+        // A failure here degrades to "no subtraction" rather than failing the page; `poSubtracted`
+        // tells the client which of the two it is looking at.
+        let openPo = {}, poSubtracted = true;
+        try { openPo = (await openPoQtyBySku()).bySku || {}; }
+        catch (e) { poSubtracted = false; console.warn('[Inventory] open PO lookup failed:', e.message); }
+        const all = buildReorder(rows, caseSizes, openPo)
             .sort((a, b) => (a.doi == null ? 1e9 : a.doi) - (b.doi == null ? 1e9 : b.doi));
         const order = all.filter(r => r.needsOrder);
         res.json({
@@ -109,8 +135,11 @@ router.get('/inventory/reorder', async (req, res) => {
                 warning: all.filter(r => r.status === 'Warning').length,
                 healthy: all.filter(r => r.status === 'Healthy').length,
                 overstock: all.filter(r => r.status === 'Overstock').length,
-                noCaseSize: all.filter(r => r.needsOrder && !r.case_size).length,
+                noCaseSize: all.filter(r => r.needsOrder && !r.case_size && r.net_qty > 0).length,
+                poCovered: all.filter(r => r.poCovered).length,
             },
+            poSubtracted,
+            openPoUnits: order.reduce((s, r) => s + (r.open_po || 0), 0),
             totalUnits: order.reduce((s, r) => s + r.order_qty, 0),
             order, rows: all,
         });
@@ -172,37 +201,63 @@ async function sendInventoryTeamsReport() {
     //    literal backticks in Teams and collapses the padding, so alignment has to come from the card.
     let orderBlocks = [];
     try {
+        // Open PO units are fetched alongside the snapshot. If EasyEcom is unreachable we fall back to
+        // an empty map rather than dropping the whole report — the table then reads exactly as it did
+        // before this feature, and the caption says the subtraction was skipped.
+        let openPo = {}, poFailed = false;
         const [{ rows: snapRows }, caseSizes] = await Promise.all([loadLatestSnapshot(), fetchCaseSizes()]);
-        const need = buildReorder(snapRows, caseSizes)
+        try { openPo = (await openPoQtyBySku()).bySku || {}; }
+        catch (e) { poFailed = true; console.warn('[Inventory] open PO lookup failed — reorder shown WITHOUT PO subtraction:', e.message); }
+
+        const need = buildReorder(snapRows, caseSizes, openPo)
             .filter(r => r.needsOrder)
             .sort((a, b) => (a.doi == null ? 1e9 : a.doi) - (b.doi == null ? 1e9 : b.doi));
         if (need.length) {
             const n = v => Number(v || 0).toLocaleString('en-IN');
             const units = need.reduce((s, r) => s + r.order_qty, 0);
             const cases = need.reduce((s, r) => s + r.cases, 0);
-            const noCase = need.filter(r => !r.case_size).length;
+            const noCase = need.filter(r => !r.case_size && r.net_qty > 0).length;
+            const covered = need.filter(r => r.poCovered);
+            const toOrder = need.filter(r => !r.poCovered);
             const table = {
                 type: 'table',
                 columns: [
                     { title: 'SKU', width: 4 },
                     { title: `DRR/${DRR_WINDOW_DAYS}d`, width: 2 },
                     { title: 'DOI', width: 2 },
+                    { title: 'Stock', width: 2 },
                     { title: 'Recommend Qty', width: 3 },
+                    { title: 'Raised PO', width: 2 },
+                    { title: 'Final Qty', width: 2 },
                     { title: 'Case Size', width: 2 },
                     { title: 'Case Qty', width: 2 },
                     { title: 'Order Units', width: 3 },
                 ],
-                rows: need.map(r => [r.sku, r.drr.toFixed(2), r.doi == null ? '—' : r.doi.toFixed(1) + 'd',
-                    n(r.raw_qty), r.case_size ? n(r.case_size) : '—',
-                    r.case_size ? n(r.cases) : '—', r.case_size ? n(r.order_qty) : n(r.raw_qty) + '*']),
-                total: ['TOTAL', '', '', '', '', n(cases), n(units)],
+                rows: need.map(r => [
+                    r.sku,
+                    r.drr.toFixed(2),
+                    r.doi == null ? '—' : r.doi.toFixed(1) + 'd',
+                    n(r.stock),
+                    n(r.raw_qty),
+                    r.open_po ? n(r.open_po) : '—',
+                    // Fully covered by an open PO — say so instead of showing a bare 0.
+                    r.poCovered ? '✓ on PO' : n(r.net_qty),
+                    r.case_size ? n(r.case_size) : '—',
+                    r.poCovered ? '—' : (r.case_size ? n(r.cases) : '—'),
+                    r.poCovered ? '—' : (r.case_size ? n(r.order_qty) : n(r.net_qty) + '*'),
+                ]),
+                total: ['TOTAL', '', '', '', '', '', '', '', n(cases), n(units)],
             };
-            const title = `🧾 *Recommended Order* — ${need.length} SKU${need.length > 1 ? 's' : ''}  ·  ${n(cases)} cases  ·  ${n(units)} units`;
+            const title = `🧾 *Recommended Order* — ${toOrder.length} SKU${toOrder.length === 1 ? '' : 's'} to order  ·  ${n(cases)} cases  ·  ${n(units)} units`;
+            const notes = [];
+            if (covered.length) notes.push(`_${covered.length} SKU${covered.length > 1 ? 's are' : ' is'} already fully covered by open POs (${n(covered.reduce((s, r) => s + r.open_po, 0))} units on order) — nothing to buy._`);
+            if (noCase) notes.push(`_* ${noCase} SKU${noCase > 1 ? 's have' : ' has'} no case size on file — raw quantity shown._`);
+            if (poFailed) notes.push(`_⚠️ Open POs could not be read from EasyEcom — **Raised PO not subtracted**, quantities may be over-stated._`);
             orderBlocks = [
                 { type: 'divider' },
                 { type: 'section', text: { type: 'mrkdwn', text: title } },
                 table,
-                ...(noCase ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: `_* ${noCase} SKU${noCase > 1 ? 's have' : ' has'} no case size on file — raw quantity shown._` }] }] : []),
+                ...(notes.length ? [{ type: 'context', elements: notes.map(text => ({ type: 'mrkdwn', text })) }] : []),
             ];
         }
     } catch (e) { console.error('[Inventory] reorder list failed (report still sent):', e.message); }

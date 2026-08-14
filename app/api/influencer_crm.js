@@ -814,7 +814,7 @@ Content Format: We're open to ideas — be it a skincare routine, product demo, 
 
 Flexibility: While we're aiming for a three to six-month collaboration initially, we understand that circumstances may change, and the duration of our partnership might be subject to company discretion and the performance of the video content. We believe in fostering long-term relationships, and we're open to adapting our approach based on mutual satisfaction and success.
 
-Commercials: As discussed, we'll be offering ${fee} for the reel + story set. Payments will be processed before uploading days from the invoice date once the content goes live and the partnership ad code is provided. We will also require content rights and raw footage, and we're open to running collab ads to extend the reach. The same reel will need to be posted on Facebook as well.
+Commercials: As discussed, we'll be offering ${fee} for the reel + story set. Payments will be processed within 15-30 days from the invoice date once the content goes live and the partnership ad code is provided. We will also require content rights and raw footage, and we're open to running collab ads to extend the reach. The same reel will need to be posted on Facebook as well.
 
 We're excited about the potential to co-create content that feels authentic, adds value to your audience, and reflects the essence of theelement.skin.
 

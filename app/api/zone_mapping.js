@@ -47,9 +47,17 @@ const router = express.Router();
 const { supabase } = require('../supabase');
 const { tokenRequired, requireAdmin } = require('../auth');
 
-// Self-contained gate (same pattern as users.js): reference data that rewrites zones on 1,000+ live
-// shipments is admin-only no matter where this router ends up mounted.
-router.use(tokenRequired, requireAdmin);
+// Self-contained gate: reference data that rewrites zones on 1,000+ live shipments is admin-only no
+// matter where this router ends up mounted.
+//
+// ⚠️⚠️ THE PATH ARGUMENT IS LOAD-BEARING — do not drop it to `router.use(tokenRequired, requireAdmin)`.
+// This router is mounted at bare `/api`, and a router-level `use()` with no path runs for EVERY
+// request that reaches the router, not just this router's own routes. Without the `/zone-mapping`
+// scope it therefore gated everything mounted AFTER it in server.js — DocPharma Recon, RapidShyp
+// Recon, the DocPharma invoice/ledger/overview/inventory pages and the Teams bot endpoint all
+// returned 403 to any non-admin who legitimately held the permission. Verified: a user with
+// `docpharma-recon` got 200 on a route mounted before this line and 403 on one mounted after.
+router.use('/zone-mapping', tokenRequired, requireAdmin);
 
 const TABLE = 'zone_mapping_with_pincode';
 const COL_FROM = 'Pin_code_From', COL_TO = 'Pin_code_To', COL_ZONE = 'Zone';

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.1",
+  "id": "54c61a94-70ec-4261-9d02-86de7f0d7558",
+  "packageName": "skin.theelement.ecomcentral",
+  "developer": {
+    "name": "The Element",
+    "websiteUrl": "https://dashboard.theelement.skin",
+    "privacyUrl": "https://dashboard.theelement.skin",
+    "termsOfUseUrl": "https://dashboard.theelement.skin"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "EcomBot",
+    "full": "Ecom Central Bot"
+  },
+  "description": {
+    "short": "Ops reports and approvals for Ecom Central.",
+    "full": "Posts DocPharma, inventory and finance reports into Teams, and takes approvals back — reply yes, no or rejected to act on whatever is pending."
+  },
+  "accentColor": "#4F46E5",
+  "bots": [
+    {
+      "botId": "54c61a94-70ec-4261-9d02-86de7f0d7558",
+      "scopes": [
+        "team"
+      ],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": [
+            "team"
+          ],
+          "commands": [
+            {
+              "title": "rejected",
+              "description": "Run the DocPharma → warehouse check now"
+            },
+            {
+              "title": "yes",
+              "description": "Approve whatever is pending (Amazon reviews / Tally push)"
+            },
+            {
+              "title": "no",
+              "description": "Reject whatever is pending"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": [
+    "dashboard.theelement.skin"
+  ]
+}

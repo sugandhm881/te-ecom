@@ -161,12 +161,52 @@ function buildCard(payload, opts = {}) {
     return { type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] };
 }
 
+// Which Teams channel does this webhook post into? Pairs TEAMS_WEBHOOK_<X> with TEAMS_CHANNEL_<X>
+// (DP, AMAZON, FINANCE, INVENTORY, WAREHOUSE, HOLD, CRON). Returns null when that channel id is not
+// configured, which simply leaves that report on its webhook.
+const _envVal = k => process.env[k] || config[k];
+function channelForWebhook(url) {
+    if (!url) return null;
+    for (const suffix of ['DP', 'AMAZON', 'FINANCE', 'INVENTORY', 'WAREHOUSE', 'HOLD', 'CRON']) {
+        if (_envVal(`TEAMS_WEBHOOK_${suffix}`) === url) return _envVal(`TEAMS_CHANNEL_${suffix}`) || null;
+    }
+    return null;
+}
+
 // Post a Slack-style payload to a Teams Workflow webhook as a native Adaptive Card.
 // The Workflow's "Post card in a chat or channel" reads triggerBody()?['card'] — a JSON string of the card.
 async function postTeams(webhookUrl, payload, opts = {}) {
-    if (!webhookUrl) return false;
     const card = buildAdaptiveCard(payload, opts);
     if (!card) return false;
+
+    // Prefer EcomBot when we can: the card then comes from the bot's own identity instead of the
+    // generic "Workflows" sender, and the bot works in PRIVATE channels where an incoming webhook
+    // cannot be created at all. Falls back to the webhook whenever the bot is not configured, has
+    // never seen that channel (no serviceUrl learned yet), or errors — so this can only ever add a
+    // delivery path, never remove one. A report failing to post because we got clever is not a
+    // trade worth making.
+    //
+    // The channel is resolved from the WEBHOOK URL rather than passed by every caller: each
+    // TEAMS_WEBHOOK_<X> has a matching TEAMS_CHANNEL_<X>, so one lookup switches every existing
+    // report to the bot with no call-site changes — and any report whose channel id is not
+    // configured simply keeps using its webhook.
+    const channelId = opts.channelId || channelForWebhook(webhookUrl);
+    if (channelId) {
+        try {
+            const bot = require('./teams_bot');
+            if (bot.botEnabled()) {
+                await bot.sendToChannel(channelId, {
+                    type: 'message',
+                    attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }],
+                });
+                return true;
+            }
+        } catch (e) {
+            console.warn(`[Teams] bot post failed (${e.message}) — falling back to the webhook`);
+        }
+    }
+
+    if (!webhookUrl) return false;
     const body = { card: JSON.stringify(card) };
     // Optional plain HTML rendering, sent alongside the card. Used by flows that reply INTO a thread
     // via "Reply with a message in a channel" (Adaptive Cards can't be posted as channel replies, only

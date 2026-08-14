@@ -11321,6 +11321,7 @@ async function initInventory(){
         <select id="inv-cat" class="filter-select"><option value="">All categories</option>${(d.categories||[]).map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select>
         <span id="inv-count" class="text-xs text-slate-400 ml-auto"></span>
       </div></div>
+      <div id="inv-reorder"></div>
       <div class="grid md:grid-cols-2 gap-5">
         <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">DOI distribution</p><div style="height:230px"><canvas id="inv-doi-chart"></canvas></div></div>
         <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Top 10 fastest moving (DRR)</p><div style="height:230px"><canvas id="inv-top-chart"></canvas></div></div>
@@ -11330,6 +11331,7 @@ async function initInventory(){
     document.getElementById('inv-wh').addEventListener('change',invRefresh);
     document.getElementById('inv-cat').addEventListener('change',invRefresh);
     invRefresh();
+    invReorder();   // independent fetch — the order sheet must not delay the snapshot view
   }catch(e){ body.innerHTML=`<div class="card p-6 text-sm text-rose-600">${escapeHtml(e.message)}</div>`; }
 }
 function invRefresh(){
@@ -11373,6 +11375,66 @@ function invRefresh(){
   document.getElementById('inv-table').innerHTML=`<table class="w-full"><thead><tr>${head}</tr></thead><tbody>${tb}</tbody></table>${rows.length>600?`<p class="text-xs text-slate-400 p-3 text-center">Showing first 600 of ${rows.length}</p>`:''}`;
   document.getElementById('inv-table').querySelectorAll('th[data-sort]').forEach(th=>th.addEventListener('click',()=>{ const k=th.dataset.sort; if(_invSort.k===k)_invSort.d*=-1; else _invSort={k,d:['sku','name','warehouse','category','status'].includes(k)?1:-1}; invRefresh(); }));
   document.getElementById('inv-table').querySelectorAll('tr[data-key]').forEach(tr=>tr.addEventListener('click',()=>{ const i=_invRowByKey.get(tr.dataset.key); if(i) infModal('inv-detail-modal',invDetailModalHtml(i),'max-w-lg'); }));
+}
+// ── Recommended Order — the same purchase sheet the daily Teams report carries ────────────────────
+// Deliberately the SAME endpoint the report uses (/inventory/reorder), so the page and the 6:30 AM
+// Teams card can never disagree about what to buy.
+//
+// ⚠️ Two things about this block do NOT follow the filters above it, and the caption says so:
+//   • It is **Shifupro only** (DP Bangalore is DocPharma's stock, reconciled elsewhere).
+//   • It is fixed at the server's DRR window / 45-day cover target, so the "DRR: 7/14/30 days"
+//     selector does not move it. Letting the selector change an ORDER quantity would mean the sheet
+//     said something different depending on a dropdown nobody remembers setting.
+// `Final Qty = Recommend Qty − Raised PO`, and cases are rounded off that NET figure — you only buy
+// what open POs don't already cover. A fully covered SKU stays listed reading "on PO" instead of
+// disappearing, so a critical-looking SKU is visibly handled rather than missing.
+async function invReorder(){
+  const host=document.getElementById('inv-reorder'); if(!host) return;
+  host.innerHTML=`<div class="card p-4">${brandLoaderSm('Loading recommended order…')}</div>`;
+  try{
+    const r=await fetch('/api/inventory/reorder',{headers:{'Content-Type':'application/json',...getAuthHeaders()}});
+    const d=await r.json(); if(!r.ok||d.success===false) throw new Error(d.error||('HTTP '+r.status));
+    const need=(d.order||[]);
+    if(!need.length){ host.innerHTML=`<div class="card p-4 text-sm text-slate-500">🧾 <b class="text-slate-700">Recommended Order</b> — nothing to order: every SKU is above its ${d.thresholds?.target||45}-day cover target.</div>`; return; }
+    const toOrder=need.filter(i=>!i.poCovered), covered=need.filter(i=>i.poCovered);
+    const cases=need.reduce((s,i)=>s+i.cases,0), units=need.reduce((s,i)=>s+i.order_qty,0);
+    const poUnits=covered.reduce((s,i)=>s+(i.open_po||0),0);
+    const noCase=need.filter(i=>!i.case_size&&i.net_qty>0).length;
+    const TH='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+    const TD='px-3 py-2 border-b border-slate-100 text-sm';
+    const cols=[['SKU','l'],[`DRR/${d.thresholds?.drrWindow||7}d`,'r'],['DOI','r'],['Stock','r'],['Recommend Qty','r'],['Raised PO','r'],['Final Qty','r'],['Case Size','r'],['Case Qty','r'],['Order Units','r']];
+    const head=cols.map(([h,a])=>`<th class="${TH} ${a==='r'?'text-right':''}">${h}</th>`).join('');
+    // NOTE: bg-emerald-50 (not an /opacity variant) — tailwind.css here is PREBUILT and does not carry
+    // arbitrary opacity modifiers; they compile to nothing and the row silently loses its tint.
+    const tb=need.map(i=>`<tr class="${i.poCovered?'bg-emerald-50':''}">
+        <td class="${TD} font-mono font-semibold text-slate-700 whitespace-nowrap">${escapeHtml(i.sku)}</td>
+        <td class="${TD} text-right tabular-nums">${Number(i.drr||0).toFixed(2)}</td>
+        <td class="${TD} text-right tabular-nums font-semibold ${i.doi!=null&&i.doi<=(d.thresholds?.placeOrder||20)?'text-rose-600':''}">${i.doi==null?'—':Number(i.doi).toFixed(1)+'d'}</td>
+        <td class="${TD} text-right tabular-nums ${i.stock<=0?'text-rose-600 font-semibold':'text-slate-600'}">${invNum(i.stock)}</td>
+        <td class="${TD} text-right tabular-nums">${invNum(i.raw_qty)}</td>
+        <td class="${TD} text-right tabular-nums ${i.open_po?'text-indigo-600 font-semibold':'text-slate-300'}">${i.open_po?invNum(i.open_po):'—'}</td>
+        <td class="${TD} text-right tabular-nums font-semibold">${i.poCovered?'<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 whitespace-nowrap">on PO</span>':invNum(i.net_qty)}</td>
+        <td class="${TD} text-right tabular-nums text-slate-500">${i.case_size?invNum(i.case_size):'—'}</td>
+        <td class="${TD} text-right tabular-nums">${i.poCovered?'—':(i.case_size?invNum(i.cases):'—')}</td>
+        <td class="${TD} text-right tabular-nums font-bold text-slate-800">${i.poCovered?'—':(i.case_size?invNum(i.order_qty):invNum(i.net_qty)+'*')}</td></tr>`).join('');
+    const notes=[];
+    if(covered.length) notes.push(`<b>${covered.length}</b> SKU${covered.length>1?'s are':' is'} already fully covered by open POs (<b>${invNum(poUnits)}</b> units on order) — nothing to buy.`);
+    if(noCase) notes.push(`* ${noCase} SKU${noCase>1?'s have':' has'} no case size on file — raw quantity shown.`);
+    if(d.poSubtracted===false) notes.push(`⚠️ Open POs could not be read from EasyEcom — <b>Raised PO not subtracted</b>, quantities may be over-stated.`);
+    host.innerHTML=`<div class="card p-4">
+      <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+        <p class="text-xs font-bold text-slate-500 uppercase tracking-wide">🧾 Recommended Order</p>
+        <p class="text-xs text-slate-400"><b class="text-slate-700">${toOrder.length}</b> SKU${toOrder.length===1?'':'s'} to order · <b class="text-slate-700">${invNum(cases)}</b> cases · <b class="text-slate-700">${invNum(units)}</b> units</p>
+      </div>
+      <div class="overflow-x-auto"><table class="w-full"><thead><tr>${head}</tr></thead><tbody>${tb}
+        <tr class="bg-slate-50"><td class="${TD} font-bold text-slate-700">TOTAL</td><td class="${TD}" colspan="7"></td>
+          <td class="${TD} text-right tabular-nums font-bold">${invNum(cases)}</td>
+          <td class="${TD} text-right tabular-nums font-bold text-slate-800">${invNum(units)}</td></tr>
+      </tbody></table></div>
+      ${notes.length?`<div class="text-xs text-slate-400 mt-2 space-y-1">${notes.map(t=>`<div>${t}</div>`).join('')}</div>`:''}
+      <p class="text-xs text-slate-400 mt-2">Shifupro only · fixed ${d.thresholds?.drrWindow||7}-day DRR and ${d.thresholds?.target||45}-day cover target (the DRR selector above does not change order quantities) · Final Qty = Recommend − Raised PO, cases rounded on the net.</p>
+    </div>`;
+  }catch(e){ host.innerHTML=`<div class="card p-4 text-sm text-rose-600">Recommended Order unavailable — ${escapeHtml(e.message)}</div>`; }
 }
 // ═══════════════ End Inventory Analytics ═══════════════
 

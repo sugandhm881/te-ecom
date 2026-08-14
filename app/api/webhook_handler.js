@@ -345,4 +345,144 @@ router.post('/shopify-order', async (req, res) => {
     });
 });
 
+// ── POST /api/webhook/teams — inbound channel messages from a Teams Workflow ─────────────────────
+//
+// WHY THIS EXISTS. Approvals used to be read by polling Microsoft Graph, but Microsoft gates the Teams
+// MESSAGE APIs behind a separate "protected API" approval: on a tenant without it every read returns a
+// bare 403/UnknownError no matter how correct the token, the permission grant or the membership is.
+// (Confirmed here: ChannelMessage.Read.All granted, /me 200, admin genuinely in the team, /messages
+// still 403.) There is nothing to fix in code, so the direction is reversed — Teams PUSHES to us, the
+// mirror image of how the outbound report webhooks already work. No Graph permission, no token to
+// rotate, no protected API, and it fires instantly instead of on a 20-second poll.
+//
+// Teams setup: on the channel → Workflows → "When a new channel message is added" → HTTP POST to
+//   https://dashboard.theelement.skin/api/webhook/teams
+//   header  x-teams-token: <TEAMS_INBOUND_SECRET>
+//   body    { "channelId": "...", "text": "...", "from": "...", "id": "..." }
+// Field names are matched loosely below because the Flow designer's output names vary by trigger.
+//
+// ⚠️ This route is PUBLIC (matched by PUBLIC_API in server.js, like every other webhook), so the
+// shared secret is the ONLY thing standing between the internet and "approve the Tally push". It is
+// compared in constant time and a missing/short secret disables the route outright rather than
+// defaulting to open.
+// Teams OUTGOING WEBHOOK signs the raw body with HMAC-SHA256 using the security token shown once at
+// creation, and sends it as `Authorization: HMAC <base64>`. The key is the token BASE64-DECODED, not
+// the token text — signing with the literal string silently never matches.
+function teamsHmacOk(req) {
+    const token = String(config.TEAMS_OUTGOING_TOKEN || process.env.TEAMS_OUTGOING_TOKEN || '');
+    const auth = String(req.get('authorization') || '');
+    if (!token || !auth.startsWith('HMAC ')) return false;
+    const raw = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+    try {
+        const digest = crypto.createHmac('sha256', Buffer.from(token, 'base64')).update(raw).digest('base64');
+        const sent = auth.slice(5).trim();
+        return sent.length === digest.length && crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(digest));
+    } catch (_) { return false; }
+}
+
+router.post('/teams', async (req, res) => {
+    const b = req.body || {};
+    // Two callers are supported: a Power Automate flow (shared secret header) and a Teams Outgoing
+    // Webhook (HMAC over the raw body). Whichever authenticates wins; both end in the same handler.
+    const isHmac = String(req.get('authorization') || '').startsWith('HMAC ');
+    let authed = false;
+
+    if (isHmac) {
+        authed = teamsHmacOk(req);
+        if (!authed) {
+            const configured = !!(config.TEAMS_OUTGOING_TOKEN || process.env.TEAMS_OUTGOING_TOKEN);
+            console.warn(`[TeamsInbound] HMAC check FAILED — TEAMS_OUTGOING_TOKEN ${configured ? 'is set but does not match this webhook (restart the server after editing .env, and check the token belongs to THIS team)' : 'is NOT SET'}`);
+            // Answer 200, not 401. Teams renders our body into the channel only on a 2xx — on an error
+            // status it shows its own useless "Sorry, there was a problem encountered with your
+            // request", which hides the one fact that would fix this. Nothing is executed on a failed
+            // signature, so replying with the reason costs nothing an attacker doesn't already know.
+            return res.json({ type: 'message', text: `⚠️ Signature check failed — ${configured
+                ? 'the server\'s TEAMS_OUTGOING_TOKEN does not match this webhook. Restart the server after editing .env, and make sure the token came from THIS team\'s webhook.'
+                : 'TEAMS_OUTGOING_TOKEN is not set on the server.'}` });
+        }
+    } else {
+        const expected = String(config.TEAMS_INBOUND_SECRET || process.env.TEAMS_INBOUND_SECRET || '');
+        if (expected.length < 16) {
+            console.error('[TeamsInbound] refused — no TEAMS_OUTGOING_TOKEN (HMAC) and TEAMS_INBOUND_SECRET is unset/too short');
+            return res.status(503).json({ ok: false, error: 'inbound webhook not configured' });
+        }
+        const sent = String(req.get('x-teams-token') || req.query.token || b.token || '');
+        authed = sent.length === expected.length &&
+            (() => { try { return crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(expected)); } catch (_) { return false; } })();
+        if (!authed) {
+            console.warn('[TeamsInbound] unauthorized hit from', req.get('x-forwarded-for') || req.ip);
+            return res.status(401).json({ ok: false, error: 'unauthorized' });
+        }
+    }
+
+    // ⚠️⚠️ TRAP: in an Outgoing Webhook payload `channelId` is the literal string **"msteams"** — the
+    // Bot Framework channel, NOT the Teams channel. The real one is `channelData.teamsChannelId`.
+    // Reading `channelId` first would match nothing and look like a routing bug forever.
+    const channelId = String(
+        (b.channelData && (b.channelData.teamsChannelId || (b.channelData.channel && b.channelData.channel.id)))
+        || (b.channelId && b.channelId !== 'msteams' ? b.channelId : '')
+        || b.channel_id || b.channel
+        // Last resort: the conversation id carries it as "19:…@thread.tacv2;messageid=…".
+        || String((b.conversation && b.conversation.id) || '').split(';')[0]
+        || '').trim();
+    const rawText = b.text ?? b.messageText ?? b.body ?? (b.message && (b.message.body?.content ?? b.message.text)) ?? '';
+    const from = String((b.from && (b.from.name || b.from.displayName)) || b.from || b.sender || b.displayName
+        || (b.message && b.message.from?.user?.displayName) || 'Teams').trim();
+    const id = String(b.id || b.messageId || (b.message && b.message.id) || '').trim() || null;
+
+    // ⚠️ TRAP: an Outgoing Webhook message arrives as "<at>EcomBot</at> rejected". Plain tag-stripping
+    // leaves "EcomBot rejected", and parseApproval requires the command to be the WHOLE message — so
+    // every single command would be ignored. Drop the mention ELEMENT (tag AND its text) first, then
+    // strip whatever HTML is left, exactly as the Graph path does.
+    const text = String(rawText)
+        .replace(/<at\b[^>]*>.*?<\/at>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+
+    if (!channelId) {
+        console.warn('[TeamsInbound] no channel id in payload:', JSON.stringify(b).slice(0, 200));
+        return res.status(isHmac ? 200 : 400).json(isHmac
+            ? { type: 'message', text: '⚠️ Could not tell which channel this came from.' }
+            : { ok: false, error: 'channelId missing from payload' });
+    }
+
+    try {
+        // Same function the poller uses, so the two paths can never disagree about what a message means.
+        const r = await require('./teams_listener').handleInboundMessage({ id, text, from, channelId });
+        if (!r.ok) console.warn(`[TeamsInbound] ${channelId}: ${r.reason}`);
+        else if (r.acted && r.acted.length) console.log(`[TeamsInbound] "${text}" from ${from} → ${r.acted.join(', ')}`);
+
+        // An Outgoing Webhook expects a reply within ~5s and posts it into the channel as the bot.
+        // Stay SILENT when an action fired: the existing flow already posts its own "🔄 Got it" card
+        // plus the result, and a second inline line would just duplicate it. Only speak up when the
+        // person @mentioned the bot and nothing matched — there, silence looks like a broken bot.
+        // ⚠️ An Outgoing Webhook MUST get a well-formed `{type:'message', text:'…'}` back. Returning an
+        // empty `{}` — the obvious way to say "nothing to add" — makes Teams post its own
+        // "Sorry, there was a problem encountered with your request" INTO THE THREAD, even though the
+        // command ran perfectly. Observed live: the action fired and the ack card appeared, while the
+        // thread showed an error. Every branch below therefore answers with real text.
+        if (isHmac) {
+            if (r.ok && r.acted && r.acted.length) {
+                const what = r.acted.includes('dp') ? 'running the DocPharma → warehouse check'
+                    : r.acted.includes('approval') ? 'processing that approval'
+                        : r.acted.join(', ');
+                return res.json({ type: 'message', text: `✅ Got it — ${what}. The result card follows in the channel.` });
+            }
+            // A duplicate is NOT an unrecognised command — it is one we already acted on. Teams retries
+            // whenever a reply is slow, so saying "ignored, nothing pending" here would actively
+            // mislead the person who just watched it work.
+            if (r.skipped) return res.json({ type: 'message', text: '✅ Already handled.' });
+            const why = !r.ok ? 'this channel is not wired to an action'
+                : 'nothing is pending, or that was not a command I recognise';
+            return res.json({ type: 'message', text: `🤔 Ignored "${text}" — ${why}. Try *yes*, *no*, or *rejected*.` });
+        }
+        // Power Automate path: always 200, since a Flow that sees an error will RETRY — and retrying an
+        // approval is worse than dropping an unrecognised message.
+        return res.json({ ok: true, ...r });
+    } catch (e) {
+        console.error('[TeamsInbound] handler error:', e.message);
+        return res.json(isHmac ? { type: 'message', text: `⚠️ ${e.message}` } : { ok: false, error: e.message });
+    }
+});
+
 module.exports = router;

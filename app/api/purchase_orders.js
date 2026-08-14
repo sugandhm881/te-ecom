@@ -741,4 +741,35 @@ router.get('/purchase-orders/meta', (req, res) => {
         allStatuses: Object.entries(PO_STATUS).map(([id, label]) => ({ id: Number(id), label })) });
 });
 
+// ── Open PO units per SKU — units already ordered and still owed to us ───────────────────────────
+// Used by the daily Inventory & Reorder report to subtract stock that is already on its way, so a
+// buyer never re-orders something a live PO is already covering.
+//
+// ⚠️ "Open" is `pending > 0 AND the PO is not dead`. Pending quantity ALONE is wrong: a Rejected (4) or
+// Cancelled (7) PO keeps its pending_quantity, so counting it would report units as inbound that
+// nobody will ever ship — and on live data a meaningful share of pending POs sit in a dead state.
+// Reuses PO_DEAD/shapePo so this can never drift from what the Purchase Order page shows.
+//
+// Returns { bySku: { SKU: units }, poCount, skuCount, fetchedAt } and NEVER throws — the report must
+// still go out if EasyEcom is unreachable; the caller degrades to not subtracting.
+let _openPoCache = null;
+const OPEN_PO_TTL = 5 * 60 * 1000;
+
+async function openPoQtyBySku({ days = DEFAULT_LOOKBACK_DAYS, fresh = false } = {}) {
+    if (!fresh && _openPoCache && Date.now() - _openPoCache.t < OPEN_PO_TTL) return _openPoCache.v;
+    const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    const { rows } = await fetchAllPurchaseOrders(since);
+    const bySku = {};
+    const pos = rows.map(shapePo).filter(p => p.isOpen);
+    pos.forEach(p => p.items.forEach(i => {
+        const sku = String(i.sku || '').trim();
+        if (!sku || !(i.pending > 0)) return;
+        bySku[sku] = (bySku[sku] || 0) + i.pending;
+    }));
+    const v = { bySku, poCount: pos.length, skuCount: Object.keys(bySku).length, fetchedAt: new Date().toISOString() };
+    _openPoCache = { t: Date.now(), v };
+    return v;
+}
+
 module.exports = router;
+module.exports.openPoQtyBySku = openPoQtyBySku;

@@ -50,8 +50,17 @@ async function getAccessToken() {
     accessToken = res.data.access_token;
     tokenExpiry = Date.now() + (res.data.expires_in || 3600) * 1000;
     if (res.data.refresh_token) persistRefreshToken(res.data.refresh_token);
+    // Log WHICH scopes the token actually carries, once per refresh. A 403 on the channel read is
+    // almost always "the token is fine but it doesn't grant what we're asking for" — and without this
+    // the two are indistinguishable in the log. `scp` is the granted delegated-scope list; if
+    // ChannelMessage.Read.All is missing here, consent is the problem, not the code.
+    try {
+        const scp = JSON.parse(Buffer.from(String(accessToken).split('.')[1], 'base64').toString()).scp || '';
+        if (scp !== _lastScp) { _lastScp = scp; console.log(`[TeamsListener] token scopes: ${scp || '(none)'}`); }
+    } catch (_) { /* token shape is Microsoft's business — never break the poll over a log line */ }
     return accessToken;
 }
+let _lastScp = null;
 
 // ── channel reading ──
 function plainText(html) {
@@ -62,6 +71,57 @@ function plainText(html) {
 
 const lastSeen = {};       // channelId -> epoch ms watermark
 const processedIds = new Set(); // message ids already acted on (belt-and-suspenders dedup)
+const _lastReadErr = {};   // channelId -> last logged failure key, so a 20s poll doesn't spam one fault
+let _diagnosed = false;    // the one-time access self-check below has already run
+
+// One-shot access diagnosis, fired the first time a channel read fails. Uses the access token the
+// poll already holds — it deliberately does NOT refresh, because the refresh token rotates and is
+// shared with the live process. Read-only; logs a verdict and changes nothing.
+async function diagnoseAccess(token) {
+    const auth = { headers: { Authorization: 'Bearer ' + token }, validateStatus: () => true, timeout: 15000 };
+    const get = async (url) => { try { return await axios.get(url, auth); } catch (e) { return { status: 0, data: { error: { message: e.message } } }; } };
+    const line = (label, r, extra = '') =>
+        console.log(`[TeamsListener] check ${label}: ${r.status}${r.status === 200 ? ' OK' : ' ' + ((r.data && r.data.error && (r.data.error.code || r.data.error.message)) || '')}${extra}`);
+
+    const me = await get('https://graph.microsoft.com/v1.0/me');
+    line('/me', me, me.status === 200 ? ` → ${me.data.userPrincipalName || me.data.displayName || ''}` : '');
+
+    // ⚠️ These two probes need scopes this token does NOT carry — /me/joinedTeams wants
+    // Team.ReadBasic.All and /teams/{id}/channels wants Channel.ReadBasic.All, while the listener only
+    // requests ChannelMessage.Read.All + User.Read. A 403 here therefore means "we never asked for that
+    // permission", NOT "the team is invisible" — an earlier version of this check drew exactly that
+    // wrong conclusion and sent the investigation after a non-existent team-id problem. They are still
+    // run because a 200 IS informative (it would prove membership outright); only the inference changes.
+    const scopes = (() => { try { return JSON.parse(Buffer.from(String(token).split('.')[1], 'base64').toString()).scp || ''; } catch (_) { return ''; } })();
+    const has = s => scopes.split(/\s+/).includes(s);
+
+    const teams = await get('https://graph.microsoft.com/v1.0/me/joinedTeams');
+    let member = null;
+    if (teams.status === 200) {
+        const list = teams.data.value || [];
+        member = list.some(t => t.id === TEAM_ID());
+        line('/me/joinedTeams', teams, ` → ${list.length} team(s); TEAMS_TEAM_ID ${member ? 'IS' : 'is NOT'} among them`);
+        if (!member) console.log(`[TeamsListener]   joined team ids: ${list.map(t => t.id).join(', ') || '(none)'}`);
+    } else line('/me/joinedTeams', teams, has('Team.ReadBasic.All') ? '' : '  (inconclusive — Team.ReadBasic.All not in token)');
+
+    const chans = await get(`https://graph.microsoft.com/v1.0/teams/${TEAM_ID()}/channels`);
+    line('/teams/{id}/channels', chans, chans.status === 200 ? ` → ${(chans.data.value || []).length} channel(s) visible`
+        : (has('Channel.ReadBasic.All') ? '' : '  (inconclusive — Channel.ReadBasic.All not in token)'));
+
+    // Verdict — say what to DO, and say so only where the evidence actually supports it.
+    if (me.status !== 200) {
+        console.error('[TeamsListener] VERDICT: the token cannot even identify the user — re-run the device-code sign-in to mint a fresh TEAMS_REFRESH_TOKEN.');
+    } else if (member === false) {
+        console.error('[TeamsListener] VERDICT: the signed-in user is NOT a member of TEAMS_TEAM_ID. Delegated auth reads AS that user, so add them to the team (or point TEAMS_TEAM_ID at a team they are in).');
+    } else if (chans.status === 200) {
+        console.error('[TeamsListener] VERDICT: team + channels ARE visible and ChannelMessage.Read.All is granted, yet /messages is refused — Microsoft gates the Teams MESSAGE APIs behind a separate approval. Request protected-API access for the app registration, or switch these approvals to an inbound Workflow instead of polling.');
+    } else {
+        console.error(`[TeamsListener] VERDICT: token is valid for ${me.data.userPrincipalName || 'this user'} and carries ChannelMessage.Read.All, but /messages returns 403. The team/channel probes could not confirm membership because the token lacks Team.ReadBasic.All / Channel.ReadBasic.All, so BOTH remain possible:`);
+        console.error(`[TeamsListener]   (a) ${me.data.userPrincipalName || 'the account'} is not a member of the team — check it in the Teams UI, and confirm TEAMS_TEAM_ID matches that team's id;`);
+        console.error('[TeamsListener]   (b) Microsoft is gating the Teams message APIs (protected API) — this turns on by tenant/rollout, which is why it can start failing with no change on our side.');
+        console.error('[TeamsListener]   Fastest split: add the account to the team (or verify it already is). If /messages still 403s with confirmed membership, it is (b).');
+    }
+}
 
 // `/messages` returns ONLY top-level channel posts — Graph does not include thread replies there.
 // That matters when a report is posted by a "Reply with a message in a channel" Flow: the card lands
@@ -73,7 +133,29 @@ async function fetchNewMessages(channelId, withReplies = false) {
     const auth = { headers: { Authorization: 'Bearer ' + token }, validateStatus: () => true, timeout: 15000 };
     const res = await axios.get(
         `https://graph.microsoft.com/v1.0/teams/${TEAM_ID()}/channels/${channelId}/messages?$top=15`, auth);
-    if (res.status !== 200) { console.error(`[TeamsListener] read ${channelId} → ${res.status}`); return []; }
+    // ⚠️ LOG THE GRAPH ERROR BODY, not just the status. A bare "→ 403" is unactionable: it cannot tell
+    // apart a missing consent, a user who was removed from the team, and a private channel that this
+    // API does not serve. Graph names the reason in error.code/message, and that one line is the whole
+    // diagnosis. Repeats are collapsed so a persistent failure doesn't flood a 20s poll loop.
+    if (res.status !== 200) {
+        const err = (res.data && res.data.error) || {};
+        const key = `${channelId}|${res.status}|${err.code || ''}`;
+        if (_lastReadErr[channelId] !== key) {
+            _lastReadErr[channelId] = key;
+            console.error(`[TeamsListener] read ${channelId} → ${res.status} ${err.code || ''}: ${err.message || JSON.stringify(res.data).slice(0, 300)}`);
+            // Graph answers a blocked channel read with a bare "Forbidden / UnknownError" that names
+            // nothing. These three probes, on the SAME token, split the only causes that produce it:
+            //   • /me                → who Graph thinks we are (delegated = we read AS this person)
+            //   • /me/joinedTeams    → is that person actually IN the team? if not, 403 is correct
+            //   • /teams/{id}/channels → can we see the team at all? if listing works but messages
+            //     don't, membership is fine and the MESSAGES api itself is what is blocked (Microsoft
+            //     gates the Teams message APIs behind a separate approval).
+            // Runs at most once per process, and only after a real failure.
+            if (!_diagnosed) { _diagnosed = true; diagnoseAccess(token).catch(() => {}); }
+        }
+        return [];
+    }
+    if (_lastReadErr[channelId]) { delete _lastReadErr[channelId]; console.log(`[TeamsListener] read ${channelId} recovered`); }
     const msgs = (res.data.value || []).slice();
 
     if (withReplies) {
@@ -226,38 +308,70 @@ async function handleApproval(m, roles) {
     // Nothing pending — stay silent. People hold ordinary conversations in these channels.
 }
 
+// Which flows a channel serves. A channel may serve more than one (Finance and Amazon share one here).
+function channelRoles() {
+    const roles = new Map();
+    const add = (id, role) => { if (!id) return; if (!roles.has(id)) roles.set(id, new Set()); roles.get(id).add(role); };
+    add(CH_DP(), 'dp'); add(CH_AMZ(), 'amazon'); add(CH_FIN(), 'finance');
+    return roles;
+}
+
+// ── The one place a channel message turns into an action ─────────────────────────────────────────
+// Shared by the Graph poller and the inbound webhook, deliberately: two copies of "what does 'yes'
+// mean here" is how one path ends up approving something the other would have refused. Dedup by
+// message id is inside, so the same message arriving on BOTH paths acts exactly once.
+async function handleInboundMessage(m) {
+    const roles = channelRoles().get(m.channelId);
+    if (!roles) return { ok: false, reason: 'channel not configured' };
+    if (!m.text) return { ok: true, skipped: 'empty' };
+    if (m.id && processedIds.has(m.id)) return { ok: true, skipped: 'duplicate' };
+    if (m.id) processedIds.add(m.id);
+    if (processedIds.size > 500) { const keep = [...processedIds].slice(-200); processedIds.clear(); keep.forEach(id => processedIds.add(id)); }
+
+    const acted = [];
+    if (roles.has('dp') && /(^|\b)rejected(\b|$)/i.test(m.text)) {
+        console.log(`[TeamsListener] DP "rejected" from ${m.from}${DRYRUN() ? ' [dry-run]' : ''}`);
+        if (!DRYRUN()) runDpCheck(m.from);
+        acted.push('dp');
+    }
+    if (roles.has('amazon') || roles.has('finance')) {
+        if (parseApproval(m.text)) acted.push('approval');
+        await handleApproval(m, roles);
+    }
+    return { ok: true, acted, roles: [...roles] };
+}
+
 async function pollOnce() {
     if (polling) return; polling = true;
     try {
         // Map channel → the flows watching it, so a channel serving two flows is fetched ONCE. Fetching
         // it twice would be a bug, not just waste: `lastSeen` is keyed by channel id, so the first read
         // advances the watermark and the second sees nothing at all.
-        const roles = new Map();
-        const add = (id, role) => { if (!id) return; if (!roles.has(id)) roles.set(id, new Set()); roles.get(id).add(role); };
-        add(CH_DP(), 'dp'); add(CH_AMZ(), 'amazon'); add(CH_FIN(), 'finance');
+        const roles = channelRoles();
 
         for (const [channelId, set] of roles) {
             // Finance cards may be posted as thread replies, which `/messages` alone never returns.
             const msgs = await fetchNewMessages(channelId, set.has('finance'));
-            for (const m of msgs) {
-                if (processedIds.has(m.id)) continue; processedIds.add(m.id);
-                if (set.has('dp') && /(^|\b)rejected(\b|$)/i.test(m.text)) {
-                    console.log(`[TeamsListener] DP "rejected" from ${m.from}${DRYRUN() ? ' [dry-run]' : ''}`);
-                    if (!DRYRUN()) runDpCheck(m.from);
-                }
-                if (set.has('amazon') || set.has('finance')) await handleApproval(m, set);
-            }
+            for (const m of msgs) await handleInboundMessage({ ...m, channelId });
         }
     } catch (e) {
         console.error('[TeamsListener] poll error:', e.message);
     } finally {
-        if (processedIds.size > 500) { const keep = [...processedIds].slice(-200); processedIds.clear(); keep.forEach(id => processedIds.add(id)); }
         polling = false;
     }
 }
 
 let timer = null;
 async function initTeamsListener() {
+    // Graph POLLING can be turned off independently of the listener. Microsoft gates the Teams message
+    // APIs behind a protected-API approval, so on a tenant without it EVERY read returns a bare
+    // 403/UnknownError however correct the token is — and there is nothing to fix in code. Set
+    // TEAMS_POLL=0 to stop the useless reads (and the hourly token refreshes) while keeping the inbound
+    // webhook path, which needs no Graph permission at all.
+    if (String(cfg('TEAMS_POLL') ?? '1') === '0') {
+        console.log('[TeamsListener] Graph polling DISABLED (TEAMS_POLL=0) — inbound approvals come from the Teams Workflow webhook at POST /api/webhook/teams');
+        return;
+    }
     if (!cfg('TEAMS_REFRESH_TOKEN')) { console.log('[TeamsListener] disabled (no TEAMS_REFRESH_TOKEN)'); return; }
     if (!TEAM_ID() || (!CH_DP() && !CH_AMZ() && !CH_FIN())) { console.log('[TeamsListener] disabled (no team/channel IDs)'); return; }
     const now = Date.now();
@@ -281,4 +395,5 @@ async function initTeamsListener() {
     console.log(`[TeamsListener] started${DRYRUN() ? ' (DRY-RUN)' : ''} — watching ${[CH_DP() && 'DP', CH_AMZ() && 'Amazon', CH_FIN() && 'Finance'].filter(Boolean).join(' + ')} channel(s) every ${interval / 1000}s`);
 }
 
-module.exports = { initTeamsListener, pollOnce, fetchNewMessages, getAccessToken, parseApproval, _lastSeen: lastSeen };
+module.exports = { initTeamsListener, pollOnce, fetchNewMessages, getAccessToken, parseApproval,
+    handleInboundMessage, channelRoles, _lastSeen: lastSeen };
