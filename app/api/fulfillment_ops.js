@@ -111,41 +111,111 @@ function journeyStatusText(j) {
 // aggregator/courier would have wrongly skipped real shipments and lost their tracking.
 const notRapidshypAwbs = new Set();
 
+// …and the same verdict, persisted, because an in-process Set forgets everything on restart. The sync
+// only fetches AWBs with no row in rapidshyp_tracking_ecom, and a foreign AWB never gets one — so it
+// stayed on the todo list forever. Measured 2026-08-17: 1,438 of 1,449 AWBs in the 7-day window were
+// foreign (708 GoKwik + 730 with no aggregator) against 11 real ones, and the job spent ~14 minutes
+// every 2 hours re-asking about all of them. Reloading the verdict from the DB skips them outright.
+const UNKNOWN_TBL = 'rapidshyp_unknown_awbs_ecom';
+
+async function loadKnownForeignAwbs(awbs) {
+    try {
+        for (let i = 0; i < awbs.length; i += 200) {
+            const { data, error } = await supabase.from(UNKNOWN_TBL).select('awb').in('awb', awbs.slice(i, i + 200));
+            if (error) throw new Error(error.message);
+            (data || []).forEach(r => notRapidshypAwbs.add(r.awb));
+        }
+    } catch (e) {
+        // Non-fatal: without the list we simply re-ask RapidShyp, exactly as before this table existed.
+        console.warn(`[RS Sync] could not read ${UNKNOWN_TBL} (${e.message}) — proceeding without the skip list`);
+    }
+}
+
+async function rememberForeignAwb(awb) {
+    notRapidshypAwbs.add(awb);
+    try { await supabase.from(UNKNOWN_TBL).upsert({ awb }, { onConflict: 'awb' }); }
+    catch (e) { console.warn(`[RS Sync] could not persist ${awb} as non-RapidShyp: ${e.message}`); }
+}
+
+// 8000 was too tight — RapidShyp routinely answers slower than that under load, and the same API is
+// given 25s by fetchRsLive() in warehouse_slack_report.js, which does not suffer these timeouts.
+const RS_TIMEOUT_MS = parseInt(process.env.RS_TIMEOUT_MS, 10) || 25000;
+// Consecutive AWB failures that mean "RapidShyp is down" rather than "this AWB is odd". Each AWB gets
+// two attempts, so 6 here is 12 failed calls in a row — far past random flakiness — and bounds a dead-
+// API run to ~5 min instead of letting it walk hundreds of AWBs at ~27s each.
+const RS_ABORT_AFTER = parseInt(process.env.RS_ABORT_AFTER, 10) || 6;
+const isTransient = e => !e.response || e.response.status === 429 || e.response.status >= 500;
+
 async function enrichAWBsBackground(awbs) {
-    let skipped = 0;
+    await loadKnownForeignAwbs(awbs);   // skip AWBs RapidShyp has already disowned, across restarts
+    let skipped = 0, ok = 0, failed = 0, consecutive = 0, aborted = false;
+    const reasons = new Map();   // message → count, for ONE summary line instead of a line per AWB
     for (const awb of awbs) {
         if (notRapidshypAwbs.has(awb)) { skipped++; continue; }   // already told us it isn't theirs
-        try {
-            const res = await axios.post(RS_URL, { awb }, { headers: RS_HDR(), timeout: 8000 });
-            if (res.data.success && res.data.records && res.data.records.length) {
-                const sd = res.data.records[0].shipment_details;
-                const ship = Array.isArray(sd) && sd.length ? sd[0] : (sd && typeof sd === 'object' ? sd : res.data.records[0]);
-                const rawStatus = ship.current_tracking_status_desc || ship.shipment_status || '';
-                if (rawStatus) {
-                    await supabase.from('rapidshyp_tracking_ecom').upsert(
-                        { awb, raw_status: rawStatus, last_checked: Date.now() / 1000, updated_at: new Date().toISOString() },
-                        { onConflict: 'awb' }
-                    );
-                    console.log(`[RS Sync] ${awb} → ${rawStatus}`);
+        let done = false;
+        // One retry: a timeout here is usually RapidShyp being briefly slow, and giving up on the first
+        // one threw away an AWB that would have answered a second later.
+        for (let attempt = 1; attempt <= 2 && !done; attempt++) {
+            try {
+                const res = await axios.post(RS_URL, { awb }, { headers: RS_HDR(), timeout: RS_TIMEOUT_MS });
+                if (res.data.success && res.data.records && res.data.records.length) {
+                    const sd = res.data.records[0].shipment_details;
+                    const ship = Array.isArray(sd) && sd.length ? sd[0] : (sd && typeof sd === 'object' ? sd : res.data.records[0]);
+                    const rawStatus = ship.current_tracking_status_desc || ship.shipment_status || '';
+                    if (rawStatus) {
+                        await supabase.from('rapidshyp_tracking_ecom').upsert(
+                            { awb, raw_status: rawStatus, last_checked: Date.now() / 1000, updated_at: new Date().toISOString() },
+                            { onConflict: 'awb' }
+                        );
+                        console.log(`[RS Sync] ${awb} → ${rawStatus}`);
+                    }
+                }
+                done = true; ok++; consecutive = 0;
+            } catch (e) {
+                // 400 = RapidShyp doesn't know this AWB → it was booked with another carrier. That's a normal
+                // fact about a multi-courier catalogue, NOT a failure: nothing was ever going to be written for
+                // it, so the data is identical either way. Logged at warn (never console.error) so it stops
+                // raising cron-failure alerts, and remembered so later runs skip it entirely.
+                const status = e && e.response && e.response.status;
+                if (status === 400) {
+                    await rememberForeignAwb(awb);   // remembered in the DB, so restarts don't re-ask
+                    console.warn(`[RS Sync] ${awb} — not a RapidShyp shipment (400); skipping from now on`);
+                    done = true; consecutive = 0;
+                } else if (attempt === 1 && isTransient(e)) {
+                    await new Promise(r => setTimeout(r, 2000));   // brief backoff, then one more go
+                } else {
+                    failed++; consecutive++;
+                    reasons.set(e.message, (reasons.get(e.message) || 0) + 1);
+                    done = true;
                 }
             }
-        } catch (e) {
-            // 400 = RapidShyp doesn't know this AWB → it was booked with another carrier. That's a normal
-            // fact about a multi-courier catalogue, NOT a failure: nothing was ever going to be written for
-            // it, so the data is identical either way. Logged at warn (never console.error) so it stops
-            // raising cron-failure alerts, and remembered so later runs skip it entirely.
-            const status = e && e.response && e.response.status;
-            if (status === 400) {
-                notRapidshypAwbs.add(awb);
-                console.warn(`[RS Sync] ${awb} — not a RapidShyp shipment (400); skipping from now on`);
-            } else {
-                console.error(`[RS Sync] ${awb} failed:`, e.message);   // real failure (5xx/timeout/auth)
-            }
+        }
+        // RapidShyp is down, not this AWB. Keep walking the list at ~27s each and the job runs for half
+        // an hour to achieve nothing, overlapping the next 2-hourly trigger.
+        if (consecutive >= RS_ABORT_AFTER) {
+            aborted = true;
+            console.error(`[RS Sync] RapidShyp unreachable — ${consecutive} consecutive failures, aborting this run (${ok} synced first). Remaining AWBs retry on the next run.`);
+            break;
         }
         await new Promise(r => setTimeout(r, 1000)); // 1 req/sec to avoid overload
     }
-    console.log(`[RS Sync] Background sync done for ${awbs.length} AWBs`
-        + (skipped ? ` (skipped ${skipped} known non-RapidShyp)` : ''));
+
+    // A per-AWB console.error made every isolated timeout a red "Cron failed" card, which is wrong twice
+    // over: the sync only fetches AWBs with NO row yet, so anything that failed is simply picked up by
+    // the next run 2 hours later — nothing is lost and nothing needs a human. So scattered failures are
+    // summarised at WARN, and only a genuine outage (already aborted above, or most of the batch
+    // failing) escalates to the error that raises a card.
+    const attempted = ok + failed;
+    if (failed && !aborted) {
+        const detail = [...reasons.entries()].sort((a, b) => b[1] - a[1]).map(([m, n]) => `${n}× ${m}`).join(' | ');
+        const badRate = attempted >= 5 && failed / attempted >= 0.25;
+        const line = `[RS Sync] ${failed}/${attempted} AWB(s) did not sync (they retry on the next run): ${detail}`;
+        if (badRate) console.error(line); else console.warn(line);
+    }
+    console.log(`[RS Sync] Background sync done — ${ok} synced, ${failed} failed of ${awbs.length} AWBs`
+        + (skipped ? ` (skipped ${skipped} known non-RapidShyp)` : '')
+        + (aborted ? ' [ABORTED EARLY]' : ''));
+    return { ok, failed, skipped, aborted };
 }
 
 const OPS_FULFILLMENT_FILTER = '(fulfillment_status:shipped OR fulfillment_status:partial OR fulfillment_status:scheduled OR fulfillment_status:on_hold OR fulfillment_status:request_declined)';

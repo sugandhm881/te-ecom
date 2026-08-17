@@ -415,9 +415,42 @@ function inferDeliveredDatetime(order) {
     return null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache freshness — ONE rule for every cached upstream payload in this codebase.
+//
+// Born from a real, month-long silent failure (2026-08-17): the shipment scan log was cached in
+// `shipment_journey_ecom.raw` and only re-fetched when that cache was EMPTY. So the first person to open
+// a shipment froze its timeline forever. TE25-40754 sat at "Out for delivery 13 Aug 11:32" while the
+// parcel went RTO the same afternoon and kept scanning for four more days; Delivery Performance and the
+// Support tracker both showed the frozen copy, and 79 of 189 cached logs were stale the day it was found.
+// Nothing errored. Nothing looked broken. It simply showed old data with a confident face.
+//
+// THE RULE: a cache read must never be the only path to the truth. Every cached payload needs either
+//   (a) a SIGNAL that something upstream moved — a timestamp another job already maintains, which costs
+//       nothing to compare and is far better than guessing, or
+//   (b) a TTL, for when no such signal exists.
+// "Re-fetch only when the cache is empty" is not a cache policy — it is a permanent freeze, and it hides
+// because a stale-but-plausible payload never raises an error.
+//
+//   capturedAt — when this cache entry was written (missing/garbage ⇒ stale; legacy entries must refresh)
+//   signalAt   — an independently-maintained "upstream last changed" timestamp, if one exists
+//   ttlMs      — max age when there is no signal (0/absent ⇒ age alone never makes it stale)
+//   frozen     — true when the underlying thing can no longer change (e.g. a delivered shipment), which
+//                suppresses TTL expiry only; a signal newer than the cache still wins, because "can't
+//                change" is an assumption and the signal is evidence.
+function isCacheStale({ capturedAt, signalAt, ttlMs = 0, frozen = false } = {}) {
+    const cap = capturedAt ? Date.parse(capturedAt) : NaN;
+    if (!cap || Number.isNaN(cap)) return true;                 // never written, or unparseable
+    const sig = signalAt ? Date.parse(signalAt) : NaN;
+    if (sig && !Number.isNaN(sig) && sig > cap) return true;    // proof of newer upstream activity
+    if (frozen || !ttlMs) return false;
+    return (Date.now() - cap) > ttlMs;
+}
+
 module.exports = {
     log,
     sleep,
+    isCacheStale,
     makeSignedApiRequest,
     getAllShopifyOrdersPaginated,
     getRawRapidshypStatus,

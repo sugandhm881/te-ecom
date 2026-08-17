@@ -7,7 +7,7 @@ const ExcelJS = require('exceljs');
 const { supabase } = require('../supabase');
 const { fetchRsShipment, fetchRsShipmentDetails, parseScanDate, parseDpDate } = require('./delivery_journey');
 const { fetchKwikshipShipment, fetchKwikshipPublic, parseKwikDate } = require('./kwikship_sync');
-const { fetchDocpharmaDetails } = require('./helpers');
+const { fetchDocpharmaDetails, isCacheStale } = require('./helpers');
 const { requirePermission } = require('../auth');
 // Email-send routes below are gated by the 'send-escalation-emails' capability (admins pass via '*';
 // other users only if the admin granted them this permission on the Users page). See server.js _VIEW_PERMS
@@ -598,7 +598,7 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
     if (!awb) return res.status(400).json({ success: false, error: 'awb required' });
     try {
         const { data: j } = await supabase.from('shipment_journey_ecom')
-            .select('awb, order_name, source, courier, outcome, status_code, order_date, dispatched_at, out_for_delivery_at, delivered_at, rto_at, first_edd, ndr_reasons, attempts, ndr_count, raw, freight_total, freight_forward, freight_rto, cod_charges, shipment_value, applied_weight, charges_fetched_at')
+            .select('awb, order_name, source, courier, outcome, status_code, order_date, dispatched_at, out_for_delivery_at, delivered_at, rto_at, last_scan_at, first_edd, ndr_reasons, attempts, ndr_count, raw, freight_total, freight_forward, freight_rto, cod_charges, shipment_value, applied_weight, charges_fetched_at')
             .eq('awb', awb).maybeSingle();
 
         // Normalize any scan array → { at, desc, code, location }, oldest first.
@@ -623,10 +623,33 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
             }))
             .filter(x => x.desc).sort((a, b) => (a.at || '').localeCompare(b.at || ''));
 
-        // Serve from the cached scan log if we have one — raw.scans (RapidShyp) or raw.status_history (Kwikship).
-        let scans = (j && j.raw && Array.isArray(j.raw.scans)) ? norm(j.raw.scans)
+        // The cached scan log — raw.scans (RapidShyp) or raw.status_history (Kwikship).
+        const cachedScans = (j && j.raw && Array.isArray(j.raw.scans)) ? norm(j.raw.scans)
             : (j && j.raw && Array.isArray(j.raw.status_history)) ? ksScans(j.raw.status_history)
             : null;
+
+        // ⚠️ This cache was WRITE-ONCE-READ-FOREVER and silently froze the timeline (fixed 2026-08-17).
+        // It was written the first time anyone opened a shipment and then served verbatim for the life of
+        // the row, because the live fetch below only ran when the cache was EMPTY. TE25-40754 was captured
+        // on 13 Aug at 13:06 IST, so its log ended at "Out for delivery 11:32" — while the shipment had
+        // gone RTO at 16:17 the same day and the journey row had `last_scan_at` four days newer. Support
+        // and Delivery Performance read the same endpoint, so both showed the same frozen log. Measured at
+        // the fix: 79 of the 189 cached logs were stale (45 Kwikship + 34 RapidShyp) — and they are stale
+        // precisely on the shipments people looked at, which are the ones being chased.
+        //
+        // `last_scan_at` is the free half of this: the webhook/cron already records when the courier last
+        // moved, so a newer value than `captured_at` PROVES the cache is behind without spending an API
+        // call. The TTL only covers rows where that signal is missing. Decided by the shared
+        // isCacheStale() rule in helpers.js — read the note there before adding another cache.
+        const SCAN_TTL_MIN = parseInt(process.env.SCAN_CACHE_TTL_MIN, 10) || 30;
+        const cacheStale = isCacheStale({
+            capturedAt: j && j.raw && j.raw.captured_at,
+            signalAt:   j && j.last_scan_at,
+            ttlMs:      SCAN_TTL_MIN * 60000,
+            frozen:     j && j.outcome === 'delivered',   // delivered = nothing further will happen
+        });
+
+        let scans = cacheStale ? null : cachedScans;
         let live = false;
         let dpInfo = null;   // DocPharma-only: tracking link + current status + promise EDD (no scan log upstream)
 
@@ -638,9 +661,11 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
                 if (!(ks.found && ks.statusHistory && ks.statusHistory.length)) ks = await fetchKwikshipShipment(awb);
                 if (ks.found && ks.statusHistory && ks.statusHistory.length) {
                     scans = ksScans(ks.statusHistory); live = true;
-                    if (j && !(j.raw && Array.isArray(j.raw.status_history))) {   // cache back so repeat views cost 0 API calls (matches RapidShyp)
+                    // Always re-cache, never only-when-empty: refreshing without writing back would
+                    // leave the stale copy in place and re-fetch on every single view.
+                    if (j) {
                         supabase.from('shipment_journey_ecom')
-                            .update({ raw: { status_history: ks.statusHistory, status: ks.status, captured_at: new Date().toISOString() } })
+                            .update({ raw: { ...(j.raw || {}), status_history: ks.statusHistory, status: ks.status, captured_at: new Date().toISOString() } })
                             .eq('awb', awb).then(() => {}).catch(() => {});
                     }
                 }
@@ -648,13 +673,16 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
                 const rs = await fetchRsShipment(awb);
                 if (rs.found && rs.scans && rs.scans.length) {
                     scans = norm(rs.scans); live = true;
-                    if (j && !(j.raw && j.raw.scans)) {            // cache back so repeat views cost 0 API calls
+                    if (j) {                                       // always re-cache (see the Kwikship note above)
                         supabase.from('shipment_journey_ecom')
-                            .update({ raw: { scans: rs.scans, status: rs.status, status_code: rs.statusCode, captured_at: new Date().toISOString() } })
+                            .update({ raw: { ...(j.raw || {}), scans: rs.scans, status: rs.status, status_code: rs.statusCode, captured_at: new Date().toISOString() } })
                             .eq('awb', awb).then(() => {}).catch(() => {});
                     }
                 }
             }
+            // The courier didn't answer. A stale log beats an empty panel — and beats the synthesized
+            // DocPharma milestones below, which would otherwise replace a real timeline with a stub.
+            if ((!scans || !scans.length) && cachedScans && cachedScans.length) scans = cachedScans;
             if ((!scans || !scans.length) && j?.source !== 'kwikship' && j?.order_name) {      // DocPharma fallback by order name
                 try {
                     const dp = await fetchDocpharmaDetails(String(j.order_name).replace('#', '').trim());

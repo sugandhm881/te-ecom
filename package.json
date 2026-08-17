@@ -4,7 +4,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "sync": "node data_fetcher.js"
+    "sync": "node data_fetcher.js",
+    "selftest": "node tests/selftest.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",
