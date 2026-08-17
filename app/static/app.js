@@ -5836,11 +5836,11 @@ function amzRevToggleAll(cb){
 function amzRevSelectAllEligible(){ amzOrders.forEach(o=>{if(amzRevIsEligible(o))amzSelected.add(o.amazon_order_id);}); amzRevRender(); amzRevUpdateBulkBar(); }
 function amzRevClearSelection(){ amzSelected.clear(); amzRevRender(); amzRevUpdateBulkBar(); }
 
-// Manual "Retry Failed": re-runs the review check for ONLY orders that previously
-// failed (same 10–30 day criteria). Posts the list to Slack and waits for yes/no —
-// nothing is sent until someone replies "yes". The daily 10 AM cron is unaffected.
+// Manual "Retry Failed": re-runs the review check for ONLY orders that previously failed (same 10–30
+// day criteria). ⚠️ Since 2026-08-17 this SENDS IMMEDIATELY — the yes/no confirmation step is gone, so
+// this dialog is the last chance to stop it. The daily 10 AM cron is unaffected.
 async function amzRevTriggerCron(){
-  if(!confirm('Retry review requests for previously-FAILED orders?\n\nThis posts the failed-orders list to Slack and waits for a yes/no reply there. No reviews are sent until you reply "yes". The daily 10 AM auto-run is unaffected.'))return;
+  if(!confirm('Send review requests now for previously-FAILED orders?\n\n⚠️ These are sent to Amazon straight away — there is no yes/no confirmation any more. The result is posted to Teams when it finishes. The daily 10 AM auto-run is unaffected.'))return;
   const btn=document.getElementById('amzrev-run-cron-btn');
   const original=btn?btn.innerHTML:'';
   if(btn){btn.disabled=true;btn.innerHTML='<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path></svg>Triggering…';}
@@ -5848,7 +5848,7 @@ async function amzRevTriggerCron(){
     const res=await fetch('/api/amazon/auto-review/trigger',{method:'POST',headers:{ 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' }});
     const d=await res.json().catch(()=>({}));
     if(res.ok && d.success!==false){
-      showNotification(d.message || 'Retry-failed check triggered — reply yes/no in Slack.');
+      showNotification(d.message || 'Retry-failed check started — the result posts to Teams when it finishes.');
     }else{
       showNotification(d.error || 'Failed to trigger retry-failed check.', true);
     }

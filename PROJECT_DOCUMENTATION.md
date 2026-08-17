@@ -39,7 +39,7 @@ Ecom Central is a single-server operations hub that unifies order management, sh
 - Track every shipment's full journey (dispatch → attempts → NDR → delivered/RTO) and compute delivery KPIs: FASR (First-Attempt Strike Rate), RTO rate, NDR recovery, TAT.
 - Detect and escalate courier problems: silent RTOs (returned with no delivery attempt → freight claims), late deliveries (promise date broken), fake delivery attempts (manually flagged, AI-polished escalation emails).
 - Run scheduled warehouse/ops reports into **Microsoft Teams** channels (native Adaptive Cards) with inbound keyword triggers via Microsoft Graph.
-- Automate **Amazon review requests** with a human yes/no approval loop in Teams.
+- Automate **Amazon review requests** — eligible orders are sent unattended each morning and the result is posted to Teams.
 - Provide marketing analytics (Meta ad sets / ads / ranking) and profitability views.
 - Multi-user access with per-dashboard, server-enforced permissions.
 
@@ -262,7 +262,7 @@ ecom-central-Staging/
         ├── warehouse_slack_report.js  # Warehouse/DocPharma-rejected/On-Hold reports (Teams)
         ├── teams.js               # Outbound Teams Adaptive Cards (Power Automate webhooks)
         ├── teams_listener.js      # Inbound Teams keyword triggers (MS Graph delegated)
-        ├── amazon_auto_review.js  # Auto review-request flow + Teams yes/no approval
+        ├── amazon_auto_review.js  # Auto review-request flow (sends unattended; result card to Teams)
         ├── amazon_review.js / amazon.js / amazon_reports.js / amazon_fba.js / amazon_inbound.js
         ├── easyecom.js            # EasyEcom OMS integration
         ├── fulfillment_ops.js     # Fulfillment operations + status sync
@@ -715,7 +715,7 @@ All schedules run in **Asia/Kolkata** inside the server process (`server.js` unl
 | `35 9 * * *` | **In-transit-overdue email** — **DAILY** 9:35 AM (still in transit past promised EDD; last 30 days; per platform) |
 | `*/10 * * * *` | **Escalation reply poll** — IMAP inbox scan, match replies to sent threads (whole-chain In-Reply-To + subject), AI-score inbound replies, retry unscored |
 | `20 */3 * * *` | RapidShyp cache sync for EasyEcom orders + once ~15s after boot |
-| `0 10 * * *` | Amazon auto-review check (`AUTO_REVIEW_CRON`, in `amazon_auto_review.js`) |
+| `0 10 * * *` | Amazon auto-review — finds eligible orders and **sends immediately** (`AUTO_REVIEW_CRON`, in `amazon_auto_review.js`) |
 | `30 6 * * *` | FBA locations sync (`amazon_fba.js`) |
 | every 20 s | Teams keyword listener poll (`teams_listener.js`) — not a cron, an interval |
 
@@ -778,7 +778,9 @@ All four are no-ops unless `TALLY_BATCH_CRON_ENABLED=true`.
 1. **Warehouse Ops** — pending Confirmed / Ready-for-Pickup / Unfulfillable orders, grouped by category with order IDs (3×/day).
 2. **DocPharma Rejected → Warehouse Action** — orders with no RapidShyp tracking that DocPharma cancelled/rejected (hourly 8-19). **Dedup:** each reported order is written to `dp_rejected_handled_ecom` and never re-reported; if that ledger can't be read the run **aborts** (fail-safe, no re-spam).
 3. **On-Hold (EasyEcom + Shopify)** — daily 11:00. EasyEcom holds (live-verified) + Shopify `shopify_hold` marks shown with their reason.
-4. **Amazon Review** — pending review batch with a Teams `yes`/`no` approval loop.
+4. **Amazon Review** — daily 10:00 IST. **No approval step (removed 2026-08-17).** The cron finds eligible orders (delivered 10–30 days ago, not already sent, not permanently 403/ineligible), posts a card saying what it is about to do, sends at one request per 1.2s, then posts a result card with sent/failed grouped by reason. `POST /api/amazon/auto-review/trigger` re-runs it by hand — retry-failed by default, `?mode=full` for the complete check — and `GET /auto-review/status` reports `running` plus the last run.
+
+   **Why the approval went away.** The pending batch lived in an in-memory variable, so a restart, redeploy or crash wiped it while the card still read "expires in 24 hours"; the reply then got "nothing is waiting for approval right now" and the day's batch was lost (hit 2026-08-17, four minutes after a deploy). Approval that cannot survive a restart is worse than no approval, because it looks reliable. The safety that matters is elsewhere and still in place: `runBulkSend()` re-checks every order's status immediately before sending, so an order already solicited or permanently rejected is never hit at Amazon twice, and a `running` flag stops the cron and the manual button overlapping.
 
 **Who sends a card: EcomBot or Workflows.** `postTeams()` prefers the bot and falls back to the Workflows webhook. It picks the bot only when `channelForWebhook(url)` resolves a channel id, and that lookup finds the webhook's env var **by scanning every `TEAMS_WEBHOOK_*` key** for a URL match, then reads the matching `TEAMS_CHANNEL_<suffix>`. It used to check a hard-coded list of seven suffixes instead, and **any webhook var outside that list silently posted via Workflows forever** — which is what happened to the On-Hold report (2026-08-14 → fixed 2026-08-17): it posts to `TEAMS_WEBHOOK_WAREHOUSE_HOLD` (its own thread inside the Ops channel), a name the list never contained. Compound names resolve through an explicit `CHANNEL_ALIAS` map (`WAREHOUSE_HOLD → HOLD`, `FINANCE_RESULT → FINANCE`) — **never** by trimming the trailing word, which would drop the hold card into the warehouse thread.
 

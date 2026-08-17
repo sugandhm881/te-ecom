@@ -10,10 +10,14 @@ const MARKETPLACE_ID  = config.MARKETPLACE_ID || 'A21TJRUUN4KGV';
 const MIN_DAYS        = 10;
 const MAX_DAYS        = 30;
 const SEND_DELAY_MS   = 1200;
-const POLL_INTERVAL   = 20000; // check Slack every 20s
 
-let pendingRun   = null; // { orders, expiry, messageTz }
-let pollingTimer = null;
+// 2026-08-17 — the yes/no approval step is GONE. An eligible batch is sent as soon as it is found and
+// the result is posted to Teams. Approval used to hang on `pendingRun`, an in-memory variable, so every
+// restart or redeploy silently voided a waiting batch: the card said "expires in 24 hours", the process
+// forgot it in seconds, and a perfectly good "yes" was answered with "nothing is waiting for approval".
+// Removing the wait removes the state, and state that does not exist cannot be lost.
+let running = false;   // a bulk send is in flight — never start a second one on top of it
+let lastRun = null;    // { at, mode, eligible, sent, failed } — surfaced by /auto-review/status
 
 // ─────────────────────────────────────────────────────
 // Order helpers
@@ -103,12 +107,11 @@ async function getEligibleOrders(failedOnly = false) {
 
 const { postTeams } = require('./teams');
 async function postToSlack(payload) {
-    // Teams — approvals moved to the dashboard, so the card links there instead of asking for a yes/no reply.
     const teamsUrl = config.TEAMS_WEBHOOK_AMAZON;
-    // Footer updated 2026-08-14: Teams CAN take the reply now. EcomBot (the Teams bot) reads
-    // @mentions in this channel, so the old "Teams can't take a yes/no reply" line was actively
-    // telling people to go somewhere they no longer need to go.
-    if (teamsUrl) postTeams(teamsUrl, payload, { footer: '➡️ Reply *@EcomBot yes* to approve and send, or *@EcomBot no* to cancel. (You can also approve from the Amazon Review page in the dashboard.)' }).catch(() => {});
+    // Footer history, because it kept lying about how to answer: it said Teams could not take a reply
+    // (untrue once EcomBot arrived), then asked for a yes/no (untrue once approval was removed). There
+    // is nothing to answer now, so it says so rather than inviting a reply nothing is listening for.
+    if (teamsUrl) postTeams(teamsUrl, payload, { footer: '🤖 Runs automatically — no reply needed. Per-order history is on the Amazon Review page in the dashboard.' }).catch(() => {});
     const token   = config.SLACK_BOT_TOKEN;
     const channel = config.SLACK_CHANNEL_ID;
     if (!token || !channel) {
@@ -127,83 +130,19 @@ async function postToSlack(payload) {
     return res.data.ts;
 }
 
-async function pollForReply(afterTs) {
-    const token   = config.SLACK_BOT_TOKEN;
-    const channel = config.SLACK_CHANNEL_ID;
-    try {
-        const res = await axios.get('https://slack.com/api/conversations.history', {
-            params:  { channel, oldest: afterTs, limit: 10 },
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (!res.data.ok) {
-            console.error('[AutoReview] conversations.history error:', res.data.error);
-            return null;
-        }
-
-        // Find first human message after the report
-        const human = (res.data.messages || [])
-            .filter(m => !m.bot_id && !m.subtype && m.ts !== afterTs)
-            .reverse(); // oldest first
-
-        for (const msg of human) {
-            const t = (msg.text || '').toLowerCase().trim();
-            if (t === 'yes' || t === 'y')  return 'yes';
-            if (t === 'no'  || t === 'n')  return 'no';
-        }
-    } catch (e) {
-        console.error('[AutoReview] Poll error:', e.message);
-    }
-    return null;
-}
-
 // ─────────────────────────────────────────────────────
-// Polling loop — started after Slack report is sent
-// ─────────────────────────────────────────────────────
-
-function stopPolling() {
-    if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }
-}
-
-function startPolling(messageTz, orders) {
-    stopPolling();
-    const expiry = Date.now() + 24 * 60 * 60 * 1000;
-    console.log('[AutoReview] Waiting for yes/no in Slack...');
-
-    pollingTimer = setInterval(async () => {
-        if (Date.now() > expiry) {
-            stopPolling();
-            pendingRun = null;
-            await postToSlack({ text: '⏰ *Auto Review expired* — no response received in 24h. Run will not proceed.' }).catch(() => {});
-            console.log('[AutoReview] Confirmation expired.');
-            return;
-        }
-
-        const reply = await pollForReply(messageTz);
-        if (!reply) return; // no answer yet
-
-        stopPolling();
-        pendingRun = null;
-
-        if (reply === 'yes') {
-            console.log('[AutoReview] Confirmed via Slack — starting bulk send');
-            await postToSlack({
-                text: `✅ *Confirmed!* Starting review requests for *${orders.length} orders*...\n_Prepaid first, then COD. Results will be posted when done._`
-            }).catch(() => {});
-            runBulkSend(orders).catch(e => console.error('[AutoReview] Bulk send error:', e.message));
-        } else {
-            console.log('[AutoReview] Cancelled via Slack');
-            await postToSlack({ text: '❌ *Auto review cancelled.* No requests have been sent.' }).catch(() => {});
-        }
-    }, POLL_INTERVAL);
-}
-
-// ─────────────────────────────────────────────────────
-// Main check — runs on cron
+// Main check — runs on cron, then sends immediately
 // ─────────────────────────────────────────────────────
 
 async function runAutoReviewCheck(failedOnly = false) {
     console.log(`[AutoReview] Running eligibility check${failedOnly ? ' (retry failed only)' : ''}...`);
-    stopPolling(); // cancel any previous pending run
+    // The daily cron and the manual button can overlap (a 375-order send takes ~8 minutes at one request
+    // every 1.2s). The send-time re-check in runBulkSend already prevents a duplicate Amazon call, but
+    // two concurrent loops would still interleave their cards and double the request rate, so refuse.
+    if (running) {
+        console.log('[AutoReview] A send is already in progress — skipping this run.');
+        return { skipped: true, reason: 'a send is already in progress' };
+    }
 
     try {
         const result = await getEligibleOrders(failedOnly);
@@ -217,10 +156,11 @@ async function runAutoReviewCheck(failedOnly = false) {
                     : `✅ *Amazon Auto Review — ${dateStr}*\nNo eligible orders in the ${MIN_DAYS}–${MAX_DAYS} day window. All caught up!`
             });
             console.log('[AutoReview] No eligible orders.');
-            return;
+            lastRun = { at: new Date().toISOString(), mode: failedOnly ? 'retry-failed' : 'full', eligible: 0, sent: 0, failed: 0 };
+            return { sent: 0, failed: 0, eligible: 0 };
         }
 
-        const ts = await postToSlack({
+        await postToSlack({
             blocks: [
                 {
                     type: 'header',
@@ -248,22 +188,20 @@ async function runAutoReviewCheck(failedOnly = false) {
                     type: 'section',
                     text: {
                         type: 'mrkdwn',
-                        text: `_Prepaid orders will be processed first, then COD._\n\n*Reply in this channel:*\n• Type \`yes\` to confirm and start sending\n• Type \`no\` to cancel\n\n⏳ _Waiting for your reply (expires in 24 hours)_`
+                        text: `_Prepaid orders are processed first, then COD — roughly ${Math.max(1, Math.round(result.ordered.length * SEND_DELAY_MS / 60000))} min at ${(SEND_DELAY_MS / 1000).toFixed(1)}s per request._\n\n🚀 *Sending now* — the result card follows when it finishes.`
                     }
                 }
             ]
         });
 
-        // Set the pending run regardless of Slack — the Teams listener approves it via "yes"
-        // when there's no Slack ts (Teams-only mode). The Slack yes/no poll runs only if Slack is on.
-        pendingRun = { orders: result.ordered, ts: ts || null, expiry: Date.now() + 24 * 60 * 60 * 1000 };
-        if (ts) startPolling(ts, result.ordered);
-
-        console.log(`[AutoReview] Report sent — ${result.ordered.length} eligible (${result.prepaid.length} prepaid, ${result.cod.length} COD). Polling for reply...`);
+        console.log(`[AutoReview] ${result.ordered.length} eligible (${result.prepaid.length} prepaid, ${result.cod.length} COD) — sending now.`);
+        const out = await runBulkSend(result.ordered, failedOnly);
+        return { eligible: result.ordered.length, ...out };
 
     } catch (e) {
         console.error('[AutoReview] Check error:', e.message);
         await postToSlack({ text: `⚠️ *Amazon Auto Review Check Failed*\n\`${e.message}\`` }).catch(() => {});
+        return { error: e.message };
     }
 }
 
@@ -271,7 +209,9 @@ async function runAutoReviewCheck(failedOnly = false) {
 // Bulk send
 // ─────────────────────────────────────────────────────
 
-async function runBulkSend(orders) {
+async function runBulkSend(orders, failedOnly = false) {
+    running = true;
+    try {
     // Idempotency guard — re-check each order's CURRENT status right before sending, so an order that was
     // already solicited ('sent') or permanently rejected (4xx / ineligible) since the report was built is
     // never hit at Amazon again. The eligibility check already excludes these at report time; this closes
@@ -325,7 +265,10 @@ async function runBulkSend(orders) {
     }
 
     console.log(`[AutoReview] Done — ${sent} sent, ${failed} failed`);
+    lastRun = { at: new Date().toISOString(), mode: failedOnly ? 'retry-failed' : 'full', eligible: orders.length, sent, failed };
 
+    // The result card is the ONLY record most people see, so it posts even when nothing was sent —
+    // a silent run is indistinguishable from a broken one.
     await postToSlack({
         blocks: [
             { type: 'header', text: { type: 'plain_text', text: '📊 Amazon Auto Review — Complete', emoji: true } },
@@ -350,26 +293,33 @@ async function runBulkSend(orders) {
             { type: 'context', elements: [{ type: 'mrkdwn', text: `Completed at ${new Date().toLocaleString('en-IN')}` }] }
         ]
     }).catch(() => {});
+    return { sent, failed };
+    } finally { running = false; }   // must release even if a send throws, or every later run is refused
 }
 
 // ─────────────────────────────────────────────────────
 // Routes
 // ─────────────────────────────────────────────────────
 
-// Manual trigger → retry ONLY previously-failed orders (failedOnly=true).
+// Manual trigger. Default stays retry-failed (what the dashboard button has always done); ?mode=full
+// runs the same complete check the 10:00 cron runs — needed when a day's batch was missed, since
+// retry-failed only revisits orders that previously errored and would find nothing.
+// Both SEND IMMEDIATELY. There is no confirmation step any more.
 router.post('/auto-review/trigger', (req, res) => {
-    res.json({ success: true, message: 'Retry-failed check triggered — reply yes/no in Slack' });
-    runAutoReviewCheck(true).catch(e => console.error('[AutoReview] Trigger error:', e.message));
+    const full = String(req.query.mode || req.body?.mode || '') === 'full';
+    if (running) return res.status(409).json({ success: false, error: 'A send is already in progress — wait for the result card in Teams.' });
+    res.json({ success: true, mode: full ? 'full' : 'retry-failed', message: full
+        ? 'Full eligibility check started — requests are being sent now; the result posts to Teams.'
+        : 'Retry-failed check started — requests are being sent now; the result posts to Teams.' });
+    runAutoReviewCheck(!full).catch(e => console.error('[AutoReview] Trigger error:', e.message));
 });
 
 router.get('/auto-review/status', (req, res) => {
     res.json({
-        pending:    !!pendingRun,
-        polling:    !!pollingTimer,
-        orderCount: pendingRun?.orders?.length || 0,
-        prepaid:    pendingRun?.orders?.filter(o => !isCOD(o)).length || 0,
-        cod:        pendingRun?.orders?.filter(o =>  isCOD(o)).length || 0,
-        expiry:     pendingRun?.expiry || null
+        running,                                   // a bulk send is in flight right now
+        approval_required: false,                  // removed 2026-08-17 — batches send automatically
+        schedule: config.AUTO_REVIEW_CRON || '0 10 * * *',
+        last_run: lastRun                          // { at, mode, eligible, sent, failed } | null
     });
 });
 
@@ -385,30 +335,14 @@ function initAutoReviewCron() {
     console.log(`[AutoReview] Cron scheduled: "${schedule}" (IST)`);
 }
 
-// ── Teams-triggered approval (the Teams listener calls these in place of the Slack yes/no reply) ──
-async function approvePendingReview() {
-    if (!pendingRun) return { ok: false, reason: 'no pending review run' };
-    if (Date.now() > pendingRun.expiry) { pendingRun = null; return { ok: false, reason: 'pending run expired' }; }
-    const orders = pendingRun.orders;
-    pendingRun = null;
-    stopPolling();
-    await runBulkSend(orders);
-    return { ok: true, sent: orders.length };
-}
+// ── Approval hooks kept for the Teams listener, which still routes "yes"/"no" and "amazon yes" ──
+// Amazon no longer waits for anyone, so these only explain themselves. They stay because the listener
+// shares a channel with the Tally approval: hasPendingReview() returning false is what lets a bare
+// "yes" there resolve to the Tally batch instead of being reported as ambiguous.
+const NO_APPROVAL = 'Amazon review no longer needs approval — eligible orders are sent automatically at 10:00 IST, and the result is posted here';
 
-async function cancelPendingReview() {
-    if (!pendingRun) return { ok: false, reason: 'no pending review run' };
-    pendingRun = null;
-    stopPolling();
-    await postToSlack({ text: '❌ *Auto review cancelled.* No requests have been sent.' }).catch(() => {});
-    return { ok: true };
-}
-
-// Read-only: is a review batch actually waiting for a yes/no right now? Needed because the Teams
-// listener may watch a channel shared with the Tally approval, where a bare "yes" has to be routed to
-// whichever flow is genuinely pending. Probing via approvePendingReview() would SEND the requests.
-function hasPendingReview() {
-    return !!(pendingRun && Date.now() <= pendingRun.expiry);
-}
+async function approvePendingReview() { return { ok: false, reason: NO_APPROVAL }; }
+async function cancelPendingReview()  { return { ok: false, reason: `${NO_APPROVAL}. Nothing was cancelled` }; }
+function hasPendingReview()           { return false; }
 
 module.exports = { router, initAutoReviewCron, runAutoReviewCheck, approvePendingReview, cancelPendingReview, hasPendingReview };

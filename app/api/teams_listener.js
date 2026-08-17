@@ -204,20 +204,20 @@ function runDpCheck(from) {
     whReport().sendDocpharmaRejectedReport(true).catch(e => console.error('[TeamsListener] DP run:', e.message));
 }
 
+// "amazon yes" / "amazon no" still reach here — people who learned the old habit will keep typing them
+// for a while. Amazon sends automatically now, so the honest answer is to say so straight away rather
+// than acknowledge an approval that is not happening (the old ack claimed "sending the review requests
+// now…", which would be a flat lie).
 function runAmazon(isYes, from) {
     const url = cfg('TEAMS_WEBHOOK_AMAZON');
-    if (isYes) {
-        ackTeams(url, `🔄 *Got it — "yes" from ${from}.* Approving & sending the review requests now…`);
-        amazonApi().approvePendingReview().then(r => {
-            console.log('[TeamsListener] amazon approve →', JSON.stringify(r));
+    const api = amazonApi();
+    (isYes ? api.approvePendingReview() : api.cancelPendingReview())
+        .then(r => {
+            console.log(`[TeamsListener] amazon ${isYes ? 'approve' : 'cancel'} →`, JSON.stringify(r));
             if (r.ok) ackTeams(url, `✅ *Sent ${r.sent} review request${r.sent === 1 ? '' : 's'}.*`);
-            else ackTeams(url, `⚠️ *Nothing sent* — ${r.reason}.`);
-        }).catch(e => console.error('[TeamsListener] amazon approve:', e.message));
-    } else {
-        ackTeams(url, `🛑 *Got it — "no" from ${from}.* Cancelling the pending review run.`);
-        amazonApi().cancelPendingReview().then(r => console.log('[TeamsListener] amazon cancel →', JSON.stringify(r)))
-            .catch(e => console.error('[TeamsListener] amazon cancel:', e.message));
-    }
+            else ackTeams(url, `ℹ️ *Nothing to do, ${from}* — ${r.reason}.`);
+        })
+        .catch(e => console.error(`[TeamsListener] amazon ${isYes ? 'approve' : 'cancel'}:`, e.message));
 }
 
 function runTally(cmd, from) {
