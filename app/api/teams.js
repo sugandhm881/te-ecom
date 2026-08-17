@@ -201,14 +201,34 @@ function buildCard(payload, opts = {}) {
     return { type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] };
 }
 
-// Which Teams channel does this webhook post into? Pairs TEAMS_WEBHOOK_<X> with TEAMS_CHANNEL_<X>
-// (DP, AMAZON, FINANCE, INVENTORY, WAREHOUSE, HOLD, CRON). Returns null when that channel id is not
-// configured, which simply leaves that report on its webhook.
+// Which Teams channel does this webhook post into? Pairs TEAMS_WEBHOOK_<X> with TEAMS_CHANNEL_<X>.
+// Returns null when that channel id is not configured, which simply leaves that report on its webhook.
+//
+// ⚠️ This used to check a HARD-CODED list of seven suffixes, and any webhook var outside it silently
+// kept posting via Workflows however well the bot was set up. The On-Hold report was invisible to the
+// bot for exactly that reason: it posts to TEAMS_WEBHOOK_WAREHOUSE_HOLD (the hold thread inside the Ops
+// channel), which was not on the list. So the lookup now DISCOVERS every TEAMS_WEBHOOK_* var instead of
+// naming them — add a webhook var tomorrow and the bot picks it up with no edit here.
 const _envVal = k => process.env[k] || config[k];
+// Compound names whose channel lives under a different suffix. Do NOT replace this with "trim the last
+// _PART": WAREHOUSE_HOLD means *the hold report inside the warehouse channel*, so it belongs to
+// TEAMS_CHANNEL_HOLD (its own thread) — trimming would send it to the warehouse thread instead.
+const CHANNEL_ALIAS = { WAREHOUSE_HOLD: 'HOLD', FINANCE_RESULT: 'FINANCE' };
+// Checked first, so a URL shared by two vars resolves the same way it always has.
+const CHANNEL_ORDER = ['DP', 'AMAZON', 'FINANCE', 'INVENTORY', 'WAREHOUSE', 'HOLD', 'CRON'];
 function channelForWebhook(url) {
     if (!url) return null;
-    for (const suffix of ['DP', 'AMAZON', 'FINANCE', 'INVENTORY', 'WAREHOUSE', 'HOLD', 'CRON']) {
-        if (_envVal(`TEAMS_WEBHOOK_${suffix}`) === url) return _envVal(`TEAMS_CHANNEL_${suffix}`) || null;
+    const suffixes = [...CHANNEL_ORDER];
+    for (const k of [...Object.keys(process.env), ...Object.keys(config)]) {
+        if (!k.startsWith('TEAMS_WEBHOOK_')) continue;
+        const s = k.slice('TEAMS_WEBHOOK_'.length);
+        if (s && !suffixes.includes(s)) suffixes.push(s);
+    }
+    for (const suffix of suffixes) {
+        if (_envVal(`TEAMS_WEBHOOK_${suffix}`) !== url) continue;
+        return _envVal(`TEAMS_CHANNEL_${suffix}`)
+            || (CHANNEL_ALIAS[suffix] && _envVal(`TEAMS_CHANNEL_${CHANNEL_ALIAS[suffix]}`))
+            || null;
     }
     return null;
 }
@@ -271,20 +291,52 @@ async function postTeams(webhookUrl, payload, opts = {}) {
     } catch (e) { console.error('[Teams] error', e.message); return false; }
 }
 
-const TARGETS = { warehouse: 'TEAMS_WEBHOOK_WAREHOUSE', dp: 'TEAMS_WEBHOOK_DP', hold: 'TEAMS_WEBHOOK_HOLD', amazon: 'TEAMS_WEBHOOK_AMAZON', cron: 'TEAMS_WEBHOOK_CRON' };
+// Every webhook var a report can post to, keyed by the ?target= name. warehouse_hold and finance_result
+// are the compound ones the old channel lookup could not see — they are listed here so a test can prove
+// they now resolve to the bot.
+const TARGETS = {
+    warehouse: 'TEAMS_WEBHOOK_WAREHOUSE', dp: 'TEAMS_WEBHOOK_DP', hold: 'TEAMS_WEBHOOK_HOLD',
+    amazon: 'TEAMS_WEBHOOK_AMAZON', cron: 'TEAMS_WEBHOOK_CRON', inventory: 'TEAMS_WEBHOOK_INVENTORY',
+    finance: 'TEAMS_WEBHOOK_FINANCE', warehouse_hold: 'TEAMS_WEBHOOK_WAREHOUSE_HOLD',
+    finance_result: 'TEAMS_WEBHOOK_FINANCE_RESULT',
+};
 
-// POST /api/teams/test?target=warehouse|dp|hold|amazon — verify a channel's webhook is wired up.
+// GET /api/teams/routing — which delivery path each report will actually take, WITHOUT posting anything.
+// A report silently falling back to the Workflows webhook is invisible in Teams apart from the sender
+// name, so this answers "is it really coming from EcomBot?" in one call instead of waiting for a cron.
+router.get('/teams/routing', (req, res) => {
+    let botOn = false;
+    try { botOn = require('./teams_bot').botEnabled(); } catch (_) { /* bot module absent → webhook only */ }
+    const rows = Object.entries(TARGETS).map(([target, key]) => {
+        const url = _envVal(key);
+        const channelId = url ? channelForWebhook(url) : null;
+        return {
+            target, env_var: key,
+            webhook: !!url,
+            channel_id: channelId,
+            via: (botOn && channelId) ? 'bot' : (url ? 'webhook' : 'not configured'),
+            why: !url ? `${key} is not set` : !channelId ? `no TEAMS_CHANNEL_* matches ${key}` : !botOn ? 'bot disabled (TEAMS_BOT_APP_ID / _APP_PASSWORD missing)' : null,
+        };
+    });
+    res.json({ success: true, bot_enabled: botOn, targets: rows });
+});
+
+// POST /api/teams/test?target=<one of TARGETS> — verify a channel is wired up, and report which path it used.
 router.post('/teams/test', async (req, res) => {
     const target = String(req.query.target || 'warehouse');
     const key = TARGETS[target];
-    const url = key && (config[key] || process.env[key]);
+    const url = key && _envVal(key);
     if (!url) return res.status(400).json({ success: false, error: `No webhook configured for '${target}' — set ${key || 'TEAMS_WEBHOOK_*'} in .env` });
+    let botOn = false;
+    try { botOn = require('./teams_bot').botEnabled(); } catch (_) {}
+    const channelId = channelForWebhook(url);
+    const via = (botOn && channelId) ? 'bot' : 'webhook';
     const ok = await postTeams(url, { blocks: [
         { type: 'header', text: { type: 'plain_text', text: '✅ Teams webhook test' } },
-        { type: 'section', text: { type: 'mrkdwn', text: `This is a *test* card from Ecom Central for the *${target}* channel. If you can see this, reports will arrive here.` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `This is a *test* card from Ecom Central for the *${target}* channel, sent via *${via === 'bot' ? 'EcomBot' : 'the Workflows webhook'}*. If you can see this, reports will arrive here.` } },
         { type: 'context', elements: [{ type: 'mrkdwn', text: new Date().toLocaleString('en-IN') }] }
     ] });
-    res.json({ success: ok, target });
+    res.json({ success: ok, target, via, channel_id: channelId });
 });
 
-module.exports = { postTeams, buildCard, mrkdwn, router };
+module.exports = { postTeams, buildCard, mrkdwn, router, channelForWebhook };

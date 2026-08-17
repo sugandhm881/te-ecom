@@ -780,6 +780,10 @@ All four are no-ops unless `TALLY_BATCH_CRON_ENABLED=true`.
 3. **On-Hold (EasyEcom + Shopify)** — daily 11:00. EasyEcom holds (live-verified) + Shopify `shopify_hold` marks shown with their reason.
 4. **Amazon Review** — pending review batch with a Teams `yes`/`no` approval loop.
 
+**Who sends a card: EcomBot or Workflows.** `postTeams()` prefers the bot and falls back to the Workflows webhook. It picks the bot only when `channelForWebhook(url)` resolves a channel id, and that lookup finds the webhook's env var **by scanning every `TEAMS_WEBHOOK_*` key** for a URL match, then reads the matching `TEAMS_CHANNEL_<suffix>`. It used to check a hard-coded list of seven suffixes instead, and **any webhook var outside that list silently posted via Workflows forever** — which is what happened to the On-Hold report (2026-08-14 → fixed 2026-08-17): it posts to `TEAMS_WEBHOOK_WAREHOUSE_HOLD` (its own thread inside the Ops channel), a name the list never contained. Compound names resolve through an explicit `CHANNEL_ALIAS` map (`WAREHOUSE_HOLD → HOLD`, `FINANCE_RESULT → FINANCE`) — **never** by trimming the trailing word, which would drop the hold card into the warehouse thread.
+
+Only the sender name on a posted card reveals which path was taken, so **`GET /api/teams/routing`** reports `bot` / `webhook` / `not configured` for every target plus the reason, without posting anything. `POST /api/teams/test?target=<name>` also returns the `via` it used. Check routing after adding any report or channel — a fallback is otherwise invisible.
+
 ### Emails (via portal-configured SMTP)
 | Email | Recipient | Trigger |
 |---|---|---|
@@ -861,8 +865,12 @@ pm2 logs <app-name> --lines 50   # verify clean boot
 ### `.env` sync
 `.env` is not in git. When new variables are introduced (see §12 — most recently `AI_*`, `EMAIL_ENC_KEY`, `TEAMS_*`), copy them to the server's `.env` manually before restart.
 
-### HTTPS
-Currently served over plain HTTP behind the VPS IP. `Caddyfile.example` documents the intended reverse-proxy setup — **pending item**.
+### HTTPS & the proxy chain (VPS infra — **not in this repo**)
+Served at **https://dashboard.theelement.skin**. Requests reach Node (`127.0.0.1:5001`) through two proxies: Traefik (owns `:443`, shared with n8n — never restart it casually) → a small `nginx:alpine` sidecar container `dashboard-proxy` (compose `/root/dashboard-proxy.yml`, config `/root/dashboard-proxy.conf`). A separate host nginx on `:8443` still proxies `/api/` directly, because Shopify and EasyEcom webhooks are hardcoded to that port. `Caddyfile.example` is a leftover from an abandoned plan — ignore it.
+
+**Proxy read timeout — any request slower than 60s dies at the proxy, not in the app.** nginx defaults `proxy_read_timeout` to 60s, so a long request returns HTTP 504 to the browser *while Node happily keeps working and completes it*. This bit Influencer → Discover (2026-08-14): `analyze-influencer` drifted from ~35s to 60–85s as Apify slowed down, and every run past the line showed a red `HTTP 504` even though the analysis finished and landed in `analysis_queue` as `completed`. Users then retried, each retry paying for another Apify scrape — one handle was analyzed six times in 45 minutes. Both nginx layers are now set to `proxy_read_timeout`/`proxy_send_timeout` **300s**.
+
+The tell for this class of bug: the UI shows a bare `HTTP <code>` with no message (the proxy's HTML error body fails `JSON.parse`, so the frontend falls back to the status code), and the work turns out to have succeeded server-side. Before blaming the feature, compare the edge function's `execution_time_ms` against the proxy timeout. The durable fix for anything routinely over ~30s is to return immediately and poll, not to keep raising the ceiling.
 
 ---
 
