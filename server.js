@@ -471,25 +471,22 @@ cronJob('RS Sync (0 16 * * *)', '0 16 * * *', async () => {
 //     await syncStatusesToShopify(30).catch(e => console.error('[StatusSync] error:', e.message));
 // }, { timezone: 'Asia/Kolkata' });
 
-// Warehouse Ops Slack report — Confirmed + Ready for Pickup + Unfulfillable, last 30 days, old→new.
-// 8:30 AM IST → −2 window; 5:30 PM and 8:00 PM IST → −1 window (posted twice in the evening).
-cronJob('WH Report (30 8 * * *)', '30 8 * * *', async () => {
-    console.log('[WH Report] 8:30 AM IST — sending warehouse ops report (last 30d, −2)…');
-    await sendWarehouseOpsReport(2).catch(e => console.error('[WH Report] Error:', e.message));
-}, { timezone: 'Asia/Kolkata' });
-
-cronJob('WH Report (30 17 * * *)', '30 17 * * *', async () => {
-    console.log('[WH Report] 5:30 PM IST — sending warehouse ops report (last 30d, −1)…');
+// Warehouse Ops report — Confirmed + Ready for Pickup + Unfulfillable, last 30 days, old→new, plus the
+// "stuck in Ready for Pickup > 48h" highlight. Every 2 hours across the working day (08:30 → 20:30 IST,
+// 7 runs) instead of the old 8:30 / 17:30 / 20:00 trio, so a parcel the courier keeps missing surfaces
+// within two hours rather than at the next of three fixed times. Overnight is deliberately skipped —
+// nobody acts on a 02:30 card, and each run does a live RapidShyp verify per pending AWB.
+cronJob('WH Report (every 2h)', process.env.WH_REPORT_CRON || '30 8-20/2 * * *', async () => {
+    console.log('[WH Report] 2-hourly — sending warehouse ops report (last 30d, −1)…');
     await sendWarehouseOpsReport(1).catch(e => console.error('[WH Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
-cronJob('WH Report (0 20 * * *)', '0 20 * * *', async () => {
-    // 8 PM is the day's final warehouse report — refresh the RapidShyp cache for ALL recent EasyEcom
-    // AWBs FIRST so every order's status is latest, then build the report (which also live-verifies
-    // its final pending set). Forced refresh (maxAgeHours 0) so nothing is skipped as "fresh".
-    console.log('[WH Report] 8:00 PM IST — full RapidShyp refresh, then warehouse report (−1)…');
+// Kept from the old 8 PM job, now standalone at 20:00 so it lands 30 min BEFORE the last report of the
+// day: refresh the RapidShyp cache for ALL recent EasyEcom AWBs (forced — nothing skipped as "fresh")
+// so the evening report is built on the freshest courier status.
+cronJob('RS cache full refresh (0 20 * * *)', '0 20 * * *', async () => {
+    console.log('[RS-EC Sync] 8:00 PM IST — full forced RapidShyp cache refresh…');
     await syncRsCacheEasyecom(30, { force: true }).catch(e => console.error('[RS-EC Sync] 8PM error:', e.message));
-    await sendWarehouseOpsReport(1).catch(e => console.error('[WH Report] Error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // DocPharma-rejected → dp-to-mwh-orders — DETECTION pass, last 30 days. Runs at :47 past each hour,

@@ -141,6 +141,68 @@ async function fetchEasyecomInfoByName(names) {
     return { awbByName, cancelled };
 }
 
+// ── "Stuck in Ready for Pickup" ──────────────────────────────────────────────────────────────────
+// How long has a labelled parcel been sitting on our shelf? The honest answer is the MANIFEST time —
+// EasyEcom stamps `raw_data.manifest_date` when the parcel is manifested for the courier, and a whole
+// batch shares one value, which is exactly the "handed over for pickup" moment.
+//
+// Two rejected alternatives, both of which would have produced confident wrong numbers:
+//   · `shipment_journey_ecom.awb_assigned_at` — only ~26% populated (0% on Kwikship/DocPharma).
+//   · the order's own date — a Shopify/EasyEcom order date is BEFORE labelling, so an order placed 3
+//     days ago and labelled an hour ago would be reported as "stuck 3 days". Over-flagging a warehouse
+//     report is how it gets ignored.
+// An order with no manifest_date is simply not aged — never guessed at, never flagged.
+const STUCK_HOURS = parseInt(process.env.WH_STUCK_HOURS, 10) || 48;
+
+// EasyEcom returns "YYYY-MM-DD HH:mm:ss" with no zone, and it means IST. Parsing it as UTC (what
+// `new Date(s)` does with a "T" or as local time on a UTC server) shifts every age by 5.5 hours —
+// enough to flip an order across a 48-hour threshold, so the offset is explicit.
+function parseIst(s) {
+    const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+    if (!m) return null;
+    const ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) - 5.5 * 3600 * 1000;
+    return Number.isFinite(ms) ? ms : null;
+}
+
+// { normalisedOrderName: readySinceMs } for the given order names. Called with just the Ready-for-Pickup
+// set (tens of orders), never the whole window — `raw_data` is a fat JSON blob and pulling it for a
+// 30-day window would be a needless megabyte-scale read.
+//
+// Two sources, in order:
+//   1. `manifest_date` — manifested for the courier. The real "waiting for pickup since".
+//   2. `shipping_last_update_date` — for parcels stuck at shipping_status "Shipment Created": a label
+//      exists but the parcel was never manifested. Skipping these would hide the worst cases, since
+//      never-manifested IS the stuck condition (one such order had been sitting 5 days). This field is
+//      "last shipping change", not "created", so a re-synced row reads younger than it is — the error
+//      runs toward under-flagging, never toward crying wolf.
+async function fetchReadySince(names) {
+    const out = {};
+    const clean = [...new Set(names.map(normName).filter(Boolean))];
+    for (let i = 0; i < clean.length; i += 200) {
+        const { data, error } = await supabase
+            .from('b2c_order_easycom')
+            .select('reference_code, raw_data->>manifest_date, raw_data->>shipping_last_update_date')
+            .in('reference_code', clean.slice(i, i + 200));
+        if (error) { console.warn(`[WH Report] ready-since lookup failed: ${error.message}`); return out; }
+        (data || []).forEach(r => {
+            const ms = parseIst(r.manifest_date) || parseIst(r.shipping_last_update_date);
+            if (ms) out[normName(r.reference_code)] = ms;
+        });
+    }
+    return out;
+}
+
+// Orders past the threshold, oldest first, each with its age in hours.
+function stuckReadyOrders(ready, readySince, now = Date.now()) {
+    return ready
+        .map(o => ({ order: o, at: readySince[normName(o.name)] || null }))
+        .filter(x => x.at && (now - x.at) >= STUCK_HOURS * 3600 * 1000)
+        .map(x => ({ ...x, hours: Math.floor((now - x.at) / 3600000) }))
+        .sort((a, b) => a.at - b.at);
+}
+
+const fmtAge = h => (h < 48 ? `${h}h` : `${Math.floor(h / 24)}d ${h % 24}h`);
+
 // COURIER movement, straight from the carriers — RapidShyp + DocPharma + Kwikship all write
 // `shipment_journey_ecom` (one row per AWB, tagged `source`). This is the courier-agnostic "has it
 // left?" signal: the old code asked ONLY RapidShyp, so a parcel shipped on DocPharma/Kwikship (or any
@@ -290,12 +352,31 @@ function orderBlocks(label, emoji, orders) {
     return blocks;
 }
 
-function buildPayload(groups, start, end) {
+// The stuck list carries an age per order, so it cannot reuse orderBlocks (names only). Same 3000-char
+// mrkdwn ceiling, so it chunks too.
+function stuckBlocks(stuck) {
+    if (!stuck.length) return [];
+    const CHUNK = 40;
+    const blocks = [];
+    for (let i = 0; i < stuck.length; i += CHUNK) {
+        const prefix = i === 0
+            ? `🚨 *Stuck in Ready for Pickup — over ${STUCK_HOURS}h* (oldest first)\n_Labelled and still on our shelf — the courier hasn't collected._\n`
+            : `🚨 *Stuck over ${STUCK_HOURS}h* (continued)\n`;
+        blocks.push({
+            type: 'section',
+            text: { type: 'mrkdwn', text: prefix + stuck.slice(i, i + CHUNK).map(s => `\`${s.order.name}\` *${fmtAge(s.hours)}*`).join('   ') }
+        });
+    }
+    return blocks;
+}
+
+function buildPayload(groups, start, end, readySince = {}) {
     const ready    = groups.READY_FOR_PICKUP || [];
     const confirmed = groups.CONFIRMED || [];
     const unful    = groups.UNFULFILLABLE || [];
     const realloc  = groups.REALLOCATION_REQUIRED || [];
     const total    = ready.length + confirmed.length + unful.length + realloc.length;
+    const stuck    = stuckReadyOrders(ready, readySince);
 
     const blocks = [
         {
@@ -307,6 +388,7 @@ function buildPayload(groups, start, end) {
             type: 'section',
             fields: [
                 { type: 'mrkdwn', text: `📦 *Ready for Pickup*\n*${ready.length}* orders` },
+                { type: 'mrkdwn', text: `🚨 *Stuck >${STUCK_HOURS}h*\n*${stuck.length}* orders` },
                 { type: 'mrkdwn', text: `✅ *Confirmed*\n*${confirmed.length}* orders` },
                 { type: 'mrkdwn', text: `⛔ *Unfulfillable*\n*${unful.length}* orders` },
                 { type: 'mrkdwn', text: `🔁 *Reallocation Reqd*\n*${realloc.length}* orders` },
@@ -314,6 +396,9 @@ function buildPayload(groups, start, end) {
             ]
         },
         { type: 'divider' },
+        // Above every other list on purpose: this is the one section that is someone's job right now.
+        ...stuckBlocks(stuck),
+        ...(stuck.length ? [{ type: 'divider' }] : []),
         ...orderBlocks('Reallocation Required (RapidShyp)', '🔁', realloc),
         ...orderBlocks('Ready for Pickup', '📦', ready),
         ...orderBlocks('Confirmed', '✅', confirmed),
@@ -713,7 +798,13 @@ async function sendWarehouseOpsReport(endOffsetDays = 2) {
         }, WH_CHANNEL, { text: true });
         console.log('[WH Report] Sent — all clear');
     } else {
-        await postSlack(buildPayload(groups, start, end), WH_CHANNEL, { text: true });
+        // Ages only for the Ready-for-Pickup set — the only group the stuck check applies to.
+        const ready = groups.READY_FOR_PICKUP || [];
+        const readySince = ready.length ? await fetchReadySince(ready.map(o => o.name)) : {};
+        const stuckCount = stuckReadyOrders(ready, readySince).length;
+        const noAge = ready.filter(o => !readySince[normName(o.name)]).length;
+        console.log(`[WH Report] Ready=${ready.length} · stuck >${STUCK_HOURS}h=${stuckCount}${noAge ? ` · ${noAge} with no EasyEcom timestamp (not aged)` : ''}`);
+        await postSlack(buildPayload(groups, start, end, readySince), WH_CHANNEL, { text: true });
         console.log('[WH Report] Sent to warehouse-ops');
     }
 }

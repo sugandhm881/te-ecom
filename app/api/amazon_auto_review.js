@@ -51,6 +51,27 @@ function failReason(code, body) {
     return msg || `HTTP ${c}`;
 }
 
+// ⚠️ PostgREST caps EVERY response at 1000 rows, SILENTLY — a short array is indistinguishable from
+// "that's all of them". `amazon_review_requests` passed 1000 rows long ago (1,833 on 2026-08-17), so
+// a plain .select() built the "already sent / ineligible / permanently failed" sets from barely half
+// the table: orders solicited weeks ago read as eligible again, and the 2026-08-17 card announced
+// *375 to send* — every single order in the window — when the true figure was 63. Only the send-time
+// re-check in runBulkSend(), which queries by explicit order-id chunks where the cap cannot bite,
+// stopped 312 needless solicitations going to Amazon.
+//
+// The orders query is paged for the same reason even though it sits at 375 today: a 20-day delivery
+// window will cross 1000 in a busy month, and THAT truncation fails the other way — eligible orders
+// silently never solicited, with no error and no missing-row to notice.
+async function pageAll(label, build) {
+    const all = [];
+    for (let ofs = 0; ; ofs += 1000) {
+        const { data, error } = await build().range(ofs, ofs + 999);
+        if (error) throw new Error(`${label} query failed: ${error.message}`);
+        all.push(...(data || []));
+        if (!data || data.length < 1000) return all;
+    }
+}
+
 // failedOnly=true → retry ONLY orders whose previous request failed (manual button).
 // failedOnly=false → normal cron behaviour: every eligible order not yet successfully sent.
 async function getEligibleOrders(failedOnly = false) {
@@ -58,22 +79,20 @@ async function getEligibleOrders(failedOnly = false) {
     const minDt = new Date(now - MAX_DAYS * 86400000).toISOString();
     const maxDt = new Date(now - MIN_DAYS * 86400000).toISOString();
 
-    const [ordersRes, requestsRes] = await Promise.all([
-        supabase
+    const [allOrders, reqs] = await Promise.all([
+        pageAll('Orders', () => supabase
             .from('amazon_orders')
             .select('amazon_order_id, order_status, payment_method, latest_delivery_date, purchase_date')
             .not('latest_delivery_date', 'is', null)
             .gte('latest_delivery_date', minDt)
-            .lte('latest_delivery_date', maxDt),
+            .lte('latest_delivery_date', maxDt)
+            .order('amazon_order_id', { ascending: true })),
 
-        supabase
+        pageAll('Review-requests', () => supabase
             .from('amazon_review_requests')
             .select('order_id, solicitation_status, response_code')
+            .order('order_id', { ascending: true })),
     ]);
-
-    if (ordersRes.error) throw new Error('Orders query failed: ' + ordersRes.error.message);
-
-    const reqs = requestsRes.data || [];
     const sentIds = new Set(reqs.filter(r => r.solicitation_status === 'sent').map(r => r.order_id));
     const ineligibleIds = new Set(reqs.filter(r => r.solicitation_status === 'ineligible').map(r => r.order_id));
     // Split failures: permanent (4xx → never retry) vs transient (429/5xx → retryable).
@@ -82,7 +101,7 @@ async function getEligibleOrders(failedOnly = false) {
     // Orders Amazon won't accept a solicitation for → sent, 4xx-failed, or already marked ineligible.
     const permanentIds = id => permanentFailIds.has(id) || ineligibleIds.has(id);
 
-    const allOrders   = ordersRes.data || [];
+    // allOrders / reqs are already fully paged by pageAll() above.
     const excluded    = allOrders.filter(o => isExcluded(o));
     const alreadySent = allOrders.filter(o => !isExcluded(o) && sentIds.has(o.amazon_order_id));
     // Permanently not-eligible (403 / ineligible) orders still in the window — reported as a count, never re-attempted.
