@@ -39,6 +39,18 @@ router.get('/download-excel-report', tokenRequired, async (req, res) => {
             fulfillments: row.fulfillments || []
         }));
 
+        // Same courier truth the Ad Set Breakdown uses — this export IS that breakdown's per-order
+        // drill-down, so reading a different status source would make the two disagree on the same
+        // orders. Chunked because PostgREST silently caps a response at 1000 rows.
+        const journeyByAwb = {};
+        const awbList = [...new Set(filteredOrders.map(o => o.awb).filter(Boolean).map(String))];
+        for (let i = 0; i < awbList.length; i += 200) {
+            const { data, error: jErr } = await supabase.from('shipment_journey_ecom')
+                .select('awb, outcome').in('awb', awbList.slice(i, i + 200));
+            if (jErr) { console.warn('[ExcelReport] journey lookup failed:', jErr.message); break; }
+            (data || []).forEach(j => { if (j.awb) journeyByAwb[String(j.awb)] = j.outcome; });
+        }
+
         const fbAds = await helpers.getFacebookAds(since, until);
         const fbAdMap = {};
         fbAds.forEach(ad => fbAdMap[ad.ad_id] = ad);
@@ -70,7 +82,8 @@ router.get('/download-excel-report', tokenRequired, async (req, res) => {
             source = s; term = t;
 
             const rawStatus = order.raw_rapidshyp_status || order.fulfillment_status || 'Unfulfilled';
-            const status = helpers.normalizeStatus ? helpers.normalizeStatus(order, rawStatus) : 'Processing';
+            const journeyOutcome = order.awb ? journeyByAwb[String(order.awb)] : null;
+            const status = helpers.normalizeStatus ? helpers.normalizeStatus(order, rawStatus, order.docpharma_data || null, journeyOutcome) : 'Processing';
 
             let adSetName = "N/A", adName = "N/A", campName = "N/A";
             if (source === 'facebook_ad') {

@@ -433,19 +433,45 @@ router.get('/orders-insights', async (req, res) => {
     try {
         const from = req.query.from && moment(req.query.from).isValid() ? moment(req.query.from).toISOString() : moment().subtract(30, 'days').toISOString();
         const to = req.query.to && moment(req.query.to).isValid() ? moment(req.query.to).toISOString() : moment().add(1, 'day').toISOString();
-        const [summary, trend, products, cities] = await Promise.all([
-            supabase.rpc('orders_insights_summary', { p_from: from, p_to: to }),
-            supabase.rpc('orders_insights_trend', { p_from: from, p_to: to }),
-            supabase.rpc('orders_top_products', { p_from: from, p_to: to, p_limit: 10 }),
-            supabase.rpc('orders_top_cities', { p_from: from, p_to: to, p_limit: 10 }),
+
+        // COMPARISON PERIOD — the same number of days immediately before the selected range, so "vs
+        // previous" always means like-for-like (7 days against the 7 before them, a month against the
+        // month before). Computed on the SERVER because the dashboard's own order cache holds only the
+        // 500 most recent rows: the KPI trend arrows used to be derived from that cache and were wrong
+        // often enough that they were deleted rather than fixed. Same RPCs, called twice — no new SQL.
+        const spanMs = Math.max(1, moment(to).diff(moment(from)));
+        const prevTo = moment(from).subtract(1, 'millisecond');
+        const prevFrom = moment(prevTo).subtract(spanMs, 'milliseconds');
+        const P = { p_from: prevFrom.toISOString(), p_to: prevTo.toISOString() };
+        const C = { p_from: from, p_to: to };
+
+        const [summary, trend, products, cities, pSummary, pTrend, pProducts, pCities] = await Promise.all([
+            supabase.rpc('orders_insights_summary', C),
+            supabase.rpc('orders_insights_trend', C),
+            supabase.rpc('orders_top_products', { ...C, p_limit: 10 }),
+            supabase.rpc('orders_top_cities', { ...C, p_limit: 10 }),
+            supabase.rpc('orders_insights_summary', P),
+            supabase.rpc('orders_insights_trend', P),
+            supabase.rpc('orders_top_products', { ...P, p_limit: 50 }),   // wider: we look up by name, not rank
+            supabase.rpc('orders_top_cities', { ...P, p_limit: 50 }),
         ]);
         if (summary.error) throw new Error(summary.error.message);
+
         res.json({
             success: true,
             summary: summary.data || {},
             trend: trend.data || [],
             topProducts: products.data || [],
             topCities: cities.data || [],
+            prev: pSummary.data || {},
+            prevTrend: pTrend.data || [],
+            prevProducts: pProducts.data || [],
+            prevCities: pCities.data || [],
+            range: {
+                from, to,
+                prevFrom: prevFrom.toISOString(), prevTo: prevTo.toISOString(),
+                days: Math.max(1, Math.round(spanMs / 86400000)),
+            },
         });
     } catch (e) {
         console.error('[orders-insights] error:', e.message);

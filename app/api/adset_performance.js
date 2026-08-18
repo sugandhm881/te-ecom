@@ -81,7 +81,9 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
     // Only the columns getOrderSourceTerm/normalizeStatus/revenue actually read — deliberately SKIP the large
     // `order_data` (full Shopify order) + line_items/shipping_address JSON so fetching ~5k rows stays light.
     // Order by the unique `shopify_id` for stable, gap-free .range() paging (tied timestamps can't drop rows).
-    const COLS = 'shopify_id, total_price, raw_rapidshyp_status, docpharma_data, note_attributes, source_name, referring_site, cancelled_at, rapidshyp_webhook_status, fulfillment_status, fulfillments';
+    // `awb` joins each order to its courier journey — without it the outcome lookup below silently
+    // matches nothing and every Kwikship delivery quietly stays "Processing", which is the bug itself.
+    const COLS = 'shopify_id, awb, total_price, raw_rapidshyp_status, docpharma_data, note_attributes, source_name, referring_site, cancelled_at, rapidshyp_webhook_status, fulfillment_status, fulfillments';
     const PAGE = 1000;
 
     // The Facebook insights call is a live Meta API round-trip and is INDEPENDENT of the order
@@ -126,6 +128,21 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
         referring_site: row.referring_site
     }));
 
+    // Courier truth for every order in range, keyed by AWB — `shipment_journey_ecom` is the only table
+    // RapidShyp, DocPharma AND Kwikship all write, so it is what makes a delivered Kwikship parcel count
+    // as delivered here (see the note on normalizeStatus). One indexed read per 200 AWBs, no API calls.
+    // ⚠️ Chunked, never a single .in() over thousands: PostgREST caps every response at 1000 rows without
+    // saying so, and a truncated map would silently mis-state the very numbers this fixes.
+    const journeyByAwb = {};
+    const awbList = [...new Set(orders.map(o => o.awb).filter(Boolean).map(String))];
+    for (let i = 0; i < awbList.length; i += 200) {
+        const { data, error } = await supabase.from('shipment_journey_ecom')
+            .select('awb, outcome').in('awb', awbList.slice(i, i + 200));
+        if (error) { console.warn('[Adset] journey lookup failed:', error.message); break; }
+        (data || []).forEach(j => { if (j.awb) journeyByAwb[String(j.awb)] = j.outcome; });
+    }
+    console.log(`[Adset] courier outcome resolved for ${Object.keys(journeyByAwb).length}/${awbList.length} AWBs`);
+
     const fbAds = await fbAdsPromise;
 
     const performanceData = {};
@@ -148,7 +165,8 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
         const rawStatus = order.raw_rapidshyp_status;
         const docpharmaData = order.docpharma_data;
 
-        const status = helpers.normalizeStatus ? helpers.normalizeStatus(order, rawStatus, docpharmaData) : 'Processing';
+        const journeyOutcome = order.awb ? journeyByAwb[String(order.awb)] : null;
+        const status = helpers.normalizeStatus ? helpers.normalizeStatus(order, rawStatus, docpharmaData, journeyOutcome) : 'Processing';
 
         let adsetBucket = null;
         let termBucket = null;

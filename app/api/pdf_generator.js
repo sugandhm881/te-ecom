@@ -6,6 +6,10 @@ const path = require('path');
 const moment = require('moment'); // You might need: npm install moment
 const { tokenRequired } = require('../auth');
 
+// Breathing room inside every table cell, in points. The gap that stops "12,75,670" and "12,49,706"
+// printing as one number — with 0 padding a value as wide as its column touches the one beside it.
+const CELL_PAD = 3;
+
 class PDFReport {
     constructor() {
         // A4 size is roughly 595.28 x 841.89 points
@@ -142,13 +146,18 @@ class PDFReport {
     }
 
     createTable(adsetData) {
-        // Adjusted widths (Total approx 540pts)
-        // Original logic scales based on width. We'll use fixed points roughly matching the ratio.
-        // Ratio: [45, 15, 15, 10, 12, 10, 10, 10, 10, 12, 10, 12, 15] -> Sum 196 units
-        const availableWidth = 540; 
-        const totalUnits = 196;
-        const scale = availableWidth / totalUnits;
-        const colWidths = [45, 15, 15, 10, 12, 10, 10, 10, 10, 12, 10, 12, 15].map(w => w * scale);
+        // Column widths in POINTS, summing to 540 — sized from the widest value each column can ever
+        // hold, not from an arbitrary ratio. The old ratio gave Spend and Rev 41.3pt each, but the
+        // grand total "12,75,670" is ~40pt of glyphs at 9pt Helvetica-Bold, so with no padding left it
+        // ran straight into the next column and printed "12,75,67012,49,706". Money columns are now
+        // 48pt, and every cell is drawn inset by CELL_PAD so two full columns can never touch again.
+        // Money columns get 54pt — the widest value today ("12,76,417") is 40pt, and the spare room is
+        // deliberate: a month that crosses ₹1 crore adds two more characters, and this table should not
+        // need re-tuning the first time that happens. Count columns are capped at 3–4 digits, so the
+        // slack came from there.
+        //        Name  Spend  Rev  Ord  Del  RTO  Cncl  Int  Prc  RTO%  CPO  ROAS  Eff
+        const colWidths = [118,   54,  54,  31,  33,  28,   28,  30,  28,   36,  34,   33,  33];
+        const availableWidth = colWidths.reduce((a, w) => a + w, 0);   // 540
         
         const headers = ["Ad Set / Source", "Spend", "Rev", "Ord", "Del", "RTO", "Cncl", "Int", "Prc", "RTO%", "CPO", "ROAS", "Eff.R"];
 
@@ -162,14 +171,18 @@ class PDFReport {
         
         // Header Background
         this.doc.rect(28, headerY, availableWidth, rowHeight).fill([67, 56, 202]); // Blue
-        
+
         this.doc.font('Helvetica-Bold').fontSize(fontSizeHeader).fillColor('white');
         headers.forEach((h, i) => {
             // Vertical center alignment simulation: y + (h - fontH)/2
             // Or just simple padding top
-            this.doc.text(h, currentX, headerY + 8, { width: colWidths[i], align: 'center' });
+            this.doc.text(h, currentX + CELL_PAD, headerY + 8, { width: colWidths[i] - CELL_PAD * 2, align: 'center' });
             currentX += colWidths[i];
         });
+        // Column separators inside the header band — light, so they read as divisions of one bar
+        // rather than as a second grid sitting on top of the indigo.
+        this.drawGrid(headerY, rowHeight, colWidths, [255, 255, 255], 0.4, 0.35);
+        this.tableTop = headerY;   // remembered so each page can close its own outer box
 
         this.doc.y += rowHeight;
         this.doc.fillColor('black');
@@ -250,6 +263,22 @@ class PDFReport {
         this.drawSignatureBlock();
     }
 
+    // Vertical column separators + the row's bottom line. Drawn AFTER the background fill and BEFORE
+    // the text, so a filled row never paints over its own borders. `opacity` lets the header use faint
+    // white dividers while body rows use a solid grey.
+    drawGrid(y, rowH, widths, colour, lineWidth = 0.5, opacity = 1) {
+        this.doc.save();
+        this.doc.lineWidth(lineWidth).strokeColor(colour).strokeOpacity(opacity);
+        let x = 28;
+        for (let i = 0; i < widths.length; i++) {
+            this.doc.moveTo(x, y).lineTo(x, y + rowH).stroke();   // left edge of every column
+            x += widths[i];
+        }
+        this.doc.moveTo(x, y).lineTo(x, y + rowH).stroke();       // right edge of the table
+        this.doc.moveTo(28, y + rowH).lineTo(x, y + rowH).stroke();
+        this.doc.restore();
+    }
+
     drawRow(name, vals, widths, fill, indent, isTotal) {
         // Pagination Check
         if (this.doc.y + 28 > this.doc.page.height - 50) {
@@ -261,9 +290,14 @@ class PDFReport {
         const y = this.doc.y;
         const rowH = 28;
 
+        const tableW = widths.reduce((a, w) => a + w, 0);
+
         // Background
-        if (isTotal) this.doc.rect(28, y, 540, rowH).fill([220, 220, 220]);
-        else if (fill) this.doc.rect(28, y, 540, rowH).fill([243, 244, 246]);
+        if (isTotal) this.doc.rect(28, y, tableW, rowH).fill([220, 220, 220]);
+        else if (fill) this.doc.rect(28, y, tableW, rowH).fill([243, 244, 246]);
+
+        // Borders — every cell, over the fill and under the text.
+        this.drawGrid(y, rowH, widths, [203, 208, 217], isTotal ? 0.8 : 0.5);
 
         this.doc.fillColor('black');
         
@@ -275,17 +309,20 @@ class PDFReport {
         let curX = 28;
         const padY = 10; // Vertical centering padding
 
-        // 1. Name
+        // 1. Name — 35 chars used to cut mid-word ("…| ASC | Ad", "…| ramp 1"), which left three
+        // different ad sets printing as the same string. The column wraps to two lines, so allow what
+        // two lines can actually hold.
         const display = indent ? `   - ${sanitizeString(name)}` : sanitizeString(name);
-        this.doc.text(display.substring(0, 35), curX + 2, y + padY, { width: widths[0], align: indent || !isTotal ? 'left' : 'center' });
+        this.doc.text(display.substring(0, 50), curX + CELL_PAD, y + padY - 3, {
+            width: widths[0] - CELL_PAD * 2, align: indent || !isTotal ? 'left' : 'center',
+            height: rowH - 6, ellipsis: true,
+        });
         curX += widths[0];
 
-        const textOpts = { width: 0, align: 'center' }; // width set in loop
-
-        // Helper to draw cell
+        // Helper to draw cell — inset on both sides so no two columns can ever touch.
         const drawCell = (txt, w, align='center', color='black') => {
             this.doc.fillColor(color);
-            this.doc.text(txt, curX, y + padY, { width: w, align: align });
+            this.doc.text(txt, curX + CELL_PAD, y + padY, { width: w - CELL_PAD * 2, align: align, lineBreak: false });
             curX += w;
         };
 

@@ -50,3 +50,15 @@ header.backdrop-blur, header.backdrop-blur-sm, .sticky.backdrop-blur{ -webkit-ba
 @media (prefers-reduced-motion: reduce){
   *, *::before, *::after{ animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
 }
+
+/* ── Dashboard width ──────────────────────────────────────────────────────────
+   Every view's content sat in `max-w-7xl` (1280px), which on a 1900px screen
+   left ~600px of empty margin either side while tables and charts squeezed.
+   Real CSS rather than a Tailwind class on purpose: tailwind.css is PREBUILT, so
+   `max-w-[1720px]` and `max-w-screen-2xl` are not compiled and would silently do
+   nothing at all. Still capped, not edge-to-edge — an unbounded row of KPI cards
+   on an ultrawide stretches into unreadable strips.                            */
+.p-8.mx-auto.w-full, .p-6.mx-auto.w-full{ max-width:1720px; }
+@media (min-width:1600px){
+  .p-8.mx-auto.w-full{ padding-left:2.5rem; padding-right:2.5rem; }
+}

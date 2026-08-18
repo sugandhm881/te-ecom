@@ -6,7 +6,7 @@
 <title>Ecom Central</title>
 <link rel="icon" type="image/png" href="/static/assets/ecom-logo.png">
 <link rel="stylesheet" href="/static/tailwind.css"><!-- pre-built Tailwind — replaces the runtime cdn.tailwindcss.com JIT compiler (huge per-render cost) -->
-<link rel="stylesheet" href="/static/smooth.css?v=2026-07-29e"><!-- motion/polish layer — smoother popups/loaders/transitions on the SAME original colours -->
+<link rel="stylesheet" href="/static/smooth.css?v=2026-08-17a"><!-- motion/polish layer — smoother popups/loaders/transitions on the SAME original colours -->
 <link rel="stylesheet" href="/static/accent.css?v=2026-07-29a"><!-- accent recolour: indigo → login/welcome violet gradient (everything else unchanged) -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1258,7 +1258,7 @@
                 </div>
             </header>
             
-            <div class="p-8 max-w-7xl mx-auto w-full">
+            <div class="p-8 mx-auto w-full">
                 <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
                     <div id="kpi-dashboard-all" class="card p-5 border-l-4 border-l-slate-600 shadow-sm"></div>
                     <div id="kpi-dashboard-new" class="card p-5 border-l-4 border-l-blue-500 shadow-sm"></div>
@@ -1309,21 +1309,53 @@
                     </div>
                 </div>
             </header>
-            <div class="p-8 max-w-7xl mx-auto w-full">
-                <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 mb-8">
+            <div class="p-8 mx-auto w-full">
+                <!-- Which two periods every "vs" on this page compares -->
+                <div id="ins-compare-bar" class="mb-5"></div>
+
+                <!-- Row 1 — the revenue waterfall: what was booked, what survives cancellation, what
+                     survives RTO, and what has actually been collected. Read left to right. -->
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
                     <div id="kpi-insights-revenue" class="card p-4"></div>
-                    <div id="kpi-insights-avg-value" class="card p-4"></div>
+                    <div id="kpi-insights-rev-cancel" class="card p-4"></div>
+                    <div id="kpi-insights-rev-rto" class="card p-4"></div>
+                    <div id="kpi-insights-realised" class="card p-4"></div>
+                </div>
+                <!-- Row 2 — volume and where every order stands -->
+                <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-4 mb-4">
                     <div id="kpi-insights-all-orders" class="card p-4"></div>
+                    <div id="kpi-insights-avg-value" class="card p-4"></div>
                     <div id="kpi-insights-new" class="card p-4"></div>
                     <div id="kpi-insights-shipped" class="card p-4"></div>
                     <div id="kpi-insights-delivered" class="card p-4"></div>
                     <div id="kpi-insights-rto" class="card p-4"></div>
                     <div id="kpi-insights-cancelled" class="card p-4"></div>
+                    <div id="kpi-insights-codshare" class="card p-4"></div>
                 </div>
-                
+                <!-- Row 3 — quality and exposure -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                    <div id="kpi-insights-delrate" class="card p-4"></div>
+                    <div id="kpi-insights-rtorate" class="card p-4"></div>
+                    <div id="kpi-insights-rtoloss" class="card p-4"></div>
+                    <div id="kpi-insights-atrisk" class="card p-4"></div>
+                </div>
+
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     <div class="lg:col-span-2 card p-6">
-                         <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Revenue Trend</h3>
+                         <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+                            <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider">Daily Trend <span id="ins-trend-sub" class="text-slate-300 normal-case font-medium"></span></h3>
+                            <div class="flex items-center gap-2">
+                                <select id="ins-trend-metric" class="filter-select">
+                                    <option value="revenue">Revenue</option>
+                                    <option value="orders">Orders</option>
+                                    <option value="delivered">Delivered</option>
+                                    <option value="rto">RTO</option>
+                                </select>
+                                <label class="flex items-center gap-1.5 text-xs text-slate-500 font-medium select-none cursor-pointer">
+                                    <input type="checkbox" id="ins-trend-compare" checked class="accent-indigo-600"> Compare
+                                </label>
+                            </div>
+                         </div>
                          <div class="relative h-80"><canvas id="revenue-chart"></canvas></div>
                     </div>
                     <div class="flex flex-col gap-6">
@@ -1335,6 +1367,25 @@
                              <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Payment Method</h3>
                              <div class="relative h-48"><canvas id="payment-chart"></canvas></div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Where orders actually end up, and how the two payment methods differ -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+                    <div class="card p-6">
+                        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Fulfilment Funnel</h3>
+                        <p class="text-xs text-slate-400 mb-4">Every order in the range, by where it stands now</p>
+                        <div id="ins-funnel"></div>
+                    </div>
+                    <div class="card p-6">
+                        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">COD vs Prepaid Outcome</h3>
+                        <p class="text-xs text-slate-400 mb-4">Share of settled orders that were delivered</p>
+                        <div class="relative h-56"><canvas id="ins-paymode-chart"></canvas></div>
+                    </div>
+                    <div class="card p-6">
+                        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Orders by Weekday</h3>
+                        <p class="text-xs text-slate-400 mb-4">Daily average across the range</p>
+                        <div class="relative h-56"><canvas id="ins-weekday-chart"></canvas></div>
                     </div>
                 </div>
 
@@ -1367,7 +1418,7 @@
                     </div>
                 </div>
             </header>
-            <div class="p-8 max-w-7xl mx-auto w-full">
+            <div class="p-8 mx-auto w-full">
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                     <div class="card p-6 border-l-4 border-l-emerald-500">
                         <p class="text-sm font-semibold text-slate-500 uppercase tracking-wide">Total Sales</p>
@@ -1432,7 +1483,7 @@
     </div>
 
             </header>
-            <div class="p-8 max-w-7xl mx-auto w-full">
+            <div class="p-8 mx-auto w-full">
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                     <div class="card p-6 h-fit">
                         <h3 class="text-lg font-bold text-slate-800 mb-4">Customer Distribution</h3>
@@ -1477,7 +1528,7 @@
                     </div>
                 </div>
             </header>
-            <div class="p-8 max-w-7xl mx-auto w-full">
+            <div class="p-8 mx-auto w-full">
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-6 mb-8">
                     <div id="kpi-rto-rate" class="card p-5 border-l-4 border-l-rose-500"></div>
                     <div id="kpi-rto-count" class="card p-5 border-l-4 border-l-orange-500"></div>
@@ -1525,7 +1576,7 @@
                    <select id="ranking-date-preset-filter" class="filter-select"></select> 
                 </div>
             </header>
-            <div class="p-8 max-w-7xl mx-auto w-full">
+            <div class="p-8 mx-auto w-full">
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                       <div class="lg:col-span-2 card p-6">
                           <h2 class="text-lg font-bold text-slate-800 mb-2">Top 5 Ad Sets by ROAS</h2>
@@ -1567,7 +1618,7 @@
                     </button>
                 </div>
             </header>
-            <div class="p-8 max-w-7xl mx-auto w-full">
+            <div class="p-8 mx-auto w-full">
                 <div id="adsetSummaryCard" class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-4 mb-6 bg-[#1e293b] text-white rounded-2xl p-6 shadow-lg hidden">
                     <div class="text-center"><p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Spend</p><p id="totalSpend" class="text-lg font-bold">0</p></div>
                     <div class="text-center"><p class="text-xs text-slate-400 uppercase tracking-wider mb-1">Del. Rev</p><p id="totalRevenue" class="text-lg font-bold">0</p></div>
@@ -1649,7 +1700,7 @@
     </div>
     
             </header>
-            <div class="p-8 max-w-7xl mx-auto w-full">
+            <div class="p-8 mx-auto w-full">
                 <div class="card overflow-hidden">
                     <div class="overflow-x-auto">
                         <table class="w-full text-left">
@@ -2183,7 +2234,7 @@
           </div>
         </header>
 
-        <div class="p-8 max-w-7xl mx-auto w-full">
+        <div class="p-8 mx-auto w-full">
 
           <!-- KPI Cards — click to filter table -->
           <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
@@ -2378,7 +2429,7 @@
             </div>
           </header>
 
-          <div class="p-6 max-w-7xl mx-auto w-full">
+          <div class="p-6 mx-auto w-full">
 
             <!-- KPI Cards -->
             <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">

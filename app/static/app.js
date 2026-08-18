@@ -100,6 +100,7 @@ let adAnalysisDatePresetFilter, adAnalysisCustomDateContainer, adAnalysisStartDa
 let sourceFilterEl;
 
 let revenueChartInstance, platformChartInstance, paymentChartInstance;
+let _insPaymodeChart = null, _insWeekdayChart = null, _insTrendWired = false;
 let _insightsServer = null;   // full-range aggregates from /api/orders-insights (accurate, not capped)
 
 // --- STATIC DATA ---
@@ -3280,6 +3281,16 @@ async function renderAllInsights(silent) {
         const d = await r.json();
         if (d && d.success) _insightsServer = d;
     } catch (_) {}
+    // Metric picker + compare toggle redraw the trend from data already in hand — no refetch, so
+    // switching between Revenue and RTO is instant. Wired once; renderAllInsights runs on every
+    // date change and would otherwise stack duplicate listeners.
+    if (!_insTrendWired) {
+        _insTrendWired = true;
+        ['ins-trend-metric', 'ins-trend-compare'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('change', () => renderInsightCharts());
+        });
+    }
     updateInsightsKpis();
     renderInsightDetail();
     if (!silent) renderInsightCharts();   // skip chart rebuild on the quiet 60s refresh → no flash
@@ -3489,9 +3500,42 @@ function updateDashboardKpis(o) {
         el.classList.toggle('ring-indigo-400', on);
     });
 }
+// ── Period comparison ────────────────────────────────────────────────────────────────────────────
+// Every "vs" on this page compares the selected range against the SAME number of days immediately
+// before it, computed server-side (`prev` in /orders-insights). The arrows that used to live here were
+// deleted because they were derived from the client's 500-row order cache and were simply wrong.
+//
+// ⚠️ DIRECTION IS PER-METRIC, NOT PER-SIGN. More revenue is good; more RTO is not. `goodWhen` says
+// which way is up for each card, so a rising RTO never renders green.
+//
+// ⚠️ AND SOME METRICS HAVE NO GOOD DIRECTION. "In transit" and "Pending" are pipeline state, not
+// performance — colouring them made the page look self-contradictory: two cards showing ▲ side by
+// side, one green one red, when both were only saying "more orders are in flight this week". Those
+// pass goodWhen:'flat' and render neutral grey. An arrow always means the direction the number moved;
+// colour only ever means good or bad; grey means the question doesn't apply.
+const insPct = (cur, prev) => {
+    const c = Number(cur || 0), p = Number(prev || 0);
+    if (!p) return null;                       // no baseline — show nothing rather than a fake +100%
+    return ((c - p) / p) * 100;
+};
+function insDelta(cur, prev, goodWhen = 'up', prevLabel) {
+    const v = insPct(cur, prev);
+    if (v === null || !isFinite(v)) return '<p class="text-xs text-slate-300 mt-1">no prior data</p>';
+    const rounded = Math.abs(v) < 0.05 ? 0 : v;
+    const up = rounded > 0;
+    const good = (goodWhen === 'flat' || rounded === 0) ? null : (goodWhen === 'up' ? up : !up);
+    const cls = good === null ? 'text-slate-500' : good ? 'text-emerald-600' : 'text-rose-500';
+    const arrow = rounded === 0 ? '±' : up ? '▲' : '▼';
+    // The baseline is spelled out, so a big percentage can be judged rather than just felt.
+    const was = prevLabel ? `<span class="text-slate-400 font-normal">vs ${prevLabel}</span>`
+                          : '<span class="text-slate-400 font-normal">vs prev</span>';
+    return `<p class="text-xs ${cls} mt-1 font-semibold">${arrow} ${Math.abs(rounded).toFixed(1)}% ${was}</p>`;
+}
+
 function updateInsightsKpis() {
     // Accurate full-range aggregates from the server (see _insightsServer / renderAllInsights).
     const sm = (_insightsServer && _insightsServer.summary) || {};
+    const pv = (_insightsServer && _insightsServer.prev) || {};
     const totalRevenue = Number(sm.revenue || 0);
     const counts = {
         total: Number(sm.total_orders || 0),
@@ -3502,81 +3546,194 @@ function updateInsightsKpis() {
         cancelled: Number(sm.cancelled || 0),
     };
     const avgValue = counts.total > 0 ? totalRevenue / counts.total : 0;
-    const c = {};   // trend arrows removed (they were computed from the capped client set)
+    const prevAov = Number(pv.total_orders || 0) > 0 ? Number(pv.revenue || 0) / Number(pv.total_orders) : 0;
+
+    // SETTLED = the orders whose fate is known. Rates are computed over these, never over every order
+    // in the range: a fresh week is mostly still in transit, so dividing by all orders would show a
+    // collapsing delivery rate that is really just orders not having arrived yet.
+    const settled = counts.delivered + counts.rto;
+    const pSettled = Number(pv.delivered || 0) + Number(pv.rto || 0);
+    const delRate = settled > 0 ? (counts.delivered / settled) * 100 : 0;
+    const pDelRate = pSettled > 0 ? (Number(pv.delivered) / pSettled) * 100 : 0;
+    const rtoRate = settled > 0 ? (counts.rto / settled) * 100 : 0;
+    const pRtoRate = pSettled > 0 ? (Number(pv.rto) / pSettled) * 100 : 0;
+    const codShare = counts.total > 0 ? (Number(sm.cod_orders || 0) / counts.total) * 100 : 0;
+    const pCodShare = Number(pv.total_orders || 0) > 0 ? (Number(pv.cod_orders || 0) / Number(pv.total_orders)) * 100 : 0;
 
     // 2. Render Helper
-    const renderKpi = (e, label, value, icon, trend, labelTrend) => {
+    const renderKpi = (e, label, value, icon, deltaHtml, sub) => {
         if (!e) return;
-        const trendColor = trend && trend.startsWith('+') ? 'text-emerald-500' : 'text-rose-500';
         e.innerHTML = `
             <div class="flex items-center">
                 ${icon}
                 <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide ml-2">${label}</p>
             </div>
             <p class="text-2xl font-bold text-slate-900 mt-2">${value}</p>
-            ${trend ? `<p class="text-xs ${trendColor} mt-1 font-medium">${trend} <span class="text-slate-400 font-normal">${labelTrend}</span></p>` : `<p class="text-xs text-slate-400 mt-1">&nbsp;</p>`}
+            ${deltaHtml || '<p class="text-xs text-slate-400 mt-1">&nbsp;</p>'}
+            ${sub ? `<p class="text-xs text-slate-400 mt-0.5">${sub}</p>` : ''}
         `;
     };
 
-    // 3. Render All 8 Cards
-    renderKpi(insightsKpiElements.revenue.el, 'Total Revenue', formatCurrency(totalRevenue),
-        `<svg class="w-5 h-5 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v.01"></path></svg>`,
-        c.revenueTrend, c.periodLabel
-    );
+    const ICON = {
+        rupee: `<svg class="w-5 h-5 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v.01"></path></svg>`,
+        cart:  `<svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 6l3 6h10a2 2 0 001.79-1.11L21 8M6 18h12a2 2 0 002-2v-5a2 2 0 00-2-2H6a2 2 0 00-2 2v5a2 2 0 002 2z"></path></svg>`,
+        box:   `<svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>`,
+        clock: `<svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`,
+        truck: `<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 17H6V6h11v4l4 4v2h-3zM6 6l6-4l6 4"></path></svg>`,
+        check: `<svg class="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`,
+        rto:   `<svg class="w-5 h-5 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`,
+        x:     `<svg class="w-5 h-5 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>`,
+        wallet:`<svg class="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h.01M3 7a2 2 0 012-2h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"></path></svg>`,
+        pct:   `<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h.01M15 17h.01M6 18L18 6"></path></svg>`,
+        burn:  `<svg class="w-5 h-5 text-rose-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>`,
+    };
+    const num = n => Number(n || 0).toLocaleString('en-IN');
+    const shareOf = (n, d) => d > 0 ? `${((n / d) * 100).toFixed(1)}% of orders` : '';
 
-    renderKpi(insightsKpiElements.avgValue.el, 'Avg. Order Value', formatCurrency(avgValue),
-        `<svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 6l3 6h10a2 2 0 001.79-1.11L21 8M6 18h12a2 2 0 002-2v-5a2 2 0 00-2-2H6a2 2 0 00-2 2v5a2 2 0 002 2z"></path></svg>`,
-        '', ''
-    );
+    const el = id => document.getElementById(id);
 
-    renderKpi(insightsKpiElements.allOrders.el, 'Total Orders', counts.total,
-        `<svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>`,
-        c.ordersTrend, c.periodLabel
-    );
+    // ROW 1 — the revenue waterfall. Each card is the one before it minus a specific leak, so the drop
+    // between them IS the loss. Percentages are of booked revenue, which is the number people quote.
+    const cancelledVal = Number(sm.cancelled_value || 0), rtoVal = Number(sm.rto_loss || 0);
+    const afterCancel = totalRevenue - cancelledVal;
+    const afterRto = afterCancel - rtoVal;
+    const pAfterCancel = Number(pv.revenue || 0) - Number(pv.cancelled_value || 0);
+    const pAfterRto = pAfterCancel - Number(pv.rto_loss || 0);
+    const keptPct = totalRevenue > 0 ? (afterRto / totalRevenue) * 100 : 0;
 
-    renderKpi(insightsKpiElements.new.el, 'Pending Processing', counts.pending,
-        `<svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`,
-        '', ''
-    );
+    renderKpi(insightsKpiElements.revenue.el, 'Total Revenue', formatCurrency(totalRevenue), ICON.rupee,
+        insDelta(sm.revenue, pv.revenue, 'up'), `${num(counts.total)} orders booked`);
 
-    renderKpi(insightsKpiElements.shipped.el, 'In Transit', counts.moving,
-        `<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 17H6V6h11v4l4 4v2h-3zM6 6l6-4l6 4"></path></svg>`,
-        '', ''
-    );
+    renderKpi(el('kpi-insights-rev-cancel'), 'After Cancellation', formatCurrency(afterCancel), ICON.x,
+        insDelta(afterCancel, pAfterCancel, 'up'), `−${formatCurrency(cancelledVal)} cancelled`);
 
-    // --- ADDED DELIVERED CARD ---
-    renderKpi(insightsKpiElements.delivered.el, 'Delivered', counts.delivered,
-        `<svg class="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`,
-        '', ''
-    );
-    // ----------------------------
+    renderKpi(el('kpi-insights-rev-rto'), 'After RTO', formatCurrency(afterRto), ICON.rto,
+        insDelta(afterRto, pAfterRto, 'up'), `−${formatCurrency(rtoVal)} returned · ${keptPct.toFixed(1)}% of booked`);
 
-    renderKpi(insightsKpiElements.rto.el, 'RTO', counts.rto,
-        `<svg class="w-5 h-5 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`,
-        '', ''
-    );
+    renderKpi(el('kpi-insights-realised'), 'Collected So Far', formatCurrency(sm.delivered_revenue), ICON.wallet,
+        insDelta(sm.delivered_revenue, pv.delivered_revenue, 'up'), 'delivered — money in hand');
 
-    renderKpi(insightsKpiElements.cancelled.el, 'Cancelled', counts.cancelled,
-        `<svg class="w-5 h-5 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>`,
-        '', ''
-    );
+    // ROW 2 — volume and where every order stands right now.
+    renderKpi(insightsKpiElements.allOrders.el, 'Total Orders', num(counts.total), ICON.box,
+        insDelta(sm.total_orders, pv.total_orders, 'up'));
+
+    renderKpi(insightsKpiElements.avgValue.el, 'Avg. Order Value', formatCurrency(avgValue), ICON.cart,
+        insDelta(avgValue, prevAov, 'up'));
+
+    // Pending and In Transit are pipeline state, not performance — neutral, never green or red.
+    renderKpi(insightsKpiElements.new.el, 'Pending Processing', num(counts.pending), ICON.clock,
+        insDelta(sm.pending, pv.pending, 'flat'), shareOf(counts.pending, counts.total));
+
+    renderKpi(insightsKpiElements.shipped.el, 'In Transit', num(counts.moving), ICON.truck,
+        insDelta(sm.in_transit, pv.in_transit, 'flat'), shareOf(counts.moving, counts.total));
+
+    renderKpi(insightsKpiElements.delivered.el, 'Delivered', num(counts.delivered), ICON.check,
+        insDelta(sm.delivered, pv.delivered, 'up'), shareOf(counts.delivered, counts.total));
+
+    renderKpi(insightsKpiElements.rto.el, 'RTO', num(counts.rto), ICON.rto,
+        insDelta(sm.rto, pv.rto, 'down'), shareOf(counts.rto, counts.total));
+
+    renderKpi(insightsKpiElements.cancelled.el, 'Cancelled', num(counts.cancelled), ICON.x,
+        insDelta(sm.cancelled, pv.cancelled, 'down'), shareOf(counts.cancelled, counts.total));
+
+    renderKpi(el('kpi-insights-codshare'), 'COD Share', `${codShare.toFixed(1)}%`, ICON.wallet,
+        insDelta(codShare, pCodShare, 'down'), `${num(sm.cod_orders)} COD orders`);
+
+    // ROW 3 — quality and exposure. Rates use SETTLED orders, so a young range isn't punished for
+    // parcels still in the air.
+    renderKpi(el('kpi-insights-delrate'), 'Delivery Rate', `${delRate.toFixed(1)}%`, ICON.check,
+        insDelta(delRate, pDelRate, 'up'), `of ${num(settled)} settled orders`);
+
+    renderKpi(el('kpi-insights-rtorate'), 'RTO Rate', `${rtoRate.toFixed(1)}%`, ICON.pct,
+        insDelta(rtoRate, pRtoRate, 'down'), `of ${num(settled)} settled orders`);
+
+    renderKpi(el('kpi-insights-rtoloss'), 'RTO Loss', formatCurrency(sm.rto_loss), ICON.burn,
+        insDelta(sm.rto_loss, pv.rto_loss, 'down'), 'value returned to us');
+
+    // What is still riding on couriers — at this RTO rate, a knowable slice of it will come back.
+    const atRisk = Number(sm.in_transit_value || 0);
+    renderKpi(el('kpi-insights-atrisk'), 'In Transit Value', formatCurrency(atRisk), ICON.truck,
+        insDelta(atRisk, pv.in_transit_value, 'flat'),
+        rtoRate > 0 ? `≈${formatCurrency(atRisk * rtoRate / 100)} may return at ${rtoRate.toFixed(0)}% RTO` : 'still with couriers');
+
+    // The comparison banner — states plainly which two windows every arrow above refers to, and warns
+    // when the current range is too young for its delivery numbers to mean much yet.
+    const bar = el('ins-compare-bar');
+    if (bar) {
+        const r = (_insightsServer && _insightsServer.range) || {};
+        const fmt = d => d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : '—';
+        const openShare = counts.total > 0 ? ((counts.pending + counts.moving) / counts.total) * 100 : 0;
+        const warn = openShare >= 25
+            ? `<span class="text-amber-700 bg-amber-50 ring-1 ring-amber-200 rounded-full px-2.5 py-1 font-medium">${openShare.toFixed(0)}% of these orders haven't landed yet — delivery and RTO figures will keep moving</span>`
+            : '';
+        bar.innerHTML = `<div class="card px-4 py-3 flex items-center justify-between gap-3 flex-wrap text-xs">
+            <div class="text-slate-500">Comparing <b class="text-slate-700">${fmt(r.from)} – ${fmt(r.to)}</b>
+              against the previous ${r.days || 0} days <b class="text-slate-700">${fmt(r.prevFrom)} – ${fmt(r.prevTo)}</b></div>
+            ${warn}</div>`;
+    }
 }
 function renderInsightCharts() {
     if (revenueChartInstance) revenueChartInstance.destroy();
     if (platformChartInstance) platformChartInstance.destroy();
     if (paymentChartInstance) paymentChartInstance.destroy();
+    if (_insPaymodeChart) { _insPaymodeChart.destroy(); _insPaymodeChart = null; }
+    if (_insWeekdayChart) { _insWeekdayChart.destroy(); _insWeekdayChart = null; }
     const trend = (_insightsServer && _insightsServer.trend) || [];
+    const prevTrend = (_insightsServer && _insightsServer.prevTrend) || [];
     const sm = (_insightsServer && _insightsServer.summary) || {};
 
-    // Revenue trend (accurate daily revenue over the full range)
+    const metric = (document.getElementById('ins-trend-metric') || {}).value || 'revenue';
+    const compare = !(document.getElementById('ins-trend-compare') || {}).checked === false;
+    const isMoney = metric === 'revenue';
+    const dayLabel = s => { const p = String(s).split('-'); return new Date(p[0], p[1] - 1, p[2]).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); };
+
+    // The two periods are plotted against the CURRENT range's dates, matched by position rather than by
+    // date — day 1 against day 1. Plotting the previous period on its own dates would put the two lines
+    // in different places on the axis and make them impossible to read against each other.
+    const sub = document.getElementById('ins-trend-sub');
+    if (sub) sub.textContent = compare ? '— solid: this period · dashed: previous' : '';
+
+    const datasets = [{
+        label: metric.charAt(0).toUpperCase() + metric.slice(1),
+        data: trend.map(x => Number(x[metric] || 0)),
+        borderColor: '#4f46e5', backgroundColor: 'rgba(79,70,229,0.10)', fill: true, tension: 0.3,
+        pointRadius: 0, pointHitRadius: 12, borderWidth: 2,
+    }];
+    if (compare && prevTrend.length) {
+        datasets.push({
+            label: 'Previous period',
+            data: prevTrend.map(x => Number(x[metric] || 0)),
+            borderColor: '#94a3b8', backgroundColor: 'transparent', borderDash: [5, 4],
+            fill: false, tension: 0.3, pointRadius: 0, pointHitRadius: 12, borderWidth: 1.5,
+        });
+    }
+
     revenueChartInstance = new Chart(revenueChartCanvas, {
         type: 'line',
-        data: {
-            labels: trend.map(x => { const p = String(x.d).split('-'); return new Date(p[0], p[1] - 1, p[2]).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }),
-            datasets: [{ label: 'Revenue', data: trend.map(x => Number(x.revenue || 0)), borderColor: '#4f46e5', backgroundColor: 'rgba(79,70,229,0.1)', fill: true, tension: 0.3 }]
-        },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false } }, y: { grid: { color: '#f1f5f9' } } } }
+        data: { labels: trend.map(x => dayLabel(x.d)), datasets },
+        options: {
+            responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: {
+                    title: items => {
+                        const i = items[0].dataIndex;
+                        const p = prevTrend[i];
+                        return compare && p ? `${dayLabel(trend[i].d)}  ·  prev ${dayLabel(p.d)}` : dayLabel(trend[i].d);
+                    },
+                    label: c => `${c.dataset.label}: ${isMoney ? formatCurrency(c.raw) : Number(c.raw).toLocaleString('en-IN')}`,
+                } },
+            },
+            scales: {
+                x: { grid: { display: false } },
+                y: { grid: { color: '#f1f5f9' }, ticks: { callback: v => isMoney ? formatCurrency(v) : v } },
+            },
+        }
     });
+
+    renderInsFunnel();
+    renderInsPaymodeChart();
+    renderInsWeekdayChart();
 
     // Order Status donut (replaces the old Shopify/Amazon "Platform Share")
     platformChartInstance = new Chart(platformChartCanvas, {
@@ -3605,6 +3762,105 @@ function renderInsightCharts() {
     });
 }
 // COD-vs-Prepaid detail + Top products + Top cities (all from the full-range server aggregates).
+// Where every order in the range currently stands. A funnel rather than a donut because these are
+// STAGES, not slices of one pie — an order that is in transit today may be delivered tomorrow, and the
+// eye should read the drop from one stage to the next.
+function renderInsFunnel() {
+    const host = document.getElementById('ins-funnel');
+    if (!host) return;
+    const sm = (_insightsServer && _insightsServer.summary) || {};
+    const pv = (_insightsServer && _insightsServer.prev) || {};
+    const total = Number(sm.total_orders || 0);
+    if (!total) { host.innerHTML = '<p class="text-sm text-slate-400">No orders in this range.</p>'; return; }
+
+    const stages = [
+        { k: 'total_orders', label: 'Orders placed',  colour: '#6366f1', good: 'up' },
+        { k: 'pending',      label: 'Awaiting dispatch', colour: '#f59e0b', good: 'down' },
+        { k: 'in_transit',   label: 'In transit',     colour: '#3b82f6', good: 'up' },
+        { k: 'delivered',    label: 'Delivered',      colour: '#10b981', good: 'up' },
+        { k: 'rto',          label: 'RTO',            colour: '#f97316', good: 'down' },
+        { k: 'cancelled',    label: 'Cancelled',      colour: '#f43f5e', good: 'down' },
+    ];
+    host.innerHTML = stages.map(s => {
+        const n = Number(sm[s.k] || 0);
+        const pct = (n / total) * 100;
+        const d = insPct(n, pv[s.k]);
+        const dTxt = d === null ? '' :
+            `<span class="${(s.good === 'up' ? d >= 0 : d <= 0) ? 'text-emerald-600' : 'text-rose-500'} font-semibold">${d >= 0 ? '▲' : '▼'}${Math.abs(d).toFixed(0)}%</span>`;
+        return `<div class="mb-3">
+            <div class="flex items-center justify-between text-xs mb-1">
+                <span class="font-medium text-slate-700">${s.label}</span>
+                <span class="text-slate-500 tabular-nums">${n.toLocaleString('en-IN')} <span class="text-slate-400">· ${pct.toFixed(1)}%</span> ${dTxt}</span>
+            </div>
+            <div class="h-2 rounded-full bg-slate-100 overflow-hidden">
+                <div class="h-full rounded-full" style="width:${Math.max(1.5, pct)}%;background:${s.colour}"></div>
+            </div></div>`;
+    }).join('');
+}
+
+// COD vs Prepaid, judged on SETTLED orders only. This is usually the single most actionable chart on
+// the page: COD and prepaid rarely fail at anything like the same rate.
+function renderInsPaymodeChart() {
+    const cv = document.getElementById('ins-paymode-chart');
+    if (!cv || typeof Chart === 'undefined') return;
+    const sm = (_insightsServer && _insightsServer.summary) || {};
+    const mk = (del, rto) => { const s = Number(del || 0) + Number(rto || 0); return s > 0 ? [(Number(del) / s) * 100, (Number(rto) / s) * 100] : [0, 0]; };
+    const cod = mk(sm.cod_delivered, sm.cod_rto), pre = mk(sm.prepaid_delivered, sm.prepaid_rto);
+    _insPaymodeChart = new Chart(cv, {
+        type: 'bar',
+        data: {
+            labels: ['COD', 'Prepaid'],
+            datasets: [
+                { label: 'Delivered', data: [cod[0], pre[0]], backgroundColor: '#10b981', borderRadius: 4, stack: 's' },
+                { label: 'RTO',       data: [cod[1], pre[1]], backgroundColor: '#f97316', borderRadius: 4, stack: 's' },
+            ],
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+            plugins: {
+                legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } },
+                tooltip: { callbacks: { label: c => `${c.dataset.label}: ${Number(c.raw).toFixed(1)}%` } },
+            },
+            scales: {
+                x: { stacked: true, max: 100, grid: { color: '#f1f5f9' }, ticks: { callback: v => v + '%' } },
+                y: { stacked: true, grid: { display: false } },
+            },
+        }
+    });
+}
+
+// Weekday pattern, averaged across the range — tells you which days actually carry the volume, which
+// is what a promo calendar or a warehouse roster gets planned around.
+function renderInsWeekdayChart() {
+    const cv = document.getElementById('ins-weekday-chart');
+    if (!cv || typeof Chart === 'undefined') return;
+    const trend = (_insightsServer && _insightsServer.trend) || [];
+    const sums = [0, 0, 0, 0, 0, 0, 0], days = [0, 0, 0, 0, 0, 0, 0];
+    trend.forEach(x => {
+        const p = String(x.d).split('-');
+        const wd = new Date(p[0], p[1] - 1, p[2]).getDay();   // 0 = Sunday
+        sums[wd] += Number(x.orders || 0); days[wd] += 1;
+    });
+    // Monday-first: a week that starts on Sunday reads oddly for an Indian ops team.
+    const order = [1, 2, 3, 4, 5, 6, 0];
+    const names = { 0: 'Sun', 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat' };
+    const avg = order.map(i => days[i] ? sums[i] / days[i] : 0);
+    const peak = Math.max(...avg);
+    _insWeekdayChart = new Chart(cv, {
+        type: 'bar',
+        data: {
+            labels: order.map(i => names[i]),
+            datasets: [{ label: 'Avg orders', data: avg, borderRadius: 4,
+                backgroundColor: avg.map(v => v >= peak * 0.999 ? '#4f46e5' : '#c7d2fe') }],
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => `${c.raw.toFixed(1)} orders/day` } } },
+            scales: { x: { grid: { display: false } }, y: { grid: { color: '#f1f5f9' }, ticks: { precision: 0 } } },
+        }
+    });
+}
+
 function renderInsightDetail() {
     const sm = (_insightsServer && _insightsServer.summary) || {};
     const products = (_insightsServer && _insightsServer.topProducts) || [];
@@ -3621,15 +3877,35 @@ function renderInsightDetail() {
             <div class="flex gap-4 text-xs text-slate-500"><span>Delivered <b class="text-emerald-600">${pctOf(delivered, orders)}%</b></span><span>RTO <b class="text-amber-600">${pctOf(rto, orders)}%</b></span></div></div>`;
         payEl.innerHTML = seg('COD', sm.cod_orders, sm.cod_revenue, sm.cod_rto, sm.cod_delivered) + seg('Prepaid', sm.prepaid_orders, sm.prepaid_revenue, sm.prepaid_rto, sm.prepaid_delivered);
     }
+    // Movement vs the previous period, matched BY NAME rather than by rank — "moved up to #3" tells you
+    // nothing about whether the product sold more, only that something else sold less. The previous
+    // period is fetched 50 deep so an item that was ranked 30th last month still has a number to compare.
+    const prevProducts = (_insightsServer && _insightsServer.prevProducts) || [];
+    const prevCities = (_insightsServer && _insightsServer.prevCities) || [];
+    const chip = (cur, prev) => {
+        const d = insPct(cur, prev);
+        if (d === null) return '<span class="text-indigo-500 font-semibold">new</span>';
+        if (Math.abs(d) < 1) return '';
+        return `<span class="${d > 0 ? 'text-emerald-600' : 'text-rose-500'} font-semibold">${d > 0 ? '▲' : '▼'}${Math.abs(d).toFixed(0)}%</span>`;
+    };
+
     const prodEl = document.getElementById('ins-top-products');
     if (prodEl) {
+        const prevBy = {}; prevProducts.forEach(p => { prevBy[String(p.title || '').toLowerCase()] = Number(p.units || 0); });
         const max = Math.max(1, ...products.map(p => Number(p.units || 0)));
-        prodEl.innerHTML = products.length ? products.map(p => bar(ecEsc(p.title), `${Number(p.units).toLocaleString('en-IN')} u · ${formatCurrency(p.revenue)}`, Number(p.units) / max, 'linear-gradient(90deg,#6366f1,#8b5cf6)')).join('') : '<p class="text-sm text-slate-400">No data.</p>';
+        prodEl.innerHTML = products.length ? products.map(p => bar(
+            ecEsc(p.title),
+            `${Number(p.units).toLocaleString('en-IN')} u · ${formatCurrency(p.revenue)} ${chip(p.units, prevBy[String(p.title || '').toLowerCase()])}`,
+            Number(p.units) / max, 'linear-gradient(90deg,#6366f1,#8b5cf6)')).join('') : '<p class="text-sm text-slate-400">No data.</p>';
     }
     const cityEl = document.getElementById('ins-top-cities');
     if (cityEl) {
+        const prevBy = {}; prevCities.forEach(c => { prevBy[String(c.city || '').toLowerCase()] = Number(c.orders || 0); });
         const max = Math.max(1, ...cities.map(c => Number(c.orders || 0)));
-        cityEl.innerHTML = cities.length ? cities.map(c => bar(`${ecEsc(c.city)}${c.state ? `<span class="text-slate-400">, ${ecEsc(c.state)}</span>` : ''}`, Number(c.orders).toLocaleString('en-IN'), Number(c.orders) / max, 'linear-gradient(90deg,#10b981,#38bdf8)')).join('') : '<p class="text-sm text-slate-400">No data.</p>';
+        cityEl.innerHTML = cities.length ? cities.map(c => bar(
+            `${ecEsc(c.city)}${c.state ? `<span class="text-slate-400">, ${ecEsc(c.state)}</span>` : ''}`,
+            `${Number(c.orders).toLocaleString('en-IN')} ${chip(c.orders, prevBy[String(c.city || '').toLowerCase()])}`,
+            Number(c.orders) / max, 'linear-gradient(90deg,#10b981,#38bdf8)')).join('') : '<p class="text-sm text-slate-400">No data.</p>';
     }
 }
 function renderSettings(){const c=document.getElementById('seller-connections');c.innerHTML=connections.map(e=>`<div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between"><div class="flex items-center"><img src="${platformLogos[e.name]}" class="w-10 h-10 mr-4 rounded-lg bg-slate-50 p-1"><div><p class="font-bold text-slate-900">${e.name}</p><p class="text-sm text-slate-500">${e.status==='Connected'?e.user:'Click to connect'}</p></div></div><button data-platform="${e.name}" data-action="${e.status==='Connected'?'disconnect':'connect'}" class="connection-btn ${e.status==='Connected'?'text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100':'text-white bg-indigo-600 hover:bg-indigo-700'} px-4 py-2 rounded-lg text-sm font-medium transition-colors">${e.status==='Connected'?'Disconnect':'Connect'}</button></div>`).join('');document.querySelectorAll('.connection-btn').forEach(b=>b.addEventListener('click',e=>handleConnection(e.currentTarget.dataset.platform,e.currentTarget.dataset.action)))}
@@ -12866,7 +13142,7 @@ async function infThreadModal(influencerId, who){
             </div>
             ${m.subject?`<p class="text-xs font-semibold text-slate-700 mb-1">${escapeHtml(m.subject)}</p>`:''}
             <pre class="text-[13px] text-slate-700 whitespace-pre-wrap break-words" style="font-family:inherit;margin:0">${escapeHtml(m.body||'')}</pre>
-            ${out&&m.ai_polished?'<p class="text-[10px] text-violet-500 mt-1.5">✨ AI-polished before sending</p>':''}
+            ${out&&m.ai_polished?'<p class="text-[10px] text-indigo-500 mt-1.5">✨ AI-polished before sending</p>':''}
             ${out&&m.sent_by?`<p class="text-[10px] text-slate-400 mt-1">by ${escapeHtml(m.sent_by)}</p>`:''}
           </div></div>`;
       };

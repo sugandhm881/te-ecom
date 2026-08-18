@@ -351,7 +351,23 @@ function getOrderSourceTerm(order) {
     return ['direct', 'direct'];
 }
 
-function normalizeStatus(order, rawStatus, docpharmaData = null) {
+// COURIER TRUTH FIRST (2026-08-17). `journeyOutcome` is `shipment_journey_ecom.outcome` — the one table
+// all three couriers write, from webhooks, covering 99.9% of orders that have an AWB. The fields below it
+// cover far less: `raw_rapidshyp_status` carries Shopify fulfillment states for Kwikship parcels
+// ("FULFILLED"), which match none of the courier keywords, so a delivered Kwikship order fell through to
+// "Processing" for life. Measured over 30 days: 805 delivered orders were not counted as Delivered —
+// 674 of them Kwikship — hiding **₹6.5 lakh of delivered revenue**, plus 221 RTOs counted as something
+// else. Delivered revenue drives ROAS, so ad sets shipping Kwikship looked worse than they were.
+//
+// Only the FINAL outcomes override: delivered / rto / lost are settled facts about the parcel. `in_transit`
+// and `ndr_pending` do NOT, because the older fields often carry a more specific live state (Out for
+// Delivery, Delivery Delayed) and this must not coarsen what the dashboard already gets right.
+const JOURNEY_FINAL = { delivered: 'Delivered', rto: 'RTO', lost: 'Exception' };
+
+function normalizeStatus(order, rawStatus, docpharmaData = null, journeyOutcome = null) {
+    const fromJourney = JOURNEY_FINAL[String(journeyOutcome || '').toLowerCase()];
+    if (fromJourney) return fromJourney;
+
     const statusUpper = (rawStatus || '').toUpperCase();
 
     if (docpharmaData) {
@@ -385,7 +401,14 @@ function normalizeStatus(order, rawStatus, docpharmaData = null) {
         return 'Unfulfilled';
     }
     
-    if (statusUpper.includes('UNDELIVERED') || statusUpper.includes('RTO') || statusUpper.includes('RETURN')) return 'RTO';
+    // ⚠️ AN UNDELIVERED SCAN IS NOT A RETURN (2026-08-17). This line used to read
+    // `UNDELIVERED || RTO || RETURN` → 'RTO', but "undelivered" is a FAILED DELIVERY ATTEMPT — the
+    // parcel is still with the courier and most reattempts succeed. Counting it as a return inflated
+    // RTO and depressed Eff. ROAS on every ad set: 47 orders month-to-date were called returns while
+    // their courier journey said in_transit / ndr_pending, and 82 carried the status in total. RTO now
+    // requires RTO or RETURN — i.e. a return that has actually been initiated.
+    if (statusUpper.includes('RTO') || statusUpper.includes('RETURN')) return 'RTO';
+    if (statusUpper.includes('UNDELIVERED')) return 'In-Transit';   // open NDR — still out for delivery
     if (['IN_TRANSIT', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELAYED', 'REACHED'].some(s => statusUpper.includes(s))) return 'In-Transit';
     if (['LOST', 'MISROUTED', 'EXCEPTION'].some(s => statusUpper.includes(s))) return 'Exception';
     if (['NA', 'CANCELLED'].some(s => statusUpper.includes(s))) return 'Cancelled';
