@@ -9782,10 +9782,23 @@ function dpRender(d){
         seg('Pending',   V?R.ndrPendingCount:k.ndrPendingCount, '#f59e0b'),
         seg('Lost',      V?R.ndrLostCount:k.ndrLostCount, '#64748b'),
     ];
+    // FIRST-ATTEMPT SPLIT — four buckets that sum to `tracked` exactly, so the card accounts for every
+    // shipment rather than reporting one percentage and leaving the rest unexplained.
+    // `NDR` is the SAME cohort the NDR Recovery card counts, so both cards state one NDR total.
+    // ₹ mode shows no split — an attempt has no rupee value.
+    const fT = k.totalShipments;
+    const fseg = (label,val,color)=>({label,count:val,pct:fT>0?Math.round((val/fT)*1000)/10:0,color});
+    const faSplit = V ? null : [
+        fseg('Delivered 1st',     k.faDelivered, '#4f46e5'),
+        fseg('RTO 1st',           k.faRto,       '#e11d48'),   // returned without an NDR ever being raised
+        fseg('NDR',               k.faNdr,       '#f59e0b'),
+        fseg('Still in transit',  k.faTransit,   '#94a3b8'),
+    ];
+
     document.getElementById('dp-kpis').innerHTML = [
         {label:'First-Attempt Strike Rate', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.bolt,   val:(V?R.fasr:k.fasr)+'%',
             foot:`${dpAmt(V?R.firstAttempt:k.fasrNumerator)} of ${dpAmt(V?R.tracked:k.totalShipments)} tracked on 1st attempt`,
-            cur:V?R.fasr:k.fasr, prev:c?(V?(CR&&CR.fasr):c.fasr):null, better:true,  unit:'pp'},
+            cur:V?R.fasr:k.fasr, prev:c?(V?(CR&&CR.fasr):c.fasr):null, better:true,  unit:'pp', split:faSplit},
         // NDR Recovery now shows the WHOLE cohort, not just the recovered slice (added 2026-08-12).
         // Recovery alone told a third of the story: on the live window 60.4% of NDRs RTO'd against 28.4%
         // recovered, and 11% were still open — none of which the single percentage revealed.
@@ -9807,6 +9820,7 @@ function dpRender(d){
     ].map(dpKpiCard).join('');
     dpStatus(d.statusBreakdown, c);
     dpRto(d.rtoBreakdown, c);
+    dpTransit(d.transitBreakdown, c);
     dpMulti('zone', d.zones); dpMulti('state', d.states); dpCouriers(d.couriers); dpTat(d.tat, c);
     dpFasr(d.fasrTrend); dpFunnel(d.ndrFunnel); dpCourier(d.rtoByCourier); dpPaymentSplit(d.byPayment); dpTableRender(); dpLoadLikelyFake();
 }
@@ -9933,14 +9947,38 @@ function dpRto(b,c){ const el=document.getElementById('dp-rto'); if(!el) return;
     const cShare=v=> tot? Math.round(v/tot*1000)/10 : 0;          // share of current RTO
     const pShare=v=> (pTot&&v!=null)? Math.round(v/pTot*1000)/10 : null;
     const chip=(state,dot,label,val,cur,prev)=>`<button data-state="${state}" title="${dpAmtFull(val)}" class="dp-rchip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-red-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${dpAmt(val)}</b>${dpPP(cur,prev)}</button>`;
+    // Three chips, but only TWO of them are terms of the sum. RTO 1st (never entered NDR) + after NDR
+    // partition the total exactly. "Silent · no attempt" is a SUBSET of RTO 1st — a parcel with no
+    // delivery attempt cannot have raised an NDR — so it is rendered after "of which", never as a third
+    // "+". Adding all three would double-count the silent ones.
+    const fst = V ? (b.firstValue||0) : b.first;
+    const aft = V ? (b.afterNdrValue||0) : b.afterNdr;
     el.innerHTML =
         `<span class="text-slate-500 mr-1">RTO <b class="text-slate-800">${dpAmt(tot)}</b> =</span>`+
-        // Previous-period share comes from the summary's own rtoAttempted / rtoSilent (both evidence-based).
-        // In the ₹ lens there is no prior split by value, so no comparison is shown rather than a wrong one.
-        chip('rto_attempted','bg-red-500','after ≥1 attempt', att, cShare(att), pShare(c&&(V?null:c.rtoAttempted)))+
+        chip('rto_first','bg-orange-500','RTO 1st · no NDR', fst, cShare(fst), pShare(c&&(V?null:c.faRto)))+
         `<span class="text-slate-400">+</span>`+
+        chip('rto_after_ndr','bg-rose-600','after NDR', aft, cShare(aft), pShare(c&&(V?null:c.ndrRtoCount)))+
+        `<span class="text-slate-300 mx-1" title="A subset of RTO 1st — no delivery was ever attempted, so no NDR could be raised. Already counted in the ${dpAmt(fst)} on the left; do not add it on.">│</span>`+
+        `<span class="text-slate-400 mr-1">of which</span>`+
         chip('rto_silent','bg-rose-300','silent · no attempt', sil, cShare(sil), pShare(c&&(V?null:c.rtoSilent)));
     el.querySelectorAll('.dp-rchip').forEach(x=>x.addEventListener('click',()=>{ const sel=document.getElementById('dp-state'); if(sel) sel.value=x.dataset.state; dpTableRender();
+        document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }));
+}
+// In-transit composition — the same shape as dpRto above, deliberately: two rows that read as a pair.
+// "In-transit 574" answers where a parcel is; this answers whether anyone has tried to hand it over yet.
+function dpTransit(b,c){ const el=document.getElementById('dp-transit'); if(!el) return; if(!b||!b.total){ el.innerHTML=''; return; }
+    const V=dpIsVal();
+    const tot = V ? (b.totalValue||0) : b.total;
+    const re  = V ? (b.reattemptingValue||0) : b.reattempting;
+    const fr  = V ? (b.freshValue||0) : b.fresh;
+    const cShare=v=> tot? Math.round(v/tot*1000)/10 : 0;
+    const chip=(state,dot,label,val,cur)=>`<button data-state="${state}" title="${dpAmtFull(val)}" class="dp-tchip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-indigo-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${dpAmt(val)}</b>${dpPP(cur,null)}</button>`;
+    el.innerHTML =
+        `<span class="text-slate-500 mr-1">In-transit <b class="text-slate-800">${dpAmt(tot)}</b> =</span>`+
+        chip('reattempting','bg-amber-500','reattempting · tried ≥1', re, cShare(re))+
+        `<span class="text-slate-400">+</span>`+
+        chip('in_transit_fresh','bg-slate-400','not attempted yet', fr, cShare(fr));
+    el.querySelectorAll('.dp-tchip').forEach(x=>x.addEventListener('click',()=>{ const sel=document.getElementById('dp-state'); if(sel) sel.value=x.dataset.state; dpTableRender();
         document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }));
 }
 function dpTip(){ let t=document.getElementById('dp-tip'); if(!t){ t=document.createElement('div'); t.id='dp-tip'; t.style.cssText='position:fixed;pointer-events:none;background:#0f172a;color:#fff;padding:5px 8px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .08s;z-index:60;white-space:nowrap'; document.body.appendChild(t);} return t; }
@@ -10264,6 +10302,12 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
     // while this list still handed back 143, most of them with an out-for-delivery scan.
     else if(state==='rto_attempted') list=list.filter(r=>r.state==='rto' && !r.silent);
     else if(state==='rto_silent') list=list.filter(r=>r.state==='rto' && r.silent);
+    // Reattempting is a SUBSET of in-transit — the ones that already failed a delivery. Server verdict.
+    else if(state==='reattempting') list=list.filter(r=>r.reattempting);
+    else if(state==='in_transit_fresh') list=list.filter(r=>r.state==='in_transit' && !r.reattempting);
+    // The NDR-based cut of RTO. Overlaps the attempted/silent cut by design — see dpRto.
+    else if(state==='rto_first') list=list.filter(r=>r.rto_first);
+    else if(state==='rto_after_ndr') list=list.filter(r=>r.state==='rto' && !r.rto_first);
     else if(state!=='all') list=list.filter(r=>r.state===state);
     // ⚠️ NO courier filter here any more. Courier is a DASHBOARD-level filter — the server has already
     // excluded other couriers from `d.shipments`, so filtering again would be a second, independent copy

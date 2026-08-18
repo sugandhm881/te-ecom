@@ -6,7 +6,7 @@
 <title>Ecom Central</title>
 <link rel="icon" type="image/png" href="/static/assets/ecom-logo.png">
 <link rel="stylesheet" href="/static/tailwind.css"><!-- pre-built Tailwind — replaces the runtime cdn.tailwindcss.com JIT compiler (huge per-render cost) -->
-<link rel="stylesheet" href="/static/smooth.css?v=2026-08-17a"><!-- motion/polish layer — smoother popups/loaders/transitions on the SAME original colours -->
+<link rel="stylesheet" href="/static/smooth.css?v=2026-08-18a"><!-- motion/polish layer — smoother popups/loaders/transitions on the SAME original colours -->
 <link rel="stylesheet" href="/static/accent.css?v=2026-07-29a"><!-- accent recolour: indigo → login/welcome violet gradient (everything else unchanged) -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -2713,7 +2713,13 @@
             <div id="dp-value-warn" class="hidden text-sm rounded-lg px-4 py-2.5" style="background:#fffbeb;color:#92400e;border:1px solid #fde68a"></div>
             <div id="dp-kpis" class="grid grid-cols-2 lg:grid-cols-4 gap-5"></div>
             <div id="dp-status" class="flex flex-wrap gap-2 text-sm"></div>
-            <div id="dp-rto" class="flex flex-wrap items-center gap-2 text-sm"></div>
+            <!-- RTO and In-transit breakdowns share ONE line — they answer the same kind of question
+                 (what is inside this chip?) and reading them side by side is the point. Column/row gaps
+                 are inline because tailwind.css is prebuilt and `gap-y-2` is not compiled in it. -->
+            <div class="flex flex-wrap items-center text-sm" style="column-gap:2rem;row-gap:.5rem">
+              <div id="dp-rto" class="flex flex-wrap items-center gap-2"></div>
+              <div id="dp-transit" class="flex flex-wrap items-center gap-2"></div>
+            </div>
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4" id="dp-tat"></div>
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
               <div class="card p-5 lg:col-span-2">
@@ -2754,9 +2760,13 @@
                   <option value="rto">RTO (all)</option>
                   <option value="rto_attempted">RTO · after ≥1 attempt</option>
                   <option value="rto_silent">RTO · silent (no attempt)</option>
+                  <option value="rto_first">RTO 1st · no NDR raised</option>
+                  <option value="rto_after_ndr">RTO · after NDR</option>
                   <option value="lost">Lost</option>
                   <option value="ndr_pending">NDR pending</option>
                   <option value="in_transit">In-transit</option>
+                  <option value="reattempting">In-transit · reattempting (failed ≥1)</option>
+                  <option value="in_transit_fresh">In-transit · not attempted yet</option>
                   <option value="ndr_cohort">NDR cohort (≥1 failed attempt)</option>
                 </select>
                 <input id="dp-search" type="text" placeholder="Search order / AWB…" class="filter-input w-48">

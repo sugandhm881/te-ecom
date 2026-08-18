@@ -133,6 +133,20 @@ function summarizeAll(rows) {
     const ndrRto = ndr.filter(r => r.outcome === 'rto');
     const attemptsArr = [...delivered, ...rto].map(r => r.attempts || 0).filter(n => n > 0);
     const avgAttempts = attemptsArr.length ? Math.round((attemptsArr.reduce((a, b) => a + b, 0) / attemptsArr.length) * 100) / 100 : 0;
+
+    // FIRST-ATTEMPT PARTITION — four buckets that add up to `tracked` EXACTLY, answering "what happened
+    // at the door". They are mutually exclusive by construction:
+    //   1 delivered on the first attempt      2 RTO with no NDR ever raised (includes silent RTOs)
+    //   3 the NDR cohort                      4 whatever is still moving
+    // ⚠️ Bucket 3 is `ndr_count > 0`, deliberately the SAME definition the NDR Recovery card uses as its
+    // denominator, so the two cards state the same NDR total instead of two plausible different ones.
+    // ⚠️ Bucket 4 is named "still in transit", NOT "not attempted": some of it HAS been attempted and is
+    // going back out. Mislabelling a bucket by what most of it looks like is how "silent RTO" ended up
+    // reporting 143 when the true figure was 4.
+    const faNdrRows = rows.filter(r => (r.ndr_count || 0) > 0);
+    const faRtoRows = rows.filter(r => r.outcome === 'rto' && (r.ndr_count || 0) === 0);
+    const faTransitRows = rows.filter(r => !(r.outcome === 'delivered' && r.first_attempt_success)
+        && (r.ndr_count || 0) === 0 && r.outcome !== 'rto');
     const otd = tatSummary(rows.map(r => diff(r.order_date, r.dispatched_at, 'hrs')), BUCKETS_HRS, 'hrs');
     const dtd = tatSummary(delivered.map(r => diff(r.dispatched_at, r.delivered_at, 'days')), BUCKETS_DAYS, 'days');
     const ndrPendingCohort = ndr.filter(r => r.outcome === 'ndr_pending');
@@ -143,6 +157,8 @@ function summarizeAll(rows) {
         firstAttempt: firstAttempt.length, deliveredMulti,
         firstAttemptCount: firstAttempt.length, ndrTotal: ndr.length, ndrRecovered: ndrDelivered.length,
         rtoAttempted: rto.length - rto.filter(isSilentRto).length, rtoSilent: rto.filter(isSilentRto).length,
+        // First-attempt partition — these four sum to totalShipments exactly.
+        faDelivered: firstAttempt.length, faRto: faRtoRows.length, faNdr: faNdrRows.length, faTransit: faTransitRows.length,
         fasr: pct(firstAttempt.length, tracked), rtoRate: pct(rto.length, resolved),
         deliveredRate: pct(delivered.length, tracked), ndrRecoveryRate: pct(ndrDelivered.length, ndr.length),
         avgAttempts, otdAvg: otd.avg, dtdAvg: dtd.avg,
@@ -305,6 +321,16 @@ router.get('/delivery-performance', async (req, res) => {
         const directRto = rto.length - ndrRto.length;          // reconciles the NDR funnel to total RTO
         const silentRto = rto.filter(isSilentRto);              // genuinely never attempted (see isSilentRto)
 
+        // FIRST-ATTEMPT PARTITION — four mutually exclusive buckets summing to `tracked` (see the same
+        // block in summarizeAll for why bucket 3 is ndr_count>0 and bucket 4 is not called "not attempted").
+        // ⚠️ Defined here AND in summarizeAll because those build different periods; a field added to only
+        // one leaves the other period blank, which is exactly what happened on the first attempt at this.
+        const faNdrRows = rows.filter(r => (r.ndr_count || 0) > 0);
+        const faRtoRows = rows.filter(r => r.outcome === 'rto' && (r.ndr_count || 0) === 0);
+        const faTransitRows = rows.filter(r => !(r.outcome === 'delivered' && r.first_attempt_success)
+            && (r.ndr_count || 0) === 0 && r.outcome !== 'rto');
+        const transitRetry = inTransit.filter(hasAttemptEvidence);           // tried once, going back out
+
         const attemptsArr = [...delivered, ...rto].map(r => r.attempts || 0).filter(n => n > 0);
         const avgAttempts = attemptsArr.length ? Math.round((attemptsArr.reduce((a, b) => a + b, 0) / attemptsArr.length) * 100) / 100 : 0;
 
@@ -321,6 +347,9 @@ router.get('/delivery-performance', async (req, res) => {
             deliveredMulti,                               // "NDR" in the model (delivered after a failed attempt)
             fasr: pct(firstAttempt.length, tracked),      // First-Attempt ÷ Total Tracked (the trend uses the same base)
             fasrNumerator: firstAttempt.length,
+            // First-attempt partition — sums to totalShipments exactly. faNdr uses the same definition
+            // as the NDR Recovery card's denominator so the two cards never state different NDR totals.
+            faDelivered: firstAttempt.length, faRto: faRtoRows.length, faNdr: faNdrRows.length, faTransit: faTransitRows.length,
 // ⚠️ RTO RATE IS MEASURED ON SETTLED SHIPMENTS, NOT ALL TRACKED (changed 2026-08-08 by request):
 //     RTO% = RTO ÷ (delivered on 1st attempt + delivered after NDR + RTO) = RTO ÷ `resolved`.
 // A parcel still in transit or sitting on an open NDR has not had its chance to come back yet, so
@@ -450,6 +479,14 @@ router.get('/delivery-performance', async (req, res) => {
                 // filter cannot drift from the chips above it. Re-deriving it client-side is exactly how
                 // the two disagreed: the KPI said 4 while the list still returned 143.
                 silent: isSilentRto(r),
+                // Reattempting = the courier already tried, failed, and the parcel is moving again.
+                // Shipped as a verdict for the same reason as `silent`: the explorer must never
+                // re-derive a rule the cards above it own.
+                reattempting: r.outcome === 'in_transit' && hasAttemptEvidence(r),
+                // RTO that never entered the NDR process — the "RTO 1st" bucket on the FASR card.
+                // A DIFFERENT cut of the same RTO total than silent/attempted: this one splits by
+                // whether an NDR was ever raised, and it CONTAINS the silent ones.
+                rto_first: r.outcome === 'rto' && (r.ndr_count || 0) === 0,
                 payment: r.payment_mode || null, zone: r.zone || null, order_type: r.order_type || null,
                 dest_state: r.dest_state || null, dest_city: r.dest_city || null, dest_pincode: r.dest_pincode || null,
                 reasons: (r.ndr_reasons || []).slice(0, 5),
@@ -493,7 +530,19 @@ router.get('/delivery-performance', async (req, res) => {
             valueCoverage: valueStat || { total: 0, matched: 0, failedBatches: 0, complete: true },
             // Total RTO split by whether the courier ever attempted delivery — the 340/73 breakdown.
             rtoBreakdown: { attempted: rto.length - silentRto.length, silent: silentRto.length, total: rto.length,
-                attemptedValue: sumV(rto) - sumV(silentRto), silentValue: sumV(silentRto), totalValue: sumV(rto) },
+                attemptedValue: sumV(rto) - sumV(silentRto), silentValue: sumV(silentRto), totalValue: sumV(rto),
+                // A SECOND, independent cut of the same total: by whether an NDR was ever raised.
+                // first + afterNdr = total, just as attempted + silent = total. The two cuts overlap —
+                // `first` includes every silent RTO — so they must never be added together.
+                first: faRtoRows.length, afterNdr: rto.length - faRtoRows.length,
+                firstValue: sumV(faRtoRows), afterNdrValue: sumV(rto) - sumV(faRtoRows) },
+            // In-transit split the same way the RTO row splits: parcels the courier has already tried and
+            // is carrying back out, versus ones it has not reached yet. 518 of 574 never attempted is a
+            // pickup/linehaul story; the 56 reattempting are a delivery story. One number hid both.
+            transitBreakdown: { total: inTransit.length,
+                reattempting: transitRetry.length, fresh: inTransit.length - transitRetry.length,
+                totalValue: sumV(inTransit), reattemptingValue: sumV(transitRetry),
+                freshValue: sumV(inTransit) - sumV(transitRetry) },
             // NDR funnel is the cohort with ≥1 failed attempt; directRto reconciles it to TOTAL RTO.
             ndrFunnel: { total: ndr.length, recovered: ndrDelivered.length, lost: ndrRto.length, pending: ndrPending.length, directRto, totalRto: rto.length,
                 totalValue: sumV(ndr), recoveredValue: sumV(ndrDelivered), lostValue: sumV(ndrRto),

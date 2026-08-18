@@ -161,6 +161,64 @@ function check(name, got, want) {
         check('silent rto: no stale ndr_count test survives in the explorer',
             /rto_silent'\) list=list\.filter\(r=>r\.state==='rto' && \(r\.ndr_count\|\|0\)===0\)/.test(app), false);
     }
+    // The first-attempt split must PARTITION tracked (delivered-1st + failed-1st + not-attempted), and
+    // the failed cohort must account for every outcome including the rare `lost` — a breakdown whose
+    // parts do not add up is worse than no breakdown.
+    // ⚠️ THE CARD RENDERED BLANK THE FIRST TIME because the fields were added to summarizeAll() only —
+    // that builds the COMPARISON period; the current period's kpis object is assembled separately in the
+    // request handler. Any KPI field has to exist in BOTH or one period silently has none.
+    check('first attempt: the split exists in BOTH period builders',
+        (src.match(/faDelivered:/g) || []).length >= 2 && (src.match(/faTransit:/g) || []).length >= 2, true);
+    // The four buckets must PARTITION tracked: delivered-1st / RTO-with-no-NDR / NDR cohort / still moving.
+    check('first attempt: buckets are mutually exclusive by construction',
+        /faRtoRows = rows\.filter\(r => r\.outcome === 'rto' && \(r\.ndr_count \|\| 0\) === 0\)/.test(src)
+        && /faTransitRows = rows\.filter\(r => !\(r\.outcome === 'delivered' && r\.first_attempt_success\)/.test(src), true);
+    // The NDR bucket must be the SAME cohort the NDR Recovery card counts, or the two cards state
+    // different NDR totals for the same shipments.
+    check('first attempt: NDR bucket uses the NDR-cohort definition (ndr_count > 0)',
+        (src.match(/faNdrRows = rows\.filter\(r => \(r\.ndr_count \|\| 0\) > 0\)/g) || []).length >= 2, true);
+    // Reattempting is a subset of in-transit, shipped as a server verdict like `silent` so the explorer
+    // filter and the FASR card can never disagree.
+    check('reattempting: the server ships a per-row verdict',
+        /reattempting: r\.outcome === 'in_transit' && hasAttemptEvidence\(r\)/.test(src), true);
+    {
+        const app = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+        const html = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+        check('reattempting: the explorer filters on the server verdict',
+            /state==='reattempting'\) list=list\.filter\(r=>r\.reattempting\)/.test(app), true);
+        check('reattempting: the option exists in the explorer dropdown',
+            html.includes('value="reattempting"'), true);
+    }
+    check('reattempting: the in-transit breakdown row partitions in-transit',
+        /transitBreakdown: \{ total: inTransit\.length,/.test(src)
+        && /fresh: inTransit\.length - transitRetry\.length/.test(src), true);
+    {
+        const app2 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+        const html2 = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+        check('reattempting: both chips have a matching explorer filter',
+            /state==='in_transit_fresh'\) list=list\.filter/.test(app2)
+            && html2.includes('value="in_transit_fresh"'), true);
+        check('reattempting: the breakdown row is rendered next to the RTO row',
+            /dpTransit\(d\.transitBreakdown/.test(app2) && html2.includes('id="dp-transit"'), true);
+    }
+    // RTO is split two independent ways over the SAME total: by attempt evidence (attempted+silent) and
+    // by NDR (RTO-1st + after-NDR). They OVERLAP — every silent RTO is inside RTO-1st — so each cut must
+    // add to the total on its own and the four must never be summed together.
+    check('rto cuts: the NDR cut is shipped as its own pair, not a third term',
+        /first: faRtoRows\.length, afterNdr: rto\.length - faRtoRows\.length/.test(src), true);
+    check('rto cuts: RTO 1st is a per-row server verdict',
+        /rto_first: r\.outcome === 'rto' && \(r\.ndr_count \|\| 0\) === 0/.test(src), true);
+    {
+        const app3 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+        const html3 = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+        check('rto cuts: both new chips have explorer filters',
+            /state==='rto_first'\) list=list\.filter\(r=>r\.rto_first\)/.test(app3)
+            && /state==='rto_after_ndr'\) list=list\.filter/.test(app3)
+            && html3.includes('value="rto_first"') && html3.includes('value="rto_after_ndr"'), true);
+        check('rto cuts: silent is rendered as a SUBSET ("of which"), never as a third term of the sum',
+            app3.includes('of which') && /RTO 1st.*no NDR/.test(app3)
+            && !/chip\('rto_silent'[\s\S]{0,80}\+`<span class="text-slate-400">\+<\/span>`/.test(app3), true);
+    }
     check('silent rto: the claims report still filters on rto_no_attempt + rapidshyp',
         src.includes("rto_no_attempt', true)") && src.includes("eq('source', 'rapidshyp')"), true);
 }

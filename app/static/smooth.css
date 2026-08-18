@@ -62,3 +62,4 @@ header.backdrop-blur, header.backdrop-blur-sm, .sticky.backdrop-blur{ -webkit-ba
 @media (min-width:1600px){
   .p-8.mx-auto.w-full{ padding-left:2.5rem; padding-right:2.5rem; }
 }
+
