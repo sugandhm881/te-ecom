@@ -102,6 +102,20 @@ function tatSummary(values, buckets, unit) {
     return { avg, unit, count: vals.length, buckets: counts };
 }
 
+// A "silent" RTO means the courier NEVER ATTEMPTED DELIVERY — that is the claim we make against them,
+// so it has to be evidence-based. It used to be inferred as "RTO with no NDR record"
+// (`rto.length - ndrRto.length`), which held only for RapidShyp: that parser logs an NDR for every
+// failed attempt. Kwikship does not — a parcel can go out for delivery and be returned without any NDR
+// event ("Code verified cancellation"), and 139 of the 143 Kwikship RTOs labelled "silent · no
+// attempt" on 2026-08-18 had an out-for-delivery scan in their own timeline (TE25-41826 among them).
+// Only 4 were genuine.
+//
+// Now: silent = no evidence of an attempt ANYWHERE — no counted attempt, no OFD timestamp, no NDR.
+// Note the claims report (`fetchSilentRto`) was never affected: it filters on the parser-set
+// `rto_no_attempt` flag AND source='rapidshyp', so no wrong claim was ever emailed to a courier.
+const hasAttemptEvidence = r => (r.attempts || 0) > 0 || !!r.out_for_delivery_at || (r.ndr_count || 0) > 0;
+const isSilentRto = r => r.outcome === 'rto' && !hasAttemptEvidence(r);
+
 // Full metric summary for a row set — used for the previous period in compare mode. Carries the KPI
 // rates AND the partition counts / RTO split / TAT averages so the UI can show a delta everywhere.
 function summarizeAll(rows) {
@@ -128,7 +142,7 @@ function summarizeAll(rows) {
         inTransit: inTransit.length, ndrPending: pending.length,
         firstAttempt: firstAttempt.length, deliveredMulti,
         firstAttemptCount: firstAttempt.length, ndrTotal: ndr.length, ndrRecovered: ndrDelivered.length,
-        rtoAttempted: ndrRto.length, rtoSilent: rto.length - ndrRto.length,
+        rtoAttempted: rto.length - rto.filter(isSilentRto).length, rtoSilent: rto.filter(isSilentRto).length,
         fasr: pct(firstAttempt.length, tracked), rtoRate: pct(rto.length, resolved),
         deliveredRate: pct(delivered.length, tracked), ndrRecoveryRate: pct(ndrDelivered.length, ndr.length),
         avgAttempts, otdAvg: otd.avg, dtdAvg: dtd.avg,
@@ -288,7 +302,8 @@ router.get('/delivery-performance', async (req, res) => {
         const ndrLostCohort = ndr.filter(r => r.outcome === 'lost');   // rare, but must be shown or the split won't sum
         // "Silent" RTOs — returned WITHOUT a recorded failed delivery attempt (RTO'd at pickup /
         // undeliverable pre-dispatch / cancelled in transit). These are in total RTO but NOT the NDR cohort.
-        const directRto = rto.length - ndrRto.length;
+        const directRto = rto.length - ndrRto.length;          // reconciles the NDR funnel to total RTO
+        const silentRto = rto.filter(isSilentRto);              // genuinely never attempted (see isSilentRto)
 
         const attemptsArr = [...delivered, ...rto].map(r => r.attempts || 0).filter(n => n > 0);
         const avgAttempts = attemptsArr.length ? Math.round((attemptsArr.reduce((a, b) => a + b, 0) / attemptsArr.length) * 100) / 100 : 0;
@@ -431,6 +446,10 @@ router.get('/delivery-performance', async (req, res) => {
                 state: stateOf(r), outcome: r.outcome,
                 value: Number(r.order_value) || 0,        // ₹ order total — powers the revenue lens + table column
                 attempts: r.attempts || 0, ndr_count: r.ndr_count || 0,
+                // The SERVER decides silent-vs-attempted and ships the verdict, so the explorer's row
+                // filter cannot drift from the chips above it. Re-deriving it client-side is exactly how
+                // the two disagreed: the KPI said 4 while the list still returned 143.
+                silent: isSilentRto(r),
                 payment: r.payment_mode || null, zone: r.zone || null, order_type: r.order_type || null,
                 dest_state: r.dest_state || null, dest_city: r.dest_city || null, dest_pincode: r.dest_pincode || null,
                 reasons: (r.ndr_reasons || []).slice(0, 5),
@@ -473,8 +492,8 @@ router.get('/delivery-performance', async (req, res) => {
             // figures are UNDERSTATED — the UI says so rather than presenting a confident wrong total.
             valueCoverage: valueStat || { total: 0, matched: 0, failedBatches: 0, complete: true },
             // Total RTO split by whether the courier ever attempted delivery — the 340/73 breakdown.
-            rtoBreakdown: { attempted: ndrRto.length, silent: directRto, total: rto.length,
-                attemptedValue: sumV(ndrRto), silentValue: sumV(rto) - sumV(ndrRto), totalValue: sumV(rto) },
+            rtoBreakdown: { attempted: rto.length - silentRto.length, silent: silentRto.length, total: rto.length,
+                attemptedValue: sumV(rto) - sumV(silentRto), silentValue: sumV(silentRto), totalValue: sumV(rto) },
             // NDR funnel is the cohort with ≥1 failed attempt; directRto reconciles it to TOTAL RTO.
             ndrFunnel: { total: ndr.length, recovered: ndrDelivered.length, lost: ndrRto.length, pending: ndrPending.length, directRto, totalRto: rto.length,
                 totalValue: sumV(ndr), recoveredValue: sumV(ndrDelivered), lostValue: sumV(ndrRto),

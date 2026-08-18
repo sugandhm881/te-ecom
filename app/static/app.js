@@ -3561,7 +3561,7 @@ function updateInsightsKpis() {
     const pCodShare = Number(pv.total_orders || 0) > 0 ? (Number(pv.cod_orders || 0) / Number(pv.total_orders)) * 100 : 0;
 
     // 2. Render Helper
-    const renderKpi = (e, label, value, icon, deltaHtml, sub) => {
+    const renderKpi = (e, label, value, icon, deltaHtml, sub, extra) => {
         if (!e) return;
         e.innerHTML = `
             <div class="flex items-center">
@@ -3571,6 +3571,7 @@ function updateInsightsKpis() {
             <p class="text-2xl font-bold text-slate-900 mt-2">${value}</p>
             ${deltaHtml || '<p class="text-xs text-slate-400 mt-1">&nbsp;</p>'}
             ${sub ? `<p class="text-xs text-slate-400 mt-0.5">${sub}</p>` : ''}
+            ${extra || ''}
         `;
     };
 
@@ -3644,8 +3645,38 @@ function updateInsightsKpis() {
     renderKpi(el('kpi-insights-delrate'), 'Delivery Rate', `${delRate.toFixed(1)}%`, ICON.check,
         insDelta(delRate, pDelRate, 'up'), `of ${num(settled)} settled orders`);
 
+    // RTO rate, with cancellations broken out beside it. ⚠️ THE TWO RATES HAVE DIFFERENT DENOMINATORS
+    // and must never be added together: RTO is measured over orders that actually shipped and settled
+    // (delivered + RTO), while a cancellation usually happens BEFORE dispatch, so it is measured over
+    // every closed order (delivered + RTO + cancelled). The combined figure is therefore recomputed
+    // from the counts, not summed from the percentages -- 21.9% + 8.4% is not 28.5%.
+    // This is also the number the Ad Set Breakdown calls "RTO%", which is why that page reads higher.
+    const closed = settled + counts.cancelled;
+    const pClosed = pSettled + Number(pv.cancelled || 0);
+    const cancelRate = closed > 0 ? (counts.cancelled / closed) * 100 : 0;
+    const combinedRate = closed > 0 ? ((counts.rto + counts.cancelled) / closed) * 100 : 0;
+    const pCombined = pClosed > 0 ? ((Number(pv.rto || 0) + Number(pv.cancelled || 0)) / pClosed) * 100 : 0;
+    const lossRow = (dot, label, count, pct, denom) => `
+        <div class="flex items-center justify-between text-xs mt-1">
+            <span class="flex items-center gap-1.5 text-slate-500"><span class="inline-block w-1.5 h-1.5 rounded-full" style="background:${dot}"></span>${label}</span>
+            <span class="tabular-nums text-slate-600"><b>${pct.toFixed(1)}%</b> <span class="text-slate-400">${num(count)}/${num(denom)}</span></span>
+        </div>`;
     renderKpi(el('kpi-insights-rtorate'), 'RTO Rate', `${rtoRate.toFixed(1)}%`, ICON.pct,
-        insDelta(rtoRate, pRtoRate, 'down'), `of ${num(settled)} settled orders`);
+        insDelta(rtoRate, pRtoRate, 'down'), `of ${num(settled)} settled orders`,
+        `<div class="mt-2 pt-2 border-t border-slate-100">
+            ${lossRow('#f97316', 'RTO', counts.rto, rtoRate, settled)}
+            ${lossRow('#f43f5e', 'Cancelled', counts.cancelled, cancelRate, closed)}
+            <div class="flex items-center justify-between text-xs mt-1.5 pt-1.5 border-t border-slate-100">
+                <span class="font-semibold text-slate-600">Combined loss</span>
+                <span class="tabular-nums font-bold text-rose-600">${combinedRate.toFixed(1)}%</span>
+            </div>
+            <div class="h-1.5 rounded-full bg-slate-100 overflow-hidden flex mt-1.5" title="Share of ${num(closed)} closed orders">
+                <div style="width:${(counts.rto / Math.max(1, closed)) * 100}%;background:#f97316"></div>
+                <div style="width:${(counts.cancelled / Math.max(1, closed)) * 100}%;background:#f43f5e"></div>
+            </div>
+            <p class="text-xs text-slate-400 mt-1">Combined ${insPct(combinedRate, pCombined) === null ? 'vs prev n/a'
+                : (insPct(combinedRate, pCombined) >= 0 ? '▲' : '▼') + Math.abs(insPct(combinedRate, pCombined)).toFixed(1) + '% vs prev'} · of ${num(closed)} closed</p>
+        </div>`);
 
     renderKpi(el('kpi-insights-rtoloss'), 'RTO Loss', formatCurrency(sm.rto_loss), ICON.burn,
         insDelta(sm.rto_loss, pv.rto_loss, 'down'), 'value returned to us');
@@ -9904,9 +9935,11 @@ function dpRto(b,c){ const el=document.getElementById('dp-rto'); if(!el) return;
     const chip=(state,dot,label,val,cur,prev)=>`<button data-state="${state}" title="${dpAmtFull(val)}" class="dp-rchip inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg hover:border-red-400 transition-colors"><span class="w-2 h-2 rounded-full ${dot}"></span><span class="text-slate-500">${label}</span><b class="text-slate-800 tabular-nums">${dpAmt(val)}</b>${dpPP(cur,prev)}</button>`;
     el.innerHTML =
         `<span class="text-slate-500 mr-1">RTO <b class="text-slate-800">${dpAmt(tot)}</b> =</span>`+
-        chip('rto_attempted','bg-red-500','after ≥1 attempt', att, cShare(att), pShare(c&&(V?(cr?cr.ndrRtoCount:null):c.rtoAttempted)))+
+        // Previous-period share comes from the summary's own rtoAttempted / rtoSilent (both evidence-based).
+        // In the ₹ lens there is no prior split by value, so no comparison is shown rather than a wrong one.
+        chip('rto_attempted','bg-red-500','after ≥1 attempt', att, cShare(att), pShare(c&&(V?null:c.rtoAttempted)))+
         `<span class="text-slate-400">+</span>`+
-        chip('rto_silent','bg-rose-300','silent · no attempt', sil, cShare(sil), pShare(c&&(V?(cr?(cr.rto-cr.ndrRtoCount):null):c.rtoSilent)));
+        chip('rto_silent','bg-rose-300','silent · no attempt', sil, cShare(sil), pShare(c&&(V?null:c.rtoSilent)));
     el.querySelectorAll('.dp-rchip').forEach(x=>x.addEventListener('click',()=>{ const sel=document.getElementById('dp-state'); if(sel) sel.value=x.dataset.state; dpTableRender();
         document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }));
 }
@@ -10226,8 +10259,11 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
     if(state==='ndr_cohort') list=list.filter(r=>(r.ndr_count||0)>0);
     else if(state==='marked_fake') list=list.filter(r=>r.marked_fake);   // manually flagged likely-fake
     else if(state==='mail_sent') list=list.filter(r=>r.mail_sent);       // escalation email sent
-    else if(state==='rto_attempted') list=list.filter(r=>r.state==='rto' && (r.ndr_count||0)>0);
-    else if(state==='rto_silent') list=list.filter(r=>r.state==='rto' && (r.ndr_count||0)===0);
+    // ⚠️ `r.silent` comes from the SERVER (isSilentRto) — never re-test ndr_count here. These two lines
+    // used to read `(r.ndr_count||0)>0` / `===0`, which is the OLD definition: the chip said 4 silent
+    // while this list still handed back 143, most of them with an out-for-delivery scan.
+    else if(state==='rto_attempted') list=list.filter(r=>r.state==='rto' && !r.silent);
+    else if(state==='rto_silent') list=list.filter(r=>r.state==='rto' && r.silent);
     else if(state!=='all') list=list.filter(r=>r.state===state);
     // ⚠️ NO courier filter here any more. Courier is a DASHBOARD-level filter — the server has already
     // excluded other couriers from `d.shipments`, so filtering again would be a second, independent copy

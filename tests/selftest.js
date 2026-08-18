@@ -122,6 +122,47 @@ function check(name, got, want) {
         /'RTO',[\s\S]{0,160}insDelta\(sm\.rto, pv\.rto, 'down'\)/.test(app), true);
     check('insights: rates divide by SETTLED orders, not all orders',
         /const settled = counts\.delivered \+ counts\.rto/.test(app), true);
+    // RTO% and cancellation% have DIFFERENT denominators (settled vs closed), so the combined figure
+    // must be recomputed from counts. Summing the two percentages is arithmetically wrong.
+    check('insights: combined loss is recomputed from counts, not summed from percentages',
+        /\(\(counts\.rto \+ counts\.cancelled\) \/ closed\)/.test(app), true);
+    check('insights: cancellation rate uses closed orders as its denominator',
+        /const closed = settled \+ counts\.cancelled/.test(app) && /counts\.cancelled \/ closed/.test(app), true);
+}
+
+// ── 5. A "silent" RTO must mean the courier never attempted delivery ──────────────────────
+// Bug 2026-08-18: silent was inferred as "RTO with no NDR record", which holds only for RapidShyp.
+// Kwikship returns parcels without logging an NDR, so 139 of 143 Kwikship RTOs labelled "silent · no
+// attempt" had an out-for-delivery scan in their own timeline. Only 4 were genuine.
+{
+    const src = fs.readFileSync(path.join(ROOT, 'app/api/delivery_reports.js'), 'utf8');
+    const hasFn = src.match(/const hasAttemptEvidence = .*\r?\n/)[0];
+    const isFn  = src.match(/const isSilentRto = .*\r?\n/)[0];
+    // `const` stays inside the eval's own scope; `var` leaks into this block, which is what we need.
+    eval((hasFn + isFn).replace(/const /g, 'var '));
+
+    check('silent rto: an out-for-delivery scan means it WAS attempted (the Kwikship case)',
+        isSilentRto({ outcome: 'rto', attempts: 0, ndr_count: 0, out_for_delivery_at: '2026-08-16T09:16:00Z' }), false);
+    check('silent rto: a counted attempt means it WAS attempted',
+        isSilentRto({ outcome: 'rto', attempts: 1, ndr_count: 0, out_for_delivery_at: null }), false);
+    check('silent rto: a logged NDR means it WAS attempted',
+        isSilentRto({ outcome: 'rto', attempts: 0, ndr_count: 2, out_for_delivery_at: null }), false);
+    check('silent rto: no evidence anywhere → genuinely silent',
+        isSilentRto({ outcome: 'rto', attempts: 0, ndr_count: 0, out_for_delivery_at: null }), true);
+    check('silent rto: a delivered shipment is never silent',
+        isSilentRto({ outcome: 'delivered', attempts: 0, ndr_count: 0, out_for_delivery_at: null }), false);
+    // The chip and the explorer list must never disagree: the server ships one verdict per row and the
+    // client filters on it. Re-testing ndr_count client-side is what made the chip say 4 and the list 143.
+    check('silent rto: the server ships a per-row verdict', /silent: isSilentRto\(r\)/.test(src), true);
+    {
+        const app = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+        check('silent rto: the explorer filters on the server verdict, not ndr_count',
+            /state==='rto_silent'\) list=list\.filter\(r=>r\.state==='rto' && r\.silent\)/.test(app), true);
+        check('silent rto: no stale ndr_count test survives in the explorer',
+            /rto_silent'\) list=list\.filter\(r=>r\.state==='rto' && \(r\.ndr_count\|\|0\)===0\)/.test(app), false);
+    }
+    check('silent rto: the claims report still filters on rto_no_attempt + rapidshyp',
+        src.includes("rto_no_attempt', true)") && src.includes("eq('source', 'rapidshyp')"), true);
 }
 
 // ── 5. RapidShyp sync: transient failures must not raise a cron-failure card ─────────────────────
