@@ -336,6 +336,73 @@ async function syncRsCacheEasyecom(days = 30, opts = {}) {
     console.log(`[RS-EC Sync] done — refreshed ${ok}/${todo.length} into the cache`);
 }
 
+// ── Courier platform + courier per order, for the pickup-facing sections (2026-08-20, user ask:
+// the WH team chases a specific courier's van, so Ready-for-Pickup and Stuck are grouped by
+// “Platform · Courier”). Source of truth: shipment_journey_ecom (source + courier), joined on the
+// normalized order name — the journey never carries '#', Shopify names always do.
+const PLATFORM_LABEL_WH = { rapidshyp: 'RapidShyp', kwikship: 'KwikShip', docpharma: 'DocPharma' };
+function courierShort(c) {
+    const t = String(c || '');
+    for (const [re, label] of [[/delhivery/i, 'Delhivery'], [/ekart/i, 'Ekart'], [/amazon/i, 'Amazon'],
+        [/blue\s*dart/i, 'Bluedart'], [/xpress\s*bee/i, 'Xpressbees'], [/shadowfax/i, 'Shadowfax'],
+        [/ecom\s*exp/i, 'Ecom Express'], [/dtdc/i, 'DTDC'], [/speed\s*post/i, 'Speed Post']]) if (re.test(t)) return label;
+    // Unmapped couriers keep their FULL name - first-word truncation turned 'Speed Post' into a
+    // meaningless 'Speed' on the first dry run.
+    return t.trim() || null;
+}
+async function fetchPlatformCourier(names) {
+    const uniq = [...new Set((names || []).map(normName).filter(Boolean))];
+    const map = {};
+    for (let i = 0; i < uniq.length; i += 300) {
+        const { data } = await supabase.from('shipment_journey_ecom')
+            .select('order_name, source, courier').in('order_name', uniq.slice(i, i + 300));
+        (data || []).forEach(j => {
+            const k = normName(j.order_name);
+            if (!k || map[k]) return;
+            map[k] = {
+                platform: PLATFORM_LABEL_WH[String(j.source || '').toLowerCase()] || (j.source || null),
+                courier: courierShort(j.courier),
+            };
+        });
+    }
+    return map;
+}
+// Group orders into “Platform · Courier” buckets (largest first), unassigned last — those have no
+// journey row yet, i.e. no courier has been allocated, which is its own signal.
+function groupByCourier(orders, pc) {
+    const groups = new Map();
+    for (const o of orders) {
+        const info = pc[normName(o.name)];
+        const key = info && info.platform ? `${info.platform}${info.courier ? ' · ' + info.courier : ''}` : 'No courier assigned yet';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(o);
+    }
+    return [...groups.entries()].sort((a, b) => {
+        if (a[0] === 'No courier assigned yet') return 1;
+        if (b[0] === 'No courier assigned yet') return -1;
+        return b[1].length - a[1].length;
+    });
+}
+// Ready-for-Pickup grouped by “Platform · Courier” — one block per courier group, chunked inside
+// a group only when it alone would breach the 3000-char mrkdwn ceiling. Falls back to the flat
+// list when no courier is known for anything (journey unreachable) — a degraded report, never none.
+function groupedOrderBlocks(label, emoji, orders, pc) {
+    if (!orders.length) return [];
+    const grouped = groupByCourier(orders, pc);
+    if (grouped.length === 1 && grouped[0][0] === 'No courier assigned yet') return orderBlocks(label, emoji, orders);
+    const blocks = [{ type: 'section', text: { type: 'mrkdwn',
+        text: `${emoji} *${label}* — ${orders.length} order${orders.length === 1 ? '' : 's'} · by courier (oldest → newest within each)` } }];
+    const CHUNK = 60;
+    for (const [key, list] of grouped) {
+        for (let i = 0; i < list.length; i += CHUNK) {
+            const head = i === 0 ? `▸ *${key}* (${list.length})\n` : `▸ *${key}* (continued)\n`;
+            blocks.push({ type: 'section', text: { type: 'mrkdwn',
+                text: head + list.slice(i, i + CHUNK).map(o => `\`${o.name}\``).join('  ') } });
+        }
+    }
+    return blocks;
+}
+
 // Slack mrkdwn text limit is 3000 chars — chunk order names into safe blocks
 function orderBlocks(label, emoji, orders) {
     if (!orders.length) return [];
@@ -354,23 +421,25 @@ function orderBlocks(label, emoji, orders) {
 
 // The stuck list carries an age per order, so it cannot reuse orderBlocks (names only). Same 3000-char
 // mrkdwn ceiling, so it chunks too.
-function stuckBlocks(stuck) {
+function stuckBlocks(stuck, pc = {}) {
     if (!stuck.length) return [];
     const CHUNK = 40;
-    const blocks = [];
-    for (let i = 0; i < stuck.length; i += CHUNK) {
-        const prefix = i === 0
-            ? `🚨 *Stuck in Ready for Pickup — over ${STUCK_HOURS}h* (oldest first)\n_Labelled and still on our shelf — the courier hasn't collected._\n`
-            : `🚨 *Stuck over ${STUCK_HOURS}h* (continued)\n`;
-        blocks.push({
-            type: 'section',
-            text: { type: 'mrkdwn', text: prefix + stuck.slice(i, i + CHUNK).map(s => `\`${s.order.name}\` *${fmtAge(s.hours)}*`).join('   ') }
-        });
+    const blocks = [{ type: 'section', text: { type: 'mrkdwn',
+        text: `🚨 *Stuck in Ready for Pickup — over ${STUCK_HOURS}h* (${stuck.length}) · by courier, oldest first\n_Labelled and still on our shelf — that courier hasn't collected._` } }];
+    // Grouped by the courier whose van hasn't come — that is WHO to chase, the report's whole job.
+    const grouped = groupByCourier(stuck.map(s => s.order), pc);
+    const bySt = new Map(stuck.map(s => [normName(s.order.name), s]));
+    for (const [key, list] of grouped) {
+        for (let i = 0; i < list.length; i += CHUNK) {
+            const head = i === 0 ? `▸ *${key}* (${list.length})\n` : `▸ *${key}* (continued)\n`;
+            blocks.push({ type: 'section', text: { type: 'mrkdwn',
+                text: head + list.slice(i, i + CHUNK).map(o => { const st = bySt.get(normName(o.name)); return `\`${o.name}\` *${fmtAge(st ? st.hours : 0)}*`; }).join('   ') } });
+        }
     }
     return blocks;
 }
 
-function buildPayload(groups, start, end, readySince = {}) {
+function buildPayload(groups, start, end, readySince = {}, pc = {}) {
     const ready    = groups.READY_FOR_PICKUP || [];
     const confirmed = groups.CONFIRMED || [];
     const unful    = groups.UNFULFILLABLE || [];
@@ -397,11 +466,11 @@ function buildPayload(groups, start, end, readySince = {}) {
         },
         { type: 'divider' },
         // Above every other list on purpose: this is the one section that is someone's job right now.
-        ...stuckBlocks(stuck),
+        ...stuckBlocks(stuck, pc),
         ...(stuck.length ? [{ type: 'divider' }] : []),
         ...orderBlocks('Reallocation Required (RapidShyp)', '🔁', realloc),
-        ...orderBlocks('Ready for Pickup', '📦', ready),
-        ...orderBlocks('Confirmed', '✅', confirmed),
+        ...groupedOrderBlocks('Ready for Pickup', '📦', ready, pc),
+        ...groupedOrderBlocks('Confirmed', '✅', confirmed, pc),
         ...orderBlocks('Unfulfillable', '⛔', unful),
         { type: 'divider' },
         {
@@ -770,7 +839,7 @@ async function getDpRejectedOrders(groups, rsMap, handledSet, awbByName = {}) {
 
 // Warehouse ops report → warehouse-ops channel only. Last-30-day window (cutoff −offset).
 // EXCLUDES DocPharma-rejected orders (those belong only to the dp-to-mwh report) → no duplicates.
-async function sendWarehouseOpsReport(endOffsetDays = 2) {
+async function sendWarehouseOpsReport(endOffsetDays = 2, { dry = false } = {}) {
     const { start, end } = reportWindow(endOffsetDays);
     const res = await collectPendingGroups(start, end, `last-30d open orders (cutoff −${endOffsetDays}d)`);
     if (!res) { await postSlack({ text: '⚠️ Warehouse Ops Report failed to fetch orders.' }, WH_CHANNEL, { text: true }); return; }
@@ -803,10 +872,20 @@ async function sendWarehouseOpsReport(endOffsetDays = 2) {
         const readySince = ready.length ? await fetchReadySince(ready.map(o => o.name)) : {};
         const stuckCount = stuckReadyOrders(ready, readySince).length;
         const noAge = ready.filter(o => !readySince[normName(o.name)]).length;
+        // Courier grouping covers Ready-for-Pickup, Stuck AND Confirmed (user, 2026-08-20) — an
+        // order can be courier-allocated while Shopify still reads CONFIRMED, and those have a
+        // journey row to group on; the rest fall under “No courier assigned yet”, its own signal.
+        // Unfulfillable stays flat: nothing is allocated on a dead order.
+        const confirmed = groups.CONFIRMED || [];
+        const pcNames = [...ready, ...confirmed].map(o => o.name);
+        const pc = pcNames.length ? await fetchPlatformCourier(pcNames) : {};
         console.log(`[WH Report] Ready=${ready.length} · stuck >${STUCK_HOURS}h=${stuckCount}${noAge ? ` · ${noAge} with no EasyEcom timestamp (not aged)` : ''}`);
-        await postSlack(buildPayload(groups, start, end, readySince), WH_CHANNEL, { text: true });
+        const payload = buildPayload(groups, start, end, readySince, pc);
+        if (dry) { console.log('[WH Report] DRY RUN — nothing posted'); return payload; }
+        await postSlack(payload, WH_CHANNEL, { text: true });
         console.log('[WH Report] Sent to warehouse-ops');
     }
+    return null;
 }
 
 // Separate report → DocPharma-rejected orders ONLY, over the last-30-days window, to dp-to-mwh-orders.

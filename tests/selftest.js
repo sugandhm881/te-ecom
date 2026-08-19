@@ -414,6 +414,27 @@ function check(name, got, want) {
         /#dp-basket-bar\{ background:#0f172a/.test(css) && !/bg-white\/10/.test(ui), true);
 }
 
+// ── 4f. WH Ops report: pickup sections grouped by Platform · Courier ───────────────────────
+// 2026-08-20 user ask: the WH team chases a specific courier's van, so Ready-for-Pickup and Stuck
+// name the platform and courier per group. Exercised through the real helpers.
+{
+    const src = fs.readFileSync(path.join(ROOT, 'app/api/warehouse_slack_report.js'), 'utf8');
+    const grab = name => src.match(new RegExp('(const|function) ' + name + '[\\s\\S]*?\\n(?=const |function |async function |// )'))[0];
+    const normName = n => String(n || '').replace('#', '').trim();
+    eval(grab('PLATFORM_LABEL_WH')); eval(grab('courierShort')); eval(grab('groupByCourier'));
+    check('wh report: courier names are normalised without losing identity',
+        [courierShort('Delhivery Enterprise'), courierShort('Blue Dart Air'), courierShort('Speed Post')],
+        ['Delhivery', 'Bluedart', 'Speed Post']);
+    const pc = { 'TE25-1': { platform: 'RapidShyp', courier: 'Delhivery' }, 'TE25-2': { platform: 'RapidShyp', courier: 'Delhivery' }, 'TE25-3': { platform: 'KwikShip', courier: 'Shadowfax' } };
+    const g = groupByCourier([{ name: '#TE25-1' }, { name: '#TE25-2' }, { name: '#TE25-3' }, { name: '#TE25-4' }], pc);
+    check('wh report: groups sort largest first, unassigned last',
+        g.map(x => x[0]), ['RapidShyp · Delhivery', 'KwikShip · Shadowfax', 'No courier assigned yet']);
+    check('wh report: the stuck list is grouped by the courier to chase',
+        /stuckBlocks\(stuck, pc\)/.test(src) && /groupedOrderBlocks\('Ready for Pickup'/.test(src) && /groupedOrderBlocks\('Confirmed'/.test(src), true);
+    check('wh report: a dry run builds the payload and posts nothing',
+        /if \(dry\) \{ console\.log\('\[WH Report\] DRY RUN[\s\S]{0,60}return payload; \}/.test(src), true);
+}
+
 // ── 5. RapidShyp sync: transient failures must not raise a cron-failure card ─────────────────────
 // Bug 2026-08-17: an 8s timeout on 3 AWBs turned a 13-minute run into "❌ Cron failed". The job only
 // fetches AWBs with no row yet, so a failure self-heals on the next run two hours later — while a
