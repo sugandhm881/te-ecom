@@ -182,36 +182,48 @@ router.post('/inventory/refresh-snapshot', async (req, res) => {
 async function sendInventoryTeamsReport() {
     const url = config.TEAMS_WEBHOOK_INVENTORY || config.TEAMS_WEBHOOK_WAREHOUSE || process.env.TEAMS_WEBHOOK_WAREHOUSE;
     if (!url) { console.log('[Inventory] no Teams webhook (TEAMS_WEBHOOK_INVENTORY/_WAREHOUSE) — skipping report'); return false; }
+
+    // ── Recommended Order list — computed FIRST, because its rows ride along to the edge fn, which
+    // renders them as a second PNG in the same style as the stock table. Why an image and not a card
+    // table: an Adaptive Card cannot scroll horizontally and is ~360px on Teams mobile, so a table
+    // WILL truncate — ten columns gave one-letter headers, and even the five-column regrouping still
+    // clipped every cell (both reported from a phone, 2026-08-19). The image restores the full
+    // ten-column detail and is pinch-zoomable in Teams via allowExpand.
+    //    Recommend Qty = DRR(30d) × 45 − stock (units still needed)
+    //    Case Qty      = Recommend Qty ÷ case size, rounded UP  →  how many CASES to actually order
+    //    Order Units   = Case Qty × case size (what lands in the warehouse)
+    // The open-PO subtraction stays HERE (EasyEcom lookups) — the edge fn only renders what it is
+    // sent, so there is no second copy of this rule to drift. If EasyEcom is unreachable we render
+    // WITHOUT the subtraction and the caption says so, rather than dropping the whole report.
+    let need = [], poFailed = false;
+    try {
+        let openPo = {};
+        const [{ rows: snapRows }, caseSizes] = await Promise.all([loadLatestSnapshot(), fetchCaseSizes()]);
+        try { openPo = (await openPoQtyBySku()).bySku || {}; }
+        catch (e) { poFailed = true; console.warn('[Inventory] open PO lookup failed — reorder shown WITHOUT PO subtraction:', e.message); }
+        need = buildReorder(snapRows, caseSizes, openPo)
+            .filter(r => r.needsOrder)
+            .sort((a, b) => (a.doi == null ? 1e9 : a.doi) - (b.doi == null ? 1e9 : b.doi));
+    } catch (e) { console.error('[Inventory] reorder list failed (report still sent):', e.message); }
+
     let img;
     try {
-        const r = await axios.post(`${config.SUPABASE_URL}/functions/v1/inventory-doi-image-teams`, {}, {
+        const reorder = need.map(r => ({
+            sku: r.sku, stock: r.stock, drr: r.drr, doi: r.doi,
+            raw_qty: r.raw_qty, open_po: r.open_po || 0, net_qty: r.net_qty,
+            case_size: r.case_size || null, cases: r.cases, order_qty: r.order_qty, poCovered: !!r.poCovered,
+        }));
+        const r = await axios.post(`${config.SUPABASE_URL}/functions/v1/inventory-doi-image-teams`, { reorder }, {
             headers: { Authorization: `Bearer ${config.SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
             timeout: 120000, validateStatus: () => true });
         if (r.status >= 400 || !r.data || !r.data.ok) throw new Error((r.data && r.data.error) || `inventory-doi-image-teams returned ${r.status}`);
         img = r.data;
     } catch (e) { console.error('[Inventory] DOI image render failed:', e.message); return false; }
-    const { image_url, label, rows: nRows, critical, watch, stockouts, warehouses = [] } = img;
+    const { image_url, reorder_image_url, label, rows: nRows, critical, watch, stockouts, warehouses = [] } = img;
     const whLine = warehouses.map(w => `${w.warehouse}: ${w.count}${w.oos ? ` (${w.oos} OOS)` : ''}`).join('  ·  ');
 
-    // ── Recommended Order list — sits directly ABOVE the "Ecom Central · Inventory Analytics" footer.
-    //    Recommend Qty = DRR(30d) × 45 − stock (units still needed)
-    //    Case Qty      = Recommend Qty ÷ case size, rounded UP  →  how many CASES to actually order
-    //    Order Units   = Case Qty × case size (what lands in the warehouse)
-    //    Only SKUs that actually need ordering. Rendered as a `table` block: a code fence renders as
-    //    literal backticks in Teams and collapses the padding, so alignment has to come from the card.
     let orderBlocks = [];
     try {
-        // Open PO units are fetched alongside the snapshot. If EasyEcom is unreachable we fall back to
-        // an empty map rather than dropping the whole report — the table then reads exactly as it did
-        // before this feature, and the caption says the subtraction was skipped.
-        let openPo = {}, poFailed = false;
-        const [{ rows: snapRows }, caseSizes] = await Promise.all([loadLatestSnapshot(), fetchCaseSizes()]);
-        try { openPo = (await openPoQtyBySku()).bySku || {}; }
-        catch (e) { poFailed = true; console.warn('[Inventory] open PO lookup failed — reorder shown WITHOUT PO subtraction:', e.message); }
-
-        const need = buildReorder(snapRows, caseSizes, openPo)
-            .filter(r => r.needsOrder)
-            .sort((a, b) => (a.doi == null ? 1e9 : a.doi) - (b.doi == null ? 1e9 : b.doi));
         if (need.length) {
             const n = v => Number(v || 0).toLocaleString('en-IN');
             const units = need.reduce((s, r) => s + r.order_qty, 0);
@@ -219,54 +231,57 @@ async function sendInventoryTeamsReport() {
             const noCase = need.filter(r => !r.case_size && r.net_qty > 0).length;
             const covered = need.filter(r => r.poCovered);
             const toOrder = need.filter(r => !r.poCovered);
-            // ⚠️ COLUMN COUNT IS THE CONSTRAINT, NOT THE DATA. A Teams card is far narrower than the
-            // composer suggests: at ten columns every cell truncated to "16,8…" / "TE-BD…". Rather
-            // than drop fields, related ones are GROUPED into a single cell — same ten numbers, seven
-            // columns, which is the width that rendered cleanly before this feature was added.
-            //   DRR · DOI          → one cell ("409.29 · 3.9d")
-            //   Case Qty × Size    → one cell ("1 × 116 = 351"), which also carries Order Units
+            // ⚠️ COLUMN COUNT IS THE CONSTRAINT, NOT THE DATA — and the binding case is a PHONE, where
+            // the card is ~360px however wide the desktop renders it (`msteams.width: Full` does not
+            // apply on mobile). At ten columns every cell AND every header truncated to one letter
+            // ("S…" / "T…" — reported from Teams mobile 2026-08-19). Five columns is what actually
+            // fits a phone, so related figures are GROUPED and derivable ones moved, not dropped:
+            //   Stock · DOI     → one cell ("347 · 0.8d")
+            //   Need            → the post-PO net quantity; "✓ on PO" when fully covered
+            //   Cases           → case qty × case size ("4 × 116")
+            //   DRR             → already on the image directly above this table, per SKU
+            //   Recommend − PO  → a note under the table naming each SKU whose PO was subtracted,
+            //                     with the arithmetic ("TE-X 1,120 − PO 500 → 620")
             // Every SKU that was short stays listed, including ones fully covered by a PO — a
             // critical-looking SKU vanishing from the sheet is exactly the confusion to avoid.
             const table = {
                 type: 'table',
                 columns: [
                     { title: 'SKU', width: 3 },
-                    { title: `DRR/${DRR_WINDOW_DAYS}d`, width: 2 },
-                    { title: 'DOI', width: 2 },
-                    { title: 'Stock', width: 2 },
-                    { title: 'Recommend Qty', width: 3 },
-                    { title: 'Raised PO', width: 2 },
-                    { title: 'Final Qty', width: 2 },
-                    { title: 'Case Size', width: 2 },
-                    { title: 'Case Qty', width: 2 },
+                    { title: 'Stock · DOI', width: 2 },
+                    { title: 'Need', width: 2 },
+                    { title: 'Cases', width: 2 },
                     { title: 'Order Units', width: 2 },
                 ],
                 rows: need.map(r => [
                     r.sku,
-                    r.drr.toFixed(2),
-                    r.doi == null ? '—' : r.doi.toFixed(1) + 'd',
-                    n(r.stock),
-                    n(r.raw_qty),
-                    r.open_po ? n(r.open_po) : '—',
+                    `${n(r.stock)} · ${r.doi == null ? '—' : r.doi.toFixed(1) + 'd'}`,
                     // Fully covered by an open PO — say so rather than showing a bare 0.
                     r.poCovered ? '✓ on PO' : n(r.net_qty),
-                    r.case_size ? n(r.case_size) : '—',
-                    r.poCovered ? '—' : (r.case_size ? n(r.cases) : '—'),
+                    r.poCovered ? '—' : (r.case_size ? `${n(r.cases)} × ${n(r.case_size)}` : '—'),
                     r.poCovered ? '—' : (r.case_size ? n(r.order_qty) : n(r.net_qty) + '*'),
                 ]),
-                total: ['TOTAL', '', '', '', '', '', '', '', n(cases), n(units)],
+                total: ['TOTAL', '', '', n(cases), n(units)],
             };
+            // The Recommend-Qty → Raised-PO → Need arithmetic, only for SKUs where a PO actually
+            // changed the number — as a wrapping note instead of three table columns.
+            const poAdjusted = need.filter(r => r.open_po && !r.poCovered);
             const title = `🧾 *Recommended Order* — ${toOrder.length} SKU${toOrder.length === 1 ? '' : 's'} to order  ·  ${n(cases)} cases  ·  ${n(units)} units`;
             const notes = [];
             // Name the covered SKUs. "7 SKUs are covered" makes a buyer go hunting; the list answers
             // "why isn't TE-BDR1 on the sheet when it shows 3.9 days of stock?" without them asking.
             if (covered.length) notes.push(`_✅ Already on order — nothing to buy: *${covered.map(r => r.sku).join('*, *')}* (${n(covered.reduce((s, r) => s + r.open_po, 0))} units across ${covered.length} SKU${covered.length > 1 ? 's' : ''})._`);
+            // The PO-arithmetic note only accompanies the FALLBACK table — the image has Raised PO as a column.
+            if (poAdjusted.length && !reorder_image_url) notes.push(`_📦 Open PO subtracted: ${poAdjusted.map(r => `*${r.sku}* ${n(r.raw_qty)} − PO ${n(r.open_po)} → ${n(r.net_qty)}`).join(' · ')}_`);
             if (noCase) notes.push(`_* ${noCase} SKU${noCase > 1 ? 's have' : ' has'} no case size on file — raw quantity shown._`);
             if (poFailed) notes.push(`_⚠️ Open POs could not be read from EasyEcom — **Raised PO not subtracted**, quantities may be over-stated._`);
+            // The order sheet is the PNG whenever the edge fn produced one — full ten-column detail,
+            // pinch-zoomable in Teams. The five-column card table exists ONLY as the fallback for a
+            // failed render, so a broken image pipeline degrades the layout, never the report.
             orderBlocks = [
                 { type: 'divider' },
                 { type: 'section', text: { type: 'mrkdwn', text: title } },
-                table,
+                reorder_image_url ? { type: 'image', image_url: reorder_image_url, alt_text: `Recommended Order — Shifupro — ${label}` } : table,
                 ...(notes.length ? [{ type: 'context', elements: notes.map(text => ({ type: 'mrkdwn', text })) }] : []),
             ];
         }

@@ -41,7 +41,8 @@ function slackToHtml(payload) {
             else if (b.type === 'section' && b.text) parts.push(mrkdwnHtml(b.text.text));
             else if (b.type === 'section' && Array.isArray(b.fields)) parts.push(b.fields.map(f => mrkdwnHtml(f.text)).join('<br>'));
             else if (b.type === 'context' && Array.isArray(b.elements)) parts.push(mrkdwnHtml(b.elements.map(e => e.text || '').join('  ')));  // context text already carries its own _italics_
-            else if (b.type === 'image' && b.image_url) parts.push(`<img src="${b.image_url}" alt="${String(b.alt_text || '').replace(/"/g, '&quot;')}" style="max-width:100%;border-radius:8px">`);
+            // Linked for the same reason the card Image carries a selectAction — tap to open full size.
+            else if (b.type === 'image' && b.image_url) parts.push(`<a href="${b.image_url}"><img src="${b.image_url}" alt="${String(b.alt_text || '').replace(/"/g, '&quot;')}" style="max-width:100%;border-radius:8px"></a>`);
             else if (b.type === 'table' && Array.isArray(b.rows)) parts.push(tableToHtml(b));
             // dividers dropped — the blank line between parts already separates sections
         }
@@ -154,7 +155,13 @@ function slackToCardBody(payload, rich = false) {
                 ] });
             }
             else if (b.type === 'context' && Array.isArray(b.elements)) push({ type: 'TextBlock', text: mrkdwn(b.elements.map(e => e.text || '').join('  ')), isSubtle: true, size: 'Small', wrap: true });
-            else if (b.type === 'image' && b.image_url) push({ type: 'Image', url: b.image_url, altText: String(b.alt_text || ''), size: 'Stretch' });
+            // `msteams.allowExpand` makes the image TAPPABLE IN TEAMS ITSELF — tap opens Teams' native
+            // full-screen viewer with pinch-zoom. Without it a card image does nothing on tap (mobile
+            // especially), so a dense report PNG was stuck at phone width. ⚠️ NOT a selectAction with
+            // Action.OpenUrl: that was tried first and it opens the raw file in the BROWSER, which the
+            // user explicitly rejected (2026-08-19) — the viewer must be Teams' own.
+            else if (b.type === 'image' && b.image_url) push({ type: 'Image', url: b.image_url, altText: String(b.alt_text || ''), size: 'Stretch',
+                msteams: { allowExpand: true } });
             else if (b.type === 'table' && Array.isArray(b.rows)) push(rich ? tableToNativeCard(b) : tableToCard(b));
             else if (b.type === 'divider') pendingSep = true;
         }

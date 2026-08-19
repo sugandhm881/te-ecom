@@ -267,6 +267,153 @@ function check(name, got, want) {
         /const SETTLED_BUCKETS = \['delivered', 'rto'\];/.test(src), true);
 }
 
+// ── 4c. Teams reports must survive a phone ──────────────────────────────────────────────────────
+// Bug 2026-08-19 (reported from Teams mobile): the reorder table had grown to TEN columns — at phone
+// width every header truncated to one letter — and the report image did nothing when tapped, because a
+// card Image never opens Teams' viewer without an explicit selectAction. The column comment had already
+// drifted from the code once (said 7, had 10), so both constraints are enforced here, through the REAL
+// renderer rather than by grepping the source.
+{
+    const { buildCard } = require(path.join(ROOT, 'app/api/teams'));
+    const inv = fs.readFileSync(path.join(ROOT, 'app/api/inventory.js'), 'utf8');
+    const colTitles = [...inv.match(/const table = \{[\s\S]*?columns: \[([\s\S]*?)\]/)[1].matchAll(/title: '([^']*)'/g)].map(m => m[1]);
+    check('teams mobile: the reorder table fits a phone (≤5 columns)', colTitles.length <= 5, true);
+    const payload = { blocks: [
+        { type: 'image', image_url: 'https://x.test/r.png', alt_text: 'r' },
+        { type: 'table', columns: colTitles.map(t => ({ title: t })), rows: [colTitles.map(() => '1')] },
+    ] };
+    for (const rich of [false, true]) {
+        const card = buildCard(payload, { rich }).attachments[0].content;
+        const img = card.body.find(x => x.type === 'Image');
+        // allowExpand = Teams' OWN full-screen viewer. A selectAction/Action.OpenUrl also fails this on
+        // purpose: it opens the browser, which the user rejected — the image must expand inside Teams.
+        check(`teams mobile: the ${rich ? 'bot (1.5)' : 'webhook (1.4)'} card image expands inside Teams`,
+            [!!(img.msteams && img.msteams.allowExpand), !!img.selectAction], [true, false]);
+        const tbl = card.body.find(x => x.type === (rich ? 'Table' : 'ColumnSet'));
+        check(`teams mobile: the ${rich ? 'bot' : 'webhook'} table renders every column`, tbl.columns.length, colTitles.length);
+    }
+}
+
+// ── 4d. PO SKU picker: a new product must be orderable the day it is created ────────────────────
+// Bug 2026-08-19: the picker was built ONLY from PO history, so the FIRST order of every new SKU was
+// impossible (TE-ABD1, created that afternoon, matched nothing). The fix unions the live EasyEcom
+// product master. These pin the load-bearing parts of that union.
+{
+    const po = fs.readFileSync(path.join(ROOT, 'app/api/purchase_orders.js'), 'utf8');
+    const ui = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    check('po picker: the catalogue reaches the live product master, not just PO history',
+        /GetProductMaster/.test(po) && /neverOrdered: true/.test(po), true);
+    // Bearer-only is a 403 on this endpoint (verified live) — losing the x-api-key header would break
+    // the master fetch while every PO endpoint kept working, which is exactly the hard-to-spot kind.
+    check('po picker: the master fetch sends both auth headers',
+        /fetchProductMaster[\s\S]{0,600}'x-api-key': config\.EASYECOM_API_KEY/.test(po), true);
+    check('po picker: bundles are not offered as purchasable',
+        /product_type !== 'combo_product'/.test(po), true);
+    // Master tax_rate is a fraction (0.05 = 5%); feeding it through unconverted would suggest 0% GST.
+    check('po picker: the master tax fraction is converted to a percent', (() => {
+        eval(po.match(/const pctFromFraction = [^\n]+\n/)[0].replace('const ', 'globalThis._pf = '));
+        return [_pf(0.05), _pf(0.18), _pf(null), _pf(18)];
+    })(), [5, 18, null, null]);
+    check('po picker: the UI renders a never-ordered row instead of "₹null"',
+        /neverOrdered \? `new/.test(ui) && /o\.lastPrice != null \? o\.lastPrice : o\.masterCost/.test(ui), true);
+}
+
+// ── 4e. Escalation sheet push: the row mapping is the contract with the courier ─────────────────
+// The basket's sheet exit (2026-08-19) appends rows to a Google Sheet SHARED WITH RAPIDSHYP, so a
+// mapping drift is visible to a partner, not just to us. These exercise the real helper functions.
+{
+    const src = fs.readFileSync(path.join(ROOT, 'app/api/delivery_reports.js'), 'utf8');
+    const grab = name => src.match(new RegExp('(const|function) ' + name + '[\\s\\S]*?\\n(?=const |function |// |router)'))[0];
+    eval(grab('sheetCourierName')); eval(grab('_istD')); eval(grab('sheetEdd')); eval(grab('sheetTypeFor'));
+    check('escalation sheet: the courier cell uses the last-mile name the sheet filters on',
+        [sheetCourierName('DelhiveryDirectSurface500G'), sheetCourierName('Ekart Brands'), sheetCourierName('Shadowfax')],
+        ['Delhivery', 'Ekart', 'Shadowfax']);
+    check('escalation sheet: an NDR shipment is typed Reattempt/Fake NDR whatever its EDD says',
+        sheetTypeFor({ ndr_count: 2, first_edd: '2020-01-01' }), 'Reattempt/Fake NDR');
+    check('escalation sheet: a breached promise with no attempt is typed EDD Breached',
+        sheetTypeFor({ ndr_count: 0, first_edd: '2020-01-01' }), 'EDD Breached_no attempt');
+    check('escalation sheet: the JWT is built with the options object, never positional args',
+        /new google\.auth\.JWT\(\{ email:/.test(src) && !/new google\.auth\.JWT\([a-z]/.test(src), true);
+    // A repeat push must be appended and MARKED, not skipped — the sheet's own Duplicate column is the
+    // team's dedup mechanism, and silently dropping a row would hide a repeat escalation from them.
+    check('escalation sheet: repeats are marked Duplicate, not silently skipped',
+        /dup \? 'Duplicate' : ''/.test(src) && !/have\.has[\s\S]{0,80}continue/.test(src), true);
+    // The sheet is shared WITH RapidShyp — a KwikShip/DocPharma AWB on it escalates to a partner who
+    // never carried the parcel. Non-RS shipments must be filtered AND reported back (they stay in the
+    // basket for the email), never silently dropped and never pushed.
+    check('escalation sheet: only rapidshyp-sourced shipments are pushed',
+        /source \|\| ''\)\.toLowerCase\(\) === 'rapidshyp'/.test(src), true);
+    check('escalation sheet: skipped shipments are reported back, not swallowed',
+        /skippedAwbs: skippedRows\.map/.test(src), true);
+    const ui = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    check('escalation sheet: the basket keeps non-RapidShyp shipments after a push',
+        /pushedAwbs \|\| awbs\)\.forEach\(a => \{ _dpBasket\.delete\(a\)/.test(ui), true);
+    // The Agent column is a dropdown; a raw portal username gets the red not-on-the-list flag on every
+    // row. The matcher must map "sugandhm881" to the sheet's own "Sugandh" and fall back visibly.
+    eval(grab('matchAgentOption'));
+    check('escalation sheet: the portal user maps to the sheet Agent dropdown',
+        [matchAgentOption('sugandhm881@x', ['Diksha', 'Shaveta', 'Sugandh', 'Anadita', 'Ashish']),
+         matchAgentOption('diksha@x', ['Diksha', 'Sugandh']),
+         matchAgentOption('nobody@x', ['Diksha', 'Sugandh'])],
+        ['Sugandh', 'Diksha', 'nobody']);
+    // The bar's colours must live in real CSS — plain bg-slate-900 / bg-white\/10 / z-[60] are NOT in
+    // the prebuilt tailwind.css, which is how the bar shipped as a white pill with white text.
+    const css = fs.readFileSync(path.join(ROOT, 'app/static/smooth.css'), 'utf8');
+    // A sheet push is NOT an email. It wore the ✉️ badge and the “Escalation sent — thread will
+    // appear…” footer, telling the agent a mail was sent that never was (user, 2026-08-19).
+    check('escalation sheet: a sheet push never wears the mail badge',
+        /sheet_pushed: sheetSet\.has/.test(src) && /mark_type === 'critical_mail_sent'/.test(src), true);
+    check('escalation sheet: the UI gives sheet pushes their own badge and viewer',
+        /Pushed to escalation sheet/.test(ui) && /dp-view-sheet/.test(ui) && /dpSheetThreadHtml/.test(ui), true);
+    // The agent's reason, typed at add-to-basket, must beat the batch override, which beats auto.
+    // Skip stores an EXPLICIT '' and the sheet cell must stay BLANK - a truthiness test anywhere
+    // in the chain would quietly resurrect the auto text the user asked to remove.
+    check('escalation sheet: a skipped reason stays blank on the sheet, not auto-filled',
+        /hasOwnProperty\.call\(perAwbReason/.test(src) && /a in _dpBasketReasons/.test(ui), true);
+    check('escalation sheet: per-AWB reason wins over batch over auto',
+        /hasOwnProperty\.call\(perAwbReason[\s\S]{0,220}reasonOverride \|\| sheetReasonFor\(j\)/.test(src), true);
+    // The one add door is the Call Queue button; DP's add was removed 2026-08-19 on request.
+    check('escalation sheet: adding to the basket asks for the reason',
+        /dpBasketReasonModal\(awb,/.test(ui) && /_dpBasketReasons\[awb\] = reason/.test(ui), true);
+    // 2026-08-19 refinements: the EDD column is the TEAM's to maintain (never filled from our
+    // side), the TYPE is chosen per AWB at add time, and the basket also lives on the Call Queue
+    // Undelivered tab (its home for the support team).
+    check('escalation sheet: the EDD cell is never filled from our side',
+        /'' \/\* EDD/.test(src) && !/sheetEdd\(j\.first_edd\), ''/.test(src), true);
+    check('escalation sheet: per-AWB type wins over batch over auto',
+        /perAwbType\[String\(j\.awb\)\] \|\| ''\)\.trim\(\) \|\| typeOverride \|\| sheetTypeFor\(j\)/.test(src), true);
+    check('escalation sheet: the add popup asks for the type too',
+        /dp-bk-type/.test(ui) && /_dpBasketTypes\[awb\] = ty/.test(ui), true);
+    check('escalation sheet: the basket lives on the Call Queue Undelivered tab',
+        /supBasketBtn/.test(ui) && /_supTab!=='und'\|\|!r\.awb_number/.test(ui.replace(/\s/g, '')), true);
+    // Late 2026-08-19: no Auto in the type dropdown (agent picks a concrete type), non-RapidShyp
+    // adds go straight in (their exit is the email), and the Undelivered tab shows WHEN each
+    // escalation left (date+time from the marks) with the same response viewers as DP.
+    // The dropdown mirrors the SHEET's own validation list (19 values today) via
+    // /escalation-sheet/options — a hardcoded subset went stale the day it shipped. No Auto either.
+    check('escalation sheet: the type dropdown is built from the sheet, with no Auto option',
+        /dp-bk-type[\s\S]{0,140}types\.map\(t => `<option>/.test(ui)
+        && /escalation-sheet\/options/.test(ui)
+        && !/Auto — from the shipment/.test(ui), true);
+    check('escalation sheet: the options endpoint reads the sheet validation',
+        /escalation-sheet\/options[\s\S]{0,400}readValidationList\(sheets, 'G2:G2'\)/.test(src), true);
+    // The bar's sheet exit exists only when the basket holds a RapidShyp order — an email-only
+    // basket (KwikShip/DocPharma) must not offer a button the server would refuse.
+    check('escalation sheet: the bar hides the sheet exit for an email-only basket',
+        /rsN \? `<button id="dp-basket-sheet"/.test(ui) && /_dpBasketPlats\[a\] \|\| 'rapidshyp'/.test(ui), true);
+    check('escalation sheet: a non-RapidShyp add skips the sheet popup',
+        ui.split("toLowerCase()==='rapidshyp') dpBasketReasonModal").length === 2, true);
+    check('escalation sheet: Delivery Performance no longer offers an add-to-basket',
+        [/dp-basket-add/.test(ui), /dpBasketEligible/.test(ui)], [false, false]);
+    check('escalation sheet: the Undelivered tab shows escalated date AND time',
+        /escalated_at/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8'))
+        && /supDT\(r\.escalated_at\)/.test(ui) && /toLocaleTimeString/.test(ui), true);
+    check('escalation sheet: the queue reuses the SAME response renderers as DP',
+        /supEscThreadModal[\s\S]{0,1600}dpThreadHtml\(awb\)[\s\S]{0,600}dpSheetThreadHtml\(awb\)/.test(ui), true);
+    check('escalation sheet: the basket bar is painted by real CSS, not phantom utilities',
+        /#dp-basket-bar\{ background:#0f172a/.test(css) && !/bg-white\/10/.test(ui), true);
+}
+
 // ── 5. RapidShyp sync: transient failures must not raise a cron-failure card ─────────────────────
 // Bug 2026-08-17: an 8s timeout on 3 AWBs turned a 13-minute run into "❌ Cron failed". The job only
 // fetches AWBs with no row yet, so a failure self-heals on the next run two hours later — while a

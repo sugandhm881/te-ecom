@@ -63,3 +63,17 @@ header.backdrop-blur, header.backdrop-blur-sm, .sticky.backdrop-blur{ -webkit-ba
   .p-8.mx-auto.w-full{ padding-left:2.5rem; padding-right:2.5rem; }
 }
 
+
+/* ── Delivery-Perf basket bar + escalation-sheet modal (2026-08-19) ─────────────────────────────
+   The bar's colour classes are NOT in the prebuilt tailwind.css — plain .bg-slate-900 does not exist
+   (only /40 and /50 variants), nor do bg-white/10 or z-[60]/z-[80] — so the bar rendered as a WHITE
+   pill with WHITE text: invisible except the emerald button. Load-bearing colour lives here as real
+   CSS, per the standing prebuilt-Tailwind rule. */
+#dp-basket-bar{ background:#0f172a; color:#fff; z-index:60; }
+#dp-basket-bar .dpb-ghost{ background:rgba(255,255,255,.14); }
+#dp-basket-bar .dpb-ghost:hover{ background:rgba(255,255,255,.25); }
+.dp-sheet-overlay{ z-index:80; }
+/* Modal primary button — plain bg-slate-900 is NOT in the prebuilt tailwind.css (same trap as the
+   basket bar): the "Add to basket" primary rendered white-on-white, leaving only Cancel visible. */
+.dpm-dark{ background:#0f172a; color:#fff; }
+.dpm-dark:hover{ background:#1e293b; }

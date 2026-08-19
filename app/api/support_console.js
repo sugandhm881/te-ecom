@@ -712,16 +712,34 @@ router.get('/support/queue', async (req, res) => {
         // Courier platform — only for the shipped panels. Repeat-tab orders are still pre-dispatch (no AWB,
         // no journey row), so the lookup would cost a query and return nothing but nulls.
         if (isUndPanel && rows.length) {
-            const [plat, raised] = await Promise.all([
+            const normNames = [...new Set(rows.map(r => String(r.order_name || '').replace('#', '').trim()).filter(Boolean))];
+            const [plat, raised, escMarks] = await Promise.all([
                 platformByOrder(rows),
                 raisedByOrder(rows.map(r => r.order_name)),
+                // Automated escalations — a sheet push or a critical email. Distinct from the manual
+                // courier_raised mark: these carry WHEN the escalation actually left (mark timestamps),
+                // which the Escalated column shows with date AND time (user, 2026-08-19).
+                chunkedIn('order_marks_ecom', 'order_name, mark_type, updated_at, created_at', 'order_name', normNames,
+                    q => q.in('mark_type', ['sheet_escalated', 'critical_mail_sent'])),
             ]);
+            const escBy = {};
+            (escMarks || []).forEach(m => {
+                const k = String(m.order_name).replace('#', '').trim();
+                const at = m.updated_at || m.created_at;
+                const e = escBy[k] || (escBy[k] = { kinds: new Set(), at: null });
+                e.kinds.add(m.mark_type === 'sheet_escalated' ? 'sheet' : 'mail');
+                if (!e.at || String(at) > String(e.at)) e.at = at;   // the LATEST escalation
+            });
             rows.forEach(r => {
                 r.platform = plat[r.order_id] || null;
-                const rz = raised[String(r.order_name || '').replace('#', '').trim()];
+                const key = String(r.order_name || '').replace('#', '').trim();
+                const rz = raised[key];
                 r.raised_kind = rz ? rz.kind : null;      // 'raised' | 'raised_voc'
                 r.raised_at = rz ? rz.at : null;          // sortable/filterable date
                 r.raised_by = rz ? rz.by : null;
+                const esc = escBy[key];
+                r.escalated_kind = esc ? [...esc.kinds].sort().join('+') : null;   // 'mail' | 'sheet' | 'mail+sheet'
+                r.escalated_at = esc ? esc.at : null;
             });
         }
         // Payment type (COD vs Prepaid) — `order_buckets` carries no payment column, so read

@@ -14,6 +14,13 @@
 //     the Teams card below it, where the case arithmetic can be laid out as a real table.
 //   • Reads `inventory_snapshots` + `sku_case_size` directly rather than the inventory_doi_low RPC — the
 //     RPC filters by threshold and knows nothing about case sizes.
+//
+// 2026-08-19: also renders the RECOMMENDED ORDER as a second PNG when the caller posts `reorder: [...]`.
+//   An Adaptive Card table cannot scroll and dies at phone width (ten columns → one-letter headers, five
+//   columns → still truncated), so the order sheet becomes an image like the stock table above it —
+//   full ten-column detail, and zoomable in Teams via the card's allowExpand. The ROWS COME FROM THE
+//   CALLER, not from here: the open-PO subtraction lives in Node (EasyEcom lookups), and recomputing it
+//   here would be a second copy of that rule waiting to drift. No payload → exactly the old behaviour.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
 import satori from 'https://esm.sh/satori@0.10.13'
 import { Resvg, initWasm } from 'https://esm.sh/@resvg/resvg-wasm@2.6.2'
@@ -97,8 +104,63 @@ function dataRow(r: Row, zebra: boolean) {
   ])
 }
 
-Deno.serve(async () => {
+// ── Recommended Order table — second PNG, rows supplied by the caller ────────────────────────────
+// Full detail deliberately: the whole point of moving off the card table is that an image has no width
+// constraint, so nothing is grouped or dropped. ⚠️ Glyphs: the Roboto latin subset has no ✓ (U+2713) or
+// ≤ (U+2264) — Satori renders tofu boxes — so covered rows read "on PO"; '×' (U+00D7) and '—' are safe.
+type ReorderRow = {
+  sku: string; stock: number; drr: number; doi: number | null
+  raw_qty: number; open_po: number; net_qty: number
+  case_size: number | null; cases: number; order_qty: number; poCovered: boolean
+}
+const roWidths = [132, 86, 96, 80, 130, 110, 110, 100, 84, 122]
+const roHeaders = ['SKU', 'Stock', `DRR/${LOOKBACK}d`, 'DOI', 'Recommend', 'Raised PO', 'Final Qty', 'Case Size', 'Cases', 'Order Units']
+function roCell(txt: string, w: number, first: boolean, opts: any = {}) {
+  return h('div', {
+    display: 'flex', width: w, height: rowH, alignItems: 'center',
+    justifyContent: first ? 'flex-start' : 'flex-end',
+    paddingLeft: 12, paddingRight: 12, fontSize: 15, borderBottom: `1px solid ${BORDER}`,
+    color: opts.color || TXT, fontWeight: opts.bold ? 700 : 400, backgroundColor: opts.bg || 'transparent',
+  }, txt)
+}
+function reorderTable(rows: ReorderRow[]) {
+  const children: any[] = [h('div', { display: 'flex', flexDirection: 'row' },
+    roHeaders.map((t, i) => roCell(t, roWidths[i], i === 0, { bold: true, bg: HEAD, color: MUT })))]
+  rows.forEach((r, i) => {
+    const bg = i % 2 === 1 ? ZEBRA : 'transparent'
+    const doiTxt = r.doi == null ? '—' : r.doi.toFixed(1) + 'd'
+    const urgent = r.doi != null && r.doi <= PLACE_ORDER_DOI
+    children.push(h('div', { display: 'flex', flexDirection: 'row' }, [
+      roCell(r.sku, roWidths[0], true, { bg, bold: true }),
+      roCell(nf(r.stock), roWidths[1], false, { bg }),
+      roCell(Number(r.drr || 0).toFixed(2), roWidths[2], false, { bg, color: MUT }),
+      roCell(doiTxt, roWidths[3], false, { bg, color: urgent ? RED : ORANGE, bold: true }),
+      roCell(nf(r.raw_qty), roWidths[4], false, { bg }),
+      roCell(r.open_po ? nf(r.open_po) : '—', roWidths[5], false, { bg, color: MUT }),
+      roCell(r.poCovered ? 'on PO' : nf(r.net_qty), roWidths[6], false, { bg, color: r.poCovered ? GREEN : TXT, bold: true }),
+      roCell(r.case_size ? nf(r.case_size) : '—', roWidths[7], false, { bg, color: MUT }),
+      roCell(r.poCovered ? '—' : (r.case_size ? nf(r.cases) : '—'), roWidths[8], false, { bg }),
+      roCell(r.poCovered ? '—' : (r.case_size ? nf(r.order_qty) : nf(r.net_qty) + '*'), roWidths[9], false, { bg, bold: true }),
+    ]))
+  })
+  const toOrder = rows.filter((r) => !r.poCovered)
+  const tCases = toOrder.reduce((s, r) => s + (r.case_size ? Number(r.cases || 0) : 0), 0)
+  const tUnits = toOrder.reduce((s, r) => s + (r.case_size ? Number(r.order_qty || 0) : Number(r.net_qty || 0)), 0)
+  children.push(h('div', { display: 'flex', flexDirection: 'row' }, [
+    roCell('TOTAL', roWidths[0], true, { bg: HEAD, bold: true }),
+    ...[1, 2, 3, 4, 5, 6, 7].map((i) => roCell('', roWidths[i], false, { bg: HEAD })),
+    roCell(nf(tCases), roWidths[8], false, { bg: HEAD, bold: true }),
+    roCell(nf(tUnits), roWidths[9], false, { bg: HEAD, bold: true, color: GREEN }),
+  ]))
+  return { table: h('div', { display: 'flex', flexDirection: 'column', borderRadius: 10, overflow: 'hidden', border: `1px solid ${BORDER}` }, children), tCases, tUnits, nRows: rows.length + 2 }
+}
+
+Deno.serve(async (req: Request) => {
   try {
+    // Optional caller payload — `reorder: ReorderRow[]` adds the second PNG. Absent/invalid → old behaviour.
+    let payload: any = {}
+    try { payload = await req.json() } catch (_) { /* GET or empty body */ }
+
     const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
 
     const { data: latest, error: dErr } = await sb.from('inventory_snapshots')
@@ -162,10 +224,12 @@ Deno.serve(async () => {
     const width = widths.reduce((a, b) => a + b, 0) + 80
     const height = 40 + 36 + 8 + 20 + 8 + 18 + 16 + (rowH * bodyRowCount) + 8 + 40
 
+    // Fonts fetched ONCE, shared by both renders.
     const [reg, bold] = await Promise.all([
       fetch('https://cdn.jsdelivr.net/npm/@fontsource/roboto@5.0.8/files/roboto-latin-400-normal.woff').then((r) => r.arrayBuffer()),
       fetch('https://cdn.jsdelivr.net/npm/@fontsource/roboto@5.0.8/files/roboto-latin-700-normal.woff').then((r) => r.arrayBuffer()),
     ])
+    const fonts = [{ name: 'Roboto', data: reg, weight: 400, style: 'normal' }, { name: 'Roboto', data: bold, weight: 700, style: 'normal' }]
     const root = h('div', { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', backgroundColor: BG, padding: 40, fontFamily: 'Roboto', color: TXT }, [
       h('div', { display: 'flex', fontSize: 30, fontWeight: 700, color: TXT }, 'Inventory & Reorder — Shifupro'),
       h('div', { display: 'flex', fontSize: 15, color: GREEN, fontWeight: 700, marginTop: 8 },
@@ -175,7 +239,7 @@ Deno.serve(async () => {
         `Place Order under ${PLACE_ORDER_DOI}d  ·  Warning under ${WARNING_DOI}d  ·  Healthy ${WARNING_DOI}-${TARGET_COVER}d  ·  Overstock over ${TARGET_COVER}d   |   order quantities in the message below`),
       table,
     ])
-    const svg = await satori(root as any, { width, height, fonts: [{ name: 'Roboto', data: reg, weight: 400, style: 'normal' }, { name: 'Roboto', data: bold, weight: 700, style: 'normal' }] })
+    const svg = await satori(root as any, { width, height, fonts })
     await ensureWasm()
     const png = new Resvg(svg, { fitTo: { mode: 'width', value: width } }).render().asPng()
 
@@ -186,8 +250,34 @@ Deno.serve(async () => {
     const { data: pub } = sb.storage.from('reports').getPublicUrl(path)
     const image_url = `${pub.publicUrl}?t=${Date.now()}`
 
+    // ── Second PNG: the Recommended Order sheet, when the caller sent rows. A failure here must not
+    // sink the report — the caller falls back to its card table when this URL is absent.
+    let reorder_image_url: string | null = null
+    if (Array.isArray(payload?.reorder) && payload.reorder.length) {
+      try {
+        const { table: roTable, tCases, tUnits, nRows } = reorderTable(payload.reorder as ReorderRow[])
+        const roWidth = roWidths.reduce((a, b) => a + b, 0) + 80
+        const roHeight = 40 + 36 + 8 + 20 + 16 + (rowH * nRows) + 8 + 40
+        const roRoot = h('div', { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', backgroundColor: BG, padding: 40, fontFamily: 'Roboto', color: TXT }, [
+          h('div', { display: 'flex', fontSize: 30, fontWeight: 700, color: TXT }, 'Recommended Order — Shifupro'),
+          h('div', { display: 'flex', fontSize: 15, color: GREEN, fontWeight: 700, marginTop: 8, marginBottom: 16 },
+            `${label}  ·  ${payload.reorder.length} SKUs short  ·  order ${nf(tCases)} cases = ${nf(tUnits)} units  ·  Final Qty "on PO" = already covered by an open PO`),
+          roTable,
+        ])
+        const roSvg = await satori(roRoot as any, { width: roWidth, height: roHeight, fonts })
+        const roPng = new Resvg(roSvg, { fitTo: { mode: 'width', value: roWidth } }).render().asPng()
+        const roPath = `inventory-reorder/${istDateStr()}.png`
+        const { error: roErr } = await sb.storage.from('reports').upload(roPath, new Blob([roPng], { type: 'image/png' }), { contentType: 'image/png', upsert: true })
+        if (roErr) throw new Error('storage upload (reorder): ' + roErr.message)
+        const { data: roPub } = sb.storage.from('reports').getPublicUrl(roPath)
+        reorder_image_url = `${roPub.publicUrl}?t=${Date.now()}`
+      } catch (e) {
+        console.error('reorder image failed (report continues without it):', e)
+      }
+    }
+
     return new Response(JSON.stringify({
-      ok: true, image_url, label,
+      ok: true, image_url, reorder_image_url, label,
       rows: rows.length, placeOrder, warning, stockouts,
       critical: placeOrder, watch: warning,        // back-compat keys for the existing card
       toOrder: toOrder.length, orderUnits, orderCases,

@@ -1998,7 +1998,7 @@ function holdOrderModal(orderName, mode) {
     const heldMeta = order && order.eeHold ? [order.eeHold.reason ? `“${escapeHtml(order.eeHold.reason)}”` : '', order.eeHold.by ? 'held by ' + escapeHtml(order.eeHold.by) : ''].filter(Boolean).join(' · ') : '';
     const wrap = document.createElement('div');
     wrap.id = 'ee-hold-modal';
-    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.className = 'dp-sheet-overlay fixed inset-0 flex items-center justify-center bg-slate-900/50 p-4';
     wrap.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-md flex flex-col">
       <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
         <div><h3 class="text-lg font-bold text-slate-800">${isHold ? '⏸ Hold order' : '▶ Release hold'}</h3>
@@ -2077,7 +2077,7 @@ async function changeWarehouseModal(orderName) {
     const _o = (typeof _ordersById !== 'undefined') ? _ordersById.get(String(orderName)) : null;
     const _panelUrl = _o && _o.easyecomOrderId ? `https://app.easyecom.io/V2/Orders/Details/${_o.easyecomOrderId}` : 'https://app.easyecom.io/';
     const wrap = document.createElement('div'); wrap.id = 'ee-wh-modal';
-    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.className = 'dp-sheet-overlay fixed inset-0 flex items-center justify-center bg-slate-900/50 p-4';
     wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
         <div class="flex items-center justify-between mb-1"><h3 class="text-lg font-bold text-slate-800">🏬 Change warehouse</h3>
           <button data-x class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div>
@@ -4787,10 +4787,48 @@ function supReasonChips(r){
 }
 // Column comparator for header-click sorting. Time columns (created_at / last_scan_at) compare by epoch
 // with empty values ALWAYS last (regardless of direction); other columns are case-insensitive strings.
-function _supSortCmp(k,d){ const isTime=(k==='created_at'||k==='last_scan_at'||k==='raised_at');
+function _supSortCmp(k,d){ const isTime=(k==='created_at'||k==='last_scan_at'||k==='raised_at'||k==='escalated_at');
   return (a,b)=>{ if(isTime){ const x=a[k]?new Date(a[k]).getTime():null, y=b[k]?new Date(b[k]).getTime():null;
       if(x===null&&y===null) return 0; if(x===null) return 1; if(y===null) return -1; return d*(x-y); }
     return d*String(a[k]||'').toLowerCase().localeCompare(String(b[k]||'').toLowerCase()); }; }
+// Date AND time for the Escalated column — "when did this actually leave" is the point of it.
+const supDT = iso => { const d=new Date(iso); return `${_dmy(iso)}, ${d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}`; };
+// Combined escalation viewer — the SAME renderers Delivery Performance uses (dpThreadHtml /
+// dpSheetThreadHtml), fed through their caches and shown in a modal, because Call Queue rows open the
+// order popup on click and have no inline expansion to render into.
+async function supEscThreadModal(awb, kinds){
+  const wrap=document.createElement('div');
+  wrap.className='dp-sheet-overlay fixed inset-0 flex items-center justify-center bg-slate-900/50 p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 max-h-[82vh] overflow-y-auto">
+    <div class="flex items-center justify-between"><h3 class="text-lg font-bold text-slate-800">📨 Escalation & responses — ${ecEsc(awb)}</h3><button id="set-x" class="text-slate-400 text-xl hover:text-slate-600">✕</button></div>
+    <div id="set-body" class="mt-2">${brandLoaderSm('Loading escalation…')}</div></div>`;
+  document.body.appendChild(wrap);
+  const close=()=>wrap.remove();
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  wrap.querySelector('#set-x').addEventListener('click',close);
+  let html='';
+  try{
+    if(kinds.includes('mail')){
+      const r=await fetch('/api/escalation-emails?awb='+encodeURIComponent(awb),{ headers:getAuthHeaders() });
+      const d=await r.json();
+      _dpThreadCache[awb]={ loading:false, threads:d.threads||[] }; html+=dpThreadHtml(awb); delete _dpThreadCache[awb];
+    }
+    if(kinds.includes('sheet')){
+      const r=await fetch('/api/escalation-sheet/thread/'+encodeURIComponent(awb),{ headers:getAuthHeaders() });
+      const d=await r.json();
+      _dpSheetCache[awb]={ loading:false, entries:d.entries||[] }; html+=dpSheetThreadHtml(awb); delete _dpSheetCache[awb];
+    }
+  }catch(e){ html=`<div class="text-xs text-rose-500">${ecEsc(e.message)}</div>`; }
+  const body=wrap.querySelector('#set-body'); if(body) body.innerHTML=html||'<div class="text-xs text-slate-400">No escalation records for this AWB.</div>';
+}
+// 🧺 on the Call Queue · Undelivered tab — the escalation basket's home for the support team
+// (user, 2026-08-19: "shift add to basket thing in Call Queue Undelivered page"). Same basket, same
+// localStorage, same floating bar as Delivery Performance — an order added here pushes identically.
+function supBasketBtn(r){
+  if(_supTab!=='und'||!r.awb_number) return '';
+  const inB=_dpBasket.has(r.awb_number);
+  return `<button class="sup-basket-btn inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors ${inB?'bg-slate-700 text-white border-slate-700':'bg-white text-slate-500 border-slate-200 hover:border-slate-400'}" data-awb="${escapeHtml(r.awb_number)}" data-oname="${escapeHtml(r.order_name||'')}" data-plat="${escapeHtml(r.platform||'')}" title="${inB?'In escalation basket — click to remove':'Add to escalation basket (sheet / email)'}">🧺${inB?' ✓':''}</button>`;
+}
 function supQueueTable(){
   const c=document.getElementById('sup-queue-table'); if(!c) return;
   const fN=document.getElementById('sup-f-notes')?.value||'all';
@@ -4867,7 +4905,8 @@ function supQueueTable(){
     ...(showBucket?[showPlat?{h:'Status',k:'tracking_status',d:1}:{h:'Bucket',k:'bucket',d:1}]:[]),
     ...(showPay?[{h:'Payment',k:'payment',d:1}]:[]),{h:'Age',k:'created_at',d:1},{h:'Courier',k:'courier',d:1},
     ...(showScan?[{h:'Last scan',k:'last_scan_at',d:-1}]:[]),
-    ...(showPlat?[{h:'Raised',k:'raised_at',d:-1}]:[]),{h:'Actions',k:null}];
+    ...(showPlat?[{h:'Raised',k:'raised_at',d:-1}]:[]),
+    ...(_supTab==='und'?[{h:'Escalated',k:'escalated_at',d:-1}]:[]),{h:'Actions',k:null}];
   const thHtml=COLS.map(col=>{ if(!col.k) return `<th class="${TH}">${col.h}</th>`;
     const on=_supSort&&_supSort.k===col.k; const car=on?(_supSort.d===1?'▲':'▼'):'<span class="text-slate-300">↕</span>';
     return `<th class="${TH} cursor-pointer select-none hover:text-indigo-600 ${on?'text-indigo-600':''}" data-sort="${col.k}" data-dir="${col.d}" title="Sort by ${col.h}">${col.h} <span class="text-[9px]">${car}</span></th>`; }).join('');
@@ -4892,9 +4931,12 @@ function supQueueTable(){
       <td class="${TD}"><div class="flex items-center gap-1.5 flex-wrap">${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}${showPlat?supPlatformTag(r.platform):''}</div>${r.awb_number?`<div class="text-[10px] mt-0.5">${supAwbLink(r.awb_number,r.order_name,r.courier)}</div>`:''}</td>
       ${showScan?`<td class="${TD} whitespace-nowrap">${r.last_scan_at?`<span class="text-slate-500" title="Latest AWB scan by courier: ${new Date(r.last_scan_at).toLocaleString()}">🛰 ${supRelTime(r.last_scan_at)}</span>`:'<span class="text-slate-300">—</span>'}</td>`:''}
       ${showPlat?`<td class="${TD} whitespace-nowrap sup-raised-cell">${supRaisedCell(r)}</td>`:''}
+      ${_supTab==='und'?`<td class="${TD} whitespace-nowrap">${r.escalated_at?`<button class="sup-esc-view text-left" data-awb="${escapeHtml(r.awb_number||'')}" data-kinds="${escapeHtml(r.escalated_kind||'')}" title="View the escalation and any responses">
+          <div class="flex items-center gap-1">${String(r.escalated_kind||'').includes('sheet')?'📋':''}${String(r.escalated_kind||'').includes('mail')?'✉️':''}<span class="text-[11px] font-semibold text-indigo-600 hover:underline">view</span></div>
+          <div class="text-[10px] text-slate-500 tabular-nums">${supDT(r.escalated_at)}</div></button>`:'<span class="text-slate-300">—</span>'}</td>`:''}
       <td class="${TD}"><div class="flex items-start gap-2">
         <div class="flex-1 min-w-0 space-y-1.5">
-          <div class="flex items-center gap-1.5 flex-wrap">${supHoldControl(r)}${showPlat?supRaiseControl(r):''}</div>
+          <div class="flex items-center gap-1.5 flex-wrap">${supHoldControl(r)}${showPlat?supRaiseControl(r):''}${supBasketBtn(r)}</div>
           ${r.latest_note?`<div class="min-w-0 border-l-2 border-slate-200 pl-2">
             <div class="text-xs text-slate-500 italic truncate max-w-[260px]" title="${escapeHtml(r.latest_note)}">“${escapeHtml(r.latest_note)}”</div>
             <div class="text-[10px] text-slate-400 truncate">${escapeHtml(r.latest_note_by||'')}${r.latest_note_by&&r.latest_note_at?' · ':''}${r.latest_note_at?supRelTime(r.latest_note_at):''}</div></div>`:''}
@@ -4905,6 +4947,18 @@ function supQueueTable(){
     const k=th.dataset.sort, dd=parseInt(th.dataset.dir,10)||1;
     if(_supSort&&_supSort.k===k) _supSort.d*=-1; else _supSort={k,d:dd};   // toggle direction on the same column
     supQueueTable(); }));
+  c.querySelectorAll('.sup-basket-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation();
+    const awb=b.dataset.awb;
+    if(_dpBasket.has(awb)){ dpBasketToggle(awb); return; }                        // remove — no popup
+    // Sheet details (type/reason) only exist for RapidShyp — the sheet is theirs. Anything else goes
+    // straight into the basket; its escalation exit is the ✉️ email (user, 2026-08-19).
+    if(_dpBasket.size>=DP_BASKET_MAX) return showNotification(`Basket is full (${DP_BASKET_MAX} orders max).`, true);
+    if(String(b.dataset.plat||'').toLowerCase()==='rapidshyp') dpBasketReasonModal(awb,{ order:b.dataset.oname||awb, plat:'rapidshyp' });
+    else { _dpBasket.add(awb); _dpBasketPlats[awb]=String(b.dataset.plat||'').toLowerCase(); dpBasketSave(); dpBasketRepaintAll(); showNotification('Added — escalates by ✉️ email (not on the RapidShyp sheet)'); }
+  }));
+  c.querySelectorAll('.sup-esc-view').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation();
+    supEscThreadModal(b.dataset.awb, String(b.dataset.kinds||'').split('+')); }));
+  dpBasketRenderBar();   // the floating bar lives on this view too
   // Clicking a row opens the order modal — but NEVER when the click landed on a control inside it.
   // ⚠️ `.csel` is the one that actually bit: ecEnhanceSelect() moves the real <select> into a wrapper and
   // puts the visible button and the option list BESIDE it as siblings, so a stopPropagation bound to the
@@ -10157,6 +10211,50 @@ async function dpToggleThread(awb){
   }catch(e){ _dpThreadCache[awb] = { loading: false, error: e.message }; }
   dpTableRender();
 }
+// ── Sheet-escalation viewer — the Google-Sheet twin of the email thread ────────────────────────
+// RapidShyp responds ON the sheet (Remarks / Escalation status / comment), so those cells render as
+// their reply, and our pushed row as the outbound message — same left/right convention as email.
+const _dpSheetCache = {};   // awb → { loading, entries, error } | undefined = collapsed
+const _SHEET_STATUS_BADGE = s => {
+  const t = String(s||'').toLowerCase();
+  if(!t) return null;
+  if(/resolve|deliver|closed/.test(t)) return ['bg-emerald-100 text-emerald-700'];
+  if(/follow/.test(t)) return ['bg-sky-100 text-sky-700'];
+  return ['bg-amber-100 text-amber-700'];
+};
+function dpSheetThreadHtml(awb){
+  const t = _dpSheetCache[awb];
+  if(!t) return '';
+  if(t.loading) return '<div class="mt-3">'+brandLoaderSm('Loading sheet escalation…')+'</div>';
+  if(t.error) return `<div class="mt-3 text-xs text-rose-500">${ecEsc(t.error)}</div>`;
+  if(!t.entries || !t.entries.length) return '<div class="mt-3 text-xs text-slate-400">Pushed to the escalation sheet — the row is no longer there (it may have been moved or cleared).</div>';
+  return `<div class="mt-3 pt-3 border-t border-slate-200 space-y-2"><div class="text-xs font-bold text-slate-600 uppercase tracking-wide">📋 Escalation sheet</div>`
+    + t.entries.map(e => {
+      const badge = _SHEET_STATUS_BADGE(e.status);
+      const ours = `<div class="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3 mr-6">
+          <div class="flex flex-wrap items-center gap-2 text-[11px]"><span class="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-bold">THE ELEMENT</span><span class="text-slate-400">${ecEsc(e.agent||'')} · ${ecEsc(e.date||'')} · row ${e.rowNum}${e.duplicate?' · duplicate':''}</span>
+          ${badge?`<span class="px-1.5 py-0.5 rounded ${badge[0]} font-semibold">${ecEsc(e.status)}</span>`:''}</div>
+          <div class="text-xs font-semibold text-slate-700 mt-1.5">${ecEsc(e.type||'Escalation')}</div>
+          ${e.reason?`<div class="text-xs text-slate-500 mt-1">${ecEsc(e.reason)}</div>`:''}</div>`;
+      const theirBits = [...(e.remarks||[]).map(x=>['Remarks',x]), ...(e.comment?[['Comment',e.comment]]:[])];
+      const theirs = theirBits.length
+        ? theirBits.map(([label,txt]) => `<div class="rounded-lg border border-slate-200 bg-white p-3 ml-6">
+            <div class="text-[11px]"><span class="px-1.5 py-0.5 rounded bg-slate-700 text-white font-bold">RAPIDSHYP</span> <span class="text-slate-400">${label} on the sheet</span></div>
+            <div class="text-xs text-slate-600 mt-1.5 whitespace-pre-wrap">${ecEsc(txt)}</div></div>`).join('')
+        : '<div class="text-xs text-slate-400 ml-6">No response on the sheet yet — Remarks / comment are empty.</div>';
+      return ours + theirs;
+    }).join('') + '</div>';
+}
+async function dpToggleSheetThread(awb){
+  if(_dpSheetCache[awb]){ delete _dpSheetCache[awb]; dpTableRender(); return; }   // collapse
+  _dpSheetCache[awb] = { loading: true }; dpTableRender();
+  try{
+    const r = await fetch('/api/escalation-sheet/thread/'+encodeURIComponent(awb), { headers: getAuthHeaders() });
+    const d = await r.json(); if(!d.success) throw new Error(d.error||'failed');
+    _dpSheetCache[awb] = { loading: false, entries: d.entries||[] };
+  }catch(e){ _dpSheetCache[awb] = { loading: false, error: e.message }; }
+  dpTableRender();
+}
 let _critTone='formal';
 async function dpPolishCritical(){
   const st=document.getElementById('crit-status'), btn=document.getElementById('crit-polish');
@@ -10356,7 +10454,7 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
         const reasons=(r.reasons||[]).join(' · ');
         let out=`<tr class="dp-row cursor-pointer transition-colors ${rowCls}" data-awb="${r.awb||''}">`+
           `<td class="${td}" style="${stripe}"><div class="flex items-center gap-1.5"><span class="text-slate-300 text-xs w-3">${open?'▾':'▸'}</span><div><div class="font-semibold text-slate-800 leading-tight">${r.order||'—'}${r.source==='docpharma'?'<span class="text-slate-400 text-[10px] font-normal ml-1">DP</span>':''}${eeHoldChip(r.order)}</div><div class="text-[11px] text-slate-400 leading-tight">${r.awb||''}</div></div></div></td>`+
-          `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${b[1]}">${b[0]}</span>${r.marked_fake?' <span title="Marked likely-fake">🚩</span>':''}${r.mail_sent?' <span title="Critical mail sent">✉️</span>':''}</td>`+
+          `<td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${b[1]}">${b[0]}</span>${r.marked_fake?' <span title="Marked likely-fake">🚩</span>':''}${r.mail_sent?' <span title="Critical mail sent">✉️</span>':''}${r.sheet_pushed?' <span title="Pushed to escalation sheet">📋</span>':''}</td>`+
           `<td class="${td}">${typ}</td>`+
           `<td class="${td} text-slate-600"><div class="truncate max-w-[130px]" title="${r.courier||''}">${r.courier||'—'}</div></td>`+
           (showVal?`<td class="${td} text-right tabular-nums ${dpIsVal()?'text-slate-800 font-semibold':'text-slate-500'}" title="${dpMoneyFull(r.value)}">${r.value?dpMoney(r.value):'<span class="text-slate-300">—</span>'}</td>`:'')+
@@ -10386,7 +10484,8 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
     c.querySelectorAll('.dp-mark-fake').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpToggleMark(b); }));
     c.querySelectorAll('.dp-send-critical').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpComposeCritical([b.dataset.awb]); }));
     c.querySelectorAll('.dp-view-thread').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpToggleThread(b.dataset.awb); }));
-    c.querySelectorAll('.dp-basket-add').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpBasketToggle(b.dataset.awb); }));
+    c.querySelectorAll('.dp-view-sheet').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); dpToggleSheetThread(b.dataset.awb); }));
+
     c.querySelectorAll('.dp-ndr-action').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); ndrActionModal(b.dataset.awb, b.dataset.order, ''); }));
     dpBasketRenderBar();   // keep the floating bar in step with the table
 }
@@ -10401,26 +10500,96 @@ const DP_BASKET_KEY = 'ec_dp_basket_v1';
 const DP_BASKET_MAX = 60;                    // matches the compose endpoint's own cap
 let _dpBasket = new Set();
 try { _dpBasket = new Set(JSON.parse(localStorage.getItem(DP_BASKET_KEY) || '[]')); } catch (_) { _dpBasket = new Set(); }
-const dpBasketSave = () => { try { localStorage.setItem(DP_BASKET_KEY, JSON.stringify([..._dpBasket])); } catch (_) {} };
-// Only a LIVE shipment can still be acted on — a delivered/RTO/cancelled parcel is finished, so
-// escalating it makes no sense. Matches the rule: basket button on NDR-pending and in-transit only.
-const dpBasketEligible = r => r && r.awb && (r.state === 'ndr_pending' || r.state === 'in_transit');
-
-function dpBasketToggle(awb) {
-    if (!awb) return;
-    if (_dpBasket.has(awb)) _dpBasket.delete(awb);
-    else {
-        if (_dpBasket.size >= DP_BASKET_MAX) return showNotification(`Basket is full (${DP_BASKET_MAX} orders max — the escalation email caps there).`, true);
-        _dpBasket.add(awb);
-    }
-    dpBasketSave(); dpBasketRenderBar(); dpTableRender();
+const dpBasketSave = () => { try { localStorage.setItem(DP_BASKET_KEY, JSON.stringify([..._dpBasket])); localStorage.setItem(DP_BASKET_KEY + '_reasons', JSON.stringify(_dpBasketReasons)); localStorage.setItem(DP_BASKET_KEY + '_types', JSON.stringify(_dpBasketTypes)); localStorage.setItem(DP_BASKET_KEY + '_plats', JSON.stringify(_dpBasketPlats)); } catch (_) {} };
+// Per-AWB escalation reason, typed at add-to-basket time — the agent adding the order knows WHY, and
+// that wording goes on the sheet's Reason column instead of the auto-derived NDR text.
+let _dpBasketReasons = {};
+try { _dpBasketReasons = JSON.parse(localStorage.getItem(DP_BASKET_KEY + '_reasons') || '{}') || {}; } catch (_) { _dpBasketReasons = {}; }
+// Per-AWB escalation TYPE, also chosen at add time (user, 2026-08-19). Absent = auto from the journey.
+let _dpBasketTypes = {};
+try { _dpBasketTypes = JSON.parse(localStorage.getItem(DP_BASKET_KEY + '_types') || '{}') || {}; } catch (_) { _dpBasketTypes = {}; }
+// Which courier platform each basketed AWB is on — decides which EXITS the bar offers: RapidShyp →
+// sheet + email, KwikShip/DocPharma → email only. Unknown (legacy) counts as RapidShyp; the server's
+// source filter is the real gate either way.
+let _dpBasketPlats = {};
+try { _dpBasketPlats = JSON.parse(localStorage.getItem(DP_BASKET_KEY + '_plats') || '{}') || {}; } catch (_) { _dpBasketPlats = {}; }
+// The sheet's OWN Escalation-type dropdown (19 values today) — fetched once per session; the sheet is
+// the truth, a hardcoded subset went stale the day it shipped (user, 2026-08-19).
+let _escTypesP = null;
+function escTypeOptions(){
+  if(!_escTypesP) _escTypesP = fetch('/api/escalation-sheet/options', { headers: getAuthHeaders() })
+    .then(r => r.json()).then(d => { if(!d.success || !Array.isArray(d.types) || !d.types.length) throw new Error('no types'); return d.types; })
+    .catch(() => { _escTypesP = null;   // failed → retry on next open; meanwhile the core four
+      return ['Reattempt/Fake NDR', 'EDD Breached_no attempt', 'Fake Attempted Urgent Delivery', 'Escalation']; });
+  return _escTypesP;
 }
-function dpBasketClear() { _dpBasket.clear(); dpBasketSave(); dpBasketRenderBar(); dpTableRender(); }
+// The basket lives on TWO views now (Delivery Performance + Call Queue · Undelivered) — one repaint
+// helper keeps whichever is on screen in step. Both renderers no-op safely when their view is absent.
+function dpBasketRepaintAll() {
+    dpBasketRenderBar();
+    if (typeof dpTableRender === 'function') dpTableRender();
+    if (typeof supQueueTable === 'function' && typeof currentView !== 'undefined' && currentView === 'support-queue') supQueueTable();
+}
+
+// Removal only - adding happens exclusively through the Call Queue button (popup / direct by
+// platform); Delivery Performance no longer offers an add (user, 2026-08-19).
+function dpBasketToggle(awb) {
+    if (!awb || !_dpBasket.has(awb)) return;
+    _dpBasket.delete(awb); delete _dpBasketReasons[awb]; delete _dpBasketTypes[awb]; delete _dpBasketPlats[awb];
+    dpBasketSave(); dpBasketRepaintAll();
+}
+// Small prompt at ADD time: the agent's own words for the sheet's "Escalation Reason / Additional
+// information" column. Optional — skipping falls back to the auto reason (latest NDR text / EDD).
+async function dpBasketReasonModal(awb, opts = {}) {
+    const types = await escTypeOptions();
+    const row = ((_dpData && _dpData.shipments) || []).find(x => x.awb === awb);
+    const auto = opts.autoReason || (row && row.reasons && row.reasons.length ? row.reasons[row.reasons.length - 1] : '');
+    const label = opts.order || (row && row.order) || awb;
+    const wrap = document.createElement('div');
+    wrap.className = 'dp-sheet-overlay fixed inset-0 flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.innerHTML = `<div class="bg-white rounded-2xl shadow-2xl w-full max-w-xl p-8">
+        <h3 class="text-xl font-bold text-slate-800">🧺 Add to basket</h3>
+        <p class="text-sm text-slate-500 mt-1.5">${ecEsc(label)} — escalation details for the sheet.</p>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mt-6 mb-1.5">Escalation type</label>
+        <select id="dp-bk-type" class="filter-select w-full">
+            ${types.map(t => `<option>${ecEsc(t)}</option>`).join('')}
+        </select>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mt-5 mb-1.5">Escalation Reason / Additional information</label>
+        <textarea id="dp-bk-reason" rows="4" class="filter-input w-full" placeholder="optional — empty stays BLANK on the sheet${auto ? ` · courier says: “${ecEsc(auto)}”` : ''}"></textarea>
+        <div class="flex items-center gap-2 mt-6">
+            <button id="dp-bk-cancel" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
+            <span class="flex-1"></span>
+            <button id="dp-bk-add" class="dpm-dark px-5 py-2.5 rounded-lg text-sm font-bold">Add</button>
+        </div></div>`;
+    document.body.appendChild(wrap);
+    if (typeof ecEnhanceFilterSelects === 'function') ecEnhanceFilterSelects(wrap);
+    const close = () => wrap.remove();
+    wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+    wrap.querySelector('#dp-bk-cancel').addEventListener('click', close);
+    const ta = wrap.querySelector('#dp-bk-reason'); ta.focus();
+    // ONE button (user, 2026-08-19): empty box → the sheet's reason cell stays BLANK; typed → that
+    // text goes on. '' is stored deliberately so the server never falls back to auto for this AWB.
+    const commit = () => {
+        const reason = ta.value.trim();
+        _dpBasket.add(awb);
+        _dpBasketReasons[awb] = reason;
+        const ty = wrap.querySelector('#dp-bk-type').value;
+        _dpBasketTypes[awb] = ty;   // always explicit — the Auto option was removed (user, 2026-08-19)
+        _dpBasketPlats[awb] = String(opts.plat || (row && row.source) || '').toLowerCase();
+        dpBasketSave(); dpBasketRepaintAll(); close();
+    };
+    wrap.querySelector('#dp-bk-add').addEventListener('click', commit);
+    // Enter in the textarea = Add (Shift+Enter keeps the newline).
+    ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); } });
+}
+function dpBasketClear() { _dpBasket.clear(); _dpBasketReasons = {}; _dpBasketTypes = {}; _dpBasketPlats = {}; dpBasketSave(); dpBasketRepaintAll(); }
 
 // Floating bar — one button, as asked. Only present while the basket has something in it.
 function dpBasketRenderBar() {
     let bar = document.getElementById('dp-basket-bar');
-    if (!_dpBasket.size) { bar?.remove(); return; }
+    // The basket is worked from Call Queue - Undelivered only (user, 2026-08-19) - on any other view
+    // the bar is noise over unrelated dashboards, so it renders nowhere else.
+    if (!_dpBasket.size || (typeof currentView !== 'undefined' && currentView !== 'support-queue')) { bar?.remove(); return; }
     if (!bar) {
         bar = document.createElement('div');
         bar.id = 'dp-basket-bar';
@@ -10429,14 +10598,66 @@ function dpBasketRenderBar() {
         document.body.appendChild(bar);
     }
     const n = _dpBasket.size;
-    bar.innerHTML = `<span class="text-sm font-semibold">🧺 ${n} order${n > 1 ? 's' : ''} in basket</span>
-        <button id="dp-basket-send" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-500 hover:bg-indigo-400">✉️ Send one email for all</button>
-        <button id="dp-basket-clear" class="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white/10 hover:bg-white/20">Clear</button>`;
+    // Exits by platform mix (user, 2026-08-19): the sheet button appears only when the basket holds
+    // ≥1 RapidShyp order — the sheet is theirs; email serves every platform. Unknown platform counts
+    // as RapidShyp: the server's source filter is the real gate, this only hides a dead button.
+    const rsN = [..._dpBasket].filter(a => (_dpBasketPlats[a] || 'rapidshyp') === 'rapidshyp').length;
+    const otherN = n - rsN;
+    bar.innerHTML = `<span class="text-sm font-semibold">🧺 ${n} order${n > 1 ? 's' : ''}${otherN ? ` (${rsN} RapidShyp · ${otherN} email-only)` : ''} in basket</span>
+        ${rsN ? `<button id="dp-basket-sheet" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-500 hover:bg-emerald-400">📋 Push to escalation sheet</button>` : ''}
+        <button id="dp-basket-send" class="dpb-ghost px-3 py-1.5 rounded-lg text-xs font-semibold">✉️ Email${rsN ? ' instead' : ''}</button>
+        <button id="dp-basket-clear" class="dpb-ghost px-2.5 py-1.5 rounded-lg text-xs font-semibold">Clear</button>`;
+    const shBtn = document.getElementById('dp-basket-sheet');
+    if (shBtn) shBtn.addEventListener('click', () => {
+        if (!canSendEmails()) return showNotification('You do not have permission to escalate shipments.', true);
+        dpSheetPushModal([..._dpBasket]);
+    });
     document.getElementById('dp-basket-send').addEventListener('click', () => {
         if (!canSendEmails()) return showNotification('You do not have permission to send escalation emails.', true);
         dpComposeCritical([..._dpBasket]);
     });
     document.getElementById('dp-basket-clear').addEventListener('click', dpBasketClear);
+}
+
+// ── Push the basket into the courier-shared escalation Google Sheet ──────────────────────────────
+// One row per AWB, columns matching the sheet exactly; the server derives type/reason per shipment
+// from its journey (NDR count, EDD) unless the agent overrides them here for the whole batch.
+function dpSheetPushModal(awbs) {
+    const wrap = document.createElement('div');
+    wrap.className = 'dp-sheet-overlay fixed inset-0 flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.innerHTML = `<div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+        <h3 class="text-lg font-bold text-slate-800">Push to escalation sheet</h3>
+        <p class="text-sm text-slate-500 mt-1">${awbs.length} shipment${awbs.length > 1 ? 's' : ''} selected → rows on the RapidShyp escalation sheet, with the type and reason chosen when each was added. <b>Only RapidShyp shipments go to the sheet</b> — any KwikShip/DocPharma orders stay in the basket for the ✉️ email flow. Repeats are appended and marked “Duplicate”, never skipped.</p>
+        <div class="flex justify-end gap-2 mt-5">
+            <button id="dp-sheet-cancel" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
+            <button id="dp-sheet-go" class="px-4 py-2 rounded-lg text-sm font-bold bg-emerald-600 text-white hover:bg-emerald-500">Push ${awbs.length} row${awbs.length > 1 ? 's' : ''}</button>
+        </div></div>`;
+    document.body.appendChild(wrap);
+    ecEnhanceFilterSelects && ecEnhanceFilterSelects(wrap);
+    const close = () => wrap.remove();
+    wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+    wrap.querySelector('#dp-sheet-cancel').addEventListener('click', close);
+    wrap.querySelector('#dp-sheet-go').addEventListener('click', async () => {
+        const btn = wrap.querySelector('#dp-sheet-go');
+        btn.disabled = true; btn.textContent = 'Pushing…';
+        try {
+            const r = await fetch('/api/escalation-sheet/push', { method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                body: JSON.stringify({ awbs,
+                    reasons: Object.fromEntries(awbs.filter(a => a in _dpBasketReasons).map(a => [a, _dpBasketReasons[a]])),
+                    types: Object.fromEntries(awbs.filter(a => _dpBasketTypes[a]).map(a => [a, _dpBasketTypes[a]])) }) });
+            const d = await r.json();
+            if (!d.success) throw new Error(d.message || 'Push failed');
+            // Only the pushed AWBs leave the basket — non-RapidShyp shipments stay in it, because their
+            // escalation path is the email and emptying the basket would silently drop them.
+            (d.pushedAwbs || awbs).forEach(a => { _dpBasket.delete(a); delete _dpBasketReasons[a]; delete _dpBasketTypes[a]; delete _dpBasketPlats[a]; });
+            dpBasketSave(); dpBasketRepaintAll();
+            const skippedN = Object.values(d.skipped || {}).reduce((a, b) => a + b, 0);
+            const skippedTxt = skippedN ? ` · ${Object.entries(d.skipped).map(([k, n]) => `${n} ${k === 'kwikship' ? 'KwikShip' : k === 'docpharma' ? 'DocPharma' : k}`).join(' + ')} kept in basket — use ✉️ Email for those` : '';
+            showNotification(`✅ ${d.pushed} row${d.pushed > 1 ? 's' : ''} pushed to the escalation sheet${d.duplicates ? ` (${d.duplicates} marked Duplicate)` : ''}${skippedTxt}`, false);
+            close();
+        } catch (e) { showNotification(e.message, true); btn.disabled = false; btn.textContent = 'Push again'; }
+    });
 }
 
 function dpRenderDetail(r,td,ncols){ const ts=r.ts||{};
@@ -10498,7 +10719,8 @@ function dpRenderDetail(r,td,ncols){ const ts=r.ts||{};
         ${r.mail_sent
             ? `<button class="dp-view-thread px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100" data-awb="${ecEsc(r.awb||'')}">📧 ${_dpThreadCache[r.awb]?'Hide email':'View email & replies'}</button>`
             : (canSendEmails()?`<button class="dp-send-critical px-3 py-1.5 rounded-lg text-xs font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300" data-awb="${ecEsc(r.awb||'')}">✉️ Send critical email</button>`:'')}
-        ${dpBasketEligible(r)?`<button class="dp-basket-add px-3 py-1.5 rounded-lg text-xs font-semibold ${_dpBasket.has(r.awb)?'bg-slate-900 text-white hover:bg-slate-800':'bg-white border border-slate-200 text-slate-600 hover:border-slate-400'}" data-awb="${ecEsc(r.awb)}">${_dpBasket.has(r.awb)?'🧺 In basket — remove':'🧺 Add to basket'}</button>`:''}
+        ${r.sheet_pushed?`<button class="dp-view-sheet px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100" data-awb="${ecEsc(r.awb||'')}">📋 ${_dpSheetCache[r.awb]?'Hide sheet escalation':'View sheet escalation'}</button>`:''}
+
         ${(r.state==='ndr_pending'&&r.awb)?`<button class="dp-ndr-action px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100" data-awb="${ecEsc(r.awb)}" data-order="${ecEsc(r.order||'')}">🔁 NDR action (reattempt / return)</button>`:''}
         <span class="dp-action-status text-xs"></span>
       </div>`;
@@ -10509,7 +10731,7 @@ function dpRenderDetail(r,td,ncols){ const ts=r.ts||{};
         <div class="grid md:grid-cols-2 gap-6">
           <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Date log</div>${timeline}${meta}${chargeHtml}</div>
           <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log</div>${scanHtml}</div>
-        </div>${actions}${dpThreadHtml(r.awb)}</td></tr>`;
+        </div>${actions}${dpThreadHtml(r.awb)}${dpSheetThreadHtml(r.awb)}</td></tr>`;
 }
 // Fetch the full scan log for one AWB (cached; served from DB if stored, else 1 live courier call).
 async function dpLoadScans(awb){ _dpScanCache[awb]={loading:true}; try{
@@ -13989,7 +14211,7 @@ function finXmlModal(title, xml) {
     document.getElementById('fin-xml-modal')?.remove();
     const wrap = document.createElement('div');
     wrap.id = 'fin-xml-modal';
-    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.className = 'dp-sheet-overlay fixed inset-0 flex items-center justify-center bg-slate-900/50 p-4';
     wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-3xl flex flex-col max-h-[85vh]">
       <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
         <h3 class="text-lg font-bold text-slate-800">${escapeHtml(title)}</h3>
@@ -14442,7 +14664,7 @@ async function finVoucherDrawer(id) {
     document.getElementById('fin-drawer')?.remove();
     const wrap = document.createElement('div');
     wrap.id = 'fin-drawer';
-    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.className = 'dp-sheet-overlay fixed inset-0 flex items-center justify-center bg-slate-900/50 p-4';
     wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-2xl flex flex-col max-h-[88vh]">
       <div class="flex items-start justify-between px-6 py-4 border-b border-slate-200">
         <div><h3 class="text-lg font-bold text-slate-800">${escapeHtml(r.voucher_type)} · ${finMoney(r.total_amount)}</h3>
@@ -14960,7 +15182,7 @@ function fbVoucherModal(v) {
     const cr = v.entries.filter(e => e.dr_cr === 'CR').reduce((s, e) => s + e.amount, 0);
     const wrap = document.createElement('div');
     wrap.id = 'fb-vch-modal';
-    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.className = 'dp-sheet-overlay fixed inset-0 flex items-center justify-center bg-slate-900/50 p-4';
     wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-2xl flex flex-col max-h-[85vh]">
       <div class="flex items-start justify-between px-6 py-4 border-b border-slate-200">
         <div><h3 class="text-lg font-bold text-slate-800">${escapeHtml(v.type)} #${escapeHtml(v.number || '—')} · ${finMoney(v.amount)}</h3>
@@ -14997,7 +15219,7 @@ async function fbLedgerModal(name) {
     document.getElementById('fb-led-modal')?.remove();
     const wrap = document.createElement('div');
     wrap.id = 'fb-led-modal';
-    wrap.className = 'fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4';
+    wrap.className = 'dp-sheet-overlay fixed inset-0 flex items-center justify-center bg-slate-900/50 p-4';
     wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-xl w-full max-w-5xl flex flex-col max-h-[90vh]">
       <div id="fb-led-head" class="px-6 py-4 border-b border-slate-200"></div>
       <div id="fb-led-body" class="px-6 py-4 overflow-auto flex-1"></div>
@@ -17352,7 +17574,7 @@ function poDefaultRef(){
 // raised, rather than after the invoice arrives.
 function poSkuField(i, l){
     const chosen = (_poData?.skuOptions || []).find(o => o.sku === l.sku);
-    const sub = chosen ? (chosen.name || `last ₹${chosen.lastPrice} excl. tax`) : '';
+    const sub = chosen ? (chosen.name || (chosen.lastPrice != null ? `last ₹${chosen.lastPrice} excl. tax` : 'new SKU')) : '';
     return `<div class="poc-sku-wrap" data-i="${i}">
         <button type="button" class="poc-sku-btn${l.sku ? ' is-set' : ''}" data-i="${i}">
           <span class="poc-sku-val">${l.sku ? escapeHtml(l.sku) : 'Choose SKU…'}${sub ? `<em>${escapeHtml(String(sub).slice(0, 38))}</em>` : ''}</span>
@@ -17374,7 +17596,7 @@ function poSkuOptionsHtml(q){
     return list.map(o => `<div class="poc-sku-item" data-sku="${escapeHtml(o.sku)}">
         <div class="poc-sku-code">${escapeHtml(o.sku)}</div>
         ${o.name ? `<div class="poc-sku-name">${escapeHtml(o.name)}</div>` : ''}
-        <div class="poc-sku-meta">₹${o.lastPrice} excl. tax${o.lastGrossPrice && o.lastGrossPrice !== o.lastPrice ? ` (₹${o.lastGrossPrice} incl.)` : ''}${o.lastOrderedAt ? ' · ' + _dmy(o.lastOrderedAt) : ''}${o.suggestedTax != null ? ` · GST ${o.suggestedTax}%` : ''}</div>
+        <div class="poc-sku-meta">${o.neverOrdered ? `new · never ordered${o.masterCost != null ? ` · cost ₹${o.masterCost}` : ''}` : `₹${o.lastPrice} excl. tax${o.lastGrossPrice && o.lastGrossPrice !== o.lastPrice ? ` (₹${o.lastGrossPrice} incl.)` : ''}${o.lastOrderedAt ? ' · ' + _dmy(o.lastOrderedAt) : ''}`}${o.suggestedTax != null ? ` · GST ${o.suggestedTax}%` : ''}</div>
         ${o.prevPrice != null ? `<div class="poc-sku-move">was ₹${o.prevPrice}${o.prevPriceAt ? ' on ' + _dmy(o.prevPriceAt) : ''}</div>` : ''}
       </div>`).join('');
 }
@@ -17438,7 +17660,7 @@ function poWireSkuPickers(root){
             // Auto-capture cost and GST, but never overwrite something the buyer already typed.
             // ⚠️ Tax comes from the HSN chapter, NOT from PO history — EasyEcom returns tax_rate 0 on
             // every line, so inheriting it would silently stamp 0% GST on new orders.
-            if(o && !_poLines[i].unitPrice) _poLines[i].unitPrice = o.lastPrice;
+            if(o && !_poLines[i].unitPrice && (o.lastPrice != null || o.masterCost != null)) _poLines[i].unitPrice = o.lastPrice != null ? o.lastPrice : o.masterCost;
             if(o && !_poLines[i].taxRate && o.suggestedTax != null) _poLines[i].taxRate = o.suggestedTax;
             close(); poRenderLines(); });
     });
@@ -17449,6 +17671,9 @@ const poSkuMeta = sku => (_poData?.skuOptions || []).find(o => o.sku === sku) ||
 // it is. Cost is NOT stable here (10 of 19 SKUs have moved), so an unremarked change is a real risk.
 function poCostHint(l){
     const o = poSkuMeta(l.sku); if(!o) return '';
+    // First order of a new SKU: no history to compare against. The prefill (if any) is EasyEcom's own
+    // cost field from the product master — named so it is never mistaken for a price we once paid.
+    if(o.lastPrice == null) return `<div class="poc-hint">${o.masterCost != null ? `first order · ₹${o.masterCost} = cost on EasyEcom master` : 'first order — no price history'}</div>`;
     const typed = Number(l.unitPrice);
     if(isFinite(typed) && typed > 0 && Math.abs(typed - o.lastPrice) > 0.005){
         const pc = o.lastPrice > 0 ? Math.round(((typed - o.lastPrice) / o.lastPrice) * 1000) / 10 : null;

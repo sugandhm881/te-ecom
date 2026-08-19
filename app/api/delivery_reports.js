@@ -456,10 +456,13 @@ router.get('/delivery-performance', async (req, res) => {
         // Manual per-order marks → flag shipments so the dashboard shows a badge + can filter on them.
         const [fmRes, msRes] = await Promise.all([
             supabase.from('order_marks_ecom').select('order_name').eq('mark_type', 'likely_fake'),
-            supabase.from('order_marks_ecom').select('order_name').eq('mark_type', 'critical_mail_sent'),
+            // mark_type is selected so email and sheet escalations stay DISTINCT — a sheet push shown
+            // with the ✉️ badge told the agent a mail was sent that never was (user, 2026-08-19).
+            supabase.from('order_marks_ecom').select('order_name, mark_type').in('mark_type', ['critical_mail_sent', 'sheet_escalated']),
         ]);
         const fakeSet = new Set((fmRes.data || []).map(m => m.order_name));
-        const mailSet = new Set((msRes.data || []).map(m => m.order_name));
+        const mailSet = new Set((msRes.data || []).filter(m => m.mark_type === 'critical_mail_sent').map(m => m.order_name));
+        const sheetSet = new Set((msRes.data || []).filter(m => m.mark_type === 'sheet_escalated').map(m => m.order_name));
         // Broke its promise date? Delivered later than EDD, or still in-transit past EDD (RTO/lost = n/a).
         const nowMs = Date.now();
         const pastPromise = r => {
@@ -495,6 +498,7 @@ router.get('/delivery-performance', async (req, res) => {
                 pastPromise: pastPromise(r),
                 marked_fake: fakeSet.has(r.order_name),   // manually flagged as a likely fake attempt
                 mail_sent: mailSet.has(r.order_name),     // an escalation email was sent for this order
+                sheet_pushed: sheetSet.has(r.order_name), // pushed to the courier-shared escalation sheet
                 otdHrs: diff(r.order_date, r.dispatched_at, 'hrs'),   // Order→Dispatch hours (null if not yet dispatched)
                 order_date: dayKey(r.order_date),        // IST calendar day (see dayKey)
                 delivered_at: dayKey(r.delivered_at),
@@ -1435,6 +1439,205 @@ router.post('/critical-email/send', requireEmailSender, async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
+// ── #4b Escalation → Google Sheet (the tracker shared WITH the courier) ──────────────────────────
+// The basket's second exit. The team keeps a Google Sheet shared with RapidShyp ("TE <> Rapidshyp
+// Escalations") and works escalations as rows in it — same basket/selection as the critical email,
+// but the output is appended rows, not a mail (user, 2026-08-19: "don't send email — required details
+// should be push in this google sheet").
+// Auth: the GOOGLE_CREDENTIALS service account; the sheet must be shared with its client_email as
+// Editor. ⚠️ googleapis' JWT MUST be constructed with the OPTIONS OBJECT — positional args
+// (email, null, key, scopes) silently drop the key and every call fails 403 "unregistered callers",
+// which reads like a sharing problem and is not (burned an hour on exactly this).
+const ESCALATION_SHEET_ID = process.env.ESCALATION_SHEET_ID || '1LEJxeq5bg7fP2i1tRdCpqxs4BG6fjZEjZ5Scim31Oa8';
+const ESCALATION_SHEET_TAB = process.env.ESCALATION_SHEET_TAB || 'Sheet1';
+let _gSheetsClient = null;
+function gSheets() {
+    if (_gSheetsClient) return _gSheetsClient;
+    const { google } = require('googleapis');   // lazy — heavy module, only this feature needs it
+    const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS || '{}');
+    if (!creds.client_email || !creds.private_key) throw new Error('GOOGLE_CREDENTIALS is not configured');
+    const auth = new google.auth.JWT({ email: creds.client_email,
+        key: String(creds.private_key).replace(/\\n/g, '\n'),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
+    _gSheetsClient = google.sheets({ version: 'v4', auth });
+    return _gSheetsClient;
+}
+// The Agent column is a DROPDOWN (data validation: Diksha / Shaveta / Sugandh / …), so writing the raw
+// portal username ("sugandhm881") gets the red "not an item on the list" flag on every pushed row
+// (reported 2026-08-19). The sheet's own list is the truth — read the validation rule off the column
+// and match the portal user against it, so the team renaming/adding agents needs no code change.
+function matchAgentOption(portalUser, opts) {
+    const local = String(portalUser || '').split('@')[0].toLowerCase();
+    let best = null;
+    for (const o of opts || []) {
+        const k = String(o).toLowerCase().replace(/\s+/g, '');
+        // "sugandhm881" starts with "sugandh" — the longest such option wins (Sugandh over Su…).
+        if (k && (local.startsWith(k) || k.startsWith(local)) && (!best || k.length > best.k.length)) best = { o, k };
+    }
+    return best ? best.o : local;   // no match → raw local part, same as before (visible, not silent)
+}
+// Read a column's dropdown (data-validation) option list off the sheet — ONE_OF_LIST inline values,
+// or ONE_OF_RANGE resolved from its helper range ("=Agents!A1:A20"). Cached per cell for 10 min.
+const _dvCache = {};   // a1 → { at, opts }
+async function readValidationList(sheets, a1) {
+    const c = _dvCache[a1];
+    if (c && Date.now() - c.at < 10 * 60 * 1000) return c.opts;
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: ESCALATION_SHEET_ID,
+        ranges: [`${ESCALATION_SHEET_TAB}!${a1}`], fields: 'sheets.data.rowData.values.dataValidation' });
+    const dv = (((((meta.data.sheets || [])[0] || {}).data || [])[0] || {}).rowData || [])
+        .flatMap(r => r.values || []).map(v => v.dataValidation).find(Boolean);
+    let opts = [];
+    if (dv && dv.condition && dv.condition.type === 'ONE_OF_LIST') {
+        opts = (dv.condition.values || []).map(v => v.userEnteredValue).filter(Boolean);
+    } else if (dv && dv.condition && dv.condition.type === 'ONE_OF_RANGE') {
+        const ref = String(((dv.condition.values || [])[0] || {}).userEnteredValue || '').replace(/^=/, '');
+        if (ref) { const r = await sheets.spreadsheets.values.get({ spreadsheetId: ESCALATION_SHEET_ID, range: ref });
+            opts = ((r.data && r.data.values) || []).flat().filter(Boolean); }
+    }
+    _dvCache[a1] = { at: Date.now(), opts };
+    return opts;
+}
+async function sheetAgentName(sheets, portalUser) {
+    let opts = [];
+    try { opts = await readValidationList(sheets, 'B2:B2'); }
+    catch (_) { /* validation unreadable → fall through to the raw name */ }
+    return matchAgentOption(portalUser, opts);
+}
+// The sheet names the LAST-MILE courier ("Ekart", "Delhivery"), not our aggregator or the full service
+// string ("DelhiveryDirectSurface500G", "Ekart Brands") — normalise so their filters keep working.
+function sheetCourierName(courier) {
+    const c = String(courier || '');
+    for (const [re, label] of [[/delhivery/i, 'Delhivery'], [/ekart/i, 'Ekart'], [/amazon/i, 'Amazon'],
+        [/blue\s*dart/i, 'Bluedart'], [/xpress\s*bee/i, 'Xpressbees'], [/shadowfax/i, 'Shadowfax'],
+        [/ecom\s*exp/i, 'Ecom Express'], [/dtdc/i, 'DTDC']]) if (re.test(c)) return label;
+    return c.split(/[\s(]/)[0] || '—';
+}
+// IST calendar helpers — the sheet writes "19/8" dates by hand, so match that exactly.
+const _istD = iso => new Date(new Date(iso || Date.now()).getTime() + 5.5 * 3600 * 1000);
+const sheetToday = () => { const d = _istD(); return `${d.getUTCDate()}/${d.getUTCMonth() + 1}`; };
+const sheetEdd = iso => { if (!iso) return ''; const d = _istD(iso); return `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${d.getUTCFullYear()}`; };
+// Per-shipment escalation type in the sheet's own vocabulary, derived from the journey — the agent can
+// override for the whole batch, but the default must describe what the data actually shows.
+function sheetTypeFor(j) {
+    if ((j.ndr_count || 0) > 0) return 'Reattempt/Fake NDR';
+    if (j.first_edd && new Date(j.first_edd).getTime() < Date.now()) return 'EDD Breached_no attempt';
+    return 'Escalation';
+}
+function sheetReasonFor(j) {
+    const rs = Array.isArray(j.ndr_reasons) ? j.ndr_reasons.filter(Boolean) : [];
+    if (rs.length) return String(rs[rs.length - 1]).slice(0, 120);   // the latest NDR reason
+    if (j.first_edd && new Date(j.first_edd).getTime() < Date.now()) return `EDD ${sheetEdd(j.first_edd)} passed, no attempt`;
+    return 'status is not update';   // the team's own phrasing for a stalled parcel
+}
+
+// POST /escalation-sheet/push { awbs: [...], type?: <batch override>, reason?: <batch override> }
+// Appends one row per shipment; never blocks on a repeat — the sheet has a Duplicate column, so a
+// re-push is APPENDED AND MARKED "Duplicate" rather than silently skipped (their own workflow).
+router.post('/escalation-sheet/push', requireEmailSender, async (req, res) => {
+    try {
+        const awbs = Array.isArray(req.body && req.body.awbs) ? req.body.awbs.filter(Boolean).slice(0, 60) : [];
+        if (!awbs.length) return res.status(400).json({ success: false, message: 'No shipments selected.' });
+        const typeOverride = String((req.body && req.body.type) || '').trim() || null;
+        const reasonOverride = String((req.body && req.body.reason) || '').trim() || null;
+        // Per-AWB reasons, typed by the agent when the order went INTO the basket — the person adding
+        // it knows why. Wins over the batch override, which wins over the auto-derived reason.
+        const perAwbReason = (req.body && typeof req.body.reasons === 'object' && req.body.reasons) || {};
+        // Per-AWB TYPE, chosen in the add-to-basket popup. Wins over the batch override, over auto.
+        const perAwbType = (req.body && typeof req.body.types === 'object' && req.body.types) || {};
+        const { data } = await supabase.from('shipment_journey_ecom')
+            .select('order_name, awb, courier, source, payment_mode, ndr_count, ndr_reasons, first_edd, outcome')
+            .in('awb', awbs);
+        const all = data || [];
+        if (!all.length) return res.status(400).json({ success: false, message: 'Selected shipments not found.' });
+        // ⚠️ RAPIDSHYP SHIPMENTS ONLY (user, 2026-08-19). This sheet is shared WITH RapidShyp — a
+        // KwikShip or DocPharma AWB on it is an escalation to a partner who never carried the parcel,
+        // the same wrong-courier class the email routing had to be fixed for. Non-RapidShyp shipments
+        // are NOT dropped: they are reported back and stay in the basket for the email flow, which
+        // routes by platform. Same principle as the email's mixed-batch refusal, but the sheet can
+        // push its own subset because the remainder still has a working exit.
+        const rows = all.filter(j => String(j.source || '').toLowerCase() === 'rapidshyp');
+        const skippedRows = all.filter(j => String(j.source || '').toLowerCase() !== 'rapidshyp');
+        const skipped = {};
+        skippedRows.forEach(j => { const k = String(j.source || 'unknown').toLowerCase(); skipped[k] = (skipped[k] || 0) + 1; });
+        if (!rows.length) {
+            const split = Object.entries(skipped).map(([k, n]) => `${n} ${k}`).join(' + ');
+            return res.status(400).json({ success: false, message: `No RapidShyp shipments in this selection (${split}) — the sheet belongs to RapidShyp; escalate other couriers by email.` });
+        }
+        const sheets = gSheets();
+        // Existing AWBs (column C) → the Duplicate flag.
+        const cur = await sheets.spreadsheets.values.get({ spreadsheetId: ESCALATION_SHEET_ID, range: `${ESCALATION_SHEET_TAB}!C2:C` });
+        const have = new Set(((cur.data && cur.data.values) || []).flat().map(v => String(v).trim()).filter(Boolean));
+        const agent = await sheetAgentName(sheets, (req.user && req.user.sub) || '');
+        let dups = 0;
+        // Columns A–P, exactly the sheet's own header order:
+        // Date · Agent · AWB · Duplicate · MOP · Courier · Escalation type · Follow-up stage ·
+        // Reason · EDD · Remarks · Remarks · Escalation status · comment · Unboxing · Packing
+        const values = rows.map(j => {
+            const dup = have.has(String(j.awb).trim()); if (dup) dups++;
+            return [sheetToday(), agent, String(j.awb),
+                dup ? 'Duplicate' : '',
+                String(j.payment_mode || '').toLowerCase() === 'cod' ? 'COD' : 'PPD',
+                sheetCourierName(j.courier),
+                String(perAwbType[String(j.awb)] || '').trim() || typeOverride || sheetTypeFor(j), '',
+                // An entry in `reasons` is used VERBATIM — including '' (the agent chose Skip, so the
+                // cell stays blank). Auto text only when the agent was never asked for this AWB.
+                Object.prototype.hasOwnProperty.call(perAwbReason, String(j.awb))
+                    ? String(perAwbReason[String(j.awb)] || '').trim()
+                    : (reasonOverride || sheetReasonFor(j)),
+                '' /* EDD — deliberately NOT filled from our side (user, 2026-08-19); the team maintains it */,
+                '', '', 'Under Follow up', '', '', ''];
+        });
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: ESCALATION_SHEET_ID, range: `${ESCALATION_SHEET_TAB}!A1`,
+            valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS',
+            requestBody: { values },
+        });
+        // Audit — the explorer's "escalated" badge reads these marks alongside critical_mail_sent.
+        const now = new Date().toISOString();
+        const marks = rows.map(j => ({ order_name: String(j.order_name).trim(), awb: j.awb, mark_type: 'sheet_escalated', created_by: (req.user && req.user.sub) || null, updated_at: now }));
+        await supabase.from('order_marks_ecom').upsert(marks, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
+        res.json({ success: true, pushed: values.length, duplicates: dups,
+            pushedAwbs: rows.map(j => String(j.awb)), skipped, skippedAwbs: skippedRows.map(j => String(j.awb)) });
+    } catch (e) {
+        const msg = /permission|403/i.test(String(e.message)) ? 'Sheet access denied — share the escalation sheet (Editor) with the service account in GOOGLE_CREDENTIALS.' : e.message;
+        res.status(500).json({ success: false, message: msg });
+    }
+});
+
+// GET /escalation-sheet/options — the sheet's OWN dropdown lists, for the add-to-basket popup.
+// The Escalation-type column carries 19 validation values; a hardcoded subset in the UI went stale the
+// day it shipped (user, 2026-08-19: "show all as per google sheet dropdown"). The sheet is the truth.
+router.get('/escalation-sheet/options', async (_req, res) => {
+    try {
+        const sheets = gSheets();
+        const types = await readValidationList(sheets, 'G2:G2');
+        res.json({ success: true, types });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// GET /escalation-sheet/thread/:awb — this AWB's rows on the escalation sheet, thread-style.
+// The sheet is where RapidShyp RESPONDS (Remarks / Escalation status / comment columns), so the
+// expanded shipment row can show that conversation the way it shows email replies. Whole-sheet read,
+// cached 60s — one Sheets call a minute however many rows the agent expands.
+let _sheetRowsCache = { at: 0, rows: [] };
+router.get('/escalation-sheet/thread/:awb', async (req, res) => {
+    try {
+        if (Date.now() - _sheetRowsCache.at > 60 * 1000) {
+            const sheets = gSheets();
+            const v = await sheets.spreadsheets.values.get({ spreadsheetId: ESCALATION_SHEET_ID, range: `${ESCALATION_SHEET_TAB}!A2:N` });
+            _sheetRowsCache = { at: Date.now(), rows: (v.data && v.data.values) || [] };
+        }
+        const awb = String(req.params.awb || '').trim();
+        const entries = _sheetRowsCache.rows
+            .map((r, i) => ({ rowNum: i + 2, date: r[0] || '', agent: r[1] || '', awb: String(r[2] || '').trim(),
+                duplicate: r[3] || '', mop: r[4] || '', courier: r[5] || '', type: r[6] || '', stage: r[7] || '',
+                reason: r[8] || '', edd: r[9] || '', remarks: [r[10], r[11]].filter(x => String(x || '').trim()),
+                status: r[12] || '', comment: r[13] || '' }))
+            .filter(e => e.awb === awb);
+        res.json({ success: true, entries });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 // ── Manual per-order marks (Likely-Fake) + insight ──────────────────────────
 // Toggle a mark on/off for an order. Any dashboard user may mark (it's an ops judgement call).
 router.post('/order-marks', async (req, res) => {
@@ -1464,6 +1667,7 @@ router.get('/likely-fake-insight', async (req, res) => {
     try {
         const { data: marks } = await supabase.from('order_marks_ecom').select('order_name, awb, created_at, created_by').eq('mark_type', 'likely_fake').order('created_at', { ascending: false });
         const list = marks || [];
+        // Email marks ONLY — a sheet push must never wear the mail badge (same rule as the explorer).
         const { data: mailMarks } = await supabase.from('order_marks_ecom').select('order_name').eq('mark_type', 'critical_mail_sent');
         const mailSet = new Set((mailMarks || []).map(m => m.order_name));
         const names = list.map(m => m.order_name);

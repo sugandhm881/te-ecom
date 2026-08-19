@@ -151,6 +151,35 @@ function gstFromHsn(hsn) {
     return HSN_GST[head] != null ? HSN_GST[head] : null;
 }
 
+// ── EasyEcom product master — the SKU universe, live ─────────────────────────────────────────────
+// Why this exists: the picker was built ONLY from PO history, so a SKU that had never been on a PO
+// could never be put on one — a chicken-and-egg that blocked exactly the first order of every new
+// product (reported 2026-08-19 on TE-ABD1, created in EasyEcom at 12:52 the same day; no snapshot,
+// count or case-size table had it either, and none would until the nightly snapshot). The master is
+// the only source that knows a SKU the moment it is created. ~126 products, one or two pages.
+// ⚠️ Auth needs BOTH headers — `x-api-key` AND the Bearer token. With only the Bearer this endpoint
+// returns 403 Forbidden (verified live), even though PO endpoints accept the same token happily.
+// Cached in-process for 10 min: the dashboard reloads the picker often, new SKUs appear rarely.
+let _pmCache = { at: 0, rows: [] };
+async function fetchProductMaster() {
+    if (Date.now() - _pmCache.at < 10 * 60 * 1000) return _pmCache.rows;
+    const jwt = await getEasyecomToken();
+    const base = String(config.EASYECOM_BASE_URL || 'https://api.easyecom.io').replace(/\/+$/, '');
+    const headers = { 'x-api-key': config.EASYECOM_API_KEY, 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' };
+    let url = `${base}/Products/GetProductMaster?limit=200&offset=0`;
+    const rows = [];
+    for (let pages = 0; url && pages < 20; pages++) {
+        const r = await axios.get(url, { headers, timeout: 30000, validateStatus: () => true });
+        if (r.status !== 200 || !r.data) throw new Error(`GetProductMaster HTTP ${r.status}`);
+        rows.push(...(Array.isArray(r.data.data) ? r.data.data : []));
+        url = r.data.nextUrl ? (String(r.data.nextUrl).startsWith('http') ? r.data.nextUrl : base + r.data.nextUrl) : null;
+    }
+    _pmCache = { at: Date.now(), rows };
+    return rows;
+}
+// Master `tax_rate` is a FRACTION (0.18 = 18%, 0.05 = 5% — verified on live products); a null stays null.
+const pctFromFraction = v => (v != null && isFinite(v) && v > 0 && v < 1) ? Math.round(v * 10000) / 100 : null;
+
 async function skuCatalogue(pos) {
     const latest = {};
     const history = {};
@@ -165,22 +194,56 @@ async function skuCatalogue(pos) {
         }
     }));
     const skus = Object.keys(latest).sort();
-    if (!skus.length) return [];
+    // The live product master joins the party for two jobs: NAMES for history SKUs our tables don't
+    // know, and — the important one — SKUs never ordered before, which PO history is blind to by
+    // definition. A master failure degrades to the old history-only picker, never blocks it.
+    let masterBySku = {};
+    try {
+        (await fetchProductMaster()).forEach(p => { const k = String(p.sku || '').trim(); if (k) masterBySku[k] = p; });
+    } catch (e) { console.warn('[PO skuCatalogue] product master failed — picker limited to PO history:', e.message); }
     const names = {};
     try {
         // Two sources, newest wins. Neither is a product master, but between them they cover the range.
-        for (const t of ['inventory_snapshots', 'inventory_counts_ecom']) {
+        if (skus.length) for (const t of ['inventory_snapshots', 'inventory_counts_ecom']) {
             const { data } = await supabase.from(t).select('sku, product_name').in('sku', skus).not('product_name', 'is', null);
             (data || []).forEach(r => { const k = String(r.sku || '').trim(); if (k && !names[k]) names[k] = r.product_name; });
         }
     } catch (e) { console.warn('[PO skuCatalogue] name lookup failed:', e.message); }   // names are a nicety, never a blocker
+    // Active master products with no PO history — the "first order" rows. Price/tax context comes from
+    // the master itself: `cost` (labelled as such in the UI, it is EasyEcom's cost field, not a price we
+    // ever paid) and `tax_rate` (a FRACTION; product-specific, set at product creation) with the HSN
+    // chapter as fallback. Inactive products stay out — a discontinued SKU on the picker is a trap.
+    // Combos are excluded: a combo_product is a bundle EasyEcom assembles from child SKUs, not a thing
+    // a supplier sells — 53 of the 124 active products, none of which has ever been on a PO. Children
+    // and normal products stay, including oddly-named marketplace imports (brand "Unknown"): hiding by
+    // name/brand guesswork could bury a legitimate SKU, and the tail only surfaces when searched.
+    const fresh = Object.values(masterBySku)
+        .filter(p => p.active === 1 && p.product_type !== 'combo_product' && !latest[String(p.sku).trim()])
+        .map(p => {
+            const sku = String(p.sku).trim();
+            const hsn = p.hsn_code || null;
+            const masterTax = pctFromFraction(p.tax_rate);
+            const suggestedTax = masterTax != null ? masterTax : gstFromHsn(hsn);
+            return {
+                sku, name: p.product_name || null, neverOrdered: true,
+                lastPrice: null, lastGrossPrice: null, lastLineTaxRate: null,
+                lastVendor: null, lastVendorId: null, lastOrderedAt: null,
+                orderCount: 0, prevPrice: null, prevPriceAt: null, priceChanged: false,
+                masterCost: (isFinite(p.cost) && p.cost > 0) ? Number(p.cost) : null,
+                hsn, suggestedTax,
+                taxSource: masterTax != null ? 'EasyEcom product master' : (suggestedTax != null ? `HSN ${hsn}` : null),
+            };
+        })
+        .sort((a, b) => a.sku.localeCompare(b.sku));
+    // History rows FIRST — buyers mostly reorder, so the familiar SKUs stay on top and the
+    // never-ordered tail sits below them; the search box reaches both equally.
     return skus.map(sku => {
         const h = (history[sku] || []).slice().sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
         const prices = [...new Set(h.map(x => x.price))];
         const prev = h.find(x => x.price !== latest[sku].price);   // the last DIFFERENT price, if any
         const hsn = latest[sku].hsn || null;
         return {
-            sku, name: names[sku] || null,
+            sku, name: names[sku] || (masterBySku[sku] && masterBySku[sku].product_name) || null,
             // ⚠️ lastPrice is the NET (tax-exclusive) figure — the one CreatePurchaseOrder expects. The
             // gross is carried alongside so the UI can show what was actually invoiced, but the two are
             // never merged: mixing them is what would re-tax a SKU on every re-order.
@@ -201,7 +264,7 @@ async function skuCatalogue(pos) {
             suggestedTax: gstFromHsn(hsn),
             taxSource: gstFromHsn(hsn) != null ? `HSN ${hsn}` : null,
         };
-    });
+    }).concat(fresh);
 }
 
 // Shape one PO for the UI. Quantities and money are normalised to numbers here so the client never has
