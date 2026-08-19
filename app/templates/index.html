@@ -981,6 +981,10 @@
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 14l6-6M9 8h.01M15 14h.01M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"></path></svg>
                         <span class="ml-3 text-sm font-medium">RapidShyp Recon</span>
                     </a>
+                    <a href="#" id="nav-gokwik-pg-recon" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h.01M3 7a2 2 0 012-2h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"></path></svg>
+                        <span class="ml-3 text-sm font-medium">GoKwik PG Recon</span>
+                    </a>
                 </div>
             </div>
 
@@ -2651,6 +2655,11 @@
 
         <!-- RapidShyp Recon — rendered entirely by rsreInit()/rsreRender() in app.js, like DocPharma Recon. -->
         <div id="rapidshyp-recon-view" class="view-hidden"></div>
+
+                <!-- GoKwik PG Recon — rendered entirely by pgrInit()/pgrRender() in app.js, like the other two recon
+             workspaces. Keeping the shell in JS means the tabs, filters and tables are built from one
+             place instead of drifting between markup and renderer. -->
+        <div id="gokwik-pg-recon-view" class="view-hidden"></div>
 
         <div id="delivery-perf-view" class="view-hidden">
           <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">

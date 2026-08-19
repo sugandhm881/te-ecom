@@ -223,6 +223,50 @@ function check(name, got, want) {
         src.includes("rto_no_attempt', true)") && src.includes("eq('source', 'rapidshyp')"), true);
 }
 
+// ── 4b. Status-changed must not depend on who had a tab open ────────────────────────────────────
+// Bug 2026-08-18: the Undelivered tab dropped terminal shipments and THEN wrote undelivered_tracking,
+// so the settled orders — the only ones Status-changed exists to show — were never recorded. 447 orders
+// with a real NDR had no row at all. Order matters here and nothing else enforces it, so assert it.
+{
+    const src = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+    const queue = src.match(/router\.get\('\/support\/queue'[\s\S]*?\n\s*\} else \{ \/\/ repeat/)[0];
+    const und = queue.slice(0, queue.indexOf("} else if (tab === 'changed')"));
+    const changed = queue.slice(queue.indexOf("} else if (tab === 'changed')"));
+
+    check('status changed: an undelivered order is recorded BEFORE the terminal filter can drop it',
+        und.indexOf('rememberUndelivered(') >= 0 && und.indexOf('rememberUndelivered(') < und.indexOf('terminalByAwb('), true);
+    check('status changed: nothing writes undelivered_tracking after rows has been filtered',
+        /terminalByAwb\([\s\S]*undelivered_tracking/.test(und), false);
+    check('status changed: the tab derives "was undelivered" from the courier journey, not from a page load',
+        changed.indexOf('syncUndeliveredFromJourney(') >= 0
+        && changed.indexOf('syncUndeliveredFromJourney(') < changed.indexOf("from('undelivered_tracking')"), true);
+    // The population rule itself, exercised — not just its presence in the source. TE25-39935 is the
+    // case that forced it: zero failed attempts, nine days past its promise date.
+    eval(src.match(/function undeliveredMoment\(j\)[\s\S]*?\n\}\r?\n/)[0]);   // \r? — this file is CRLF
+    const late = undeliveredMoment({ outcome: 'delivered', ndr_count: 0, first_edd: '2026-08-09T00:00:00Z',
+        delivered_at: '2026-08-18T07:19:45Z', ofd_dates: ['2026-08-18T05:11:25Z'], order_date: '2026-08-03T13:18:38Z' })[0];
+    check('status changed: a parcel delivered after its promised date counts as undelivered', !!late, true);
+    check('status changed: it became undelivered when the promise broke, not at the late attempt',
+        String(late).slice(0, 10), '2026-08-09');
+    check('status changed: an on-time delivery with no failed attempt never enters the list',
+        undeliveredMoment({ outcome: 'delivered', ndr_count: 0, first_edd: '2026-08-10T00:00:00Z',
+            delivered_at: '2026-08-09T11:00:00Z', ofd_dates: ['2026-08-09T06:00:00Z'] })[0], null);
+    check('status changed: a failed delivery attempt still counts on its own',
+        !!undeliveredMoment({ outcome: 'in_transit', ndr_count: 2, first_edd: null, ofd_dates: ['2026-08-09T06:00:00Z'] })[0], true);
+    check('status changed: an RTO is undelivered whatever its dates say',
+        !!undeliveredMoment({ outcome: 'rto', ndr_count: 0, first_edd: '2026-08-20T00:00:00Z', ofd_dates: [] })[0], true);
+    // fetchPaged(build, maxRows) — a numeric second argument silently truncates the candidate list.
+    check('status changed: the candidate fetch has no silent row cap',
+        /\.range\(f, t\),\s*\d+\)/.test(changed), false);
+    // The rule is undelivered → DELIVERED or RTO. "Anything that is no longer undelivered" also catches
+    // orders that are merely moving again, which are still open and belong on no settled list.
+    check('status changed: the tab lists settled outcomes, not just "no longer undelivered"',
+        [/SETTLED_BUCKETS\.includes\(r\.bucket\)/.test(changed),
+         /!UNDELIVERED_BUCKETS\.includes\(r\.bucket\)/.test(changed)], [true, false]);
+    check('status changed: settled means delivered + rto',
+        /const SETTLED_BUCKETS = \['delivered', 'rto'\];/.test(src), true);
+}
+
 // ── 5. RapidShyp sync: transient failures must not raise a cron-failure card ─────────────────────
 // Bug 2026-08-17: an 8s timeout on 3 AWBs turned a 13-minute run into "❌ Cron failed". The job only
 // fetches AWBs with no row yet, so a failure self-heals on the next run two hours later — while a

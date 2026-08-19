@@ -13,6 +13,9 @@ const { requirePermission } = require('../auth');
 const shopifyHold = require('./shopify_hold');
 
 const UNDELIVERED_BUCKETS = ['undelivered'];   // per the console spec: single member
+// What "Status changed" means: an order that WAS undelivered and has since SETTLED. Delivered or RTO —
+// the two outcomes the customer-support team acts on. Not merely "any bucket other than undelivered".
+const SETTLED_BUCKETS = ['delivered', 'rto'];
 const HIGH_VALUE_MIN = 1500;   // ₹ — high-value hold threshold, and the bar a PAST DELIVERED order must
                                // clear to earn the trust exception. Keep in sync with shopify_hold.js.
 const CALL_OUTCOMES = ['no_answer', 'customer_will_accept', 'refused', 'reschedule', 'wrong_number', 'delivered_confirmed', 'other'];
@@ -81,13 +84,28 @@ async function fetchPaged(build, maxRows = 20000) {
     return all;
 }
 // PostgREST URL limits: big IN() lists are chunked at 300 and fetched in parallel (console pattern).
-async function chunkedIn(table, select, col, ids, extra) {
-    const parts = await Promise.all(chunk(ids, 300).map(part => {
-        let q = supabase.from(table).select(select).in(col, part);
-        if (extra) q = extra(q);
-        return q;
-    }));
-    return parts.flatMap(p => p.data || []);
+// AN ERROR HERE MUST THROW, NEVER RESOLVE TO AN EMPTY LIST. This used to end with
+// `parts.flatMap(p => p.data || [])`, so any chunk that failed - throttling, a URL too long, a dropped
+// socket - silently contributed zero rows and the caller reported a confident, WRONG number. Caught
+// 2026-08-19: the Status-changed tab returned 0 rows for August while returning 207 for a range that
+// CONTAINS August. The tab had grown to ~7,000 candidate ids (24 chunks) and fired another 48 lookups on
+// top; chunks were being dropped. A 500 the user can see beats a total that quietly lies. Concurrency is
+// capped for the same reason - the fan-out, not the query, was what broke.
+async function chunkedIn(table, select, col, ids, extra, concurrency = 6) {
+    const parts = chunk(ids, 300);
+    const out = [];
+    for (let i = 0; i < parts.length; i += concurrency) {
+        const res = await Promise.all(parts.slice(i, i + concurrency).map(part => {
+            let q = supabase.from(table).select(select).in(col, part);
+            if (extra) q = extra(q);
+            return q;
+        }));
+        res.forEach(r => {
+            if (r.error) throw new Error(table + ' lookup failed: ' + r.error.message);
+            out.push(...(r.data || []));
+        });
+    }
+    return out;
 }
 // When each order was FIRST seen undelivered — the boundary between "worked pre-dispatch" (Call Queue /
 // hold) and "worked as an undelivered parcel". Used to scope notes to the panel they were written in.
@@ -208,10 +226,12 @@ const TERMINAL_OUTCOMES = new Set(['delivered', 'rto', 'lost']);
 async function terminalByAwb(rows) {
     const awbs = [...new Set(rows.map(r => String(r.awb_number || '').trim()).filter(Boolean))];
     const names = [...new Set(rows.map(r => String(r.order_name || '').replace('#', '').trim()).filter(Boolean))];
-    const done = new Set();
+    // A MAP, not a Set: the Status-changed tab needs the OUTCOME itself, not just "is it finished".
+    // `.has()` / `.size` behave identically, so the Undelivered caller is unaffected.
+    const done = new Map();
     if (awbs.length) {
         const jr = await chunkedIn('shipment_journey_ecom', 'awb, outcome', 'awb', awbs);
-        jr.filter(j => TERMINAL_OUTCOMES.has(String(j.outcome || ''))).forEach(j => done.add(j.awb));
+        jr.filter(j => TERMINAL_OUTCOMES.has(String(j.outcome || ''))).forEach(j => done.set(j.awb, String(j.outcome)));
     }
     // ⚠️ DOCPHARMA ORDERS OFTEN HAVE NO JOURNEY ROW AT ALL, so the check above cannot see them — the
     // partner portal showed TE25-37876 delivered on 27 Jul while the panel still listed it as
@@ -224,9 +244,106 @@ async function terminalByAwb(rows) {
         const byName = {};
         rows.forEach(r => { byName[String(r.order_name || '').replace('#', '').trim()] = String(r.awb_number || '').trim(); });
         dp.filter(d => finished.test(String(d.order_status || '')))
-            .forEach(d => { const awb = byName[d.partner_order_id] || d.awb; if (awb) done.add(awb); });
+            .forEach(d => { const awb = byName[d.partner_order_id] || d.awb;
+                if (awb) done.set(awb, /^rto|^return/i.test(String(d.order_status)) ? 'rto' : /^deliver/i.test(String(d.order_status)) ? 'delivered' : 'lost'); });
     }
     return done;
+}
+
+// Put a batch of orders on the "was undelivered" record. Never deletes, only ever adds/refreshes
+// last_seen_at — `first_seen_at` keeps its original value on conflict (that is the note-scoping boundary).
+async function rememberUndelivered(rows) {
+    const ids = [...new Set((rows || []).map(r => String(r.order_id || '')).filter(Boolean))];
+    if (!ids.length) return 0;
+    const now = new Date().toISOString();
+    for (const part of chunk(ids.map(id => ({ order_id: id, last_seen_at: now })), 500)) {
+        await supabase.from('undelivered_tracking').upsert(part, { onConflict: 'order_id' }).then(() => {}).catch(() => {});
+    }
+    return ids.length;
+}
+
+// WHAT COUNTS AS "UNDELIVERED" — the parcel was not in the customer's hands when it should have been.
+// Two ways that happens, and BOTH count (settled with the user on TE25-39935, 2026-08-18):
+//   (a) the courier logged a FAILED DELIVERY ATTEMPT — `ndr_count > 0`;
+//   (b) the parcel went PAST ITS PROMISED DATE (`first_edd`) still undelivered — no failed attempt
+//       needed. TE25-39935 was promised 09 Aug, sat in a Moradabad facility for a week, and delivered
+//       on 18 Aug on its first and only attempt. `ndr_count` is 0 and always will be, so rule (a) alone
+//       can never see it — yet it is exactly the parcel support spends its day chasing.
+// An RTO or a lost parcel is undelivered by definition, whatever its dates say.
+// Returns [momentISO] — when the parcel BECAME undelivered work, or [null] if it never did. That moment
+// is the earlier of the first delivery attempt and the missed promise date; it is stored as
+// `first_seen_at` and scopes which panel a note belongs to (see undeliveredSince).
+function undeliveredMoment(j) {
+    const outcome = String(j.outcome || '').toLowerCase();
+    const firstOfd = Array.isArray(j.ofd_dates) && j.ofd_dates.length ? j.ofd_dates[0] : null;
+    const edd = j.first_edd ? new Date(j.first_edd) : null;
+    // The promise is a DATE, so it is only broken once that whole day is gone.
+    const eddEnd = edd ? new Date(edd.getFullYear(), edd.getMonth(), edd.getDate(), 23, 59, 59) : null;
+    const delivered = j.delivered_at ? new Date(j.delivered_at) : null;
+    const overdue = !!eddEnd && (outcome === 'rto' || outcome === 'lost'
+        || (delivered ? delivered > eddEnd : Date.now() > eddEnd.getTime()));
+    if (!(Number(j.ndr_count || 0) > 0) && !overdue) return [null];
+    const candidates = [firstOfd, overdue ? eddEnd.toISOString() : null].filter(Boolean)
+        .sort((a, b) => new Date(a) - new Date(b));
+    return [candidates[0] || j.order_date || null];
+}
+
+// ── Self-healing: "was undelivered" is a courier fact, not a record of who had a tab open ─────────
+// `undelivered_tracking` was written ONLY as a side effect of somebody loading the Undelivered tab, so a
+// parcel that failed a delivery attempt and then settled (delivered or RTO) between two visits was never
+// recorded — and therefore could never appear on Status changed. Measured 2026-08-18: 447 orders with a
+// real NDR (218 RTO + 229 delivered) had no row at all, plus 7 sitting in the undelivered bucket right
+// now with a terminal journey, about to disappear the same way.
+//
+// The courier journey already knows: `ndr_count > 0` means the parcel failed at least one delivery
+// attempt, whether or not anyone was watching. This backfills the missing rows from it — pure DB work,
+// ZERO courier calls, ~1,500 journeys per 30 days — so it is cheap enough to run on every load of the tab.
+// `first_seen_at` is set to the FIRST out-for-delivery scan, i.e. when the parcel actually became
+// undelivered work. That is the boundary that decides which panel a note belongs to (see
+// undeliveredSince), so a courier timestamp is strictly better than "when a human first refreshed".
+// DocPharma shipments have no journey row and are still covered the old way, by rememberUndelivered().
+// The Call Queue auto-refreshes every 30s and this derivation is pure catch-up work, so repeating it on
+// every poll is waste, not freshness: an order that qualifies now still qualifies in a minute. Orders
+// ALREADY tracked stay real-time regardless - their settled verdict comes from the journey at read time.
+const _undSyncAt = new Map();   // `${from}|${to}` -> ms
+const UND_SYNC_TTL_MS = 60000;
+async function syncUndeliveredFromJourney(fromISO, toISO) {
+    const key = fromISO + '|' + toISO;
+    const last = _undSyncAt.get(key) || 0;
+    if (Date.now() - last < UND_SYNC_TTL_MS) return 0;
+    _undSyncAt.set(key, Date.now());
+    const journeys = await fetchPaged((f, t) => supabase.from('shipment_journey_ecom')
+        .select('awb, order_name, outcome, ndr_count, ofd_dates, first_edd, delivered_at, order_date')
+        .gte('order_date', fromISO).lte('order_date', toISO)
+        .order('order_date', { ascending: true }).order('awb', { ascending: true })
+        .range(f, t));
+    if (!journeys.length) return 0;
+    // Earliest undelivered moment per order — an order re-shipped on a second AWB has two journey rows.
+    const seenAt = {};
+    journeys.forEach(j => {
+        const key = String(j.order_name || '').replace('#', '').trim();
+        if (!key) return;
+        const [at] = undeliveredMoment(j);
+        if (!at) return;
+        if (!seenAt[key] || new Date(at) < new Date(seenAt[key])) seenAt[key] = at;
+    });
+    const names = Object.keys(seenAt);
+    if (!names.length) return 0;
+    // `shipment_journey_ecom.order_name` carries no '#'; `orders.name` does — look up both spellings.
+    const ordRows = await chunkedIn('orders', 'id, name', 'name', names.flatMap(n => [n, '#' + n]));
+    const idByName = {};
+    ordRows.forEach(o => { idByName[String(o.name || '').replace('#', '').trim()] = String(o.id); });
+    const known = names.filter(n => idByName[n]);
+    if (!known.length) return 0;
+    const have = new Set((await chunkedIn('undelivered_tracking', 'order_id', 'order_id', known.map(n => idByName[n])))
+        .map(r => String(r.order_id)));
+    const missing = known.filter(n => !have.has(idByName[n]))
+        .map(n => ({ order_id: idByName[n], first_seen_at: new Date(seenAt[n]).toISOString(), last_seen_at: new Date(seenAt[n]).toISOString() }));
+    if (!missing.length) return 0;
+    for (const part of chunk(missing, 500)) {
+        await supabase.from('undelivered_tracking').upsert(part, { onConflict: 'order_id' }).then(() => {}).catch(() => {});
+    }
+    return missing.length;
 }
 
 async function platformByOrder(rows) {
@@ -497,22 +614,31 @@ router.get('/support/queue', async (req, res) => {
                 .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true })
                 .order('order_id', { ascending: true })
                 .range(f, t));
+            // ⚠️ REMEMBER FIRST, FILTER SECOND. Every order this query saw undelivered goes on record
+            // BEFORE the terminal filter below removes any of them — a parcel that has just been delivered
+            // or returned is exactly the one the Status-changed tab exists to show. This upsert used to sit
+            // AFTER `rows` had already been reassigned by the filter, so the settled orders were the only
+            // ones never recorded, and they vanished from both tabs at once.
+            await rememberUndelivered(rows);
             // Drop anything the courier has already finished with — a delivered or returned parcel is not
-            // a call to make. Done BEFORE the undelivered_tracking upsert below so a terminal order still
-            // gets remembered for the Status-changed tab, which is exactly where it belongs now.
+            // a call to make.
             const done = await terminalByAwb(rows);
             if (done.size) rows = rows.filter(r => !done.has(String(r.awb_number || '').trim()));
-            // Remember every order ever seen undelivered — powers the Status-changed tab.
-            if (rows.length) {
-                const now = new Date().toISOString();
-                for (const part of chunk(rows.map(r => ({ order_id: r.order_id, last_seen_at: now })), 500)) {
-                    await supabase.from('undelivered_tracking').upsert(part, { onConflict: 'order_id' }).then(() => {}).catch(() => {});
-                }
-            }
         } else if (tab === 'changed') {
-            // Paginated — .limit(3000) silently capped at 1000 (server max).
+            // Put on record everything the COURIER says went undelivered in this window, so the tab does
+            // not depend on who happened to have the Undelivered tab open — see syncUndeliveredFromJourney().
+            await syncUndeliveredFromJourney(fromISO, toISO);
+            // Paginated — .limit(3000) silently capped at 1000 (server max). The old 3000-row ceiling here
+            // was itself a silent cap: ordered by last_seen_at DESC, it dropped the oldest-seen orders once
+            // the table passed 3,000 rows (3,982 today), so old orders fell off the tab for good.
+            // `first_seen_at` is never earlier than the order date (it is a delivery attempt, a missed
+            // promise date, or the order date itself), so anything first seen BEFORE the window opened
+            // cannot be an in-window order - a safe pre-filter that cut the candidate set from ~7,000 to
+            // the low hundreds and the tab from 17.6s to about a second. No upper bound: an order placed
+            // inside the window may only have gone undelivered after it closed, and it still belongs here.
             const tracked = await fetchPaged((f, t) => supabase.from('undelivered_tracking').select('order_id')
-                .order('last_seen_at', { ascending: false }).order('order_id', { ascending: true }).range(f, t), 3000);
+                .gte('first_seen_at', fromISO)
+                .order('last_seen_at', { ascending: false }).order('order_id', { ascending: true }).range(f, t));
             const ids = tracked.map(t => t.order_id);
             const all = ids.length ? await chunkedIn('order_buckets', SEL, 'order_id', ids) : [];
             // ⚠️ APPLY THE DATE RANGE. This tab ignored the picker entirely — it listed every order ever
@@ -520,8 +646,31 @@ router.get('/support/queue', async (req, res) => {
             // window is filtered here rather than in the query because the candidate ids come from
             // `undelivered_tracking`, which has no order date of its own.
             const fromMs = new Date(fromISO).getTime(), toMs = new Date(toISO).getTime();
-            rows = all.filter(r => !UNDELIVERED_BUCKETS.includes(r.bucket))
-                .filter(r => { const t = new Date(r.created_at).getTime(); return t >= fromMs && t <= toMs; })
+            // THE RULE (set by the user 2026-08-18): "if an order is undelivered → delivered or RTO, it
+            // should go on Status changed". So the tab lists SETTLED outcomes only, not merely "no longer
+            // undelivered". Aug MTD this drops 72 orders that were cancelled after going undelivered and
+            // 10 that are moving again (8 five_days_plus, 2 order_to_dispatch) — the latter are still in
+            // flight, so they belong on no closed list. Was `!UNDELIVERED_BUCKETS.includes(bucket)`.
+            //
+            // ⚠️ SETTLED IS DECIDED BY THE JOURNEY, NOT THE BUCKET — the two tabs must hand over in the
+            // SAME instant. Undelivered drops a parcel the moment `shipment_journey_ecom.outcome` turns
+            // terminal (webhook, seconds), but `order_buckets.bucket` only follows once the periodic
+            // `order_tracking` / `rapidshyp_tracking_ecom` snapshot is rewritten. Reading the bucket here
+            // left a window where an order was on NEITHER tab — measured 2026-08-19: 3 orders, one of them
+            // a RapidShyp RTO invisible since 11 Aug. Same source for both tabs = no window at all.
+            // Window FIRST, courier lookups second. Resolving outcomes for every order ever seen
+            // undelivered (~7,000) and then throwing 85% away is what blew the fan-out up.
+            const inWindow = all.filter(r => { const t = new Date(r.created_at).getTime(); return t >= fromMs && t <= toMs; });
+            const settled = await terminalByAwb(inWindow);
+            // Only fills a bucket that has NOT yet resolved — never overrides `cancelled`, which is a
+            // decision we made about the order, not a lagging courier snapshot. (Overriding it too pulled
+            // 607 cancelled orders onto the tab, against the delivered-or-RTO rule.)
+            const PENDING_BUCKET = b => !['delivered', 'rto', 'cancelled'].includes(b);
+            inWindow.forEach(r => {                  // show the courier's verdict, not the stale snapshot
+                const o = settled.get(String(r.awb_number || '').trim());
+                if (o && PENDING_BUCKET(r.bucket) && SETTLED_BUCKETS.includes(o)) r.bucket = o;
+            });
+            rows = inWindow.filter(r => SETTLED_BUCKETS.includes(r.bucket))
                 .sort((a, b) => (b.msg91_confirmed === true) - (a.msg91_confirmed === true) || new Date(a.created_at) - new Date(b.created_at));
         } else { // repeat — reason-tagged COD/pre-pickup base (see findRepeatCandidates); shown/filtered below.
             rows = await findRepeatCandidates({ fromISO, toISO, skipDispatchFilter: true, anyReason: true });
@@ -549,12 +698,16 @@ router.get('/support/queue', async (req, res) => {
         };
         const [notes, scansRaw, names] = await Promise.all([
             notesByOrder(orderIds, keepNote),
-            scanTimesByOrder(orderIds),
+            // The Last-scan column renders on the Undelivered tab ONLY (a settled parcel's last scan IS
+            // its outcome, and a pre-dispatch order has none), so paying for it elsewhere buys nothing.
+            // Two table sweeps saved. It is NOT the tab's bottleneck (measured: no change) - the
+            // `order_buckets` VIEW is, at ~1.1s per 300 rows. Kept because the work buys nothing.
+            tab === 'und' ? scanTimesByOrder(orderIds) : Promise.resolve({}),
             namesByOrder(orderIds),
         ]);
         rows.forEach(r => { r.customer_name = names[String(r.order_id)] || null; });
         // Real-time courier scans beat the nightly tracking snapshot — see overlayJourneyScans().
-        const scans = await overlayJourneyScans(rows, scansRaw);
+        const scans = tab === 'und' ? await overlayJourneyScans(rows, scansRaw) : {};
         rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; r.last_scan_at = scans[r.order_id] || null; });
         // Courier platform — only for the shipped panels. Repeat-tab orders are still pre-dispatch (no AWB,
         // no journey row), so the lookup would cost a query and return nothing but nulls.
@@ -631,7 +784,13 @@ router.get('/support/queue', async (req, res) => {
                 // dropped above via !_moved; this catches the AWB-assigned-but-not-yet-scanned gap.)
                 .filter(r => !(r.shopify_hold && r.shopify_hold.status === 'released' && (r._dispatched || r.awb_number) && !r.ee_hold));
         }
-        res.json({ success: true, tab, rows: rows.slice(0, 1500), lock: await lockState() });
+        // ⚠️ THE RESPONSE IS CAPPED AND THE CLIENT MUST SAY SO. 1,500 rows keeps the payload and the
+        // table render sane, but a silent truncation reads as "that is all of them" — Status changed
+        // crossed the cap the day it started catching late parcels (1,500 shown of 1,905 over 30 days).
+        // `total` lets the count line say "1,500 of 1,905 — narrow the dates" instead of lying.
+        const ROW_CAP = 1500;
+        res.json({ success: true, tab, total: rows.length, capped: rows.length > ROW_CAP,
+            rows: rows.slice(0, ROW_CAP), lock: await lockState() });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
@@ -952,3 +1111,5 @@ router.post('/support/refresh-tracking', async (req, res) => {
 
 module.exports = router;
 module.exports.findRepeatCandidates = findRepeatCandidates;   // reused by the Shopify auto-hold cron
+// Exported for the backfill/verification harness and any future cron — see the comment on the function.
+module.exports.syncUndeliveredFromJourney = syncUndeliveredFromJourney;

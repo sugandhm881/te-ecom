@@ -1173,6 +1173,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('rapidshyp-recon-view');
             if (typeof rsreInit === 'function') rsreInit();
             break;
+        case 'gokwik-pg-recon':
+            activeLinkElement = document.getElementById('nav-gokwik-pg-recon');
+            activeViewElement = document.getElementById('gokwik-pg-recon-view');
+            if (typeof pgrInit === 'function') pgrInit();
+            break;
         case 'amazon-fba':
             activeLinkElement = document.getElementById('nav-amazon-fba');
             activeViewElement = document.getElementById('amazon-fba-view');
@@ -4613,7 +4618,7 @@ async function supDashInit(){
 }
 
 // ── Call Queue ─────────────────────────────────────────────────────────────
-let _supTab='und', _supQueueRows=[], _supQueueWired=false, _supSort=null;   // _supSort={k,d} set by clicking a column header
+let _supTab='und', _supQueueRows=[], _supCapped=false, _supTotal=0, _supQueueWired=false, _supSort=null;   // _supSort={k,d} set by clicking a column header
 function supQueueInit(){
   supRenderRange('sup-range-queue', supLoadQueue);
   if(!_supQueueWired){ _supQueueWired=true;
@@ -4632,7 +4637,7 @@ function supSyncInfo(lock){ const el=document.getElementById('sup-sync-info'); i
   const res=lock.last_result||{}; el.textContent = lock.is_running?'Sync running…':(lock.last_finished_at?`Last sync ${new Date(lock.last_finished_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}${res.updated!=null?` · ${res.updated} updated`:''}`:''); }
 async function supLoadQueue(quiet){
   const c=document.getElementById('sup-queue-table'); if(c && !quiet) c.innerHTML=brandLoader('Loading queue…');
-  try{ _eeHoldAt=0; const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS()); await eeHoldRefresh(); _supQueueRows=d.rows||[]; supSyncInfo(d.lock); supQueueTable(); }
+  try{ _eeHoldAt=0; const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS()); await eeHoldRefresh(); _supQueueRows=d.rows||[]; _supCapped=!!d.capped; _supTotal=d.total||0; supSyncInfo(d.lock); supQueueTable(); }
   catch(e){ if(c && !quiet) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }   // quiet poll error → keep showing current data
 }
 // Real-time-ish: quietly re-fetch the queue every 30s WHILE the support view is visible, so agents see
@@ -4838,7 +4843,11 @@ function supQueueTable(){
   if(fR!=='all') list=list.filter(r=> fR==='none' ? !r.raised_kind : fR==='any' ? !!r.raised_kind : r.raised_kind===fR);
   if(fS!=='all') list=list.filter(r=>supStatusText(r)===fS);
   if(_supSort&&_supSort.k) list.sort(_supSortCmp(_supSort.k,_supSort.d));   // else keep the server order (confirmed → oldest)
-  const cnt=document.getElementById('sup-queue-count'); if(cnt) cnt.textContent=`${list.length} shown`;
+  // Say when the SERVER truncated, not just how many survived the client filters — otherwise a capped
+  // tab reads as complete. Only meaningful with no client filter narrowing the list further.
+  const cnt=document.getElementById('sup-queue-count');
+  if(cnt) cnt.textContent = (_supCapped && list.length===_supQueueRows.length)
+    ? `${list.length} of ${_supTotal} — narrow the dates to see the rest` : `${list.length} shown`;
   document.querySelector(`.sup-tab[data-tab="${_supTab}"] .sup-tab-count`).textContent=`(${list.length})`;
   if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">Queue is clear 🎉</div>'; return; }
   const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
@@ -5817,7 +5826,7 @@ const NAV_HREF = {
     'nav-customer-segments': 'customer-segments', 'nav-returns-analysis': 'returns-analysis', 'nav-ad-ranking': 'ad-ranking',
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
-    'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon',
+    'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice',
@@ -6544,6 +6553,7 @@ document.getElementById('nav-amazon-review')?.addEventListener('click', (e) => {
 document.getElementById('nav-fulfillment-ops')?.addEventListener('click', (e) => { e.preventDefault(); navigate('fulfillment-ops'); });
 document.getElementById('nav-docpharma-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('docpharma-recon'); });
 document.getElementById('nav-rapidshyp-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('rapidshyp-recon'); });
+document.getElementById('nav-gokwik-pg-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('gokwik-pg-recon'); });
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
 document.getElementById('nav-claims-sla')?.addEventListener('click', (e) => { e.preventDefault(); navigate('claims-sla'); });
@@ -6868,7 +6878,7 @@ function zmInit() {
 const PERM_GROUPS = [
   ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['last-mile','Last-Mile Funnel'],['amazon-fba','Amazon FBA']]],
   // Reconciliation — one group per billing partner; each ledger stays SEPARATE (different money flows).
-  ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon']]],
+  ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon'],['gokwik-pg-recon','GoKwik PG Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
   ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)']]],
@@ -8593,7 +8603,7 @@ function dpreInit(){
         const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
         _dpreFrom=fmt(f); _dpreTo=fmt(t);
         v.innerHTML=`
-        <div class="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200 px-6 pt-4">
+        <div class="sticky top-0 z-30 bg-white border-b border-slate-200 px-6 pt-4">
           <h1 class="text-2xl font-bold text-slate-800">DocPharma</h1>
           <nav class="flex gap-1 mt-3 -mb-px overflow-x-auto">
             ${[['overview','Overview'],['recon','Reconciliation'],['ledger','Ledger'],['invoices','Invoices'],['payments','Payments'],['inventory','Inventory Match']].map(([k,l])=>`<button class="dpre-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-700 whitespace-nowrap" data-tab="${k}">${l}</button>`).join('')}
@@ -15754,14 +15764,14 @@ function rsreInit() {
     _rsreFrom = _ymd(f); _rsreTo = _ymd(t);
     const TABS = [['overview', 'Overview'], ['recon', 'Reconciliation'], ['rates', 'Rate Card'], ['ledger', 'Ledger'], ['payments', 'Payments']];
     v.innerHTML = `
-      <div class="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200 px-6 pt-4">
+      <div class="sticky top-0 z-30 bg-white border-b border-slate-200 px-6 pt-4">
         <h1 class="text-2xl font-bold text-slate-800">RapidShyp</h1>
         <nav class="flex gap-1 mt-3 -mb-px overflow-x-auto">
           ${TABS.map(([k, l]) => `<button class="rsre-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-700 whitespace-nowrap" data-tab="${k}">${l}</button>`).join('')}
         </nav>
       </div>
 
-      <header class="px-6 py-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-3 bg-slate-50/50">
+      <header class="px-6 py-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-3 bg-slate-50">
         <p class="text-sm text-slate-400" id="rsre-sub">Billed by RapidShyp vs their own zone rate — no rate card, the benchmark is their invoices.<br><span class="text-xs">Date range = when a shipment <b>closed</b> (delivered / RTO), which is when RapidShyp bills it — not the order date.</span></p>
         <div class="flex items-center gap-2 flex-wrap">
           <input id="rsre-from" type="date" class="${RSRE_IN}" value="${_rsreFrom}">
@@ -17842,4 +17852,469 @@ function ecResult(opts){
         document.body.appendChild(wrap);
         wrap.querySelector('.ec-result-ok').focus();
     });
+}
+
+// ═══════════════ GoKwik PG Reconciliation ═══════════════
+// A five-tab workspace mirroring DocPharma Recon and RapidShyp Recon: Overview · Reconciliation ·
+// Rate Card · Ledger · Refunds. The whole shell is rendered here rather than half-declared in
+// index.html, so tabs, filters and tables cannot drift apart from the renderer.
+//
+// What it answers: what SHOULD GoKwik charge us. 2.15% prepaid · 2% COD · 2.5% partial (excluding
+// shipping) + 18% GST ON the fee. Fee and GST are shown SEPARATELY everywhere — a blended total cannot
+// be checked against an invoice that itemises them. Every figure comes from pg_recon_summary() /
+// pg_recon_rows() in SQL, and the rates live in `pg_charge_config_ecom`; no rate is restated here.
+// ⚠️ THE DATE RANGE IS PER TAB, like Silent-RTO & SLA. Overview, Reconciliation, Ledger and Refunds
+// each keep their own from/to/preset and their own fetched data, so comparing last month's ledger
+// against this month's order list does not require re-picking dates every time you switch. Applying a
+// range reloads ONLY the active tab. Rate Card has no range at all — it lists every effective-dated
+// rate — so its date controls are hidden rather than shown doing nothing.
+let _pgr = null, _pgrTab = 'overview', _pgrShell = false;
+const PGR_DATED = ['overview', 'recon', 'ledger', 'refunds'];
+const _pgrState = {};        // tab -> { from, to, preset, data }
+const PGR_LIVE_FROM = '2025-05-05';                    // GoKwik's first order
+// Project-standard controls: `.filter-select` is upgraded app-wide into the custom .csel widget by
+// ecEnhanceFilterSelects() (a MutationObserver re-runs it whenever a dashboard renders), and
+// `.filter-input` / `.date-input` / `.filter-btn` give the shared 38px sizing and indigo focus ring.
+// Hand-rolled classes here would render as raw OS dropdowns — the open option list is the giveaway.
+const PGR_SEL = 'filter-select', PGR_IN = 'filter-input', PGR_DATE = 'date-input';
+const pgrMoney  = n => '₹' + Math.round(Number(n || 0)).toLocaleString('en-IN');
+const pgrMoney2 = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const pgrNum    = n => Number(n || 0).toLocaleString('en-IN');
+// Date presets. Every range is built from LOCAL calendar parts (see pgrYmd) — a month boundary computed
+// through toISOString() lands on the previous day in IST, which is how "This month" first rendered as
+// starting on the 31st of last month.
+const PGR_PRESETS = [['thismonth', 'This month'], ['lastmonth', 'Last month'], ['thisyear', 'This year'],
+                     ['lastyear', 'Last year'], ['all', 'Since GoKwik went live'], ['custom', 'Custom range']];
+function pgrPresetRange(key) {
+    const n = new Date(), y = n.getFullYear(), m = n.getMonth();
+    if (key === 'thismonth') return [new Date(y, m, 1), n];
+    if (key === 'lastmonth') return [new Date(y, m - 1, 1), new Date(y, m, 0)];   // day 0 = last day of prev month
+    if (key === 'thisyear')  return [new Date(y, 0, 1), n];
+    if (key === 'lastyear')  return [new Date(y - 1, 0, 1), new Date(y - 1, 11, 31)];
+    if (key === 'all')       return [PGR_LIVE_FROM, n];                            // string start, handled below
+    return null;                                                                   // custom → leave the inputs alone
+}
+
+// Local-calendar YYYY-MM-DD. See the note in pgrInit(): toISOString() shifts the day in IST.
+const pgrYmd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+const PGR_TYPE  = { prepaid: 'Prepaid', cod: 'COD', partial: 'Partial (COD fee paid online)', other: 'Unclassified' };
+
+function pgrInit() {
+  const v = document.getElementById('gokwik-pg-recon-view');
+  if (!v) return;
+  if (!_pgrShell) {
+    _pgrShell = true;
+    // Month-to-date by default: the page is opened to answer "what are we paying GoKwik this month",
+    // and a since-go-live default made every visit load 42k orders to answer a question about ~4k.
+    // The full history is one date change away (PGR_LIVE_FROM above is where it starts).
+    //
+    // ⚠️ Dates are formatted from LOCAL parts, never via toISOString(). IST is UTC+5:30, so
+    // `new Date(y, m, 1).toISOString()` returns the 5:30pm of the PREVIOUS day → the month picker opened
+    // on the 31st of last month, and "today" would read as yesterday before 5:30am. This is the same
+    // day-shift that has bitten this codebase before.
+    const _n = new Date();
+    const _f = pgrYmd(new Date(_n.getFullYear(), _n.getMonth(), 1)), _t = pgrYmd(_n);
+    PGR_DATED.forEach(function (k) { _pgrState[k] = { from: _f, to: _t, preset: 'thismonth', data: null }; });
+    const TABS = [['overview', 'Overview'], ['recon', 'Reconciliation'], ['rates', 'Rate Card'],
+                  ['ledger', 'Ledger'], ['refunds', 'Refunds']];
+    v.innerHTML =
+      '<div class="sticky top-0 z-30 bg-white border-b border-slate-200 px-6 pt-4">'
+      + '<h1 class="text-2xl font-bold text-slate-800">GoKwik PG</h1>'
+      + '<nav class="flex gap-1 mt-3 -mb-px overflow-x-auto">'
+      + TABS.map(function (t) {
+          return '<button class="pgr-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent '
+            + 'text-slate-500 hover:text-slate-700 whitespace-nowrap" data-tab="' + t[0] + '">' + t[1] + '</button>';
+        }).join('')
+      + '</nav></div>'
+      + '<header class="px-6 py-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-3 bg-slate-50">'
+      + '<p class="text-sm text-slate-400" id="pgr-sub">What GoKwik should charge for processing payments — computed from the rate card, not from an invoice.'
+      + '<br><span class="text-xs">Fee and GST are always shown separately. Date range = order date.</span></p>'
+      + '<div class="flex items-center gap-2 flex-wrap" id="pgr-range">'
+      + '<select id="pgr-preset" class="' + PGR_SEL + '">'
+      + PGR_PRESETS.map(function (p) {
+          return '<option value="' + p[0] + '"' + (p[0] === 'thismonth' ? ' selected' : '') + '>' + p[1] + '</option>';
+        }).join('') + '</select>'
+      + '<input id="pgr-from" type="date" class="' + PGR_DATE + '" value="' + _f + '">'
+      + '<span class="text-slate-400 text-sm">→</span>'
+      + '<input id="pgr-to" type="date" class="' + PGR_DATE + '" value="' + _t + '">'
+      + '<button id="pgr-apply" class="filter-btn">Apply</button>'
+      + '<button id="pgr-csv" class="filter-btn">Export CSV</button>'
+      + '</div></header>'
+      + '<div id="pgr-warn" class="hidden mx-6 mt-4 text-sm rounded-lg px-4 py-2.5" style="background:#fffbeb;color:#92400e;border:1px solid #fde68a"></div>'
+      + '<section id="pgr-tab-overview" class="pgr-tabsec p-6"></section>'
+      + '<section id="pgr-tab-recon"    class="pgr-tabsec hidden p-6"></section>'
+      + '<section id="pgr-tab-rates"    class="pgr-tabsec hidden p-6"></section>'
+      + '<section id="pgr-tab-ledger"   class="pgr-tabsec hidden p-6"></section>'
+      + '<section id="pgr-tab-refunds"  class="pgr-tabsec hidden p-6"></section>';
+
+    v.querySelectorAll('.pgr-tab').forEach(function (b) {
+      b.addEventListener('click', function () { pgrTab(b.dataset.tab); });
+    });
+    document.getElementById('pgr-preset').addEventListener('change', function (e) {
+      const st = _pgrState[_pgrTab]; if (!st) return;
+      st.preset = e.target.value;
+      const r = pgrPresetRange(st.preset);
+      if (!r) return;                                   // Custom — keep whatever is in the inputs
+      st.from = typeof r[0] === 'string' ? r[0] : pgrYmd(r[0]);
+      st.to = pgrYmd(r[1]);
+      document.getElementById('pgr-from').value = st.from;
+      document.getElementById('pgr-to').value = st.to;
+      pgrLoad(_pgrTab);
+    });
+    // Editing a date by hand means the range is no longer whichever preset is displayed — say so rather
+    // than leaving a label that contradicts the dates beside it.
+    ['pgr-from', 'pgr-to'].forEach(function (id) {
+      document.getElementById(id).addEventListener('change', function () {
+        const sel = document.getElementById('pgr-preset');
+        sel.value = 'custom';
+        if (typeof ecSyncSelect === 'function') ecSyncSelect(sel);   // repaint the .csel face
+        if (_pgrState[_pgrTab]) _pgrState[_pgrTab].preset = 'custom';
+      });
+    });
+    document.getElementById('pgr-apply').addEventListener('click', function () {
+      const st = _pgrState[_pgrTab]; if (!st) return;
+      st.from = document.getElementById('pgr-from').value;
+      st.to = document.getElementById('pgr-to').value;
+      pgrLoad(_pgrTab);
+    });
+    document.getElementById('pgr-csv').addEventListener('click', pgrCsv);
+  }
+  pgrTab(_pgrTab);
+}
+
+function pgrTab(name) {
+  const v = document.getElementById('gokwik-pg-recon-view');
+  if (!v) return;
+  _pgrTab = name;
+  v.querySelectorAll('.pgr-tabsec').forEach(function (s) { s.classList.toggle('hidden', s.id !== 'pgr-tab-' + name); });
+  v.querySelectorAll('.pgr-tab').forEach(function (b) {
+    const on = b.dataset.tab === name;
+    b.classList.toggle('border-indigo-500', on);
+    b.classList.toggle('text-indigo-600', on);
+    b.classList.toggle('border-transparent', !on);
+    b.classList.toggle('text-slate-500', !on);
+  });
+
+  // Rate Card is not date-scoped — it lists every effective-dated rate — so the picker is hidden
+  // rather than left visible doing nothing.
+  const st = _pgrState[name];
+  const range = document.getElementById('pgr-range');
+  if (range) range.classList.toggle('hidden', !st);
+  if (!st) { pgrRates(); return; }
+
+  // Restore THIS tab's range into the shared controls.
+  document.getElementById('pgr-from').value = st.from;
+  document.getElementById('pgr-to').value = st.to;
+  const sel = document.getElementById('pgr-preset');
+  if (sel) { sel.value = st.preset; if (typeof ecSyncSelect === 'function') ecSyncSelect(sel); }
+
+  if (!st.data) { pgrLoad(name); return; }     // first visit to this tab → fetch its own range
+  _pgr = st.data;
+  pgrWarn();
+  if (name === 'overview') pgrOverview();
+  else if (name === 'recon') pgrReconTab();
+  else if (name === 'ledger') pgrLedger();
+  else if (name === 'refunds') pgrRefunds();
+}
+
+// Loads ONE tab's range. Each dated tab holds its own result, so switching back to a tab shows what it
+// was last showing instead of silently adopting whichever range another tab was set to.
+async function pgrLoad(tab) {
+  tab = tab || _pgrTab;
+  const st = _pgrState[tab];
+  if (!st) return;
+  const sec = document.getElementById('pgr-tab-' + tab);
+  if (sec) sec.innerHTML = brandLoader('Reconciling payment-gateway charges…');
+  try {
+    const r = await fetch('/api/pg-recon?from=' + st.from + '&to=' + st.to, { headers: getAuthHeaders() });
+    const d = await r.json();
+    if (!r.ok || d.success === false) throw new Error(d.error || ('HTTP ' + r.status));
+    st.data = d;
+    if (sec) sec.dataset.built = '';          // the tab is re-rendered from scratch for the new range
+    if (_pgrTab === tab) pgrTab(tab);          // only repaint if the user is still on it
+  } catch (e) {
+    if (sec) sec.innerHTML = '<div class="card p-4 text-sm text-rose-600">' + ecEsc(e.message) + '</div>';
+  }
+}
+
+// An incomplete figure must never pass as a confident one.
+function pgrWarn() {
+  const el = document.getElementById('pgr-warn');
+  if (!el || !_pgr) return;
+  const t = (_pgr.summary && _pgr.summary.totals) || {};
+  const bits = [];
+  if (Number(t.unclassified) > 0) bits.push(pgrNum(t.unclassified) + ' charged order(s) worth '
+    + pgrMoney(t.unclassified_value) + ' could not resolve a rate — the totals are UNDERSTATED by that much.');
+  if (_pgr.capped) bits.push('The Reconciliation table shows the newest ' + pgrNum(_pgr.rows.length)
+    + ' of ' + pgrNum(_pgr.rowsTotal) + ' orders; every total is computed over all of them.');
+  el.innerHTML = bits.join(' ');
+  el.classList.toggle('hidden', !bits.length);
+}
+
+function pgrCard(label, value, sub, accent) {
+  return '<div class="card p-4">'
+    + '<p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">' + label + '</p>'
+    + '<p class="text-2xl font-bold mt-2 tabular-nums ' + (accent || 'text-slate-900') + '">' + value + '</p>'
+    + '<p class="text-xs text-slate-400 mt-1">' + (sub || '&nbsp;') + '</p></div>';
+}
+
+function pgrBar(label, right, frac, colour) {
+  return '<div class="mb-3">'
+    + '<div class="flex items-center justify-between text-xs mb-1"><span class="font-medium text-slate-700">' + label
+    + '</span><span class="text-slate-500 tabular-nums">' + right + '</span></div>'
+    + '<div class="h-2 rounded-full bg-slate-100 overflow-hidden"><div class="h-full rounded-full" style="width:'
+    + Math.max(1.5, frac * 100) + '%;background:' + colour + '"></div></div></div>';
+}
+
+// ── Tab 1: Overview ─────────────────────────────────────────────────────────
+function pgrOverview() {
+  const sec = document.getElementById('pgr-tab-overview');
+  const d = _pgr, t = (d.summary && d.summary.totals) || {};
+  const types = (d.summary.by_type || []).filter(function (x) { return Number(x.orders) > 0; });
+  const maxT = Math.max.apply(null, [1].concat(types.map(function (x) { return Number(x.charge || 0); })));
+  const gws = (d.summary.by_gateway || []).slice(0, 10);
+  const maxG = Math.max.apply(null, [1].concat(gws.map(function (x) { return Number(x.gross || 0); })));
+
+  sec.innerHTML =
+      '<div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">'
+    + pgrCard('Order value', pgrMoney(t.gross), pgrNum(t.orders) + ' orders')
+    + pgrCard('PG fee', pgrMoney2(t.fee), 'excluding GST', 'text-rose-600')
+    + pgrCard('GST on fee', pgrMoney2(t.gst), 'charged on the fee', 'text-amber-600')
+    + pgrCard('Total charge', pgrMoney2(t.charge), 'fee + GST')
+    + pgrCard('Charged orders', pgrNum(t.charged_orders), pgrNum(t.excluded_orders) + ' not charged')
+    + pgrCard('Effective rate', (Number(t.gross) > 0 ? (Number(t.charge) / Number(t.gross) * 100).toFixed(2) : '0') + '%', 'of order value')
+    + '</div>'
+    + '<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">'
+    + '<div class="card p-6"><h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">By payment type</h3>'
+    + '<p class="text-xs text-slate-400 mb-4">Rate applied per order, read from the rate card</p>'
+    + types.map(function (x) {
+        const rate = x.fee_percent ? ' <span class="text-slate-400">@ ' + Number(x.fee_percent) + '%</span>' : '';
+        const not = x.charged ? '' : ' <span class="text-slate-400">— not charged</span>';
+        return pgrBar((PGR_TYPE[x.payment_type] || x.payment_type) + rate + not,
+          pgrNum(x.orders) + ' · ' + pgrMoney(x.gross) + ' → <b>' + pgrMoney2(x.charge) + '</b>',
+          Number(x.charge || 0) / maxT, x.charged ? 'linear-gradient(90deg,#6366f1,#8b5cf6)' : '#cbd5e1');
+      }).join('')
+    + '</div>'
+    + '<div class="card p-6"><h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">By gateway</h3>'
+    + '<p class="text-xs text-slate-400 mb-4">What Shopify recorded as the processor</p>'
+    + gws.map(function (x) {
+        return pgrBar(ecEsc(x.gateway), pgrNum(x.orders) + ' · ' + pgrMoney(x.gross) + ' → <b>' + pgrMoney2(x.charge) + '</b>',
+          Number(x.gross || 0) / maxG, Number(x.charge) > 0 ? 'linear-gradient(90deg,#10b981,#38bdf8)' : '#cbd5e1');
+      }).join('')
+    + '</div></div>';
+}
+
+// ── Tab 2: Reconciliation (the order-level table) ───────────────────────────
+function pgrReconTab() {
+  const sec = document.getElementById('pgr-tab-recon');
+  if (!sec.dataset.built) {
+    sec.dataset.built = '1';
+    sec.innerHTML =
+        '<div class="flex items-center justify-between gap-3 flex-wrap mb-4">'
+      + '<p class="text-sm text-slate-500" id="pgr-count"></p>'
+      + '<div class="flex items-center gap-2 flex-wrap">'
+      + '<select id="pgr-f-type" class="' + PGR_SEL + '"></select>'
+      + '<select id="pgr-f-charged" class="' + PGR_SEL + '">'
+      + '<option value="all">Charged + not charged</option><option value="charged">Charged only</option>'
+      + '<option value="excluded">Not charged only</option></select>'
+      + '<input type="text" id="pgr-search" class="' + PGR_IN + '" placeholder="Order / gateway…">'
+      + '</div></div><div class="card overflow-x-auto"><div id="pgr-table"></div></div>';
+    document.getElementById('pgr-f-type').innerHTML = '<option value="all">All payment types</option>'
+      + ['prepaid', 'cod', 'partial', 'other'].map(function (v) {
+          return '<option value="' + v + '">' + PGR_TYPE[v] + '</option>';
+        }).join('');
+    ['pgr-f-type', 'pgr-f-charged'].forEach(function (id) {
+      document.getElementById(id).addEventListener('change', pgrTable);
+    });
+    document.getElementById('pgr-search').addEventListener('input', pgrTable);
+  }
+  pgrTable();
+}
+
+function pgrRows() {
+  const rows = (_pgr && _pgr.rows) || [];
+  const ty = (document.getElementById('pgr-f-type') || {}).value || 'all';
+  const ch = (document.getElementById('pgr-f-charged') || {}).value || 'all';
+  const q = ((document.getElementById('pgr-search') || {}).value || '').trim().toLowerCase();
+  return rows.filter(function (r) {
+    if (ty !== 'all' && r.payment_type !== ty) return false;
+    if (ch === 'charged' && !r.charged) return false;
+    if (ch === 'excluded' && r.charged) return false;
+    if (q && String(r.order_name || '').toLowerCase().indexOf(q) < 0
+          && String(r.gateway || '').toLowerCase().indexOf(q) < 0) return false;
+    return true;
+  });
+}
+
+function pgrRowHtml(r, withStatus) {
+  const dash = '—';
+  return '<tr class="border-b border-slate-50 ' + (r.charged ? '' : 'text-slate-400') + '">'
+    + '<td class="py-2 px-3 font-medium">' + ecEsc(r.order_name || '') + '</td>'
+    + '<td class="px-3">' + _dmy(String(r.created_at).slice(0, 10)) + '</td>'
+    + (withStatus ? '<td class="px-3">' + ecEsc(String(r.financial_status || '').replace(/_/g, ' ')) + '</td>' : '')
+    + '<td class="px-3">' + (PGR_TYPE[r.payment_type] || r.payment_type)
+      + (r.charged ? '' : ' <span class="text-xs">· not charged</span>') + '</td>'
+    + '<td class="px-3 text-slate-500">' + ecEsc(r.gateway || dash) + '</td>'
+    + '<td class="px-3 text-right tabular-nums">' + pgrMoney2(r.order_value) + '</td>'
+    + '<td class="px-3 text-right tabular-nums">' + (r.fee_percent == null ? dash : Number(r.fee_percent) + '%') + '</td>'
+    + '<td class="px-3 text-right tabular-nums text-rose-600">' + (r.charged && r.fee != null ? pgrMoney2(r.fee) : dash) + '</td>'
+    + '<td class="px-3 text-right tabular-nums text-amber-600">' + (r.charged && r.gst != null ? pgrMoney2(r.gst) : dash) + '</td>'
+    + '<td class="px-3 text-right tabular-nums font-semibold">' + (r.charged && r.total_charge != null ? pgrMoney2(r.total_charge) : dash) + '</td></tr>';
+}
+
+function pgrHead(withStatus) {
+  return '<thead><tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
+    + '<th class="text-left py-2 px-3">Order</th><th class="text-left px-3">Date</th>'
+    + (withStatus ? '<th class="text-left px-3">Status</th>' : '')
+    + '<th class="text-left px-3">Type</th><th class="text-left px-3">Gateway</th>'
+    + '<th class="text-right px-3">Order value</th><th class="text-right px-3">Rate</th>'
+    + '<th class="text-right px-3">Fee</th><th class="text-right px-3">GST</th>'
+    + '<th class="text-right px-3">Charge</th></tr></thead>';
+}
+
+function pgrTable() {
+  const host = document.getElementById('pgr-table');
+  if (!host || !_pgr) return;
+  const rows = pgrRows();
+  const cnt = document.getElementById('pgr-count');
+  if (cnt) {
+    const charge = rows.reduce(function (a, r) { return a + (r.charged ? Number(r.total_charge || 0) : 0); }, 0);
+    cnt.textContent = pgrNum(rows.length) + ' orders · ' + pgrMoney2(charge) + ' charged';
+  }
+  if (!rows.length) { host.innerHTML = '<p class="text-sm text-slate-400 p-6">No orders match.</p>'; return; }
+  host.innerHTML = '<table class="w-full text-sm">' + pgrHead(false) + '<tbody>'
+    + rows.slice(0, 500).map(function (r) { return pgrRowHtml(r, false); }).join('') + '</tbody></table>'
+    + (rows.length > 500 ? '<p class="text-xs text-slate-400 p-3">Showing 500 of ' + pgrNum(rows.length)
+        + ' — narrow the filters or export the CSV for the full set.</p>' : '');
+}
+
+// ── Tab 3: Rate Card ────────────────────────────────────────────────────────
+// Read from pg_charge_config_ecom so the page shows what it actually charged against, rather than a
+// second copy of the rates written into the UI.
+async function pgrRates() {
+  const sec = document.getElementById('pgr-tab-rates');
+  sec.innerHTML = brandLoaderSm('Loading rate card…');
+  try {
+    const r = await fetch('/api/pg-recon/rates', { headers: getAuthHeaders() });
+    const d = await r.json();
+    if (!r.ok || d.success === false) throw new Error(d.error || ('HTTP ' + r.status));
+    const rows = (d.rates || []).map(function (x) {
+      return '<tr class="border-b border-slate-50">'
+        + '<td class="py-2 px-3 font-medium">' + (PGR_TYPE[x.payment_type] || x.payment_type) + '</td>'
+        + '<td class="px-3 text-slate-500">' + ecEsc(x.gateway_pattern) + '</td>'
+        + '<td class="px-3 text-right tabular-nums font-semibold">' + Number(x.fee_percent) + '%</td>'
+        + '<td class="px-3 text-right tabular-nums">' + Number(x.gst_percent) + '%</td>'
+        + '<td class="px-3">' + (x.base_excludes_shipping ? 'Order value − shipping' : 'Order value') + '</td>'
+        + '<td class="px-3">' + _dmy(String(x.effective_from).slice(0, 10)) + '</td>'
+        + '<td class="px-3 text-slate-400">' + ecEsc(x.note || '') + '</td></tr>';
+    }).join('');
+    sec.innerHTML = '<div class="card p-6">'
+      + '<h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Rate card</h3>'
+      + '<p class="text-xs text-slate-400 mb-4">Effective-dated: a renegotiated rate is added as a new row, so months already settled keep the rate they were billed at.</p>'
+      + '<div class="overflow-x-auto"><table class="w-full text-sm">'
+      + '<thead><tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
+      + '<th class="text-left py-2 px-3">Payment type</th><th class="text-left px-3">Gateway</th>'
+      + '<th class="text-right px-3">Fee</th><th class="text-right px-3">GST</th>'
+      + '<th class="text-left px-3">Charged on</th><th class="text-left px-3">Effective from</th>'
+      + '<th class="text-left px-3">Note</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+  } catch (e) {
+    sec.innerHTML = '<div class="card p-4 text-sm text-rose-600">' + ecEsc(e.message) + '</div>';
+  }
+}
+
+// ── Tab 4: Ledger ───────────────────────────────────────────────────────────
+function pgrLedger() {
+  const sec = document.getElementById('pgr-tab-ledger');
+  const months = (_pgr.summary && _pgr.summary.monthly) || [];
+  const tot = months.reduce(function (a, m) {
+    return { orders: a.orders + Number(m.orders || 0), gross: a.gross + Number(m.gross || 0),
+             fee: a.fee + Number(m.fee || 0), gst: a.gst + Number(m.gst || 0), charge: a.charge + Number(m.charge || 0) };
+  }, { orders: 0, gross: 0, fee: 0, gst: 0, charge: 0 });
+  const body = months.map(function (m) {
+    const eff = Number(m.gross) > 0 ? (Number(m.charge) / Number(m.gross) * 100).toFixed(2) + '%' : '—';
+    return '<tr class="border-b border-slate-50">'
+      + '<td class="py-2 px-3 font-medium text-slate-700">' + ecEsc(m.month) + '</td>'
+      + '<td class="px-3 text-right tabular-nums">' + pgrNum(m.orders) + '</td>'
+      + '<td class="px-3 text-right tabular-nums">' + pgrMoney(m.gross) + '</td>'
+      + '<td class="px-3 text-right tabular-nums text-rose-600">' + pgrMoney2(m.fee) + '</td>'
+      + '<td class="px-3 text-right tabular-nums text-amber-600">' + pgrMoney2(m.gst) + '</td>'
+      + '<td class="px-3 text-right tabular-nums font-semibold">' + pgrMoney2(m.charge) + '</td>'
+      + '<td class="px-3 text-right tabular-nums text-slate-500">' + eff + '</td></tr>';
+  }).join('');
+  sec.innerHTML = '<div class="card p-6">'
+    + '<h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Monthly ledger</h3>'
+    + '<p class="text-xs text-slate-400 mb-4">The sheet to check against a GoKwik invoice — fee and GST itemised, as they bill them.</p>'
+    + '<div class="overflow-x-auto"><table class="w-full text-sm">'
+    + '<thead><tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
+    + '<th class="text-left py-2 px-3">Month</th><th class="text-right px-3">Orders</th>'
+    + '<th class="text-right px-3">Order value</th><th class="text-right px-3">PG fee</th>'
+    + '<th class="text-right px-3">GST</th><th class="text-right px-3">Total charge</th>'
+    + '<th class="text-right px-3">Effective %</th></tr></thead><tbody>' + body
+    + '<tr class="border-t-2 border-slate-300 font-bold bg-slate-50">'
+    + '<td class="py-2 px-3">Total</td>'
+    + '<td class="px-3 text-right tabular-nums">' + pgrNum(tot.orders) + '</td>'
+    + '<td class="px-3 text-right tabular-nums">' + pgrMoney(tot.gross) + '</td>'
+    + '<td class="px-3 text-right tabular-nums text-rose-600">' + pgrMoney2(tot.fee) + '</td>'
+    + '<td class="px-3 text-right tabular-nums text-amber-600">' + pgrMoney2(tot.gst) + '</td>'
+    + '<td class="px-3 text-right tabular-nums">' + pgrMoney2(tot.charge) + '</td>'
+    + '<td class="px-3 text-right tabular-nums">' + (tot.gross > 0 ? (tot.charge / tot.gross * 100).toFixed(2) + '%' : '—') + '</td>'
+    + '</tr></tbody></table></div></div>';
+}
+
+// ── Tab 5: Refunds ──────────────────────────────────────────────────────────
+// GoKwik does not reverse its fee when money goes back to the customer, so a refund costs twice: the
+// goods return AND the fee stays. That deserves its own tab rather than a row in a table nobody scrolls.
+function pgrRefunds() {
+  const sec = document.getElementById('pgr-tab-refunds');
+  const t = _pgr.refundTotals || { orders: 0, gross: 0, fee: 0, gst: 0, charge: 0 };
+  if (!sec.dataset.built) {
+    sec.dataset.built = '1';
+    sec.innerHTML = '<div id="pgr-refund-kpis" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6"></div>'
+      + '<div class="card p-6"><div class="flex items-center justify-between gap-3 flex-wrap mb-4">'
+      + '<div><h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider">Refunded orders</h3>'
+      + '<p class="text-xs text-slate-400 mt-1">Refunded and partially refunded — the PG fee is not reversed</p></div>'
+      + '<input type="text" id="pgr-refund-search" class="' + PGR_IN + '" placeholder="Order / gateway…"></div>'
+      + '<div class="overflow-x-auto"><div id="pgr-refund-table"></div></div></div>';
+    document.getElementById('pgr-refund-search').addEventListener('input', pgrRefundTable);
+  }
+  document.getElementById('pgr-refund-kpis').innerHTML =
+      pgrCard('Refunded orders', pgrNum(t.orders), 'refunded + partially refunded')
+    + pgrCard('Value returned', pgrMoney(t.gross), 'money given back to customers')
+    + pgrCard('Fee still charged', pgrMoney2(t.fee), 'GoKwik does not reverse it', 'text-rose-600')
+    + pgrCard('GST on that fee', pgrMoney2(t.gst), 'total ' + pgrMoney2(t.charge), 'text-amber-600');
+  pgrRefundTable();
+}
+
+function pgrRefundTable() {
+  const host = document.getElementById('pgr-refund-table');
+  if (!host || !_pgr) return;
+  const q = ((document.getElementById('pgr-refund-search') || {}).value || '').trim().toLowerCase();
+  const rows = (_pgr.refunds || []).filter(function (r) {
+    if (!q) return true;
+    return String(r.order_name || '').toLowerCase().indexOf(q) >= 0
+        || String(r.gateway || '').toLowerCase().indexOf(q) >= 0;
+  });
+  if (!rows.length) { host.innerHTML = '<p class="text-sm text-slate-400 py-4">No refunded orders in this range.</p>'; return; }
+  host.innerHTML = '<table class="w-full text-sm">' + pgrHead(true) + '<tbody>'
+    + rows.slice(0, 500).map(function (r) { return pgrRowHtml(r, true); }).join('') + '</tbody></table>'
+    + (rows.length > 500 ? '<p class="text-xs text-slate-400 mt-3">Showing 500 of ' + pgrNum(rows.length) + '.</p>' : '');
+}
+
+function pgrCsv() {
+  if (!_pgr) return;
+  const rows = _pgrTab === 'refunds' ? (_pgr.refunds || []) : pgrRows();
+  if (!rows.length) { showNotification('Nothing to export for these filters.', true); return; }
+  const head = ['Order', 'Date', 'Status', 'Payment type', 'Charged', 'Gateway', 'Order value', 'Fee base', 'Rate %', 'GST %', 'Fee', 'GST', 'Total charge'];
+  const lines = rows.map(function (r) {
+    return [r.order_name, String(r.created_at).slice(0, 10), r.financial_status, r.payment_type,
+      r.charged ? 'yes' : 'no', '"' + String(r.gateway || '').replace(/"/g, '""') + '"',
+      r.order_value, r.fee_base == null ? '' : r.fee_base, r.fee_percent == null ? '' : r.fee_percent,
+      r.gst_percent == null ? '' : r.gst_percent, r.fee == null ? '' : r.fee,
+      r.gst == null ? '' : r.gst, r.total_charge == null ? '' : r.total_charge].join(',');
+  });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([[head.join(',')].concat(lines).join('\n')], { type: 'text/csv' }));
+  const st = _pgrState[_pgrTab] || { from: '', to: '' };
+  a.download = 'gokwik-pg-' + _pgrTab + '_' + st.from + '_to_' + st.to + '.csv';
+  a.click(); URL.revokeObjectURL(a.href);
 }

@@ -26,7 +26,13 @@ async function upsertShopifyOrder(o) {
         total_tax: num(o.total_tax), total_discounts: num(o.total_discounts),
         total_shipping: num(o.total_shipping_price_set && o.total_shipping_price_set.shop_money && o.total_shipping_price_set.shop_money.amount),
         total_weight: (o.total_weight === undefined ? null : o.total_weight), taxes_included: bool(o.taxes_included),
-        confirmed: bool(o.confirmed), test: bool(o.test), token: o.token || null, gateway: o.gateway || null,
+        confirmed: bool(o.confirmed), test: bool(o.test), token: o.token || null,
+        // ⚠️ The payment gateway lives in `payment_gateway_names` (an array); `o.gateway` is the legacy
+        // single field and is usually EMPTY on the orders/create webhook because payment has not been
+        // captured yet. Reading only `o.gateway` left this column null on every row, which is why
+        // GoKwik PG reconciliation could not tell a GoKwik payment from a Cashfree one and had to fall
+        // back to EasyEcom (blank on 124 of August's prepaid orders). Shopify is the authority here.
+        gateway: o.gateway || (Array.isArray(o.payment_gateway_names) ? o.payment_gateway_names[0] : null) || null,
         source_name: o.source_name || null, tags: o.tags || null, note: o.note || null,
         order_status_url: o.order_status_url || null, cart_token: o.cart_token || null, checkout_token: o.checkout_token || null,
         buyer_accepts_marketing: bool(o.buyer_accepts_marketing), synced_at: now,

@@ -108,6 +108,7 @@ const purchaseOrderRoutes = require('./app/api/purchase_orders');
 const { router: amazonFbaRoutes, initFbaLocationCron } = require('./app/api/amazon_fba');
 const docpharmaReconRoutes = require('./app/api/docpharma_recon');
 const rapidshypReconRoutes = require('./app/api/rapidshyp_recon');
+const { router: pgReconRoutes, syncOrderGateways } = require('./app/api/pg_recon');
 const docpharmaInvoiceRoutes = require('./app/api/docpharma_invoices');
 const docpharmaLedgerRoutes = require('./app/api/docpharma_ledger');
 const docpharmaOverviewRoutes = require('./app/api/docpharma_overview');
@@ -153,6 +154,7 @@ app.use('/api', (req, res, next) => {
 const _VIEW_PERMS = [
     [/^\/docpharma/i, 'docpharma-recon'],
     [/^\/rapidshyp-(recon|payments)/i, 'rapidshyp-recon'],   // recon + its own payments ledger
+    [/^\/pg-recon/i, 'gokwik-pg-recon'],                     // GoKwik payment-gateway reconciliation
     [/^\/fba\//i, 'amazon-fba'],
     [/^\/ops-control/i, 'ops-control'],
     [/^\/last-mile/i, 'last-mile'],               // Last-Mile Funnel dashboard (OFD → delivered / RTO), incl. /last-mile/shipment/:awb
@@ -320,6 +322,7 @@ app.use('/api', require('./app/api/zone_mapping'));
 app.use('/api', require('./app/api/teams_bot'));
 app.use('/api', docpharmaReconRoutes);
 app.use('/api', rapidshypReconRoutes);
+app.use('/api', pgReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
 app.use('/api', docpharmaLedgerRoutes);
 app.use('/api', docpharmaOverviewRoutes);
@@ -449,6 +452,16 @@ setTimeout(() => {
         else console.log('[JourneyDest] startup dest state/city refresh done');
     });
 }, 60000);
+
+// Payment-gateway labels for GoKwik PG reconciliation. The orders/create webhook already records the
+// gateway, but on a COD or a slow UPI capture Shopify has no `payment_gateway_names` yet at that moment,
+// so a nightly-ish sweep re-asks for anything still unlabelled. Cheap: only rows where gateway IS NULL,
+// and only the last few days. Without it those orders sit permanently in the "excluded" bucket and the
+// PG bill reads low.
+cronJob('PG gateway labels (20 */3 * * *)', '20 */3 * * *', async () => {
+    const r = await syncOrderGateways({ days: 5 });
+    console.log(`[PG] gateway sweep — ${r.updated}/${r.checked} labelled`);
+}, { timezone: 'Asia/Kolkata' });
 
 // RS Sync — every 2 hours: last 7 days orders (skips 4 PM slot — MTD runs then)
 cronJob('RS Sync (0 */2 * * *)', '0 */2 * * *', async () => {
