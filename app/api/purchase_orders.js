@@ -818,10 +818,31 @@ router.get('/purchase-orders/meta', (req, res) => {
 let _openPoCache = null;
 const OPEN_PO_TTL = 5 * 60 * 1000;
 
+// ⚠️ HARDENED 2026-08-20 after the 06:30 inventory report warned "Open POs could not be read". The
+// lookup worked seconds later when reproduced — EasyEcom flakes transiently in that busy sync window,
+// and ONE bad response among the ~14 pages threw the whole lookup with no retry and no fallback, so
+// the report silently over-stated every reorder quantity. Ladder: one retry after 3s (same recipe as
+// the RS-sync hardening), then the LAST GOOD copy however old — labelled stale with its timestamp —
+// and only with no history at all does it throw and the report show the old warning.
+let _lastGoodOpenPo = null;   // survives past OPEN_PO_TTL, exactly for the fallback
 async function openPoQtyBySku({ days = DEFAULT_LOOKBACK_DAYS, fresh = false } = {}) {
     if (!fresh && _openPoCache && Date.now() - _openPoCache.t < OPEN_PO_TTL) return _openPoCache.v;
     const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
-    const { rows } = await fetchAllPurchaseOrders(since);
+    let rows;
+    try {
+        ({ rows } = await fetchAllPurchaseOrders(since));
+    } catch (e1) {
+        console.warn('[OpenPO] fetch failed, retrying in 3s:', e1.message);
+        await new Promise(r => setTimeout(r, 3000));
+        try { ({ rows } = await fetchAllPurchaseOrders(since)); }
+        catch (e2) {
+            if (_lastGoodOpenPo) {
+                console.warn(`[OpenPO] retry failed too (${e2.message}) — serving the last good copy from ${_lastGoodOpenPo.fetchedAt}`);
+                return { ..._lastGoodOpenPo, stale: true };
+            }
+            throw e2;   // no history at all — the caller's warning is the honest outcome
+        }
+    }
     const bySku = {};
     const pos = rows.map(shapePo).filter(p => p.isOpen);
     pos.forEach(p => p.items.forEach(i => {
@@ -831,6 +852,7 @@ async function openPoQtyBySku({ days = DEFAULT_LOOKBACK_DAYS, fresh = false } = 
     }));
     const v = { bySku, poCount: pos.length, skuCount: Object.keys(bySku).length, fetchedAt: new Date().toISOString() };
     _openPoCache = { t: Date.now(), v };
+    _lastGoodOpenPo = v;
     return v;
 }
 

@@ -435,6 +435,20 @@ function check(name, got, want) {
         /if \(dry\) \{ console\.log\('\[WH Report\] DRY RUN[\s\S]{0,60}return payload; \}/.test(src), true);
 }
 
+// ── 4g. Open-PO lookup: one EasyEcom flake must not silently over-state every reorder qty ───────
+// 2026-08-20, 06:30 report: 'Open POs could not be read' — reproduced fine seconds later. The lookup
+// now retries once, then serves its last good copy flagged stale; throwing is the last resort.
+{
+    const po = fs.readFileSync(path.join(ROOT, 'app/api/purchase_orders.js'), 'utf8');
+    const inv = fs.readFileSync(path.join(ROOT, 'app/api/inventory.js'), 'utf8');
+    check('open po: a failed fetch retries before giving up',
+        /fetch failed, retrying in 3s/.test(po), true);
+    check('open po: the last good copy is served flagged stale, not dropped',
+        /_lastGoodOpenPo, stale: true/.test(po.replace(/\s+/g, ' ')) || /\.\.\._lastGoodOpenPo, stale: true/.test(po.replace(/\s+/g, ' ')), true);
+    check('open po: the report names the stale copy instead of claiming failure',
+        /po\.stale\) poStaleAt = po\.fetchedAt/.test(inv) && /subtracted from the last good copy/.test(inv), true);
+}
+
 // ── 5. RapidShyp sync: transient failures must not raise a cron-failure card ─────────────────────
 // Bug 2026-08-17: an 8s timeout on 3 AWBs turned a 13-minute run into "❌ Cron failed". The job only
 // fetches AWBs with no row yet, so a failure self-heals on the next run two hours later — while a

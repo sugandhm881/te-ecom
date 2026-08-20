@@ -195,11 +195,13 @@ async function sendInventoryTeamsReport() {
     // The open-PO subtraction stays HERE (EasyEcom lookups) — the edge fn only renders what it is
     // sent, so there is no second copy of this rule to drift. If EasyEcom is unreachable we render
     // WITHOUT the subtraction and the caption says so, rather than dropping the whole report.
-    let need = [], poFailed = false;
+    let need = [], poFailed = false, poStaleAt = null;
     try {
         let openPo = {};
         const [{ rows: snapRows }, caseSizes] = await Promise.all([loadLatestSnapshot(), fetchCaseSizes()]);
-        try { openPo = (await openPoQtyBySku()).bySku || {}; }
+        // openPoQtyBySku retries once and then serves its last good copy (flagged stale, 2026-08-20) —
+        // it only throws when there is no history at all, so this warning became genuinely rare.
+        try { const po = await openPoQtyBySku(); openPo = po.bySku || {}; if (po.stale) poStaleAt = po.fetchedAt; }
         catch (e) { poFailed = true; console.warn('[Inventory] open PO lookup failed — reorder shown WITHOUT PO subtraction:', e.message); }
         need = buildReorder(snapRows, caseSizes, openPo)
             .filter(r => r.needsOrder)
@@ -275,6 +277,7 @@ async function sendInventoryTeamsReport() {
             if (poAdjusted.length && !reorder_image_url) notes.push(`_📦 Open PO subtracted: ${poAdjusted.map(r => `*${r.sku}* ${n(r.raw_qty)} − PO ${n(r.open_po)} → ${n(r.net_qty)}`).join(' · ')}_`);
             if (noCase) notes.push(`_* ${noCase} SKU${noCase > 1 ? 's have' : ' has'} no case size on file — raw quantity shown._`);
             if (poFailed) notes.push(`_⚠️ Open POs could not be read from EasyEcom — **Raised PO not subtracted**, quantities may be over-stated._`);
+            if (poStaleAt) notes.push(`_⚠️ EasyEcom was unreachable just now — Raised PO subtracted from the last good copy (${new Date(poStaleAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })})._`);
             // The order sheet is the PNG whenever the edge fn produced one — full ten-column detail,
             // pinch-zoomable in Teams. The five-column card table exists ONLY as the fallback for a
             // failed render, so a broken image pipeline degrades the layout, never the report.
