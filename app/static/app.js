@@ -1168,6 +1168,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('docpharma-recon-view');
             if (typeof dpreInit === 'function') dpreInit();
             break;
+        case 'kwikship-recon':
+            activeLinkElement = document.getElementById('nav-kwikship-recon');
+            activeViewElement = document.getElementById('kwikship-recon-view');
+            if (typeof ksrInit === 'function') ksrInit();
+            break;
         case 'rapidshyp-recon':
             activeLinkElement = document.getElementById('nav-rapidshyp-recon');
             activeViewElement = document.getElementById('rapidshyp-recon-view');
@@ -5970,7 +5975,7 @@ const NAV_HREF = {
     'nav-customer-segments': 'customer-segments', 'nav-returns-analysis': 'returns-analysis', 'nav-ad-ranking': 'ad-ranking',
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
-    'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon',
+    'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon', 'nav-kwikship-recon': 'kwikship-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice',
@@ -6697,6 +6702,7 @@ document.getElementById('nav-amazon-review')?.addEventListener('click', (e) => {
 document.getElementById('nav-fulfillment-ops')?.addEventListener('click', (e) => { e.preventDefault(); navigate('fulfillment-ops'); });
 document.getElementById('nav-docpharma-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('docpharma-recon'); });
 document.getElementById('nav-rapidshyp-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('rapidshyp-recon'); });
+document.getElementById('nav-kwikship-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('kwikship-recon'); });
 document.getElementById('nav-gokwik-pg-recon')?.addEventListener('click', (e) => { e.preventDefault(); navigate('gokwik-pg-recon'); });
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
@@ -7022,7 +7028,7 @@ function zmInit() {
 const PERM_GROUPS = [
   ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['last-mile','Last-Mile Funnel'],['amazon-fba','Amazon FBA']]],
   // Reconciliation — one group per billing partner; each ledger stays SEPARATE (different money flows).
-  ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon'],['gokwik-pg-recon','GoKwik PG Recon']]],
+  ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon'],['gokwik-pg-recon','GoKwik PG Recon'],['kwikship-recon','KwikShip Freight Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
   ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)']]],
@@ -18360,8 +18366,9 @@ function pgrWarn() {
   const bits = [];
   if (Number(t.unclassified) > 0) bits.push(pgrNum(t.unclassified) + ' charged order(s) worth '
     + pgrMoney(t.unclassified_value) + ' could not resolve a rate — the totals are UNDERSTATED by that much.');
-  if (_pgr.capped) bits.push('The Reconciliation table shows the newest ' + pgrNum(_pgr.rows.length)
-    + ' of ' + pgrNum(_pgr.rowsTotal) + ' orders; every total is computed over all of them.');
+  if (_pgr.capped) bits.push('Only the newest ' + pgrNum(_pgr.rows.length) + ' of '
+    + pgrNum(_pgr.rowsTotal) + ' order rows are listed below — the cards, the count above the table and the '
+    + 'CSV export all cover the full ' + pgrNum(_pgr.rowsTotal) + '.');
   el.innerHTML = bits.join(' ');
   el.classList.toggle('hidden', !bits.length);
 }
@@ -18493,8 +18500,30 @@ function pgrTable() {
   const rows = pgrRows();
   const cnt = document.getElementById('pgr-count');
   if (cnt) {
-    const charge = rows.reduce(function (a, r) { return a + (r.charged ? Number(r.total_charge || 0) : 0); }, 0);
-    cnt.textContent = pgrNum(rows.length) + ' orders · ' + pgrMoney2(charge) + ' charged';
+    // ⚠️ THIS LINE MUST DESCRIBE THE WHOLE WINDOW, NOT THE RENDERED PAGE. It used to sum `rows`
+    // (capped at 5,000), so July read "4,911 charged + 89 not charged" — a pair that sums to the CAP,
+    // not to the 5,592 orders in the window — and understated the charge by ₹11,421. The server ships
+    // per-(type × charged) buckets computed over every row; a text search is the one case that can only
+    // be answered from what is loaded, and it says so rather than pretending.
+    const ty = (document.getElementById('pgr-f-type') || {}).value || 'all';
+    const ch = (document.getElementById('pgr-f-charged') || {}).value || 'all';
+    const q = ((document.getElementById('pgr-search') || {}).value || '').trim();
+    if (!q && Array.isArray(_pgr.buckets)) {
+      const b = _pgr.buckets.filter(function (x) {
+        if (ty !== 'all' && x.payment_type !== ty) return false;
+        if (ch === 'charged' && !x.charged) return false;
+        if (ch === 'excluded' && x.charged) return false;
+        return true;
+      });
+      const n = b.reduce(function (a, x) { return a + x.orders; }, 0);
+      const charge = b.reduce(function (a, x) { return a + Number(x.charge || 0); }, 0);
+      cnt.textContent = pgrNum(n) + ' orders · ' + pgrMoney2(charge) + ' charged'
+        + (n > rows.length ? ' · newest ' + pgrNum(rows.length) + ' listed below' : '');
+    } else {
+      const charge = rows.reduce(function (a, r) { return a + (r.charged ? Number(r.total_charge || 0) : 0); }, 0);
+      cnt.textContent = pgrNum(rows.length) + ' matching · ' + pgrMoney2(charge) + ' charged'
+        + (_pgr.capped ? ' · searched within the newest ' + pgrNum(_pgr.rows.length) + ' loaded' : '');
+    }
   }
   if (!rows.length) { host.innerHTML = '<p class="text-sm text-slate-400 p-6">No orders match.</p>'; return; }
   host.innerHTML = '<table class="w-full text-sm">' + pgrHead(false) + '<tbody>'
@@ -18615,8 +18644,30 @@ function pgrRefundTable() {
     + (rows.length > 500 ? '<p class="text-xs text-slate-400 mt-3">Showing 500 of ' + pgrNum(rows.length) + '.</p>' : '');
 }
 
-function pgrCsv() {
+async function pgrCsv() {
   if (!_pgr) return;
+  // ⚠️ The reconciliation export is built SERVER-SIDE from the full window. Building it from the
+  // rendered page silently produced 5,000 of 5,592 rows for July — a short file nobody could tell was
+  // short. The refunds tab is not capped the same way and stays client-side.
+  if (_pgrTab === 'recon') {
+    const st = _pgrState[_pgrTab] || { from: '', to: '' };
+    const qs = 'from=' + encodeURIComponent(st.from) + '&to=' + encodeURIComponent(st.to)
+      + '&type=' + encodeURIComponent((document.getElementById('pgr-f-type') || {}).value || 'all')
+      + '&charged=' + encodeURIComponent((document.getElementById('pgr-f-charged') || {}).value || 'all')
+      + '&q=' + encodeURIComponent(((document.getElementById('pgr-search') || {}).value || '').trim());
+    try {
+      showNotification('Building the full export\u2026');
+      const r = await fetch('/api/pg-recon/export.csv?' + qs, { headers: getAuthHeaders() });
+      if (!r.ok) throw new Error(await r.text());
+      const blob = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'gokwik-pg-recon_' + st.from + '_to_' + st.to + '.csv';
+      a.click(); URL.revokeObjectURL(a.href);
+      showNotification('Export ready \u2014 every row in the range.');
+    } catch (e) { showNotification('Export failed: ' + e.message, true); }
+    return;
+  }
   const rows = _pgrTab === 'refunds' ? (_pgr.refunds || []) : pgrRows();
   if (!rows.length) { showNotification('Nothing to export for these filters.', true); return; }
   const head = ['Order', 'Date', 'Status', 'Payment type', 'Charged', 'Gateway', 'Order value', 'Fee base', 'Rate %', 'GST %', 'Fee', 'GST', 'Total charge'];
@@ -18632,4 +18683,495 @@ function pgrCsv() {
   const st = _pgrState[_pgrTab] || { from: '', to: '' };
   a.download = 'gokwik-pg-' + _pgrTab + '_' + st.from + '_to_' + st.to + '.csv';
   a.click(); URL.revokeObjectURL(a.href);
+}
+
+// ═════════════════ KWIKSHIP RECON (GoKwik shipping — freight) ═════════════════
+// Mirrors the GoKwik PG workspace: five tabs, per-tab date ranges, project-standard controls.
+// Formatters (pgrMoney/pgrMoney2/pgrNum/pgrYmd/pgrCard/pgrPresetRange, PGR_SEL/PGR_IN/PGR_DATE) are
+// REUSED from that block rather than copied — two copies of a money formatter is how ₹ and ₹0.00 start
+// disagreeing between two pages that should read identically.
+//
+// ⚠️⚠️ EVERY FIGURE HERE IS OUR COMPUTED EXPECTATION, NOT A KWIKSHIP INVOICE. RapidShyp Recon shows what
+// RapidShyp actually billed (their API returns it); KwikShip publishes no billing endpoint, so these
+// numbers come from the rate card the team entered. The banner says so on every tab, permanently — a
+// modelled number presented as a settled one is how a wrong rate card survives for months.
+let _ksr = null, _ksrTab = 'overview', _ksrShell = false, _ksrPay = null;
+const KSR_DATED = ['overview', 'recon', 'ledger'];
+const _ksrState = {};
+const KSR_OUTCOME = { delivered: 'Delivered', rto: 'RTO', in_transit: 'In transit', ndr_pending: 'NDR pending', lost: 'Lost' };
+const KSR_FLAG = {
+  unpriced: ['Unpriced', 'bg-amber-50 text-amber-700', 'Final shipment with no charge computed — the rate card could not price it'],
+  no_weight: ['No weight', 'bg-amber-50 text-amber-700', 'No applied weight, so the slab could not be chosen'],
+  no_zone: ['No zone', 'bg-amber-50 text-amber-700', 'Destination pincode is not in the zone map'],
+  cod_on_prepaid: ['COD fee on prepaid', 'bg-rose-50 text-rose-700', 'A COD fee on a prepaid shipment — we already hold the money'],
+  rto_no_attempt: ['RTO, no attempt', 'bg-rose-50 text-rose-700', 'Returned without ever going out for delivery — the forward leg is disputable'],
+};
+
+function ksrInit() {
+  const v = document.getElementById('kwikship-recon-view');
+  if (!v) return;
+  if (!_ksrShell) {
+    _ksrShell = true;
+    const n = new Date();
+    const f = pgrYmd(new Date(n.getFullYear(), n.getMonth(), 1)), t = pgrYmd(n);
+    KSR_DATED.forEach(k => { _ksrState[k] = { from: f, to: t, preset: 'thismonth', data: null }; });
+    const TABS = [['overview', 'Overview'], ['recon', 'Reconciliation'], ['rates', 'Rate Card'],
+                  ['ledger', 'Ledger'], ['payments', 'Payments']];
+    v.innerHTML =
+      '<div class="sticky top-0 z-30 bg-white border-b border-slate-200 px-6 pt-4">'
+      + '<h1 class="text-2xl font-bold text-slate-800">KwikShip Freight</h1>'
+      + '<nav class="flex gap-1 mt-3 -mb-px overflow-x-auto">'
+      + TABS.map(x => '<button class="ksr-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent '
+          + 'text-slate-500 hover:text-slate-700 whitespace-nowrap" data-kstab="' + x[0] + '">' + x[1] + '</button>').join('')
+      + '</nav></div>'
+      + '<div class="px-6 py-5 space-y-4">'
+      + '<div class="flex flex-wrap items-start justify-between gap-3">'
+      + '<div><p id="ksr-blurb" class="text-sm text-slate-500"></p>'
+      + '<p class="text-xs text-slate-400 mt-0.5">Fee and GST are always shown separately. Date range = order date.</p></div>'
+      + '<div id="ksr-range" class="flex flex-wrap items-center gap-2">'
+      + '<select id="ksr-preset" class="' + PGR_SEL + '">'
+      + PGR_PRESETS.filter(p => p[0] !== 'all').map(p => '<option value="' + p[0] + '">' + p[1] + '</option>').join('')
+      + '</select>'
+      + '<input type="date" id="ksr-from" class="' + PGR_DATE + '">'
+      + '<span class="text-slate-400">→</span>'
+      + '<input type="date" id="ksr-to" class="' + PGR_DATE + '">'
+      + '<button id="ksr-apply" class="filter-btn">Apply</button>'
+      + '<button id="ksr-csv" class="filter-btn">Export CSV</button>'
+      + '</div></div>'
+      // The permanent honesty line. Not a dismissible toast — it qualifies every number on the page.
+      + '<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">'
+      + '⚠️ These are <b>our computed charges</b> from the rate card below — <b>not a KwikShip invoice</b>. '
+      + 'KwikShip publishes no billing API, so hold a real invoice against this page rather than the other way round.</div>'
+      + '<div id="ksr-note" class="hidden rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800"></div>'
+      + TABS.map(x => '<section id="ksr-sec-' + x[0] + '" class="hidden space-y-4"></section>').join('')
+      + '</div>';
+    v.querySelectorAll('.ksr-tab').forEach(b => b.addEventListener('click', () => ksrTab(b.dataset.kstab)));
+    document.getElementById('ksr-apply').addEventListener('click', () => {
+      const st = _ksrState[_ksrTab]; if (!st) return;
+      st.from = document.getElementById('ksr-from').value;
+      st.to = document.getElementById('ksr-to').value;
+      ksrLoad(_ksrTab);
+    });
+    document.getElementById('ksr-csv').addEventListener('click', ksrCsv);
+    document.getElementById('ksr-preset').addEventListener('change', e => {
+      const st = _ksrState[_ksrTab]; if (!st) return;
+      st.preset = e.target.value;
+      const r = pgrPresetRange(st.preset);
+      if (r) { st.from = pgrYmd(r[0]); st.to = pgrYmd(r[1]);
+        document.getElementById('ksr-from').value = st.from;
+        document.getElementById('ksr-to').value = st.to;
+        ksrLoad(_ksrTab); }
+    });
+    // Hand-editing a date means the preset no longer describes the range — say so instead of lying.
+    ['ksr-from', 'ksr-to'].forEach(id => document.getElementById(id).addEventListener('change', () => {
+      const st = _ksrState[_ksrTab]; if (!st) return;
+      st.preset = 'custom';
+      const sel = document.getElementById('ksr-preset');
+      if (sel) { sel.value = 'custom'; if (typeof ecSyncSelect === 'function') ecSyncSelect(sel); }
+    }));
+    if (typeof ecEnhanceFilterSelects === 'function') ecEnhanceFilterSelects(v);
+  }
+  ksrTab(_ksrTab);
+}
+
+function ksrTab(name) {
+  _ksrTab = name;
+  document.querySelectorAll('.ksr-tab').forEach(b => {
+    const on = b.dataset.kstab === name;
+    b.classList.toggle('border-indigo-600', on);
+    b.classList.toggle('text-indigo-700', on);
+    b.classList.toggle('text-slate-500', !on);
+  });
+  document.querySelectorAll('[id^="ksr-sec-"]').forEach(s => s.classList.toggle('hidden', s.id !== 'ksr-sec-' + name));
+  const dated = KSR_DATED.indexOf(name) >= 0;
+  const bar = document.getElementById('ksr-range');
+  if (bar) bar.classList.toggle('hidden', !dated);      // Rate Card / Payments are not date-scoped
+  const csv = document.getElementById('ksr-csv');
+  if (csv) csv.classList.toggle('hidden', name !== 'recon');
+  const blurb = document.getElementById('ksr-blurb');
+  if (blurb) blurb.textContent = ({
+    overview: 'What KwikShip should charge for the shipments in this window.',
+    recon: 'Every shipment with its computed forward, RTO and COD legs.',
+    rates: 'The zone × weight rate card and billing rules these charges are computed from.',
+    ledger: 'Month by month: computed charge + GST against what we have paid.',
+    payments: 'Payments made to KwikShip — hand-entered; they expose no billing API.',
+  })[name] || '';
+  if (dated) {
+    const st = _ksrState[name];
+    document.getElementById('ksr-from').value = st.from;
+    document.getElementById('ksr-to').value = st.to;
+    const sel = document.getElementById('ksr-preset');
+    if (sel) { sel.value = st.preset; if (typeof ecSyncSelect === 'function') ecSyncSelect(sel); }
+    if (!st.data) return ksrLoad(name);
+    _ksr = st.data; ksrPaint(name);
+    return;
+  }
+  if (name === 'rates') return ksrRates();
+  if (name === 'payments') return ksrPayments();
+}
+
+async function ksrLoad(tab) {
+  const st = _ksrState[tab]; if (!st) return;
+  const sec = document.getElementById('ksr-sec-' + tab);
+  if (sec) sec.innerHTML = '<div class="py-10">' + brandLoaderSm('Loading KwikShip freight…') + '</div>';
+  try {
+    const url = tab === 'ledger'
+      ? '/api/kwikship-recon/ledger?from=' + st.from + '&to=' + st.to
+      : '/api/kwikship-recon?from=' + st.from + '&to=' + st.to;
+    const r = await fetch(url, { headers: getAuthHeaders() });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Load failed');
+    st.data = d;
+    if (_ksrTab === tab) { _ksr = d; ksrPaint(tab); }   // repaint only if the user is still on this tab
+  } catch (e) {
+    if (sec) sec.innerHTML = '<p class="text-sm text-rose-600 py-6">' + ecEsc(e.message) + '</p>';
+  }
+}
+
+function ksrPaint(tab) {
+  if (tab === 'overview') return ksrOverview();
+  if (tab === 'recon') return ksrRecon();
+  if (tab === 'ledger') return ksrLedger();
+}
+
+function ksrNote(bits) {
+  const el = document.getElementById('ksr-note');
+  if (!el) return;
+  el.innerHTML = bits.join(' ');
+  el.classList.toggle('hidden', !bits.length);
+}
+
+function ksrOverview() {
+  const sec = document.getElementById('ksr-sec-overview');
+  if (!sec || !_ksr) return;
+  const s = _ksr.summary, cfg = _ksr.config || {};
+  const bits = [];
+  if (s.unpriced) bits.push('<b>' + pgrNum(s.unpriced) + '</b> final shipment(s) could not be priced — the totals are UNDERSTATED by that much.');
+  if (s.valuePending) bits.push(pgrNum(s.valuePending) + ' shipment(s) have no value yet, so their COD fee and remittance are not counted.');
+  ksrNote(bits);
+  const pct = (a, b) => b ? Math.round(a / b * 1000) / 10 : 0;
+  sec.innerHTML =
+    '<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">'
+    + pgrCard('Shipments', pgrNum(s.shipments), pgrNum(s.priced) + ' priced · ' + pgrNum(s.inFlight) + ' still moving')
+    + pgrCard('Freight ex-GST', pgrMoney2(s.charge), 'avg ' + pgrMoney2(s.avgPerShipment) + ' per shipment', 'text-slate-900')
+    + pgrCard('GST ' + s.gstPct + '%', pgrMoney2(s.gst), 'shown separately, never merged', 'text-amber-600')
+    + pgrCard('Total incl GST', pgrMoney2(s.chargeInclGst), 'what a matching invoice should say', 'text-indigo-700')
+    + '</div>'
+    + '<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">'
+    + '<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-3">Charge breakdown</h3>'
+    + ksrBar([['Forward', s.forward, 'bg-indigo-500'], ['RTO', s.rtoFreight, 'bg-rose-500'], ['COD fees', s.codFee, 'bg-amber-500']], s.charge)
+    + '<p class="text-xs text-slate-400 mt-3">RTO ' + (cfg.rto_bills_forward ? 'also pays the forward leg' : 'pays the return leg only')
+    + ' · COD ' + Number(cfg.cod_pct || 0) + '% min ' + pgrMoney(cfg.cod_min) + (cfg.cod_on_delivered_only ? ', delivered only' : '') + '</p></div>'
+    + '<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-3">Outcomes</h3>'
+    + ksrBar([['Delivered', s.delivered, 'bg-emerald-500'], ['RTO', s.rto, 'bg-rose-500'], ['Still moving', s.other, 'bg-slate-400']], s.shipments, true)
+    + '<p class="text-xs text-slate-400 mt-3">RTO rate ' + pct(s.rto, s.delivered + s.rto) + '% of settled shipments</p></div>'
+    + '</div>'
+    + '<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">'
+    + pgrCard('COD shipments', pgrNum(s.cod), pgrNum(s.codDelivered) + ' delivered')
+    + pgrCard('Expected COD remittance', pgrMoney(s.expectedCodRemittance), 'value of COD parcels that DELIVERED', 'text-emerald-600')
+    + pgrCard('COD value returned', pgrMoney(s.codRtoValue), 'RTO collects no cash', 'text-rose-600')
+    + pgrCard('Prepaid value', pgrMoney(s.prepaidValue), pgrNum(s.prepaid) + ' shipments, already collected')
+    + '</div>'
+    + (s.flagged ? '<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-3">Needs attention · '
+        + pgrNum(s.flagged) + '</h3><div class="flex flex-wrap gap-2">'
+        + Object.keys(s.flagCounts).map(f => {
+            const m = KSR_FLAG[f] || [f, 'bg-slate-100 text-slate-600', ''];
+            return '<button class="ksr-flag px-3 py-1.5 rounded-lg text-xs font-semibold ' + m[1] + '" data-flag="' + f + '" title="' + ecEsc(m[2]) + '">'
+              + ecEsc(m[0]) + ' · ' + pgrNum(s.flagCounts[f]) + '</button>'; }).join('')
+        + '</div><p class="text-xs text-slate-400 mt-3">Click to open the Reconciliation tab filtered to it.</p></div>' : '');
+  sec.querySelectorAll('.ksr-flag').forEach(b => b.addEventListener('click', () => {
+    _ksrState.recon.from = _ksrState.overview.from; _ksrState.recon.to = _ksrState.overview.to;
+    _ksrState.recon.preset = _ksrState.overview.preset; _ksrState.recon.data = null;
+    _ksrPendingFlag = b.dataset.flag;
+    ksrTab('recon');
+  }));
+}
+let _ksrPendingFlag = null;
+
+function ksrBar(parts, total, isCount) {
+  const t = Number(total) || 0;
+  return parts.map(p => {
+    const v = Number(p[1]) || 0, w = t ? Math.max(1, Math.round(v / t * 100)) : 0;
+    return '<div class="mb-2.5"><div class="flex justify-between text-xs mb-1">'
+      + '<span class="text-slate-600 font-medium">' + p[0] + '</span>'
+      + '<span class="tabular-nums text-slate-700 font-semibold">' + (isCount ? pgrNum(v) : pgrMoney2(v))
+      + ' <span class="text-slate-400 font-normal">' + w + '%</span></span></div>'
+      + '<div class="h-2 rounded-full bg-slate-100 overflow-hidden"><div class="h-2 ' + p[2] + '" style="width:' + w + '%"></div></div></div>';
+  }).join('');
+}
+
+function ksrRecon() {
+  const sec = document.getElementById('ksr-sec-recon');
+  if (!sec || !_ksr) return;
+  const zones = _ksr.zones || [];
+  sec.innerHTML =
+    '<div class="flex flex-wrap items-center gap-2">'
+    + '<select id="ksr-f-zone" class="' + PGR_SEL + '"><option value="all">All zones</option>'
+      + zones.map(z => '<option value="' + z + '">Zone ' + z + '</option>').join('') + '</select>'
+    + '<select id="ksr-f-outcome" class="' + PGR_SEL + '"><option value="all">All outcomes</option>'
+      + Object.keys(KSR_OUTCOME).map(k => '<option value="' + k + '">' + KSR_OUTCOME[k] + '</option>').join('') + '</select>'
+    + '<select id="ksr-f-pay" class="' + PGR_SEL + '"><option value="all">All payments</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select>'
+    + '<select id="ksr-f-flag" class="' + PGR_SEL + '"><option value="all">All shipments</option>'
+      + Object.keys(KSR_FLAG).map(k => '<option value="' + k + '">' + KSR_FLAG[k][0] + '</option>').join('') + '</select>'
+    + '<input id="ksr-search" type="text" class="' + PGR_IN + ' w-56" placeholder="AWB / order / courier…">'
+    + '<span id="ksr-count" class="text-sm text-slate-500 ml-auto"></span>'
+    + '</div>'
+    + '<div class="card overflow-hidden"><div class="overflow-x-auto" id="ksr-table"></div></div>';
+  if (_ksrPendingFlag) { const el = sec.querySelector('#ksr-f-flag'); if (el) el.value = _ksrPendingFlag; _ksrPendingFlag = null; }
+  if (typeof ecEnhanceFilterSelects === 'function') ecEnhanceFilterSelects(sec);
+  ['ksr-f-zone', 'ksr-f-outcome', 'ksr-f-pay', 'ksr-f-flag'].forEach(id =>
+    document.getElementById(id).addEventListener('change', ksrTable));
+  document.getElementById('ksr-search').addEventListener('input', debounce(ksrTable, 250));
+  ksrTable();
+}
+
+function ksrRows() {
+  const rows = (_ksr && _ksr.rows) || [];
+  const z = (document.getElementById('ksr-f-zone') || {}).value || 'all';
+  const o = (document.getElementById('ksr-f-outcome') || {}).value || 'all';
+  const p = (document.getElementById('ksr-f-pay') || {}).value || 'all';
+  const f = (document.getElementById('ksr-f-flag') || {}).value || 'all';
+  const q = ((document.getElementById('ksr-search') || {}).value || '').trim().toLowerCase();
+  return rows.filter(r => {
+    if (z !== 'all' && (r.zone || '') !== z) return false;
+    if (o !== 'all' && (r.outcome || '') !== o) return false;
+    if (p === 'cod' && !/cod/i.test(r.payment_mode || '')) return false;
+    if (p === 'prepaid' && !/prepaid/i.test(r.payment_mode || '')) return false;
+    if (f !== 'all' && r.flags.indexOf(f) < 0) return false;
+    if (q && String(r.awb || '').toLowerCase().indexOf(q) < 0
+          && String(r.order_name || '').toLowerCase().indexOf(q) < 0
+          && String(r.courier || '').toLowerCase().indexOf(q) < 0) return false;
+    return true;
+  });
+}
+
+function ksrTable() {
+  const host = document.getElementById('ksr-table');
+  if (!host || !_ksr) return;
+  const rows = ksrRows();
+  const cnt = document.getElementById('ksr-count');
+  if (cnt) {
+    // ⚠️ Counts come from the server's buckets, which cover EVERY row in the window — never from the
+    // rendered page. The PG recon shipped the other way and its header summed to the row cap.
+    const z = (document.getElementById('ksr-f-zone') || {}).value || 'all';
+    const o = (document.getElementById('ksr-f-outcome') || {}).value || 'all';
+    const p = (document.getElementById('ksr-f-pay') || {}).value || 'all';
+    const f = (document.getElementById('ksr-f-flag') || {}).value || 'all';
+    const q = ((document.getElementById('ksr-search') || {}).value || '').trim();
+    // Buckets are keyed by zone × outcome × priced; payment/flag/search are per-row, so they fall back.
+    if (!q && p === 'all' && f === 'all' && Array.isArray(_ksr.buckets)) {
+      const b = _ksr.buckets.filter(x => (z === 'all' || (x.zone || '') === z) && (o === 'all' || (x.outcome || '') === o));
+      const n = b.reduce((a, x) => a + x.shipments, 0), c = b.reduce((a, x) => a + Number(x.charge || 0), 0);
+      cnt.textContent = pgrNum(n) + ' shipments · ' + pgrMoney2(c) + ' ex-GST'
+        + (n > rows.length ? ' · newest ' + pgrNum(rows.length) + ' listed below' : '');
+    } else {
+      const c = rows.reduce((a, r) => a + Number(r.charge || 0), 0);
+      cnt.textContent = pgrNum(rows.length) + ' matching · ' + pgrMoney2(c) + ' ex-GST'
+        + (_ksr.capped ? ' · within the newest ' + pgrNum(_ksr.rows.length) + ' loaded' : '');
+    }
+  }
+  if (!rows.length) { host.innerHTML = '<p class="text-sm text-slate-400 p-6">No shipments match.</p>'; return; }
+  const dash = '—';
+  host.innerHTML = '<table class="w-full text-sm">'
+    + '<thead><tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
+    + '<th class="text-left py-2 px-3">AWB / Order</th><th class="text-left px-3">Date</th>'
+    + '<th class="text-left px-3">Courier</th><th class="text-left px-3">Zone</th>'
+    + '<th class="text-left px-3">Payment</th><th class="text-left px-3">Outcome</th>'
+    + '<th class="text-right px-3">Weight</th><th class="text-right px-3">Forward</th>'
+    + '<th class="text-right px-3">RTO</th><th class="text-right px-3">COD fee</th>'
+    + '<th class="text-right px-3">Charge</th></tr></thead><tbody>'
+    + rows.slice(0, 1500).map(r =>
+      '<tr class="border-b border-slate-50">'
+      + '<td class="py-2 px-3"><div class="font-medium">' + ecEsc(r.order_name || dash) + '</div>'
+        + '<div class="text-xs text-slate-400 font-mono">' + ecEsc(r.awb || '') + '</div>'
+        + (r.flags.length ? '<div class="flex flex-wrap gap-1 mt-1">' + r.flags.map(f => {
+            const m = KSR_FLAG[f] || [f, 'bg-slate-100 text-slate-600', ''];
+            return '<span class="px-1.5 py-0.5 rounded text-xs font-semibold ' + m[1] + '" title="' + ecEsc(m[2]) + '">' + ecEsc(m[0]) + '</span>';
+          }).join('') + '</div>' : '')
+      + '</td>'
+      + '<td class="px-3 whitespace-nowrap">' + _dmy(String(r.order_date).slice(0, 10)) + '</td>'
+      + '<td class="px-3 text-slate-500">' + ecEsc(r.courier || dash) + '</td>'
+      + '<td class="px-3">' + (r.zone ? '<span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-xs font-semibold">' + ecEsc(r.zone) + '</span>' : dash) + '</td>'
+      + '<td class="px-3">' + ecEsc(r.payment_mode || dash) + '</td>'
+      + '<td class="px-3">' + (KSR_OUTCOME[r.outcome] || r.outcome || dash) + '</td>'
+      + '<td class="px-3 text-right tabular-nums text-slate-500">' + (r.weight == null ? dash : pgrNum(r.weight) + ' g') + '</td>'
+      + '<td class="px-3 text-right tabular-nums">' + pgrMoney2(r.forward) + '</td>'
+      + '<td class="px-3 text-right tabular-nums text-rose-600">' + (r.rto ? pgrMoney2(r.rto) : dash) + '</td>'
+      + '<td class="px-3 text-right tabular-nums text-amber-600">' + (r.cod ? pgrMoney2(r.cod) : dash) + '</td>'
+      + '<td class="px-3 text-right tabular-nums font-semibold">' + pgrMoney2(r.charge) + '</td></tr>').join('')
+    + '</tbody></table>'
+    + (rows.length > 1500 ? '<p class="text-xs text-slate-400 p-3">Showing 1,500 of ' + pgrNum(rows.length) + ' — the count above and the CSV cover all of them.</p>' : '');
+}
+
+async function ksrRates() {
+  const sec = document.getElementById('ksr-sec-rates');
+  if (!sec) return;
+  sec.innerHTML = '<div class="py-10">' + brandLoaderSm('Loading rate card…') + '</div>';
+  try {
+    const r = await fetch('/api/kwikship-recon/rates', { headers: getAuthHeaders() });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Load failed');
+    const cfg = d.config || {};
+    const zones = [...new Set(d.rates.map(x => x.zone))].sort();
+    const kinds = [['fwd_base_500', 'Forward — first 500 g'], ['fwd_add_500', 'Forward — each +500 g'],
+                   ['fwd_base_2000', 'Forward — first 2 kg'], ['fwd_add_1000', 'Forward — each +1 kg'],
+                   ['rto_base_500', 'RTO — first 500 g'], ['rto_base_2000', 'RTO — first 2 kg']];
+    const at = (k, z) => { const hit = d.rates.find(x => x.rate_kind === k && x.zone === z); return hit ? Number(hit.rate) : null; };
+    sec.innerHTML =
+      '<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-1">Billing rules</h3>'
+      + '<p class="text-xs text-slate-400 mb-3">Edited in <code>kwikship_billing_config_ecom</code>; every charge on this page is recomputed from them.</p>'
+      + '<div class="grid grid-cols-2 lg:grid-cols-5 gap-4">'
+      + pgrCard('COD fee', Number(cfg.cod_pct || 0) + '%', 'minimum ' + pgrMoney(cfg.cod_min))
+      + pgrCard('GST', Number(cfg.gst_pct || 0) + '%', 'added on top, shown apart')
+      + pgrCard('Slab switch', pgrNum(cfg.slab_switch_g) + ' g', 'above this, the 2 kg slab applies')
+      + pgrCard('RTO billing', cfg.rto_bills_forward ? 'Forward + RTO' : 'RTO only', 'what a return costs')
+      + pgrCard('COD charged on', cfg.cod_on_delivered_only ? 'Delivered only' : 'Every COD', 'an RTO collects no cash')
+      + '</div></div>'
+      + '<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-1">Rate card · ₹ per shipment by zone</h3>'
+      + '<p class="text-xs text-slate-400 mb-3">Effective-dated — the newest rate on or before today is used, so re-pricing a month never rewrites a settled one.</p>'
+      + '<div class="overflow-x-auto"><table class="w-full text-sm">'
+      + '<thead><tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
+      + '<th class="text-left py-2 px-3">Rate</th>' + zones.map(z => '<th class="text-right px-3">Zone ' + z + '</th>').join('') + '</tr></thead><tbody>'
+      + kinds.map(k => '<tr class="border-b border-slate-50"><td class="py-2 px-3 font-medium">' + k[1] + '</td>'
+          + zones.map(z => { const v = at(k[0], z); return '<td class="px-3 text-right tabular-nums">' + (v == null ? '—' : pgrMoney2(v)) + '</td>'; }).join('')
+          + '</tr>').join('')
+      + '</tbody></table></div>'
+      + (d.history.length ? '<p class="text-xs text-slate-400 mt-3">' + pgrNum(d.history.length) + ' superseded or future rate(s) on file.</p>' : '')
+      + '</div>';
+  } catch (e) { sec.innerHTML = '<p class="text-sm text-rose-600 py-6">' + ecEsc(e.message) + '</p>'; }
+}
+
+function ksrLedger() {
+  const sec = document.getElementById('ksr-sec-ledger');
+  if (!sec || !_ksr) return;
+  const d = _ksr, t = d.totals || {};
+  ksrNote([]);
+  sec.innerHTML =
+    '<div class="grid grid-cols-2 lg:grid-cols-3 gap-4">'
+    + pgrCard('Computed charge incl GST', pgrMoney2(t.charge), 'across every month shown', 'text-slate-900')
+    + pgrCard('Paid to KwikShip', pgrMoney2(t.paid), 'recorded on the Payments tab', 'text-emerald-600')
+    + pgrCard('Outstanding', pgrMoney2(t.outstanding), '+ = payable to KwikShip', t.outstanding > 0 ? 'text-rose-600' : 'text-emerald-600')
+    + '</div>'
+    + '<div class="card overflow-hidden"><div class="overflow-x-auto"><table class="w-full text-sm">'
+    + '<thead><tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
+    + '<th class="text-left py-2 px-3">Month</th><th class="text-right px-3">Shipments</th>'
+    + '<th class="text-right px-3">Delivered</th><th class="text-right px-3">RTO</th>'
+    + '<th class="text-right px-3">Forward</th><th class="text-right px-3">RTO freight</th>'
+    + '<th class="text-right px-3">COD fees</th><th class="text-right px-3">Charge</th>'
+    + '<th class="text-right px-3">GST</th><th class="text-right px-3">Incl GST</th>'
+    + '<th class="text-right px-3">Paid</th><th class="text-right px-3">Balance</th></tr></thead><tbody>'
+    + (d.months || []).map(m =>
+      '<tr class="border-b border-slate-50">'
+      + '<td class="py-2 px-3 font-medium">' + ecEsc(m.month) + '</td>'
+      + '<td class="px-3 text-right tabular-nums">' + pgrNum(m.shipments) + '</td>'
+      + '<td class="px-3 text-right tabular-nums text-emerald-600">' + pgrNum(m.delivered) + '</td>'
+      + '<td class="px-3 text-right tabular-nums text-rose-600">' + pgrNum(m.rto) + '</td>'
+      + '<td class="px-3 text-right tabular-nums">' + pgrMoney2(m.forward) + '</td>'
+      + '<td class="px-3 text-right tabular-nums">' + pgrMoney2(m.rtoFreight) + '</td>'
+      + '<td class="px-3 text-right tabular-nums">' + pgrMoney2(m.codFee) + '</td>'
+      + '<td class="px-3 text-right tabular-nums font-semibold">' + pgrMoney2(m.charge) + '</td>'
+      + '<td class="px-3 text-right tabular-nums text-amber-600">' + pgrMoney2(m.gst) + '</td>'
+      + '<td class="px-3 text-right tabular-nums font-semibold">' + pgrMoney2(m.chargeInclGst) + '</td>'
+      + '<td class="px-3 text-right tabular-nums text-emerald-600">' + (m.payments ? pgrMoney2(m.payments) : '—') + '</td>'
+      + '<td class="px-3 text-right tabular-nums font-semibold ' + (m.balance > 0 ? 'text-rose-600' : 'text-emerald-600') + '">' + pgrMoney2(m.balance) + '</td></tr>').join('')
+    + '</tbody></table></div></div>'
+    + '<p class="text-xs text-slate-400">Balance is FIFO — a payment clears the oldest outstanding month first, which is how a partner actually applies money received.</p>';
+}
+
+async function ksrPayments() {
+  const sec = document.getElementById('ksr-sec-payments');
+  if (!sec) return;
+  sec.innerHTML = '<div class="py-10">' + brandLoaderSm('Loading payments…') + '</div>';
+  try {
+    const r = await fetch('/api/kwikship-payments', { headers: getAuthHeaders() });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Load failed');
+    _ksrPay = d.payments || [];
+    const total = _ksrPay.reduce((a, p) => a + Number(p.amount || 0), 0);
+    sec.innerHTML =
+      '<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-1">Record a payment</h3>'
+      + '<p class="text-xs text-slate-400 mb-3">Hand-entered: KwikShip exposes no wallet or billing API we can read.</p>'
+      + '<div class="flex flex-wrap items-end gap-2">'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Date</label><input type="date" id="ksrp-date" class="' + PGR_DATE + '" value="' + pgrYmd(new Date()) + '"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Amount ₹</label><input type="number" id="ksrp-amt" class="' + PGR_IN + ' w-32" min="0" step="0.01"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Reference</label><input type="text" id="ksrp-ref" class="' + PGR_IN + ' w-44" placeholder="UTR / invoice no."></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Method</label><input type="text" id="ksrp-method" class="' + PGR_IN + ' w-32" placeholder="NEFT"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Note</label><input type="text" id="ksrp-note" class="' + PGR_IN + ' w-56"></div>'
+      + '<button id="ksrp-add" class="filter-btn">Add payment</button></div></div>'
+      + '<div class="card overflow-hidden"><div class="px-5 py-3 border-b border-slate-100 flex justify-between items-center">'
+      + '<h3 class="text-sm font-bold text-slate-700">' + pgrNum(_ksrPay.length) + ' payment(s)</h3>'
+      + '<span class="text-sm font-semibold text-slate-700">' + pgrMoney2(total) + ' total</span></div>'
+      + '<div class="overflow-x-auto"><table class="w-full text-sm"><thead>'
+      + '<tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
+      + '<th class="text-left py-2 px-3">Date</th><th class="text-right px-3">Amount</th>'
+      + '<th class="text-left px-3">Reference</th><th class="text-left px-3">Method</th>'
+      + '<th class="text-left px-3">Note</th><th class="text-left px-3">By</th><th class="px-3"></th></tr></thead><tbody>'
+      + (_ksrPay.length ? _ksrPay.map(p =>
+          '<tr class="border-b border-slate-50"><td class="py-2 px-3">' + _dmy(String(p.payment_date).slice(0, 10)) + '</td>'
+          + '<td class="px-3 text-right tabular-nums font-semibold">' + pgrMoney2(p.amount) + '</td>'
+          + '<td class="px-3 text-slate-500">' + ecEsc(p.reference || '—') + '</td>'
+          + '<td class="px-3 text-slate-500">' + ecEsc(p.method || '—') + '</td>'
+          + '<td class="px-3 text-slate-500">' + ecEsc(p.notes || '—') + '</td>'
+          + '<td class="px-3 text-slate-400 text-xs">' + ecEsc(String(p.created_by || '').split('@')[0] || '—') + '</td>'
+          + '<td class="px-3 text-right"><button class="ksrp-del text-xs font-semibold text-rose-600 hover:underline" data-id="' + p.id + '">Delete</button></td></tr>').join('')
+        : '<tr><td colspan="7" class="px-3 py-8 text-center text-sm text-slate-400">No payments recorded yet.</td></tr>')
+      + '</tbody></table></div></div>';
+    document.getElementById('ksrp-add').addEventListener('click', ksrPayAdd);
+    sec.querySelectorAll('.ksrp-del').forEach(b => b.addEventListener('click', () => ksrPayDel(b.dataset.id)));
+  } catch (e) { sec.innerHTML = '<p class="text-sm text-rose-600 py-6">' + ecEsc(e.message) + '</p>'; }
+}
+
+async function ksrPayAdd() {
+  const body = {
+    payment_date: document.getElementById('ksrp-date').value,
+    amount: document.getElementById('ksrp-amt').value,
+    reference: document.getElementById('ksrp-ref').value.trim() || null,
+    method: document.getElementById('ksrp-method').value.trim() || null,
+    notes: document.getElementById('ksrp-note').value.trim() || null,
+  };
+  if (!body.payment_date || !(Number(body.amount) > 0)) return showNotification('Date and a positive amount are required.', true);
+  const btn = document.getElementById('ksrp-add'); btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/kwikship-payments', { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Save failed');
+    showNotification('Payment recorded');
+    if (_ksrState.ledger) _ksrState.ledger.data = null;   // the balance moved — force a fresh ledger
+    ksrPayments();
+  } catch (e) { showNotification(e.message, true); btn.disabled = false; btn.textContent = 'Add payment'; }
+}
+
+async function ksrPayDel(id) {
+  const ok = await supConfirm({ title: 'Delete this payment?', danger: true, confirmLabel: 'Delete',
+    message: 'It will be removed from the ledger and the outstanding balance recalculated.' });
+  if (!ok) return;
+  try {
+    const r = await fetch('/api/kwikship-payments/' + id, { method: 'DELETE', headers: getAuthHeaders() });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Delete failed');
+    showNotification('Payment deleted');
+    if (_ksrState.ledger) _ksrState.ledger.data = null;
+    ksrPayments();
+  } catch (e) { showNotification(e.message, true); }
+}
+
+// The reconciliation CSV is built SERVER-SIDE over the full window — never from the rendered page.
+async function ksrCsv() {
+  const st = _ksrState.recon; if (!st) return;
+  const qs = 'from=' + encodeURIComponent(st.from) + '&to=' + encodeURIComponent(st.to)
+    + '&zone=' + encodeURIComponent((document.getElementById('ksr-f-zone') || {}).value || 'all')
+    + '&outcome=' + encodeURIComponent((document.getElementById('ksr-f-outcome') || {}).value || 'all')
+    + '&payment=' + encodeURIComponent((document.getElementById('ksr-f-pay') || {}).value || 'all')
+    + '&flag=' + encodeURIComponent((document.getElementById('ksr-f-flag') || {}).value || 'all')
+    + '&q=' + encodeURIComponent(((document.getElementById('ksr-search') || {}).value || '').trim());
+  try {
+    showNotification('Building the full export…');
+    const r = await fetch('/api/kwikship-recon/export.csv?' + qs, { headers: getAuthHeaders() });
+    if (!r.ok) throw new Error(await r.text());
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = 'kwikship-recon_' + st.from + '_to_' + st.to + '.csv';
+    a.click(); URL.revokeObjectURL(a.href);
+    showNotification('Export ready — every shipment in the range.');
+  } catch (e) { showNotification('Export failed: ' + e.message, true); }
 }

@@ -108,6 +108,7 @@ const purchaseOrderRoutes = require('./app/api/purchase_orders');
 const { router: amazonFbaRoutes, initFbaLocationCron } = require('./app/api/amazon_fba');
 const docpharmaReconRoutes = require('./app/api/docpharma_recon');
 const rapidshypReconRoutes = require('./app/api/rapidshyp_recon');
+const kwikshipReconRoutes = require('./app/api/kwikship_recon');
 const { router: pgReconRoutes, syncOrderGateways } = require('./app/api/pg_recon');
 const docpharmaInvoiceRoutes = require('./app/api/docpharma_invoices');
 const docpharmaLedgerRoutes = require('./app/api/docpharma_ledger');
@@ -154,6 +155,7 @@ app.use('/api', (req, res, next) => {
 const _VIEW_PERMS = [
     [/^\/docpharma/i, 'docpharma-recon'],
     [/^\/rapidshyp-(recon|payments)/i, 'rapidshyp-recon'],   // recon + its own payments ledger
+    [/^\/kwikship-(recon|payments)/i, 'kwikship-recon'],     // same shape for KwikShip freight
     [/^\/pg-recon/i, 'gokwik-pg-recon'],                     // GoKwik payment-gateway reconciliation
     [/^\/fba\//i, 'amazon-fba'],
     [/^\/ops-control/i, 'ops-control'],
@@ -322,6 +324,7 @@ app.use('/api', require('./app/api/zone_mapping'));
 app.use('/api', require('./app/api/teams_bot'));
 app.use('/api', docpharmaReconRoutes);
 app.use('/api', rapidshypReconRoutes);
+app.use('/api', kwikshipReconRoutes);
 app.use('/api', pgReconRoutes);
 app.use('/api', docpharmaInvoiceRoutes);
 app.use('/api', docpharmaLedgerRoutes);

@@ -93,15 +93,63 @@ async function syncOrderGateways({ since = null, days = 45, max = 40000, onProgr
 // Every figure comes from pg_recon_summary()/pg_recon_rows() in SQL — the charge is defined once, so a
 // dashboard, an export and any later report cannot quietly disagree about the same money.
 const ROW_CAP = 5000;
+// The table's filter, defined ONCE server-side so the CSV export and the client cannot drift apart.
+// The client mirrors this in pgrRows(); any new filter belongs in both, and the export is the
+// authoritative artifact (an accountant reconciles from the file, not the screen).
+function pgrFilter(rows, { type = 'all', charged = 'all', q = '' } = {}) {
+    const needle = String(q || '').trim().toLowerCase();
+    return rows.filter(r => {
+        if (type !== 'all' && r.payment_type !== type) return false;
+        if (charged === 'charged' && !r.charged) return false;
+        if (charged === 'excluded' && r.charged) return false;
+        if (needle && String(r.order_name || '').toLowerCase().indexOf(needle) < 0
+                   && String(r.gateway || '').toLowerCase().indexOf(needle) < 0) return false;
+        return true;
+    });
+}
+// Aggregates over EVERY row in the window, keyed by the two dimensions the table can filter on.
+// ⚠️ THIS EXISTS BECAUSE THE COUNT LINE WAS COMPUTED FROM THE CAPPED PAGE (2026-08-20, user-reported):
+// with 5,592 July orders the screen read "4,911 charged + 89 not charged" — which sums to the 5,000 cap,
+// not the 5,592 truth — and understated the charge by ₹11,421 (₹97,763 shown vs ₹1,09,184 real). The
+// banner meanwhile claimed every total covered all of them. Buckets let the client state the real
+// figures for any type/charged selection while still rendering only a capped page.
+function pgrBuckets(rows) {
+    const by = new Map();
+    for (const r of rows) {
+        const key = String(r.payment_type) + '|' + (r.charged ? 1 : 0);
+        let b = by.get(key);
+        if (!b) { b = { payment_type: r.payment_type, charged: !!r.charged, orders: 0, order_value: 0, fee: 0, gst: 0, charge: 0 }; by.set(key, b); }
+        b.orders++;
+        b.order_value += Number(r.order_value || 0);
+        if (r.charged) { b.fee += Number(r.fee || 0); b.gst += Number(r.gst || 0); b.charge += Number(r.total_charge || 0); }
+    }
+    return [...by.values()];
+}
+// The window's rows, paged past PostgREST's 1000-row cap on set-returning functions.
+async function pgrAllRows(args) {
+    const all = [];
+    for (let off = 0; ; off += 1000) {
+        const { data, error } = await supabase.rpc('pg_recon_rows', args).range(off, off + 999);
+        if (error) throw new Error(error.message);
+        all.push(...(data || []));
+        if (!data || data.length < 1000 || all.length >= 60000) break;   // hard stop, never an infinite page
+    }
+    all.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    return all;
+}
+function pgrRange(req) {
+    const to = req.query.to ? new Date(req.query.to) : new Date();
+    const from = req.query.from ? new Date(req.query.from) : new Date(Date.now() - 30 * 86400000);
+    if (isNaN(from) || isNaN(to)) return null;
+    to.setHours(23, 59, 59, 999);
+    return { from, to, args: { p_from: from.toISOString(), p_to: to.toISOString() } };
+}
 
 router.get('/pg-recon', async (req, res) => {
     try {
-        const to = req.query.to ? new Date(req.query.to) : new Date();
-        const from = req.query.from ? new Date(req.query.from) : new Date(Date.now() - 30 * 86400000);
-        if (isNaN(from) || isNaN(to)) return res.status(400).json({ success: false, error: 'Invalid date range.' });
-        to.setHours(23, 59, 59, 999);
-
-        const args = { p_from: from.toISOString(), p_to: to.toISOString() };
+        const rng = pgrRange(req);
+        if (!rng) return res.status(400).json({ success: false, error: 'Invalid date range.' });
+        const { from, to, args } = rng;
         // ⚠️ PAGE THE RPC. PostgREST caps a set-returning function at 1000 rows exactly as it caps a
         // table select, and it does so SILENTLY — the first build reported "1000 of 1000" for a 42,000
         // order window and truncated both the table and the CSV. The summary is computed inside SQL so
@@ -109,14 +157,7 @@ router.get('/pg-recon', async (req, res) => {
         const sum = await supabase.rpc('pg_recon_summary', args);
         if (sum.error) throw new Error(sum.error.message);
 
-        const all = [];
-        for (let off = 0; ; off += 1000) {
-            const { data, error } = await supabase.rpc('pg_recon_rows', args).range(off, off + 999);
-            if (error) throw new Error(error.message);
-            all.push(...(data || []));
-            if (!data || data.length < 1000 || all.length >= 60000) break;   // hard stop, never an infinite page
-        }
-        all.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+        const all = await pgrAllRows(args);
         // Refunds get their own slice, taken from the FULL set before the table cap — they are rare and
         // scattered, so filtering the capped page would show only the ones that happen to be recent.
         const REFUND = new Set(['refunded', 'partially_refunded']);
@@ -136,6 +177,8 @@ router.get('/pg-recon', async (req, res) => {
             rows: all.slice(0, ROW_CAP),
             rowsTotal: all.length,
             capped: all.length > ROW_CAP,
+            // True per-(type × charged) totals over ALL rows — the count line reads these, never the page.
+            buckets: pgrBuckets(all),
             refunds: refunds.slice(0, 3000),
             refundTotals: rTot,
         });
@@ -154,6 +197,36 @@ router.get('/pg-recon/rates', async (_req, res) => {
         if (error) throw new Error(error.message);
         res.json({ success: true, rates: data || [] });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// GET /pg-recon/export.csv — the reconciliation rows for the window, FILTERED BUT NEVER CAPPED.
+// ⚠️ The client used to build this file from the same 5,000-row page the table renders, so exporting
+// July silently produced 5,000 of 5,592 rows — a truncated file an accountant would reconcile against
+// and never know was short. Built server-side from the full set instead (2026-08-20).
+router.get('/pg-recon/export.csv', async (req, res) => {
+    try {
+        const rng = pgrRange(req);
+        if (!rng) return res.status(400).send('Invalid date range.');
+        const rows = pgrFilter(await pgrAllRows(rng.args), {
+            type: req.query.type, charged: req.query.charged, q: req.query.q,
+        });
+        const head = ['Order', 'Date', 'Status', 'Payment type', 'Charged', 'Gateway', 'Order value',
+            'Fee base', 'Rate %', 'GST %', 'Fee', 'GST', 'Total charge'];
+        const csv = [head.join(',')].concat(rows.map(r => [
+            r.order_name, String(r.created_at).slice(0, 10), r.financial_status, r.payment_type,
+            r.charged ? 'yes' : 'no', '"' + String(r.gateway || '').replace(/"/g, '""') + '"',
+            r.order_value, r.fee_base == null ? '' : r.fee_base, r.fee_percent == null ? '' : r.fee_percent,
+            r.gst_percent == null ? '' : r.gst_percent, r.fee == null ? '' : r.fee,
+            r.gst == null ? '' : r.gst, r.total_charge == null ? '' : r.total_charge,
+        ].join(','))).join('\n');
+        const name = 'gokwik-pg-recon_' + String(req.query.from || '') + '_to_' + String(req.query.to || '') + '.csv';
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="' + name + '"');
+        res.send(csv);
+    } catch (e) {
+        console.error('[PG recon] export error:', e.message);
+        res.status(500).send('Export failed: ' + e.message);
+    }
 });
 
 // Manual gateway refresh — the ingest labels new orders, this catches ones whose payment was captured

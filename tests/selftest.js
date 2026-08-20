@@ -496,6 +496,100 @@ function check(name, got, want) {
         /po\.stale\) poStaleAt = po\.fetchedAt/.test(inv) && /subtracted from the last good copy/.test(inv), true);
 }
 
+// -- 4h. GoKwik PG recon: the count line and the export must cover the WHOLE window --------------
+// 2026-08-20, user-reported: the Reconciliation header read "4,911 charged" and "89 not charged" for a
+// 5,592-order month -- a pair that sums to the 5,000 ROW CAP, not to the window -- while the banner
+// claimed every total covered all of them. It understated the July charge by Rs 11,421. The CSV export
+// had the same flaw, which is worse: a short file nobody can tell is short. Buckets are now computed
+// over every row server-side, and the export is built there too.
+{
+    const src = fs.readFileSync(path.join(ROOT, 'app/api/pg_recon.js'), 'utf8');
+    const ui = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    eval(src.match(/function pgrBuckets[\s\S]*?\n\}\r?\n/)[0]);
+    const rows = [
+        { payment_type: 'cod',     charged: true,  order_value: 100, fee: 2,   gst: 0.36, total_charge: 2.36 },
+        { payment_type: 'cod',     charged: true,  order_value: 200, fee: 4,   gst: 0.72, total_charge: 4.72 },
+        { payment_type: 'prepaid', charged: false, order_value: 50 },
+        { payment_type: 'partial', charged: true,  order_value: 300, fee: 7.5, gst: 1.35, total_charge: 8.85 },
+    ];
+    const b = pgrBuckets(rows);
+    check('pg recon: buckets partition every row exactly once',
+        b.reduce((a, x) => a + x.orders, 0), rows.length);
+    check('pg recon: charged + not-charged buckets rebuild the full count',
+        [b.filter(x => x.charged).reduce((a, x) => a + x.orders, 0),
+         b.filter(x => !x.charged).reduce((a, x) => a + x.orders, 0)], [3, 1]);
+    check('pg recon: an uncharged row contributes 0 charge, never null',
+        b.filter(x => !x.charged).reduce((a, x) => a + x.charge, 0), 0);
+    check('pg recon: charge survives bucketing',
+        Math.round(b.reduce((a, x) => a + x.charge, 0) * 100) / 100, 15.93);
+    check('pg recon: the count line reads buckets, not the rendered page',
+        /_pgr\.buckets/.test(ui) && !/cnt\.textContent = pgrNum\(rows\.length\) \+ ' orders/.test(ui), true);
+    check('pg recon: the reconciliation CSV is built server-side over the full window',
+        /pg-recon\/export\.csv/.test(src) && /pg-recon\/export\.csv/.test(ui), true);
+}
+
+// -- 4i. KwikShip Freight Recon: a COMPUTED expectation that must never masquerade as an invoice ---
+// Built 2026-08-20. Unlike RapidShyp Recon (charges are RapidShyp's own, from their API), KwikShip
+// publishes no billing endpoint: every rupee is OUR computation from kwikship_rate_card_ecom. These
+// pin the arithmetic that decides what we think we owe, and the honesty line that says so.
+{
+    const ks = require(path.join(ROOT, 'app/api/kwikship_recon'));
+    const ui = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    const api = fs.readFileSync(path.join(ROOT, 'app/api/kwikship_recon.js'), 'utf8');
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+
+    const cfg = { gst_pct: 18, cod_pct: 1.3, cod_min: 25 };
+    const rows = [
+        { outcome: 'delivered',  payment_mode: 'COD',     value: 1000, priced: true,  is_final: true,  forward: 43, rto: 0,  cod: 25, charge: 68, weight: 100, zone: 'D', flags: [] },
+        { outcome: 'rto',        payment_mode: 'COD',     value: 500,  priced: true,  is_final: true,  forward: 43, rto: 43, cod: 0,  charge: 86, weight: 100, zone: 'D', flags: [] },
+        { outcome: 'delivered',  payment_mode: 'Prepaid', value: 800,  priced: true,  is_final: true,  forward: 23, rto: 0,  cod: 0,  charge: 23, weight: 100, zone: 'A', flags: [] },
+        { outcome: 'in_transit', payment_mode: 'COD',     value: 600,  priced: false, is_final: false, forward: 0,  rto: 0,  cod: 0,  charge: 0,  weight: 100, zone: 'A', flags: [] },
+    ];
+    const s2 = ks.summarize(rows, cfg);
+
+    // GST is carried SEPARATELY and never folded into the freight figure -- the user asked for that on
+    // every recon page, and a merged number is impossible to hold against a tax invoice.
+    check('kwikship: freight and GST stay separate, and add up',
+        [s2.charge, s2.gst, s2.chargeInclGst], [177, 31.86, 208.86]);
+    // COD cash reaches us only on delivery: an RTO collects nothing, so it owes no remittance.
+    check('kwikship: only DELIVERED cod shipments create an expected remittance',
+        [s2.expectedCodRemittance, s2.codRtoValue, s2.prepaidValue], [1000, 500, 800]);
+    check('kwikship: a still-moving shipment is in-flight, not an unpriced billing gap',
+        [s2.priced, s2.unpriced, s2.inFlight], [3, 0, 1]);
+
+    // Buckets must cover every row -- the count line reads them instead of the capped page.
+    const b = ks.buckets(rows);
+    check('kwikship: buckets partition every shipment exactly once',
+        [b.reduce((a, x) => a + x.shipments, 0), Math.round(b.reduce((a, x) => a + x.charge, 0) * 100) / 100],
+        [rows.length, 177]);
+
+    // `unpriced` means FINAL-but-unpriced only. Counting in-flight shipments as billing gaps is what
+    // made RapidShyp Recon report 1,131 missing invoices when the true number was 181.
+    check('kwikship: unpriced flags a settled shipment, never one still moving',
+        [ks.flagsOf({ is_final: true,  freight_total: null, applied_weight: 100, zone: 'D' }).includes('unpriced'),
+         ks.flagsOf({ is_final: false, freight_total: null, applied_weight: 100, zone: 'D' }).includes('unpriced')],
+        [true, false]);
+    check('kwikship: a COD fee on a prepaid shipment is flagged',
+        ks.flagsOf({ is_final: true, freight_total: 23, applied_weight: 100, zone: 'A', payment_mode: 'Prepaid', cod_charges: 25 }).includes('cod_on_prepaid'), true);
+
+    // The filter lives once, server-side, so the CSV and the screen cannot drift.
+    check('kwikship: the export filter is shared, and the CSV is built server-side over the full window',
+        [/export\.csv/.test(api) && /applyFilter\(/.test(api), /kwikship-recon\/export\.csv/.test(ui)], [true, true]);
+    check('kwikship: the page states the charges are computed, not invoiced',
+        /not a KwikShip invoice/i.test(ui) && /computed: true/.test(api), true);
+    // ALL SIX registration points -- adding the permission alone leaves the nav item invisible, which
+    // cost a debugging round on the GoKwik PG build (index.html is static).
+    check('kwikship: every registration point is wired',
+        [/require\('\.\/app\/api\/kwikship_recon'\)/.test(srv),
+         /kwikship-\(recon\|payments\)/.test(srv),
+         /case 'kwikship-recon':/.test(ui),
+         /'nav-kwikship-recon': 'kwikship-recon'/.test(ui),
+         /\['kwikship-recon','KwikShip Freight Recon'\]/.test(ui),
+         /id="nav-kwikship-recon"/.test(html) && /id="kwikship-recon-view"/.test(html)],
+        [true, true, true, true, true, true]);
+}
+
 // ── 5. RapidShyp sync: transient failures must not raise a cron-failure card ─────────────────────
 // Bug 2026-08-17: an 8s timeout on 3 AWBs turned a 13-minute run into "❌ Cron failed". The job only
 // fetches AWBs with no row yet, so a failure self-heals on the next run two hours later — while a
