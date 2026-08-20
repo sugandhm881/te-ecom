@@ -48,7 +48,12 @@ const statusLabel = id => PO_STATUS[id] || `Status ${id}`;
 // Terminal states — a PO here is finished and should not be counted as inbound stock, however its
 // pending_quantity reads. A Rejected or Cancelled PO with 10,000 units "pending" is not 10,000 units
 // on their way; that is exactly the number a buyer would act on wrongly.
-const PO_DEAD = new Set([4, 7]);
+// ⚠️ COMPLETED (5) IS TERMINAL TOO (added 2026-08-20). A short-closed PO — goods received by a GRN
+// that was never linked to it, then the PO marked Completed — keeps its pending_quantity FROZEN
+// forever. Two live POs (49: 2,441 × TE-BDR1; 50: 2,022 × TE-2SAS1 + 254 × TE-LB1) sat "Completed"
+// with 4,717 phantom inbound units, so the reorder sheet under-ordered those SKUs indefinitely.
+// Marking a PO Completed IS EasyEcom's way of closing it short; the subtraction must respect that.
+const PO_DEAD = new Set([4, 5, 7]);
 
 const num = v => { const n = Number(v); return isFinite(n) ? n : 0; };
 // ⚠️ **`tax_rate` COMES BACK AS THE STRING "18%", NOT THE NUMBER 18.** `Number("18%")` is NaN, so a plain

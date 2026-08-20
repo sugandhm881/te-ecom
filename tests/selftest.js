@@ -414,6 +414,44 @@ function check(name, got, want) {
         /#dp-basket-bar\{ background:#0f172a/.test(css) && !/bg-white\/10/.test(ui), true);
 }
 
+// ── 4e2. Call Queue hold/release/cancel: the row responds, the page does not reload ───────────
+// 2026-08-20 user ask. Every action ended in supLoadQueue() — a full re-fetch that flashed the grid
+// and lost the agent's place. The outcome is known at API success, so the row is patched in place;
+// the 30s poll reconciles. Behavioural pin on the two helpers plus a structural one on the handlers.
+{
+    const ui = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    let repaints = 0;
+    const supQueueTable = () => repaints++;
+    let _supQueueRows = [{ order_id: 1, shopify_hold: null }, { order_id: 2 }];
+    eval(ui.match(new RegExp('function supRowPatch.*'))[0]);
+    eval(ui.match(new RegExp('function supRowDrop.*'))[0]);
+    supRowPatch('1', r => { r.shopify_hold = { status: 'held' }; });
+    check('call queue actions: a patch updates the row and repaints once',
+        [_supQueueRows[0].shopify_hold.status, repaints], ['held', 1]);
+    supRowDrop(1);
+    check('call queue actions: cancel drops the row client-side',
+        [_supQueueRows.length, _supQueueRows[0].order_id, repaints], [1, 2, 2]);
+    // The five action handlers must not re-fetch the whole queue on success any more.
+    const handlers = ui.slice(ui.indexOf('async function supDoHold'), ui.indexOf('async function supRefreshTracking'));
+    check('call queue actions: no handler reloads the page/queue on success',
+        (handlers.match(/supLoadQueue\(\)/g) || []).length, 0);
+    check('call queue actions: every success path answers through the row',
+        (handlers.match(/supRowPatch\(|supRowDrop\(/g) || []).length >= 5, true);
+    // Shopify release and EasyEcom release must stay the SAME experience (user, 2026-08-20):
+    // emerald 'go' confirm popup that turns into the loader while the API runs.
+    const rel = f => { const fn = ui.slice(ui.indexOf('async function ' + f)); return ['tone:' + String.fromCharCode(39) + 'go', 'busyTitle:`Releasing', 'work:()=>supFetch'].every(x => fn.slice(0, 900).includes(x)); };
+    check('call queue actions: both releases share the confirm-then-loader popup',
+        [rel('supDoUnhold'), rel('supDoEeUnhold')], [true, true]);
+    check('call queue actions: hold and cancel show a busy popup, not button text',
+        (handlers.match(/supBusyModal\(/g) || []).length >= 2 && !/textContent='(Holding|Releasing|Cancelling)/.test(handlers), true);
+    // The result must be SHOWN in the popup (user, 2026-08-20: 'Unhold successfully is not showed').
+    // Success = a ✓ beat that closes itself; errors stay until Read via a Close button.
+    check('call queue actions: success and failure are shown in the popup itself',
+        [/successTitle/.test(ui) && (handlers.match(/successTitle:/g) || []).length >= 3,
+         (handlers.match(/busy\.success\(/g) || []).length >= 2,
+         /supcf-errclose/.test(ui) && /supbm-close/.test(ui)], [true, true, true]);
+}
+
 // ── 4f. WH Ops report: pickup sections grouped by Platform · Courier ───────────────────────
 // 2026-08-20 user ask: the WH team chases a specific courier's van, so Ready-for-Pickup and Stuck
 // name the platform and courier per group. Exercised through the real helpers.
@@ -423,8 +461,13 @@ function check(name, got, want) {
     const normName = n => String(n || '').replace('#', '').trim();
     eval(grab('PLATFORM_LABEL_WH')); eval(grab('courierShort')); eval(grab('groupByCourier'));
     check('wh report: courier names are normalised without losing identity',
-        [courierShort('Delhivery Enterprise'), courierShort('Blue Dart Air'), courierShort('Speed Post')],
-        ['Delhivery', 'Bluedart', 'Speed Post']);
+        [courierShort('Delhivery Enterprise'), courierShort('Blue Dart Air'), courierShort('Speed Post'), courierShort('Shree Maruti Surface')],
+        ['Delhivery', 'Bluedart', 'Speed Post', 'Shree Maruti']);
+    // A freshly-labelled parcel has no journey row until its first courier scan, so the lookup
+    // must fall back to EasyEcom's own allocation (2026-08-20: two Shree Maruti orders read
+    // "No courier assigned yet" three hours after manifest). Structural pin on the fallback.
+    check('wh report: pre-scan parcels fall back to the EasyEcom allocation',
+        /const missing = uniq\.filter\(n => !map\[n\]\)/.test(src) && /courier_aggregator_name/.test(src), true);
     const pc = { 'TE25-1': { platform: 'RapidShyp', courier: 'Delhivery' }, 'TE25-2': { platform: 'RapidShyp', courier: 'Delhivery' }, 'TE25-3': { platform: 'KwikShip', courier: 'Shadowfax' } };
     const g = groupByCourier([{ name: '#TE25-1' }, { name: '#TE25-2' }, { name: '#TE25-3' }, { name: '#TE25-4' }], pc);
     check('wh report: groups sort largest first, unassigned last',
@@ -445,6 +488,10 @@ function check(name, got, want) {
         /fetch failed, retrying in 3s/.test(po), true);
     check('open po: the last good copy is served flagged stale, not dropped',
         /_lastGoodOpenPo, stale: true/.test(po.replace(/\s+/g, ' ')) || /\.\.\._lastGoodOpenPo, stale: true/.test(po.replace(/\s+/g, ' ')), true);
+    // A short-closed PO (goods came by an unlinked GRN, PO marked Completed) keeps its pending
+    // frozen forever - 4,717 phantom inbound units were suppressing reorders (2026-08-20).
+    check('open po: a Completed PO never counts as inbound stock',
+        /const PO_DEAD = new Set\(\[4, 5, 7\]\)/.test(po), true);
     check('open po: the report names the stale copy instead of claiming failure',
         /po\.stale\) poStaleAt = po\.fetchedAt/.test(inv) && /subtracted from the last good copy/.test(inv), true);
 }

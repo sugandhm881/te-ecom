@@ -5008,28 +5008,70 @@ function supHoldControl(r){
   const failed = h && h.status==='failed';
   return `${rel?rel+' ':''}${failed?`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 whitespace-nowrap" title="Shopify hold failed: ${escapeHtml(h.reason||'')}">⚠️ Shopify hold failed</span> `:''}<button class="sup-hold-btn px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-slate-800 text-white hover:bg-slate-700 whitespace-nowrap" data-oid="${oid}" data-oname="${oname}" title="Not yet in EasyEcom — hold on Shopify (stops it importing / shipping)">🔒 Hold Shopify</button>`;
 }
-async function supDoHold(oid,oname,btn){
-  btn.disabled=true; const t=btn.innerHTML; btn.textContent='Holding…';
-  try{ await supFetch('/api/support/shopify-hold',{method:'POST',body:JSON.stringify({orderId:oid,orderName:oname})});
-    showNotification(`${oname} held on Shopify`); supLoadQueue(); }
-  catch(e){ showNotification('Hold failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
+// ── In-place row updates for the hold/release/cancel actions (user, 2026-08-20) ───────────────
+// Every action used to end in supLoadQueue() — a full re-fetch of the heavy queue endpoint that
+// flashed the grid and lost the agent's scroll position on each click. The action's outcome is known
+// the moment the API says success, so the ROW is patched and the table repainted client-side (same
+// optimistic pattern as the Raised control); the 30s auto-poll reconciles with the server soon after,
+// so a drifted guess cannot outlive half a minute.
+function supRowPatch(oid, fn){ const r=(_supQueueRows||[]).find(x=>String(x.order_id)===String(oid)); if(r) fn(r); supQueueTable(); }
+function supRowDrop(oid){ _supQueueRows=(_supQueueRows||[]).filter(x=>String(x.order_id)!==String(oid)); supQueueTable(); }
+const _supHoldReason='Repeat COD — awaiting customer confirmation';
+// Standalone busy popup for the two actions with no confirm step (Hold Shopify goes straight to work;
+// Cancel confirms through its own reason picker) — same chrome as supConfirm's busy state.
+function supBusyModal(title, message){
+  document.getElementById('sup-confirm-modal')?.remove();
+  const wrap=document.createElement('div');
+  wrap.id='sup-confirm-modal';
+  wrap.className='fixed inset-0 z-[95] flex items-center justify-center bg-slate-900/50 backdrop-blur-[2px] p-4';
+  wrap.innerHTML=`<div class="sup-pop bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6"><div class="py-2">${brandLoaderSm(title)}
+    ${message?`<p class="text-xs text-slate-400 mt-2 text-center">${escapeHtml(message)}</p>`:''}</div></div>`;
+  document.body.appendChild(wrap);
+  const box = wrap.firstElementChild;
+  return {
+    close: () => wrap.remove(),
+    success: (t, m) => { box.innerHTML = `<div class="py-3 text-center">
+        <span class="inline-flex w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 items-center justify-center text-2xl">✓</span>
+        <h3 class="text-base font-bold text-slate-800 mt-3">${escapeHtml(t)}</h3>
+        ${m ? `<p class="text-sm text-slate-500 mt-1">${escapeHtml(m)}</p>` : ''}</div>`;
+      setTimeout(() => wrap.remove(), 1300); },
+    error: (t, m) => { box.innerHTML = `<div class="py-2 text-center">
+        <span class="inline-flex w-12 h-12 rounded-full bg-rose-100 text-rose-600 items-center justify-center text-2xl">✕</span>
+        <h3 class="text-base font-bold text-slate-800 mt-3">${escapeHtml(t)}</h3>
+        <p class="text-sm text-slate-500 mt-1 break-words">${escapeHtml(m || '')}</p>
+        <button class="supbm-close mt-4 px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Close</button></div>`;
+      box.querySelector('.supbm-close').addEventListener('click', () => wrap.remove()); },
+  };
 }
-async function supDoUnhold(oid,oname,btn){
-  const ok=await supConfirm({title:'Release hold?',message:`${oname} will be released and can ship / import to EasyEcom. Do this only after the customer has confirmed.`,confirmLabel:'Release'});
-  if(!ok) return;
-  btn.disabled=true; const t=btn.innerHTML; btn.textContent='Releasing…';
-  try{ await supFetch('/api/support/shopify-unhold',{method:'POST',body:JSON.stringify({orderId:oid,orderName:oname})});
-    showNotification(`${oname} released`); supLoadQueue(); }
-  catch(e){ showNotification('Release failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
+async function supDoHold(oid,oname){
+  const busy=supBusyModal(`Holding ${oname}…`,'Talking to Shopify — a few seconds.');
+  try{ await supFetch('/api/support/shopify-hold',{method:'POST',body:JSON.stringify({orderId:oid,orderName:oname})});
+    busy.success(`${oname} held on Shopify`, 'It will not ship or import to EasyEcom until released.');
+    showNotification(`${oname} held on Shopify`);
+    supRowPatch(oid, r=>{ r.shopify_hold={ status:'held', reason:_supHoldReason, by:(currentUser&&currentUser.email)||null, at:new Date().toISOString() }; }); }
+  catch(e){ busy.error('Hold failed', e.message); }
+}
+async function supDoUnhold(oid,oname){
+  const res=await supConfirm({ title:`Release ${oname}?`, tone:'go', confirmLabel:'Release hold',
+    message:`The order will be released and can ship / import to EasyEcom. Do this only after the customer has confirmed.`,
+    busyTitle:`Releasing ${oname}…`, busyMessage:'Talking to Shopify — a few seconds.',
+    successTitle:`${oname} released`, successMessage:'The order can now ship / import to EasyEcom.', errorTitle:'Release failed',
+    work:()=>supFetch('/api/support/shopify-unhold',{method:'POST',body:JSON.stringify({orderId:oid,orderName:oname})}) });
+  if(res!==true) return;   // cancelled, or the popup already showed the error until it was read
+  showNotification(`${oname} released`);
+  supRowPatch(oid, r=>{ const prev=r.shopify_hold||{};
+    r.shopify_hold={ status:'released', by:(currentUser&&currentUser.email)||null, at:new Date().toISOString(), reason:prev.reason?`held for: ${prev.reason}`:null }; });
 }
 // Cancel a held Shopify order — pick a reason (logged), then cancel on Shopify (restock, no customer email).
-async function supDoCancel(oid,oname,btn){
+async function supDoCancel(oid,oname){
   const reason=await supCancelReason(oname);
   if(!reason) return;
-  btn.disabled=true; const t=btn.innerHTML; btn.textContent='Cancelling…';
+  const busy=supBusyModal(`Cancelling ${oname}…`,'Cancelling on Shopify and refunding any online-paid amount — a few seconds.');
   try{ const d=await supFetch('/api/support/cancel-order',{method:'POST',body:JSON.stringify({orderId:oid,orderName:oname,reason})});
-    showNotification(`${oname} cancelled on Shopify${d&&d.refunded?` · ₹${d.refunded} refunded`:''}`); _eeHoldAt=0; supLoadQueue(); }
-  catch(e){ showNotification('Cancel failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
+    busy.success(`${oname} cancelled`, `Inventory restocked${d&&d.refunded?` · ₹${d.refunded} refunded`:''} · no email to the customer.`);
+    showNotification(`${oname} cancelled on Shopify${d&&d.refunded?` · ₹${d.refunded} refunded`:''}`);
+    delete _eeHold[String(oname||'').replace('#','').trim()]; _eeHoldAt=0; supRowDrop(oid); }
+  catch(e){ busy.error('Cancel failed', e.message); }
 }
 // Reason picker for cancelling — a category dropdown + optional note. Returns the reason string, or null if dismissed.
 function supCancelReason(oname){
@@ -5064,21 +5106,28 @@ function supCancelReason(oname){
   });
 }
 // EasyEcom hold/unhold from the Repeat tab (order already imported into EasyEcom → hold it there).
-async function supDoEeHold(oid,oname,btn){
-  const ok=await supConfirm({title:'Hold on EasyEcom?',message:`${oname} is already in EasyEcom — it will be paused there (works before manifest). Do this to stop it shipping until the customer confirms.`,confirmLabel:'Hold'});
-  if(!ok) return;
-  btn.disabled=true; const t=btn.innerHTML; btn.textContent='Holding…';
-  try{ await supFetch('/api/easyecom/hold-order',{method:'POST',body:JSON.stringify({orderName:oname,reason:'Repeat COD — awaiting customer confirmation'})});
-    showNotification(`${oname} held in EasyEcom`); _eeHoldAt=0; supLoadQueue(); }
-  catch(e){ showNotification('EasyEcom hold failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
+async function supDoEeHold(oid,oname){
+  const res=await supConfirm({ title:`Hold ${oname} on EasyEcom?`, icon:'⏸', confirmLabel:'Hold order',
+    message:`The order is already in EasyEcom — it will be paused there (works before manifest). Do this to stop it shipping until the customer confirms.`,
+    busyTitle:`Holding ${oname}…`, busyMessage:'Talking to EasyEcom — a few seconds.',
+    successTitle:`${oname} held in EasyEcom`, successMessage:'It will not ship until released.', errorTitle:'EasyEcom hold failed',
+    work:()=>supFetch('/api/easyecom/hold-order',{method:'POST',body:JSON.stringify({orderName:oname,reason:_supHoldReason})}) });
+  if(res!==true) return;
+  showNotification(`${oname} held in EasyEcom`);
+  const _hk=String(oname||'').replace('#','').trim();
+  _eeHold[_hk]={ order_name:_hk, note:_supHoldReason, created_by:currentUser&&currentUser.email, created_at:new Date().toISOString() }; _eeHoldAt=0;
+  supRowPatch(oid, r=>{ r.ee_hold=true; });
 }
-async function supDoEeUnhold(oid,oname,btn){
-  const ok=await supConfirm({title:'Release EasyEcom hold?',message:`${oname} will be released in EasyEcom and can proceed. Do this only after the customer has confirmed.`,confirmLabel:'Release'});
-  if(!ok) return;
-  btn.disabled=true; const t=btn.innerHTML; btn.textContent='Releasing…';
-  try{ await supFetch('/api/easyecom/unhold-order',{method:'POST',body:JSON.stringify({orderName:oname})});
-    showNotification(`${oname} released in EasyEcom`); _eeHoldAt=0; supLoadQueue(); }
-  catch(e){ showNotification('EasyEcom unhold failed: '+e.message,true); btn.disabled=false; btn.innerHTML=t; }
+async function supDoEeUnhold(oid,oname){
+  const res=await supConfirm({ title:`Release ${oname}?`, tone:'go', confirmLabel:'Release hold',
+    message:`The order will be released in EasyEcom and can proceed. Do this only after the customer has confirmed.`,
+    busyTitle:`Releasing ${oname}…`, busyMessage:'Talking to EasyEcom — a few seconds.',
+    successTitle:`${oname} released`, successMessage:'The order can now proceed in EasyEcom.', errorTitle:'Release failed',
+    work:()=>supFetch('/api/easyecom/unhold-order',{method:'POST',body:JSON.stringify({orderName:oname})}) });
+  if(res!==true) return;
+  showNotification(`${oname} released in EasyEcom`);
+  delete _eeHold[String(oname||'').replace('#','').trim()]; _eeHoldAt=0;
+  supRowPatch(oid, r=>{ r.ee_hold=false; });
 }
 async function supRefreshTracking(){
   const btn=document.getElementById('sup-refresh'); const orig=btn.textContent;
@@ -5094,7 +5143,18 @@ function supRelTime(iso){ if(!iso) return ''; const m=(Date.now()-new Date(iso).
   if(m<1) return 'just now'; if(m<60) return Math.round(m)+'m ago'; if(m<1440) return Math.round(m/60)+'h ago';
   if(m<10080) return Math.round(m/1440)+'d ago'; return new Date(iso).toLocaleDateString('en-IN',{day:'2-digit',month:'short'}); }
 // Our own confirm dialog (no browser confirm()) — stacks above any open modal. Returns Promise<boolean>.
-function supConfirm({ title = 'Are you sure?', message = '', confirmLabel = 'Confirm', danger = false } = {}) {
+// Confirmation popup. `tone` picks the visual voice: 'go' (emerald — release/proceed actions),
+// 'danger' (rose), default ask (indigo); `icon` overrides the emoji. Pass `work: async () => …` and
+// the popup CARRIES THE ACTION: on confirm it stays open as a loader (busyTitle/busyMessage) while the
+// API call runs, then closes — resolves true on success, { error } on failure, false on cancel.
+// (2026-08-20, user: after confirming a release, the only feedback was tiny button text — the modal
+// vanished and nothing visibly loaded. Escape/backdrop are dead while busy: the work is in flight and
+// closing the popup would not undo it, only hide it.)
+function supConfirm({ title = 'Are you sure?', message = '', confirmLabel = 'Confirm', danger = false, tone = null, icon = null, busyTitle = 'Working…', busyMessage = '', successTitle = 'Done', successMessage = '', errorTitle = 'Something went wrong', work = null } = {}) {
+  const t = tone || (danger ? 'danger' : 'ask');
+  const iconBg = t === 'danger' ? 'bg-rose-100 text-rose-600' : t === 'go' ? 'bg-emerald-100 text-emerald-600' : 'bg-indigo-100 text-indigo-600';
+  const btnBg = t === 'danger' ? 'bg-rose-600 hover:bg-rose-700' : t === 'go' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-indigo-600 hover:bg-indigo-700';
+  const glyph = icon || (t === 'danger' ? '🗑' : t === 'go' ? '🔓' : '❓');
   return new Promise(resolve => {
     document.getElementById('sup-confirm-modal')?.remove();
     const wrap = document.createElement('div');
@@ -5102,20 +5162,50 @@ function supConfirm({ title = 'Are you sure?', message = '', confirmLabel = 'Con
     wrap.className = 'fixed inset-0 z-[95] flex items-center justify-center bg-slate-900/50 backdrop-blur-[2px] p-4';
     wrap.innerHTML = `<div class="sup-pop bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
       <div class="flex items-start gap-3">
-        <span class="w-10 h-10 rounded-xl ${danger ? 'bg-rose-100 text-rose-600' : 'bg-indigo-100 text-indigo-600'} flex items-center justify-center text-lg shrink-0">${danger ? '🗑' : '❓'}</span>
+        <span class="w-10 h-10 rounded-xl ${iconBg} flex items-center justify-center text-lg shrink-0">${glyph}</span>
         <div class="min-w-0"><h3 class="text-base font-bold text-slate-800">${escapeHtml(title)}</h3>
           ${message ? `<p class="text-sm text-slate-500 mt-1">${escapeHtml(message)}</p>` : ''}</div></div>
       <div class="flex justify-end gap-2.5 mt-5">
         <button id="supcf-no" class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100 transition-colors">Cancel</button>
-        <button id="supcf-yes" class="px-4 py-2 rounded-lg text-sm font-semibold text-white ${danger ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'} transition-colors">${escapeHtml(confirmLabel)}</button>
+        <button id="supcf-yes" class="px-4 py-2 rounded-lg text-sm font-semibold text-white ${btnBg} transition-colors">${escapeHtml(confirmLabel)}</button>
       </div></div>`;
     document.body.appendChild(wrap);
-    const done = v => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
-    const onKey = e => { if (e.key === 'Escape') done(false); if (e.key === 'Enter') done(true); };
+    let busy = false;
+    const done = v => { if (busy && v === false) return;   // no closing out of an in-flight action
+      wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = e => { if (e.key === 'Escape') done(false); if (e.key === 'Enter' && !busy) onYes(); };
+    const onYes = async () => {
+      if (!work) return done(true);
+      if (busy) return;
+      busy = true;
+      // The popup becomes the loader — the action visibly runs where the agent just clicked …
+      wrap.firstElementChild.innerHTML = `<div class="py-2">${brandLoaderSm(busyTitle)}
+        ${busyMessage ? `<p class="text-xs text-slate-400 mt-2 text-center">${escapeHtml(busyMessage)}</p>` : ''}</div>`;
+      try {
+        await work();
+        // … then the RESULT shows in the same popup (user, 2026-08-20: success was never shown — the
+        // modal vanished and only a corner toast fired). A short ✅ beat, then it closes itself.
+        busy = false;
+        wrap.firstElementChild.innerHTML = `<div class="py-3 text-center">
+          <span class="inline-flex w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 items-center justify-center text-2xl">✓</span>
+          <h3 class="text-base font-bold text-slate-800 mt-3">${escapeHtml(successTitle)}</h3>
+          ${successMessage ? `<p class="text-sm text-slate-500 mt-1">${escapeHtml(successMessage)}</p>` : ''}</div>`;
+        setTimeout(() => done(true), 1300);
+      } catch (e) {
+        // Errors stay until READ — an auto-closing failure is a missed failure.
+        busy = false;
+        wrap.firstElementChild.innerHTML = `<div class="py-2 text-center">
+          <span class="inline-flex w-12 h-12 rounded-full bg-rose-100 text-rose-600 items-center justify-center text-2xl">✕</span>
+          <h3 class="text-base font-bold text-slate-800 mt-3">${escapeHtml(errorTitle)}</h3>
+          <p class="text-sm text-slate-500 mt-1 break-words">${escapeHtml(e.message || String(e))}</p>
+          <button id="supcf-errclose" class="mt-4 px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Close</button></div>`;
+        wrap.querySelector('#supcf-errclose').addEventListener('click', () => done({ error: e, shown: true }));
+      }
+    };
     document.addEventListener('keydown', onKey);
     wrap.addEventListener('click', e => { if (e.target === wrap) done(false); });
     document.getElementById('supcf-no').addEventListener('click', () => done(false));
-    const yes = document.getElementById('supcf-yes'); yes.addEventListener('click', () => done(true)); yes.focus();
+    const yes = document.getElementById('supcf-yes'); yes.addEventListener('click', onYes); yes.focus();
   });
 }
 const SUP_ICON_EDIT='<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>';

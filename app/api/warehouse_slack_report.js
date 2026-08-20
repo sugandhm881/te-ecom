@@ -345,11 +345,14 @@ function courierShort(c) {
     const t = String(c || '');
     for (const [re, label] of [[/delhivery/i, 'Delhivery'], [/ekart/i, 'Ekart'], [/amazon/i, 'Amazon'],
         [/blue\s*dart/i, 'Bluedart'], [/xpress\s*bee/i, 'Xpressbees'], [/shadowfax/i, 'Shadowfax'],
-        [/ecom\s*exp/i, 'Ecom Express'], [/dtdc/i, 'DTDC'], [/speed\s*post/i, 'Speed Post']]) if (re.test(t)) return label;
+        [/ecom\s*exp/i, 'Ecom Express'], [/dtdc/i, 'DTDC'], [/speed\s*post/i, 'Speed Post'], [/shree\s*maruti/i, 'Shree Maruti']]) if (re.test(t)) return label;
     // Unmapped couriers keep their FULL name - first-word truncation turned 'Speed Post' into a
     // meaningless 'Speed' on the first dry run.
     return t.trim() || null;
 }
+// EasyEcom's aggregator field → our platform label. EasyEcom knows the allocation the moment the
+// label exists; the journey table only learns it at the first courier scan.
+const EE_AGGREGATOR_WH = { 'rapidshyp- outbound': 'RapidShyp', 'gokwik outbound': 'KwikShip' };
 async function fetchPlatformCourier(names) {
     const uniq = [...new Set((names || []).map(normName).filter(Boolean))];
     const map = {};
@@ -365,6 +368,26 @@ async function fetchPlatformCourier(names) {
             };
         });
     }
+    // ⚠️ FRESHLY-LABELLED PARCELS HAVE NO JOURNEY ROW YET (2026-08-20: TE25-43585/43609, manifested to
+    // Shree Maruti at 03:35, read "No courier assigned yet" on the 06:30 card while EasyEcom knew both
+    // the aggregator and the courier). The journey is written at the FIRST COURIER SCAN, which for a
+    // parcel still on our shelf may be days away — and Ready-for-Pickup is precisely the pre-scan
+    // population, so EasyEcom's own allocation is the right fallback: courier_name + the
+    // raw_data.courier_aggregator_name marker (the same field the Kwikship sync keys on).
+    const missing = uniq.filter(n => !map[n]);
+    for (let i = 0; i < missing.length; i += 200) {
+        const { data } = await supabase.from('b2c_order_easycom')
+            .select('reference_code, courier_name, raw_data->courier_aggregator_name')
+            .in('reference_code', missing.slice(i, i + 200));
+        (data || []).forEach(r => {
+            const k = normName(r.reference_code);
+            if (!k || map[k] || !r.courier_name) return;
+            map[k] = {
+                platform: EE_AGGREGATOR_WH[String(r.courier_aggregator_name || '').toLowerCase().trim()] || null,
+                courier: courierShort(r.courier_name),
+            };
+        });
+    }
     return map;
 }
 // Group orders into “Platform · Courier” buckets (largest first), unassigned last — those have no
@@ -373,7 +396,9 @@ function groupByCourier(orders, pc) {
     const groups = new Map();
     for (const o of orders) {
         const info = pc[normName(o.name)];
-        const key = info && info.platform ? `${info.platform}${info.courier ? ' · ' + info.courier : ''}` : 'No courier assigned yet';
+        const key = info && (info.platform || info.courier)
+            ? `${info.platform || 'Unknown platform'}${info.courier ? ' · ' + info.courier : ''}`
+            : 'No courier assigned yet';
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(o);
     }
@@ -1128,7 +1153,7 @@ async function sendEasyecomHoldReport(announceEmpty = false) {
     console.log(`[Hold Report] Sent — EasyEcom: ${eeCount}, Shopify: ${shCount}`);
 }
 
-module.exports = { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom, autoRouteHandledRejections };
+module.exports = { sendWarehouseOpsReport, sendDocpharmaRejectedReport, initDpSlackTrigger, sendEasyecomHoldReport, syncRsCacheEasyecom, autoRouteHandledRejections, fetchPlatformCourier };
 
 // --- Manual run ---
 // Run on demand and post to Slack immediately, then exit.
