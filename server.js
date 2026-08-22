@@ -564,8 +564,19 @@ cronJob('EE Session (*/20 * * * *)', '*/20 * * * *', async () => {
 //      transient failure now WARNS; only SH_ALERT_AFTER consecutive failures (≈10 min of continuous
 //      failure) escalate, then once an hour while it stays down. A non-transient error is still loud
 //      immediately — a real bug must never be muffled by this.
-const SH_TRANSIENT = /fetch failed|timeout of \d+ ?ms|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|network error|Bad Gateway|Service Unavailable|Gateway Time/i;
-const shTransient = e => SH_TRANSIENT.test(String((e && e.message) || e));
+// ⚠️ `terminated` IS THE ONE THAT KEPT CARDING (added 2026-08-22). undici throws a bare
+// `TypeError: terminated` when the connection dies mid-response, and it was the message on three of the
+// four cards from 21 Aug 20:42-20:44 — but it was not in this list, so it fell through to the
+// non-transient branch and raised a card on EVERY occurrence, hardening or no hardening. The list is
+// now written against undici's actual vocabulary rather than the generic node one: its timeout errors
+// are `HeadersTimeoutError` / `BodyTimeoutError` / `ConnectTimeoutError`, and its codes are `UND_ERR_*`.
+const SH_TRANSIENT = /\bterminated\b|\bUND_ERR|fetch failed|(Headers|Body|Connect)Timeout|SocketError|timeout of \d+ ?ms|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|socket hang up|socket disconnected|network error|Bad Gateway|Service Unavailable|Gateway Time/i;
+// A run we abandoned at the deadline is transient BY CONSTRUCTION, so it is flagged rather than matched
+// on its wording — a message-shaped test for our own error would be a string we could rename by accident.
+const shTransient = e => (e && e.transient === true) || SH_TRANSIENT.test(String((e && e.message) || e));
+// A tick is 120s. A run still going after this is not going to finish usefully, and the report was
+// carrying 500.9s durations while three ticks queued behind it.
+const SH_RUN_MS = parseInt(process.env.SH_RUN_MS, 10) || 100000;
 const SH_ALERT_AFTER = parseInt(process.env.SH_ALERT_AFTER, 10) || 5;   // × 2 min = 10 minutes down
 let _shRunning = false, _shFails = 0, _shSkippedOverlap = 0;
 
@@ -579,6 +590,34 @@ cronJob('ShopifyHold (*/2 * * * *)', '*/2 * * * *', async () => {
     }
     _shRunning = true;
     try {
+        // ⚠️ THE DEADLINE STOPS US WAITING, IT DOES NOT CANCEL THE WORK — so `_shRunning` is cleared by
+        // the work ITSELF finishing, never by this tick giving up on it. Clearing it here (the obvious
+        // `finally`) would let the next tick start while the abandoned run was still holding orders,
+        // which is the overlap this guard exists to prevent.
+        const work = shRunOnce();
+        work.then(() => { _shRunning = false; }, () => { _shRunning = false; });
+        await Promise.race([work, new Promise((_, rej) => setTimeout(() => {
+            const e = new Error(`run still going after ${Math.round(SH_RUN_MS / 1000)}s — abandoning this tick`);
+            e.transient = true; rej(e);
+        }, SH_RUN_MS))]);
+        if (_shFails) { console.log(`[ShopifyHold] recovered after ${_shFails} failed run(s)`); _shFails = 0; }
+        _shSkippedOverlap = 0;
+    } catch (e) {
+        _shFails++;
+        if (!shTransient(e)) { console.error('[ShopifyHold] cron error:', e.message); return; }
+        // Transient: warn while it is plausibly a blip, escalate once it is plainly an outage, then
+        // hourly so a long outage is not forgotten after its single card.
+        if (_shFails === SH_ALERT_AFTER || (_shFails > SH_ALERT_AFTER && _shFails % 30 === 0)) {
+            console.error(`[ShopifyHold] cron error: ${e.message} — ${_shFails} consecutive failed runs (~${_shFails * 2} min). Upstream looks down.`);
+        } else {
+            console.warn(`[ShopifyHold] transient failure ${_shFails}/${SH_ALERT_AFTER} (${e.message}) — next run in 2 min`);
+        }
+    }
+}, { timezone: 'Asia/Kolkata' });
+
+// The run itself, lifted out so the tick above can stop waiting on it without killing it.
+async function shRunOnce() {
+    {
         const { findRepeatCandidates } = require('./app/api/support_console');
         const shopifyHold = require('./app/api/shopify_hold');
         const fromISO = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
@@ -612,20 +651,8 @@ cronJob('ShopifyHold (*/2 * * * *)', '*/2 * * * *', async () => {
         if (held || failed) console.log(`[ShopifyHold] auto-hold backstop: held ${held}, skipped ${skipped}, failed ${failed} of ${cand.length}`);
         // Per-order failures are a WARN, never a card: the next run is 120 seconds away and retries them.
         if (reasons.size) console.warn(`[ShopifyHold] ${failed} order(s) failed this run — ` + [...reasons].map(([m, n]) => `${n}× ${m}`).join(' · '));
-        if (_shFails) { console.log(`[ShopifyHold] recovered after ${_shFails} failed run(s)`); _shFails = 0; }
-        _shSkippedOverlap = 0;
-    } catch (e) {
-        _shFails++;
-        if (!shTransient(e)) { console.error('[ShopifyHold] cron error:', e.message); return; }
-        // Transient: warn while it is plausibly a blip, escalate once it is plainly an outage, then
-        // hourly so a long outage is not forgotten after its single card.
-        if (_shFails === SH_ALERT_AFTER || (_shFails > SH_ALERT_AFTER && _shFails % 30 === 0)) {
-            console.error(`[ShopifyHold] cron error: ${e.message} — ${_shFails} consecutive failed runs (~${_shFails * 2} min). Upstream looks down.`);
-        } else {
-            console.warn(`[ShopifyHold] transient failure ${_shFails}/${SH_ALERT_AFTER} (${e.message}) — next run in 2 min`);
-        }
-    } finally { _shRunning = false; }
-}, { timezone: 'Asia/Kolkata' });
+    }
+}
 
 // Silent-RTO claim mail → RapidShyp — weekly, Monday 9:30 AM IST, last 30 days ending yesterday.
 // Lists shipments RTO'd with no delivery attempt + their forward/RTO freight (disputable). No-op if

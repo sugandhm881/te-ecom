@@ -762,10 +762,38 @@ function check(name, got, want) {
 {
     const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
     const SH_TRANSIENT = eval(srv.match(/const SH_TRANSIENT = (\/.+\/i);/)[1]);
-    const shTransient = e => SH_TRANSIENT.test(String((e && e.message) || e));
+    // Built FROM server.js, never re-typed here: a hand-copied classifier drifts from the real one,
+    // and a test that passes against its own copy of the rule is worse than no test. (It happened:
+    // this line missed the e.transient flag the moment server.js grew one.)
+    const shTransient = eval(srv.match(/const shTransient = ([^;]+);/)[1]);
     const AFTER = parseInt((srv.match(/SH_ALERT_AFTER, 10\) \|\| (\d+)/) || [])[1], 10);
 
     // The four real messages from the cards, verbatim.
+    // The four real messages from the cards, verbatim.
+    // WARNING: `terminated` is undici's message when the connection dies mid-response, and it was on
+    // THREE of the four cards from 21 Aug 20:42-20:44. It was missing from SH_TRANSIENT, so it fell
+    // through to the non-transient branch and raised a card on EVERY occurrence -- the hardening did
+    // nothing at all for the failure that was actually happening.
+    check('shopify hold: undici own vocabulary is classed transient',
+        ['terminated', 'HeadersTimeoutError: Headers Timeout Error', 'BodyTimeoutError',
+         'ConnectTimeoutError', 'UND_ERR_SOCKET', 'ECONNREFUSED',
+         'Client network socket disconnected before secure TLS connection'].map(m => shTransient({ message: m })),
+        [true, true, true, true, true, true, true]);
+    // Replay of that exact night: four consecutive transient failures, SH_ALERT_AFTER = 5 -> no card.
+    check('shopify hold: the 21 Aug burst raises no card at all',
+        ['terminated', 'terminated', 'fetch failed', 'terminated']
+            .reduce((n, m, i) => n + ((shTransient({ message: m }) ? (i + 1 === AFTER ? 1 : 0) : 1)), 0), 0);
+    // A run we abandon at the deadline is transient by CONSTRUCTION -- flagged, not matched on wording,
+    // because a message-shaped test for our own error is a string we could rename by accident.
+    check('shopify hold: an abandoned run is transient by flag, not by wording',
+        [shTransient({ transient: true, message: 'run still going after 100s' }),
+         /e\.transient = true/.test(srv)], [true, true]);
+    // The deadline stops the tick WAITING; it must NOT clear the overlap guard, or the abandoned run
+    // would still be holding orders while the next tick started behind it.
+    check('shopify hold: a hung run is abandoned without letting the next tick overlap it',
+        /work\.then\(\(\) => \{ _shRunning = false; \}, \(\) => \{ _shRunning = false; \}\);/.test(srv)
+        && !/finally \{ _shRunning = false; \}/.test(srv), true);
+
     check('shopify hold: the real network failures are classed transient',
         ['cron error: TypeError: fetch failed', 'orders lookup failed: TypeError: fetch failed',
          'TypeError: fetch failed', 'timeout of 20000ms exceeded'].map(m => shTransient({ message: m })),
