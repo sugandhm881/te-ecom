@@ -250,8 +250,10 @@ router.post('/zone-mapping/upload', async (req, res) => {
         // Apply it straight away — an upload that doesn't move the shipments is a half-done job.
         const { data: remap, error: remapErr } = await supabase.rpc('remap_kwikship_zones');
         if (remapErr) console.error('[ZoneMapping] remap after upload failed:', remapErr.message);
-        // Zone drives the rate, so freight has to be re-costed whenever a zone moves.
-        const { data: charges, error: chargeErr } = await supabase.rpc('apply_kwikship_charges');
+        // Zone drives the rate, so freight has to be re-costed whenever a zone moves. ⚠️ Through the
+        // wrapper, never the RPC directly: the RPC nulls any weight we supplied, so the backfill has to
+        // follow it or shipments KwikShip never weighed go straight back to unpriced.
+        const { data: charges, error: chargeErr } = await require('./kwikship_sync').applyKwikshipCharges();
         if (chargeErr) console.error('[ZoneMapping] charge recalc after upload failed:', chargeErr.message);
 
         console.log(`[ZoneMapping] ${(req.user && req.user.sub) || 'admin'} uploaded ${filename || 'sheet'} — ${written} destination pincodes; remap: ${JSON.stringify(remap || (remapErr && remapErr.message))}; charges: ${JSON.stringify(charges || (chargeErr && chargeErr.message))}`);
@@ -307,8 +309,8 @@ router.post('/zone-mapping/remap', async (req, res) => {
         const { data, error } = await supabase.rpc('remap_kwikship_zones');
         if (error) throw new Error(error.message);
         // Always re-cost after re-zoning: the rate is a function of the zone, so leaving freight behind
-        // would put the two out of step until the next upload.
-        const { data: charges, error: chargeErr } = await supabase.rpc('apply_kwikship_charges');
+        // would put the two out of step until the next upload. ⚠️ Wrapper, not the raw RPC — see above.
+        const { data: charges, error: chargeErr } = await require('./kwikship_sync').applyKwikshipCharges();
         if (chargeErr) console.error('[ZoneMapping] charge recalc failed:', chargeErr.message);
         console.log(`[ZoneMapping] manual remap by ${(req.user && req.user.sub) || 'admin'}: ${JSON.stringify(data)}; charges: ${JSON.stringify(charges || (chargeErr && chargeErr.message))}`);
         res.json({ success: true, ...(data || {}), charges: charges || null, chargeError: chargeErr ? chargeErr.message : null });

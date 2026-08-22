@@ -12083,6 +12083,17 @@ async function invReorder(){
     const toOrder=need.filter(i=>!i.poCovered), covered=need.filter(i=>i.poCovered);
     const cases=need.reduce((s,i)=>s+i.cases,0), units=need.reduce((s,i)=>s+i.order_qty,0);
     const poUnits=covered.reduce((s,i)=>s+(i.open_po||0),0);
+    // "Raised PO 549" against a PO you raised for 500 reads as a bug until you can see it is 500 from
+    // PO 69 plus a 49-unit remnant of PO 38 (raised 5 Jun, 1 of 50 ever received, still Open). The
+    // total is right; what was missing was any way to READ it. Hovering names every contributing PO,
+    // and a line still pending after 45 days is marked -- a forgotten PO silently suppressing a
+    // re-order is exactly how this figure does damage.
+    const poTitle=i=>{
+      const dt=i.open_po_detail||[];
+      if(!dt.length) return '';
+      return escapeHtml(dt.map(x=>`PO ${x.po} (${x.status}${x.ageDays!=null?`, ${x.ageDays}d ago`:''}): ${invNum(x.pending)} pending of ${invNum(x.ordered)}${x.received?` · ${invNum(x.received)} received`:''}${x.stale?'  \u26a0 STALE':''}`).join('\n'));
+    };
+
     const noCase=need.filter(i=>!i.case_size&&i.net_qty>0).length;
     const TH='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
     const TD='px-3 py-2 border-b border-slate-100 text-sm';
@@ -12096,7 +12107,7 @@ async function invReorder(){
         <td class="${TD} text-right tabular-nums font-semibold ${i.doi!=null&&i.doi<=(d.thresholds?.placeOrder||20)?'text-rose-600':''}">${i.doi==null?'—':Number(i.doi).toFixed(1)+'d'}</td>
         <td class="${TD} text-right tabular-nums ${i.stock<=0?'text-rose-600 font-semibold':'text-slate-600'}">${invNum(i.stock)}</td>
         <td class="${TD} text-right tabular-nums">${invNum(i.raw_qty)}</td>
-        <td class="${TD} text-right tabular-nums ${i.open_po?'text-indigo-600 font-semibold':'text-slate-300'}">${i.open_po?invNum(i.open_po):'—'}</td>
+        <td class="${TD} text-right tabular-nums ${i.open_po?'text-indigo-600 font-semibold':'text-slate-300'}" title="${poTitle(i)}">${i.open_po?`${i.open_po_stale?'<span class="text-amber-600" title="includes a stale PO">\u26a0</span> ':''}${invNum(i.open_po)}${(i.open_po_detail||[]).length>1?`<span class="text-slate-400 font-normal"> (${i.open_po_detail.length} POs)</span>`:''}`:'—'}</td>
         <td class="${TD} text-right tabular-nums font-semibold">${i.poCovered?'<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 whitespace-nowrap">on PO</span>':invNum(i.net_qty)}</td>
         <td class="${TD} text-right tabular-nums text-slate-500">${i.case_size?invNum(i.case_size):'—'}</td>
         <td class="${TD} text-right tabular-nums">${i.poCovered?'—':(i.case_size?invNum(i.cases):'—')}</td>
@@ -12105,6 +12116,17 @@ async function invReorder(){
     if(covered.length) notes.push(`<b>${covered.length}</b> SKU${covered.length>1?'s are':' is'} already fully covered by open POs (<b>${invNum(poUnits)}</b> units on order) — nothing to buy.`);
     if(noCase) notes.push(`* ${noCase} SKU${noCase>1?'s have':' has'} no case size on file — raw quantity shown.`);
     if(d.poSubtracted===false) notes.push(`⚠️ Open POs could not be read from EasyEcom — <b>Raised PO not subtracted</b>, quantities may be over-stated.`);
+    // Stale remnants get named, with the SKU they are holding back and the units at stake, because the
+    // fix is a 10-second close in EasyEcom and the cost of not doing it is a SKU that never gets bought.
+    const stale=[];
+    need.forEach(i=>(i.open_po_detail||[]).forEach(x=>{ if(x.stale) stale.push({sku:i.sku,...x}); }));
+    if(stale.length){
+      const byPo={};
+      stale.forEach(x=>{ (byPo[x.po]=byPo[x.po]||{po:x.po,age:x.ageDays,skus:[]}).skus.push(`${x.sku} ${invNum(x.pending)}u`); });
+      notes.push(`⚠️ <b>${stale.length} stale PO line${stale.length>1?'s':''}</b> still counted as inbound — `
+        +Object.values(byPo).map(g=>`<b>PO ${escapeHtml(String(g.po))}</b> (${g.age}d old: ${g.skus.map(escapeHtml).join(', ')})`).join(', ')
+        +`. These are subtracted from the recommendation. If the goods are not actually coming, close the PO in EasyEcom and re-run.`);
+    }
     host.innerHTML=`<div class="card p-4">
       <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
         <p class="text-xs font-bold text-slate-500 uppercase tracking-wide">🧾 Recommended Order</p>
@@ -18705,6 +18727,7 @@ const KSR_FLAG = {
   no_zone: ['No zone', 'bg-amber-50 text-amber-700', 'Destination pincode is not in the zone map'],
   cod_on_prepaid: ['COD fee on prepaid', 'bg-rose-50 text-rose-700', 'A COD fee on a prepaid shipment — we already hold the money'],
   rto_no_attempt: ['RTO, no attempt', 'bg-rose-50 text-rose-700', 'Returned without ever going out for delivery — the forward leg is disputable'],
+  no_value: ['No value yet', 'bg-slate-100 text-slate-600', 'Shipment value has not synced, so the COD fee and expected remittance leave this row out'],
 };
 
 function ksrInit() {
@@ -18716,18 +18739,23 @@ function ksrInit() {
     const f = pgrYmd(new Date(n.getFullYear(), n.getMonth(), 1)), t = pgrYmd(n);
     KSR_DATED.forEach(k => { _ksrState[k] = { from: f, to: t, preset: 'thismonth', data: null }; });
     const TABS = [['overview', 'Overview'], ['recon', 'Reconciliation'], ['rates', 'Rate Card'],
-                  ['ledger', 'Ledger'], ['payments', 'Payments']];
+                  ['ledger', 'Ledger'], ['invoices', 'Invoices'], ['payments', 'Payments']];
     v.innerHTML =
       '<div class="sticky top-0 z-30 bg-white border-b border-slate-200 px-6 pt-4">'
+      + '<div class="flex items-center gap-2 flex-wrap">'
       + '<h1 class="text-2xl font-bold text-slate-800">KwikShip Freight</h1>'
+      + '<span class="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold" '
+      + 'title="KwikShip publishes no billing API. Every figure here is computed from the rate card on the Rate Card tab '
+      + '— hold a real invoice against this page, not the other way round.">Computed · not an invoice</span></div>'
       + '<nav class="flex gap-1 mt-3 -mb-px overflow-x-auto">'
       + TABS.map(x => '<button class="ksr-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent '
           + 'text-slate-500 hover:text-slate-700 whitespace-nowrap" data-kstab="' + x[0] + '">' + x[1] + '</button>').join('')
       + '</nav></div>'
       + '<div class="px-6 py-5 space-y-4">'
       + '<div class="flex flex-wrap items-start justify-between gap-3">'
-      + '<div><p id="ksr-blurb" class="text-sm text-slate-500"></p>'
-      + '<p class="text-xs text-slate-400 mt-0.5">Fee and GST are always shown separately. Date range = order date.</p></div>'
+      + '<div class="min-w-0"><p id="ksr-blurb" class="text-sm text-slate-500"></p>'
+      + '<p class="text-xs text-slate-400 mt-0.5">Expected KwikShip charges from your rate card, <b>not a KwikShip invoice</b>. '
+      + 'Fee and GST shown separately. <b>Date range = delivered / RTO date</b> — freight is billed when a shipment closes.</p></div>'
       + '<div id="ksr-range" class="flex flex-wrap items-center gap-2">'
       + '<select id="ksr-preset" class="' + PGR_SEL + '">'
       + PGR_PRESETS.filter(p => p[0] !== 'all').map(p => '<option value="' + p[0] + '">' + p[1] + '</option>').join('')
@@ -18738,11 +18766,7 @@ function ksrInit() {
       + '<button id="ksr-apply" class="filter-btn">Apply</button>'
       + '<button id="ksr-csv" class="filter-btn">Export CSV</button>'
       + '</div></div>'
-      // The permanent honesty line. Not a dismissible toast — it qualifies every number on the page.
-      + '<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">'
-      + '⚠️ These are <b>our computed charges</b> from the rate card below — <b>not a KwikShip invoice</b>. '
-      + 'KwikShip publishes no billing API, so hold a real invoice against this page rather than the other way round.</div>'
-      + '<div id="ksr-note" class="hidden rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800"></div>'
+      + '<p id="ksr-note" class="hidden text-xs text-amber-700"></p>'
       + TABS.map(x => '<section id="ksr-sec-' + x[0] + '" class="hidden space-y-4"></section>').join('')
       + '</div>';
     v.querySelectorAll('.ksr-tab').forEach(b => b.addEventListener('click', () => ksrTab(b.dataset.kstab)));
@@ -18790,10 +18814,11 @@ function ksrTab(name) {
   if (csv) csv.classList.toggle('hidden', name !== 'recon');
   const blurb = document.getElementById('ksr-blurb');
   if (blurb) blurb.textContent = ({
-    overview: 'What KwikShip should charge for the shipments in this window.',
-    recon: 'Every shipment with its computed forward, RTO and COD legs.',
+    overview: 'What KwikShip should charge for the shipments that CLOSED in this window.',
+    recon: 'Every shipment that closed in this window, with its computed forward, RTO and COD legs.',
     rates: 'The zone × weight rate card and billing rules these charges are computed from.',
     ledger: 'Month by month: computed charge + GST against what we have paid.',
+    invoices: 'KwikShip’s actual bills, held against what this page computes.',
     payments: 'Payments made to KwikShip — hand-entered; they expose no billing API.',
   })[name] || '';
   if (dated) {
@@ -18807,6 +18832,7 @@ function ksrTab(name) {
     return;
   }
   if (name === 'rates') return ksrRates();
+  if (name === 'invoices') return ksrInvoices();
   if (name === 'payments') return ksrPayments();
 }
 
@@ -18837,22 +18863,39 @@ function ksrPaint(tab) {
 function ksrNote(bits) {
   const el = document.getElementById('ksr-note');
   if (!el) return;
-  el.innerHTML = bits.join(' ');
+  el.innerHTML = bits.length ? '⚠ ' + bits.join('  ·  ') : '';
   el.classList.toggle('hidden', !bits.length);
+  // Each part opens the Reconciliation tab filtered to that flag — the answer to "which order?" is a
+  // click rather than a question to whoever built the page.
+  el.querySelectorAll('[data-flag]').forEach(b => b.addEventListener('click', () => {
+    _ksrState.recon.from = _ksrState[_ksrTab].from; _ksrState.recon.to = _ksrState[_ksrTab].to;
+    _ksrState.recon.preset = _ksrState[_ksrTab].preset;
+    _ksrState.recon.data = _ksrState[_ksrTab].data;   // same window, no refetch
+    _ksrPendingFlag = b.dataset.flag;
+    ksrTab('recon');
+  }));
+}
+// Built from the summary so the Overview and the Reconciliation tab always say the same thing.
+function ksrNoteFor(s) {
+  const bits = [];
+  const chip = (flag, label, tip) => '<button type="button" data-flag="' + flag + '" class="underline hover:no-underline" title="'
+    + ecEsc(tip) + '">' + label + '</button>';
+  if (s.unpriced) bits.push(chip('unpriced', '<b>' + pgrNum(s.unpriced) + '</b> unpriced — totals understated',
+    'A settled shipment the rate card could not price — every total on this page is understated by its charge. Click to see which.'));
+  if (s.valuePending) bits.push(chip('no_value', '<b>' + pgrNum(s.valuePending) + '</b> without a value yet',
+    'Shipment value has not synced, so the COD fee and expected remittance leave these out. Click to see which.'));
+  ksrNote(bits);
 }
 
 function ksrOverview() {
   const sec = document.getElementById('ksr-sec-overview');
   if (!sec || !_ksr) return;
   const s = _ksr.summary, cfg = _ksr.config || {};
-  const bits = [];
-  if (s.unpriced) bits.push('<b>' + pgrNum(s.unpriced) + '</b> final shipment(s) could not be priced — the totals are UNDERSTATED by that much.');
-  if (s.valuePending) bits.push(pgrNum(s.valuePending) + ' shipment(s) have no value yet, so their COD fee and remittance are not counted.');
-  ksrNote(bits);
+  ksrNoteFor(s);
   const pct = (a, b) => b ? Math.round(a / b * 1000) / 10 : 0;
   sec.innerHTML =
     '<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">'
-    + pgrCard('Shipments', pgrNum(s.shipments), pgrNum(s.priced) + ' priced · ' + pgrNum(s.inFlight) + ' still moving')
+    + pgrCard('Shipments closed', pgrNum(s.shipments), pgrNum(s.priced) + ' priced · delivered or returned in this window')
     + pgrCard('Freight ex-GST', pgrMoney2(s.charge), 'avg ' + pgrMoney2(s.avgPerShipment) + ' per shipment', 'text-slate-900')
     + pgrCard('GST ' + s.gstPct + '%', pgrMoney2(s.gst), 'shown separately, never merged', 'text-amber-600')
     + pgrCard('Total incl GST', pgrMoney2(s.chargeInclGst), 'what a matching invoice should say', 'text-indigo-700')
@@ -18872,6 +18915,11 @@ function ksrOverview() {
     + pgrCard('COD value returned', pgrMoney(s.codRtoValue), 'RTO collects no cash', 'text-rose-600')
     + pgrCard('Prepaid value', pgrMoney(s.prepaidValue), pgrNum(s.prepaid) + ' shipments, already collected')
     + '</div>'
+    // Open shipments belong to NO window until they close. Saying so beats letting the reader wonder
+    // why the month's shipment count is lower than the orders they know went out.
+    + ((_ksr.open && _ksr.open.count) ? '<div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-600">'
+        + '🚚 <b>' + pgrNum(_ksr.open.count) + '</b> shipment(s) are still moving, so they are in no window yet — '
+        + 'about <b>' + pgrMoney2(_ksr.open.charge) + '</b> ex-GST will land in the month each one closes.</div>' : '')
     + (s.flagged ? '<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-3">Needs attention · '
         + pgrNum(s.flagged) + '</h3><div class="flex flex-wrap gap-2">'
         + Object.keys(s.flagCounts).map(f => {
@@ -18903,6 +18951,7 @@ function ksrBar(parts, total, isCount) {
 function ksrRecon() {
   const sec = document.getElementById('ksr-sec-recon');
   if (!sec || !_ksr) return;
+  ksrNoteFor(_ksr.summary);
   const zones = _ksr.zones || [];
   sec.innerHTML =
     '<div class="flex flex-wrap items-center gap-2">'
@@ -18974,7 +19023,7 @@ function ksrTable() {
   const dash = '—';
   host.innerHTML = '<table class="w-full text-sm">'
     + '<thead><tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
-    + '<th class="text-left py-2 px-3">AWB / Order</th><th class="text-left px-3">Date</th>'
+    + '<th class="text-left py-2 px-3">AWB / Order</th><th class="text-left px-3">Closed <span class="normal-case">(billing date)</span></th>'
     + '<th class="text-left px-3">Courier</th><th class="text-left px-3">Zone</th>'
     + '<th class="text-left px-3">Payment</th><th class="text-left px-3">Outcome</th>'
     + '<th class="text-right px-3">Weight</th><th class="text-right px-3">Forward</th>'
@@ -18989,7 +19038,8 @@ function ksrTable() {
             return '<span class="px-1.5 py-0.5 rounded text-xs font-semibold ' + m[1] + '" title="' + ecEsc(m[2]) + '">' + ecEsc(m[0]) + '</span>';
           }).join('') + '</div>' : '')
       + '</td>'
-      + '<td class="px-3 whitespace-nowrap">' + _dmy(String(r.order_date).slice(0, 10)) + '</td>'
+      + '<td class="px-3 whitespace-nowrap">' + (r.closed_at ? _dmy(String(r.closed_at).slice(0, 10)) : dash)
+        + '<div class="text-xs text-slate-400">ordered ' + _dmy(String(r.order_date).slice(0, 10)) + '</div></td>'
       + '<td class="px-3 text-slate-500">' + ecEsc(r.courier || dash) + '</td>'
       + '<td class="px-3">' + (r.zone ? '<span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-xs font-semibold">' + ecEsc(r.zone) + '</span>' : dash) + '</td>'
       + '<td class="px-3">' + ecEsc(r.payment_mode || dash) + '</td>'
@@ -19041,42 +19091,437 @@ async function ksrRates() {
   } catch (e) { sec.innerHTML = '<p class="text-sm text-rose-600 py-6">' + ecEsc(e.message) + '</p>'; }
 }
 
+// ── Ledger: the two-sided account with KwikShip ──────────────────────────────────────────────────
+// Modelled on the DocPharma ledger, because the settlement is the same shape: KwikShip COLLECTS the COD
+// and remits it net of their freight. A freight-only ledger reads the account backwards — it announced
+// "₹358.72 payable to KwikShip" for a month in which KwikShip was holding ₹3.87 lakh of ours.
+//   Receivable (COD they collected)  −  Payable (freight + GST)  =  Net they should remit
+//   Net  −  payments applied  =  Outstanding
+// The payable side is deliberately TWO figures: what the rate card expects, and what KwikShip actually
+// invoiced. Only the invoiced amount is netted — an un-billed month is not a liability yet — and each
+// card re-bases Net and Outstanding on itself so the other basis can be checked without arithmetic.
+let _ksrLedCard = '';
+const _ksrLedOpen = {};
+const KSR_LED_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const KSR_SETTLE = {
+  settled: ['Settled', 'bg-emerald-100 text-emerald-700'],
+  partial: ['Partial', 'bg-amber-100 text-amber-700'],
+  outstanding: ['Pending', 'bg-rose-100 text-rose-700'],
+  na: ['—', 'bg-slate-100 text-slate-500'],
+};
+// Responsive without Tailwind: tailwind.css is PREBUILT and carries no `md:`/`lg:` grid variants at all,
+// so `lg:grid-cols-3` silently does nothing. auto-fit does the same job and cannot rot.
+const KSR_AUTOGRID = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:1rem';
+const KSR_MICRO = 'font-size:11px;line-height:1.45';               // text-[11px] is not compiled either
+function ksrLedMonth(ym) {
+  if (!ym || ym === 'unknown') return 'Unknown';
+  const p = String(ym).split('-');
+  return (KSR_LED_MON[parseInt(p[1], 10) - 1] || p[1]) + ' ' + p[0];
+}
+function ksrLedCard(key, label, value, sub, accent) {
+  return '<div class="card p-4 cursor-pointer ' + (_ksrLedCard === key ? 'ring-2 ring-indigo-400' : '') + '" data-ledcard="' + key + '">'
+    + '<div class="flex items-center justify-between"><p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">' + label + '</p>'
+    + '<span class="text-slate-300 text-xs">' + (_ksrLedCard === key ? '▾' : '▸') + '</span></div>'
+    + '<p class="text-2xl font-bold mt-2 tabular-nums ' + (accent || 'text-slate-900') + '">' + value + '</p>'
+    + '<p class="text-slate-400 mt-1" style="' + KSR_MICRO + '">' + (sub || '&nbsp;') + '</p></div>';
+}
+// One line of a breakdown: label left, signed amount right.
+function ksrLedLine(label, value, accent, note, strong) {
+  return '<div class="flex items-start justify-between gap-3 py-1.5 ' + (strong ? 'border-t-2 border-slate-200 mt-1' : 'border-b border-slate-100') + '">'
+    + '<div><span class="text-sm ' + (strong ? 'font-bold text-slate-700' : 'text-slate-600') + '">' + label + '</span>'
+    + (note ? '<div class="text-slate-400" style="' + KSR_MICRO + '">' + note + '</div>' : '') + '</div>'
+    + '<span class="text-sm font-semibold tabular-nums whitespace-nowrap ' + (accent || 'text-slate-800') + '">' + value + '</span></div>';
+}
+function ksrLedDetail(t) {
+  if (!_ksrLedCard) return '';
+  const M = pgrMoney2, d = _ksr || {};
+  const basisNote = '<div class="mt-3 pt-2 border-t border-slate-100 text-amber-600" style="' + KSR_MICRO + '">'
+    + '↑ While this card is open, <b>Net</b> and <b>Outstanding</b> above are re-based on this figure. Click again to restore.</div>';
+  const memo = Math.max(0, (t.payableExpected || 0) - (t.payableInvoiced || 0));
+  let inner = '', title = '';
+  if (_ksrLedCard === 'receivable') {
+    title = 'Receivable — cash KwikShip is holding';
+    inner = ksrLedLine('COD collected', '+ ' + M(t.receivable), 'text-emerald-700',
+        pgrNum(t.codDelivered) + ' delivered COD shipments — KwikShip collected this and owes it to us')
+      + ksrLedLine('Total receivable', M(t.receivable), 'text-emerald-700', '', true)
+      + '<div class="mt-3 pt-2 text-slate-400" style="' + KSR_MICRO + '">For reference — not receivable from KwikShip:</div>'
+      + ksrLedLine('Prepaid delivered', M(t.prepaidValue), 'text-slate-500',
+        pgrNum(t.prepaidOrders) + ' shipments — already paid to us online, KwikShip collects nothing')
+      + ksrLedLine('COD value returned', M(t.codRtoValue), 'text-slate-500',
+        pgrNum(t.codRto) + ' RTO — the parcel came back, so no cash was ever collected');
+  } else if (_ksrLedCard === 'payableExpected') {
+    title = 'Payable — what the rate card expects';
+    inner = ksrLedLine('Forward freight', '+ ' + M(t.forward), 'text-slate-700', 'zone × weight slab')
+      + ksrLedLine('RTO freight', '+ ' + M(t.rtoFreight), 'text-rose-600', pgrNum(t.rto) + ' returned shipments')
+      + ksrLedLine('COD fees', '+ ' + M(t.codFee), 'text-amber-600', pgrNum(t.codDelivered) + ' delivered COD shipments')
+      + ksrLedLine('Subtotal (rate card)', M(t.charge), 'text-slate-800', '', true)
+      + ksrLedLine('GST ' + pgrNum(t.gstPct) + '%', '+ ' + M(t.gst), 'text-slate-500', 'computed, never merged into freight')
+      + ksrLedLine('Expected total incl GST', M(t.payableExpected), 'text-slate-800', '', true)
+      + basisNote;
+  } else if (_ksrLedCard === 'payableInvoiced') {
+    title = 'Payable — what KwikShip actually invoiced';
+    const invs = (d.invoices || []);
+    if (!invs.length) {
+      inner = '<p class="text-sm text-slate-400 py-4 text-center">No KwikShip invoices recorded for this period. Add them on the Invoices tab.</p>' + basisNote;
+    } else {
+      const th = 'px-3 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50';
+      const td = 'px-3 py-2 text-sm border-b border-slate-100 tabular-nums';
+      inner = '<div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr>'
+        + '<th class="' + th + ' text-left">Invoice</th><th class="' + th + ' text-left">Period</th>'
+        + '<th class="' + th + ' text-right">Freight</th><th class="' + th + ' text-right">GST</th>'
+        + '<th class="' + th + ' text-right">Total</th></tr></thead><tbody>'
+        + invs.map(iv => '<tr><td class="' + td + ' text-left font-semibold">' + ecEsc(iv.invoice_no || '—') + '</td>'
+          + '<td class="' + td + ' text-left text-slate-500">' + ksrLedMonth(iv._month) + '</td>'
+          + '<td class="' + td + ' text-right">' + (iv.freight_amount == null ? '—' : pgrMoney2(iv.freight_amount)) + '</td>'
+          + '<td class="' + td + ' text-right">' + (iv.gst_amount == null ? '—' : pgrMoney2(iv.gst_amount)) + '</td>'
+          + '<td class="' + td + ' text-right font-semibold text-rose-600">' + pgrMoney2(iv.total_amount) + '</td></tr>').join('')
+        + '<tr class="bg-slate-50 font-bold"><td class="' + td + ' text-left" colspan="4">Total (' + invs.length + ')</td>'
+        + '<td class="' + td + ' text-right text-rose-600">' + M(t.payableInvoiced) + '</td></tr></tbody></table></div>'
+        + (t.variance != null
+          ? '<div class="mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">⚠ <b>Billing variance:</b> KwikShip invoiced '
+            + M(t.payableInvoiced) + ' against ' + M(t.payableExpected) + ' from the rate card — <b>'
+            + (t.variance > 0 ? '+' : '') + M(t.variance) + '</b>. '
+            + (t.variance > 0 ? 'They billed MORE than the rate card implies — check before paying.' : 'They billed less than expected.') + '</div>'
+          : '')
+        + basisNote;
+    }
+  } else if (_ksrLedCard === 'net') {
+    title = 'Net — what KwikShip should remit';
+    inner = ksrLedLine('Receivable', '+ ' + M(t.receivable), 'text-emerald-700', 'COD collected on ' + pgrNum(t.codDelivered) + ' delivered shipments')
+      + ksrLedLine('Payable — invoiced', '− ' + M(t.payableInvoiced), 'text-rose-600', t.invoices ? t.invoices + ' invoice(s) recorded' : 'nothing invoiced yet')
+      + (memo > 0.5 ? ksrLedLine('Un-invoiced freight (memo, not deducted)', '(' + M(memo) + ')', 'text-slate-400',
+        'rate-card expectation — excluded until KwikShip actually bills it') : '')
+      + ksrLedLine('Net KwikShip should remit', M(t.net), 'text-indigo-600', '', true);
+  } else if (_ksrLedCard === 'payments') {
+    title = 'Payments';
+    const ps = d.payments || [];
+    if (!ps.length) {
+      inner = '<p class="text-sm text-slate-400 py-4 text-center">No payments recorded. Add them on the Payments tab — they apply oldest-first (FIFO) across the whole account.</p>';
+    } else {
+      const th = 'px-3 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50';
+      const td = 'px-3 py-2 text-sm border-b border-slate-100';
+      inner = '<div class="overflow-x-auto"><table class="w-full border-collapse"><thead><tr>'
+        + '<th class="' + th + ' text-left">Date</th><th class="' + th + ' text-left">Direction</th>'
+        + '<th class="' + th + ' text-left">Reference</th><th class="' + th + ' text-right">Amount</th></tr></thead><tbody>'
+        + ps.map(p => {
+          const out = /^(out|paid)$/i.test(String(p.direction || ''));
+          return '<tr><td class="' + td + ' tabular-nums">' + ecEsc(String(p.payment_date || '').slice(0, 10).split('-').reverse().join('-')) + '</td>'
+            + '<td class="' + td + '"><span class="px-2 py-0.5 rounded-full text-xs font-medium ' + (out ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700') + '">'
+            + (out ? 'Paid to KwikShip' : 'Received') + '</span></td>'
+            + '<td class="' + td + ' text-slate-500">' + ecEsc(p.reference || '—') + '</td>'
+            + '<td class="' + td + ' text-right tabular-nums font-semibold ' + (out ? 'text-rose-600' : 'text-emerald-700') + '">'
+            + (out ? '− ' : '+ ') + pgrMoney2(p.amount) + '</td></tr>';
+        }).join('')
+        + '<tr class="bg-slate-50 font-bold"><td class="' + td + '" colspan="3">Net applied (' + ps.length + ')</td>'
+        + '<td class="' + td + ' text-right tabular-nums text-emerald-700">' + M(t.paid) + '</td></tr></tbody></table></div>';
+    }
+  } else if (_ksrLedCard === 'outstanding') {
+    title = 'Outstanding — the full statement';
+    const f = t.fifo || {};
+    inner = ksrLedLine('COD collected', '+ ' + M(t.receivable), 'text-emerald-700', pgrNum(t.codDelivered) + ' delivered COD shipments')
+      + ksrLedLine('Receivable', M(t.receivable), 'text-emerald-700', '', true)
+      + ksrLedLine('Payable — invoiced', '− ' + M(t.payableInvoiced), 'text-rose-600', t.invoices ? t.invoices + ' invoice(s)' : 'nothing invoiced yet')
+      + (memo > 0.5 ? ksrLedLine('Un-invoiced freight (memo)', '(' + M(memo) + ')', 'text-slate-400', 'not deducted until billed') : '')
+      + ksrLedLine('Net should remit', M(t.net), 'text-indigo-600', '', true)
+      + ksrLedLine('Payments applied', '− ' + M(t.paid), 'text-emerald-700', 'FIFO, oldest month first')
+      + ksrLedLine('Outstanding', M(t.outstanding), t.outstanding >= 0 ? 'text-amber-600' : 'text-rose-600', '', true)
+      + '<div class="mt-3 pt-2 text-slate-400" style="' + KSR_MICRO + '">If every month were billed at the rate card instead: <b class="text-amber-600">'
+      + M(t.outstandingIfExpected) + '</b>'
+      + (f.settledThrough ? ' · settled through <b>' + ksrLedMonth(f.settledThrough) + '</b>' : '')
+      + (f.unsettledMonths ? ' · ' + f.unsettledMonths + ' month(s) unsettled, ' + M(f.unsettledTotal) : '')
+      + (f.overpaid > 0.5 ? ' · ' + M(f.overpaid) + ' paid beyond the account' : '') + '</div>';
+  }
+  return '<div class="card p-5 border-l-4 border-indigo-400">'
+    + '<div class="flex items-center justify-between mb-3"><h3 class="text-sm font-bold text-slate-700">' + title + '</h3>'
+    + '<button id="ksr-led-close" class="text-slate-400 text-lg leading-none">✕</button></div>' + inner + '</div>';
+}
+// Per-month expansion: the same three columns the DocPharma ledger opens — what happened, what it should
+// cost, and what that leaves owing.
+function ksrLedRowDetail(m, gstPct) {
+  const M = pgrMoney2;
+  const hd = t => '<div class="font-bold text-slate-400 uppercase tracking-wider mb-1.5" style="font-size:10px">' + t + '</div>';
+  const li = (l, v, c, strong) => '<div class="flex items-center justify-between gap-3 py-1 text-xs '
+    + (strong ? 'border-t border-slate-200 mt-1 pt-1.5' : '') + '"><span class="' + (strong ? 'font-semibold text-slate-700' : 'text-slate-500') + '">' + l + '</span>'
+    + '<span class="font-semibold tabular-nums whitespace-nowrap ' + (c || 'text-slate-700') + '">' + v + '</span></div>';
+  const oc = v => v > 0 ? 'text-amber-600' : v < 0 ? 'text-rose-600' : 'text-slate-400';
+  const col1 = hd('Fulfilment')
+    + li('Delivered', pgrNum(m.delivered), 'text-emerald-700')
+    + li('· COD delivered', pgrNum(m.codDelivered))
+    + li('· Prepaid delivered', pgrNum(m.prepaid))
+    + li('RTO', pgrNum(m.rto), 'text-rose-600')
+    + li('· COD returned', pgrNum(m.codRto))
+    + (m.lost ? li('Lost', pgrNum(m.lost), 'text-rose-600') : '')
+    + (m.unpriced ? li('Unpriced', pgrNum(m.unpriced), 'text-amber-600') : '')
+    + li('Shipments closed', pgrNum(m.shipments), 'text-slate-800', true);
+  const col2 = hd('Payable — freight')
+    + li('Forward', M(m.forward), 'text-indigo-600')
+    + li('RTO freight', M(m.rtoFreight), 'text-rose-600')
+    + li('COD fees', M(m.codFee), 'text-amber-600')
+    + li('Subtotal (rate card)', M(m.charge), 'text-slate-800', true)
+    + li('GST ' + pgrNum(gstPct) + '%', M(m.gst), 'text-slate-400')
+    + li('Expected incl GST', M(m.chargeInclGst), 'text-slate-800')
+    + (m.invoices
+      ? li('Invoiced (actual)', M(m.invGrand), 'text-rose-600')
+        + li('Variance vs expected', (m.variance > 0 ? '+' : '') + M(m.variance),
+          Math.abs(m.variance) < 1 ? 'text-slate-400' : m.variance > 0 ? 'text-rose-600' : 'text-emerald-600')
+        + (m.shipmentVariance ? li('Shipment count vs ours', (m.shipmentVariance > 0 ? '+' : '') + pgrNum(m.shipmentVariance), 'text-amber-600') : '')
+      : li('Invoiced', 'not billed yet', 'text-slate-400'));
+  const col3 = hd('Receivable & settlement')
+    + li('COD collected', '+ ' + M(m.codCollected), 'text-emerald-700')
+    + li('Prepaid delivered (memo)', M(m.prepaidValue), 'text-slate-400')
+    + li('COD returned (no cash)', M(m.codRtoValue), 'text-slate-400')
+    + li('Receivable', M(m.receivable), 'text-emerald-700', true)
+    + li(m.invoices ? 'Payable · invoiced' : 'Payable · not billed yet', '− ' + M(m.payableActual), 'text-rose-600')
+    + li('Net should remit', M(m.remitExpected), 'text-indigo-600', true)
+    + li('Paid (FIFO)', M(m.paidNet), 'text-emerald-700')
+    + li('Outstanding', M(m.outstanding), oc(m.outstanding), true)
+    + (m.unInvoicedMemo > 0.5
+      ? '<div class="mt-2 text-slate-400" style="' + KSR_MICRO + '">Un-invoiced freight of <b>' + M(m.unInvoicedMemo)
+        + '</b> is NOT deducted above — it becomes a liability when KwikShip bills it.</div>' : '');
+  return '<tr class="bg-slate-50"><td colspan="12" class="px-6 py-4 border-b border-slate-100">'
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0.5rem 2.5rem;max-width:64rem">'
+    + '<div>' + col1 + '</div><div>' + col2 + '</div><div>' + col3 + '</div></div></td></tr>';
+}
+function ksrLedCsv() {
+  const d = _ksr || {}, rows = d.months || [];
+  const head = ['Month', 'Shipments', 'Delivered', 'RTO', 'Forward', 'RTO freight', 'COD fees', 'Charge', 'GST',
+    'Expected incl GST', 'Invoiced', 'Variance', 'COD collected', 'Net should remit', 'Paid (FIFO)', 'Status', 'Outstanding'];
+  const body = rows.map(m => [ksrLedMonth(m.month), m.shipments, m.delivered, m.rto, m.forward, m.rtoFreight, m.codFee,
+    m.charge, m.gst, m.chargeInclGst, m.invoices ? m.invGrand : '', m.variance == null ? '' : m.variance,
+    m.codCollected, m.remitExpected, m.paidNet, (KSR_SETTLE[m.settled] || KSR_SETTLE.na)[0], m.outstanding]);
+  const csv = [head].concat(body).map(r => r.map(v => {
+    const s = String(v == null ? '' : v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = 'kwikship-ledger.csv';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
 function ksrLedger() {
   const sec = document.getElementById('ksr-sec-ledger');
   if (!sec || !_ksr) return;
-  const d = _ksr, t = d.totals || {};
+  const d = _ksr, t = Object.assign({}, d.totals || {});
   ksrNote([]);
+  // Selecting a payable card re-bases Net and Outstanding on that basis, so the two readings of the
+  // account can be compared without doing the arithmetic by hand.
+  const basis = _ksrLedCard === 'payableExpected' ? 'expected' : _ksrLedCard === 'payableInvoiced' ? 'invoiced' : '';
+  const payableBasis = basis === 'expected' ? t.payableExpected : t.payableInvoiced;
+  t.net = Math.round((t.receivable - payableBasis) * 100) / 100;
+  t.outstanding = Math.round((t.net - t.paid) * 100) / 100;
+  const whatIf = basis ? ' · <span class="text-amber-600 font-semibold">what-if: ' + basis + '</span>' : '';
+  const varSub = t.variance == null ? 'KwikShip bills, incl GST'
+    : '<span class="' + (Math.abs(t.variance) < 1 ? 'text-slate-400' : t.variance > 0 ? 'text-amber-600 font-semibold' : 'text-emerald-600') + '">'
+      + (t.variance > 0 ? '⚠ +' : '') + pgrMoney2(t.variance) + ' vs rate card</span>';
+  const f = t.fifo || {};
+  const strip = (t.receivable > 0 || t.paid > 0)
+    ? '<p class="text-xs text-slate-500">' + (f.settledThrough ? 'Settled through <b>' + ksrLedMonth(f.settledThrough) + '</b>' : 'Nothing settled yet')
+      + (f.unsettledMonths ? ' · <b>' + f.unsettledMonths + '</b> month(s) unsettled, ' + pgrMoney2(f.unsettledTotal) : '')
+      + (f.overpaid > 0.5 ? ' · ' + pgrMoney2(f.overpaid) + ' received beyond the account' : '')
+      + ' · payments apply oldest-first.</p>' : '';
+
+  const th = 'text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50';
+  const td = 'px-3 text-right tabular-nums';
+  const dash = '<span class="text-slate-300">—</span>';
+  const body = (d.months || []).map(m => {
+    const open = !!_ksrLedOpen[m.month];
+    const st = KSR_SETTLE[m.settled] || KSR_SETTLE.na;
+    const big = m.variance != null && Math.abs(m.variance) > Math.max(0.05 * (m.chargeInclGst || 0), 100);
+    const varTxt = m.variance == null ? dash
+      : '<span class="' + (Math.abs(m.variance) < 1 ? 'text-slate-400' : m.variance > 0 ? 'text-rose-600' : 'text-emerald-600') + '">'
+        + (big ? '⚠ ' : '') + (m.variance > 0 ? '+' : '') + pgrMoney2(m.variance) + '</span>';
+    return '<tr class="ksr-led-row border-b border-slate-50 cursor-pointer" data-m="' + ecEsc(m.month) + '">'
+      + '<td class="py-2 px-3 font-medium"><span class="text-slate-400">' + (open ? '▾' : '▸') + '</span> ' + ksrLedMonth(m.month) + '</td>'
+      + '<td class="' + td + '">' + pgrNum(m.shipments) + '</td>'
+      + '<td class="' + td + ' text-emerald-600">' + pgrNum(m.delivered) + '</td>'
+      + '<td class="' + td + ' text-rose-600">' + pgrNum(m.rto) + '</td>'
+      + '<td class="' + td + '">' + pgrMoney2(m.chargeInclGst) + '</td>'
+      + '<td class="' + td + '">' + (m.invoices ? pgrMoney2(m.invGrand) : dash) + '</td>'
+      + '<td class="' + td + '">' + varTxt + '</td>'
+      + '<td class="' + td + ' text-emerald-700">' + pgrMoney2(m.codCollected) + '</td>'
+      + '<td class="' + td + ' font-semibold text-indigo-600">' + pgrMoney2(m.remitExpected) + '</td>'
+      + '<td class="' + td + ' text-emerald-700">' + (m.paidNet ? pgrMoney2(m.paidNet) : dash) + '</td>'
+      + '<td class="px-3 text-center"><span class="px-2 py-0.5 rounded-full text-xs font-semibold ' + st[1] + '">' + st[0] + '</span></td>'
+      + '<td class="' + td + ' font-bold ' + (m.outstanding > 0 ? 'text-amber-600' : m.outstanding < 0 ? 'text-rose-600' : 'text-slate-400') + '">'
+      + pgrMoney2(m.outstanding) + '</td></tr>'
+      + (open ? ksrLedRowDetail(m, t.gstPct) : '');
+  }).join('');
+
   sec.innerHTML =
-    '<div class="grid grid-cols-2 lg:grid-cols-3 gap-4">'
-    + pgrCard('Computed charge incl GST', pgrMoney2(t.charge), 'across every month shown', 'text-slate-900')
-    + pgrCard('Paid to KwikShip', pgrMoney2(t.paid), 'recorded on the Payments tab', 'text-emerald-600')
-    + pgrCard('Outstanding', pgrMoney2(t.outstanding), '+ = payable to KwikShip', t.outstanding > 0 ? 'text-rose-600' : 'text-emerald-600')
+    '<div style="' + KSR_AUTOGRID + '">'
+    + ksrLedCard('receivable', 'Receivable', pgrMoney2(t.receivable), pgrNum(t.codDelivered) + ' delivered COD — KwikShip holds this', 'text-emerald-600')
+    + ksrLedCard('payableExpected', 'Payable · expected', pgrMoney2(t.payableExpected), 'rate card + GST ' + pgrNum(t.gstPct) + '%', 'text-slate-700')
+    + ksrLedCard('payableInvoiced', 'Payable · invoiced', pgrMoney2(t.payableInvoiced), varSub, 'text-rose-600')
+    + ksrLedCard('net', 'Net (should remit)', pgrMoney2(t.net), 'receivable − ' + (basis === 'expected' ? 'expected' : 'invoiced only') + whatIf, 'text-indigo-600')
+    + ksrLedCard('payments', 'Payments applied', pgrMoney2(t.paid), 'FIFO, oldest month first', 'text-emerald-700')
+    + ksrLedCard('outstanding', 'Outstanding', pgrMoney2(t.outstanding),
+      (t.outstanding >= 0 ? 'KwikShip owes us' : 'we owe KwikShip') + whatIf, t.outstanding >= 0 ? 'text-amber-600' : 'text-rose-600')
     + '</div>'
-    + '<div class="card overflow-hidden"><div class="overflow-x-auto"><table class="w-full text-sm">'
-    + '<thead><tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
+    + '<div id="ksr-led-detail" class="mt-4"></div>'
+    + strip
+    + '<div class="card overflow-hidden"><div class="flex items-center justify-between px-4 py-2 border-b border-slate-100">'
+    + '<h3 class="text-sm font-bold text-slate-700">Month by month <span class="font-normal text-slate-400">· click a row for the full working</span></h3>'
+    + '<button id="ksr-led-csv" class="text-xs px-3 py-1.5 border border-slate-200 rounded-lg text-slate-600">⬇ CSV</button></div>'
+    + '<div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="' + th + '">'
     + '<th class="text-left py-2 px-3">Month</th><th class="text-right px-3">Shipments</th>'
-    + '<th class="text-right px-3">Delivered</th><th class="text-right px-3">RTO</th>'
-    + '<th class="text-right px-3">Forward</th><th class="text-right px-3">RTO freight</th>'
-    + '<th class="text-right px-3">COD fees</th><th class="text-right px-3">Charge</th>'
-    + '<th class="text-right px-3">GST</th><th class="text-right px-3">Incl GST</th>'
-    + '<th class="text-right px-3">Paid</th><th class="text-right px-3">Balance</th></tr></thead><tbody>'
-    + (d.months || []).map(m =>
-      '<tr class="border-b border-slate-50">'
-      + '<td class="py-2 px-3 font-medium">' + ecEsc(m.month) + '</td>'
-      + '<td class="px-3 text-right tabular-nums">' + pgrNum(m.shipments) + '</td>'
-      + '<td class="px-3 text-right tabular-nums text-emerald-600">' + pgrNum(m.delivered) + '</td>'
-      + '<td class="px-3 text-right tabular-nums text-rose-600">' + pgrNum(m.rto) + '</td>'
-      + '<td class="px-3 text-right tabular-nums">' + pgrMoney2(m.forward) + '</td>'
-      + '<td class="px-3 text-right tabular-nums">' + pgrMoney2(m.rtoFreight) + '</td>'
-      + '<td class="px-3 text-right tabular-nums">' + pgrMoney2(m.codFee) + '</td>'
-      + '<td class="px-3 text-right tabular-nums font-semibold">' + pgrMoney2(m.charge) + '</td>'
-      + '<td class="px-3 text-right tabular-nums text-amber-600">' + pgrMoney2(m.gst) + '</td>'
-      + '<td class="px-3 text-right tabular-nums font-semibold">' + pgrMoney2(m.chargeInclGst) + '</td>'
-      + '<td class="px-3 text-right tabular-nums text-emerald-600">' + (m.payments ? pgrMoney2(m.payments) : '—') + '</td>'
-      + '<td class="px-3 text-right tabular-nums font-semibold ' + (m.balance > 0 ? 'text-rose-600' : 'text-emerald-600') + '">' + pgrMoney2(m.balance) + '</td></tr>').join('')
+    + '<th class="text-right px-3">Deliv</th><th class="text-right px-3">RTO</th>'
+    + '<th class="text-right px-3">Expected</th><th class="text-right px-3">Invoiced</th>'
+    + '<th class="text-right px-3">Variance</th><th class="text-right px-3">COD collected</th>'
+    + '<th class="text-right px-3">Net remit</th><th class="text-right px-3">Paid</th>'
+    + '<th class="text-center px-3">Status</th><th class="text-right px-3">Outstanding</th></tr></thead><tbody>'
+    + (body || '<tr><td colspan="12" class="p-6 text-center text-xs text-slate-400">Nothing closed in this window.</td></tr>')
     + '</tbody></table></div></div>'
-    + '<p class="text-xs text-slate-400">Balance is FIFO — a payment clears the oldest outstanding month first, which is how a partner actually applies money received.</p>';
+    + '<p class="text-xs text-slate-400">Months group by the <b>delivered / RTO date</b> — a parcel ordered 28 Jul and delivered 3 Aug is August freight. '
+    + '<b>Receivable</b> is COD on DELIVERED shipments only; an RTO collects no cash. Only <b>invoiced</b> freight is netted off — an un-billed month is not a liability yet, '
+    + 'so it rides along as a memo. Payments apply <b>oldest-month-first (FIFO)</b>, which is how a partner actually allocates money received.</p>';
+
+  const det = document.getElementById('ksr-led-detail');
+  if (det) det.innerHTML = ksrLedDetail(t);
+  const close = document.getElementById('ksr-led-close');
+  if (close) close.addEventListener('click', () => { _ksrLedCard = ''; ksrLedger(); });
+  sec.querySelectorAll('[data-ledcard]').forEach(c => c.addEventListener('click', () => {
+    const k = c.getAttribute('data-ledcard');
+    _ksrLedCard = _ksrLedCard === k ? '' : k;
+    ksrLedger();
+  }));
+  sec.querySelectorAll('.ksr-led-row').forEach(tr => tr.addEventListener('click', () => {
+    const k = tr.getAttribute('data-m');
+    _ksrLedOpen[k] = !_ksrLedOpen[k];
+    ksrLedger();
+  }));
+  const csv = document.getElementById('ksr-led-csv');
+  if (csv) csv.addEventListener('click', e => { e.stopPropagation(); ksrLedCsv(); });
 }
+
+// ── Invoices: the real KwikShip bill vs what this page computed ──────────────────────────────────
+// The reason the rest of the dashboard is trustworthy. Every other tab agrees with itself by
+// construction -- it is all one rate card -- so only a real invoice can prove the rate card right.
+// Upload a PDF/Excel, check what was read, save; the variance against our computed charge for the same
+// period appears next to it.
+async function ksrUpload(url, file) {
+  const r = await fetch(url, { method: 'POST', headers: { ...getAuthHeaders(), 'X-Filename': file.name }, body: file });
+  const d = await r.json();
+  if (!d.success) throw new Error(d.error || 'Could not read the file');
+  return d;
+}
+
+async function ksrInvoices() {
+  const sec = document.getElementById('ksr-sec-invoices');
+  if (!sec) return;
+  sec.innerHTML = '<div class="py-10">' + brandLoaderSm('Loading invoices\u2026') + '</div>';
+  try {
+    const r = await fetch('/api/kwikship-invoices', { headers: getAuthHeaders() });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Load failed');
+    if (d.needsSetup) {
+      sec.innerHTML = '<div class="card p-6"><h3 class="text-sm font-bold text-slate-700">One-time setup needed</h3>'
+        + '<p class="text-sm text-slate-500 mt-2">The <code>kwikship_invoices</code> table has not been created yet. '
+        + 'Run <code>supabase/migrations/20260821_kwikship_invoices.sql</code> against the database and reload \u2014 everything else on this page works meanwhile.</p></div>';
+      return;
+    }
+    const inv = d.invoices || [];
+    const paid = inv.reduce((a, x) => a + Number(x.total_amount || 0), 0);
+    sec.innerHTML =
+      '<div class="card p-5"><h3 class="text-sm font-bold text-slate-700">Add an invoice</h3>'
+      + '<p class="text-xs text-slate-400 mt-0.5 mb-3">Upload the bill and the fields fill themselves \u2014 <b>check every one</b>, the layout is read best-effort. Re-uploading the same invoice number corrects it rather than adding a duplicate.</p>'
+      + '<div class="flex flex-wrap items-end gap-2">'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Invoice no.</label><input id="ksri-no" class="' + PGR_IN + ' w-44"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Invoice date</label><input type="date" id="ksri-date" class="' + PGR_DATE + '"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Period from</label><input type="date" id="ksri-from" class="' + PGR_DATE + '"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Period to</label><input type="date" id="ksri-to" class="' + PGR_DATE + '"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Shipments</label><input type="number" id="ksri-ship" class="' + PGR_IN + ' w-24"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Freight \u20b9</label><input type="number" step="0.01" id="ksri-freight" class="' + PGR_IN + ' w-28"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">GST \u20b9</label><input type="number" step="0.01" id="ksri-gst" class="' + PGR_IN + ' w-28"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Total \u20b9</label><input type="number" step="0.01" id="ksri-total" class="' + PGR_IN + ' w-28"></div>'
+      + '<button id="ksri-save" class="filter-btn">Save invoice</button>'
+      + '<button id="ksri-upload" class="filter-btn" title="Read a KwikShip invoice (PDF / Excel) and fill the form from it">📄 From PDF / Excel</button>'
+      + '<input type="file" id="ksri-file" accept=".pdf,.xlsx,.xls,.csv" class="hidden">'
+      + '</div></div>'
+      + '<div class="card overflow-hidden"><div class="px-5 py-3 border-b border-slate-100 flex justify-between items-center">'
+      + '<h3 class="text-sm font-bold text-slate-700">' + pgrNum(inv.length) + ' invoice(s)</h3>'
+      + '<span class="text-sm font-semibold text-slate-700">' + pgrMoney2(paid) + ' invoiced</span></div>'
+      + '<div class="overflow-x-auto"><table class="w-full text-sm"><thead>'
+      + '<tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
+      + '<th class="text-left py-2 px-3">Invoice</th><th class="text-left px-3">Period</th>'
+      + '<th class="text-right px-3">Shipments</th><th class="text-right px-3">Freight</th>'
+      + '<th class="text-right px-3">GST</th><th class="text-right px-3">Invoiced</th>'
+      + '<th class="text-right px-3">We computed</th><th class="text-right px-3">Variance</th><th class="px-3"></th></tr></thead><tbody>'
+      + (inv.length ? inv.map(function (x) {
+          const v = x.variance;
+          const cls = v == null ? 'text-slate-400' : (Math.abs(v) < 1 ? 'text-emerald-600' : (v > 0 ? 'text-rose-600' : 'text-amber-600'));
+          return '<tr class="border-b border-slate-50">'
+            + '<td class="py-2 px-3 font-medium">' + ecEsc(x.invoice_no) + '<div class="text-xs text-slate-400">' + (x.invoice_date ? _dmy(String(x.invoice_date)) : '\u2014') + '</div></td>'
+            + '<td class="px-3 text-slate-500">' + (x.period_from ? _dmy(String(x.period_from)) + ' \u2192 ' + _dmy(String(x.period_to)) : '<span class="text-slate-300">not stated</span>') + '</td>'
+            + '<td class="px-3 text-right tabular-nums">' + (x.shipments == null ? '\u2014' : pgrNum(x.shipments))
+              + (x.shipmentVariance ? '<div class="text-xs ' + (x.shipmentVariance > 0 ? 'text-rose-600' : 'text-amber-600') + '">' + (x.shipmentVariance > 0 ? '+' : '') + pgrNum(x.shipmentVariance) + ' vs ours</div>' : '') + '</td>'
+            + '<td class="px-3 text-right tabular-nums">' + (x.freight_amount == null ? '\u2014' : pgrMoney2(x.freight_amount)) + '</td>'
+            + '<td class="px-3 text-right tabular-nums text-amber-600">' + (x.gst_amount == null ? '\u2014' : pgrMoney2(x.gst_amount)) + '</td>'
+            + '<td class="px-3 text-right tabular-nums font-semibold">' + pgrMoney2(x.total_amount) + '</td>'
+            + '<td class="px-3 text-right tabular-nums text-slate-500">' + (x.computed ? pgrMoney2(x.computed.total) : '<span class="text-slate-300">no period</span>') + '</td>'
+            + '<td class="px-3 text-right tabular-nums font-semibold ' + cls + '">' + (v == null ? '\u2014' : (v > 0 ? '+' : '') + pgrMoney2(v)) + '</td>'
+            + '<td class="px-3 text-right"><button class="ksri-del text-xs font-semibold text-rose-600 hover:underline" data-id="' + x.id + '">Delete</button></td></tr>';
+        }).join('')
+        : '<tr><td colspan="9" class="px-3 py-8 text-center text-sm text-slate-400">No invoices yet \u2014 upload one to check the rate card against a real bill.</td></tr>')
+      + '</tbody></table></div></div>'
+      + '<p class="text-xs text-slate-400">Variance is <b>invoice \u2212 our computed total</b> for the same period: <span class="text-rose-600">red</span> means they billed more than the rate card says, <span class="text-amber-600">amber</span> means less. It is only shown when the invoice states a period \u2014 a guessed window would invent a difference.</p>';
+
+    const g = id => document.getElementById(id);
+    const f = g('ksri-file');
+    g('ksri-upload').addEventListener('click', () => f.click());
+    f.addEventListener('change', async () => {
+      const file = f.files && f.files[0]; if (!file) return;
+      try {
+        showNotification('Reading ' + file.name + '\u2026');
+        const dd = await ksrUpload('/api/kwikship-invoices/parse', file);
+        const e = dd.extracted || {};
+        const set = (id, v) => { if (v != null && v !== '') g(id).value = v; };
+        set('ksri-no', e.invoice_no); set('ksri-date', e.invoice_date);
+        set('ksri-from', e.period_from); set('ksri-to', e.period_to);
+        set('ksri-ship', e.shipments); set('ksri-freight', e.freight_amount);
+        set('ksri-gst', e.gst_amount); set('ksri-total', e.total_amount);
+        const got = ['invoice_no', 'invoice_date', 'period_from', 'shipments', 'freight_amount', 'gst_amount', 'total_amount']
+          .filter(k => e[k] != null && e[k] !== '').length;
+        showNotification(got ? 'Filled ' + got + ' field(s) from ' + file.name + ' \u2014 check them before saving.'
+                             : 'Could not read that layout \u2014 enter the invoice by hand.', !got);
+      } catch (err) { showNotification('Could not read the file: ' + err.message, true); }
+      f.value = '';
+    });
+    g('ksri-save').addEventListener('click', async () => {
+      const body = {
+        invoice_no: g('ksri-no').value.trim(), invoice_date: g('ksri-date').value || null,
+        period_from: g('ksri-from').value || null, period_to: g('ksri-to').value || null,
+        shipments: g('ksri-ship').value, freight_amount: g('ksri-freight').value,
+        gst_amount: g('ksri-gst').value, total_amount: g('ksri-total').value,
+      };
+      if (!body.invoice_no) return showNotification('Invoice number is required.', true);
+      if (!(Number(body.total_amount) >= 0)) return showNotification('Total amount is required.', true);
+      const btn = g('ksri-save'); btn.disabled = true; btn.textContent = 'Saving\u2026';
+      try {
+        const rr = await fetch('/api/kwikship-invoices', { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify(body) });
+        const dd = await rr.json();
+        if (!dd.success) throw new Error(dd.error || 'Save failed');
+        showNotification('Invoice saved');
+        ksrInvoices();
+      } catch (err) { showNotification(err.message, true); btn.disabled = false; btn.textContent = 'Save invoice'; }
+    });
+    sec.querySelectorAll('.ksri-del').forEach(b => b.addEventListener('click', async () => {
+      const ok = await supConfirm({ title: 'Delete this invoice?', danger: true, confirmLabel: 'Delete',
+        message: 'It will be removed from the comparison against our computed charges.' });
+      if (!ok) return;
+      try {
+        const rr = await fetch('/api/kwikship-invoices/' + b.dataset.id, { method: 'DELETE', headers: getAuthHeaders() });
+        const dd = await rr.json();
+        if (!dd.success) throw new Error(dd.error || 'Delete failed');
+        showNotification('Invoice deleted'); ksrInvoices();
+      } catch (err) { showNotification(err.message, true); }
+    }));
+  } catch (e) { sec.innerHTML = '<p class="text-sm text-rose-600 py-6">' + ecEsc(e.message) + '</p>'; }
+}
+
+// Money runs BOTH ways with KwikShip: they remit the COD they collected, and we pay them when freight
+// outruns collection. A row without an explicit direction is a remittance -- that is the normal case.
+const _ksrPayOut = p => /^(out|paid)$/i.test(String((p && p.direction) || ''));
 
 async function ksrPayments() {
   const sec = document.getElementById('ksr-sec-payments');
@@ -19087,46 +19532,71 @@ async function ksrPayments() {
     const d = await r.json();
     if (!d.success) throw new Error(d.error || 'Load failed');
     _ksrPay = d.payments || [];
-    const total = _ksrPay.reduce((a, p) => a + Number(p.amount || 0), 0);
+    // NET movement -- summing two opposite flows as one figure overstates what has actually moved.
+    const total = _ksrPay.reduce((a, p) => a + Number(p.amount || 0) * (_ksrPayOut(p) ? -1 : 1), 0);
     sec.innerHTML =
       '<div class="card p-5"><h3 class="text-sm font-bold text-slate-700 mb-1">Record a payment</h3>'
       + '<p class="text-xs text-slate-400 mb-3">Hand-entered: KwikShip exposes no wallet or billing API we can read.</p>'
       + '<div class="flex flex-wrap items-end gap-2">'
       + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Date</label><input type="date" id="ksrp-date" class="' + PGR_DATE + '" value="' + pgrYmd(new Date()) + '"></div>'
+      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Direction</label>'
+      + '<select id="ksrp-dir" class="' + PGR_IN + ' w-52">'
+      + '<option value="received">Received from KwikShip</option>'
+      + '<option value="paid">Paid to KwikShip</option></select></div>'
       + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Amount ₹</label><input type="number" id="ksrp-amt" class="' + PGR_IN + ' w-32" min="0" step="0.01"></div>'
       + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Reference</label><input type="text" id="ksrp-ref" class="' + PGR_IN + ' w-44" placeholder="UTR / invoice no."></div>'
-      + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Method</label><input type="text" id="ksrp-method" class="' + PGR_IN + ' w-32" placeholder="NEFT"></div>'
       + '<div><label class="block text-xs font-semibold text-slate-500 mb-1">Note</label><input type="text" id="ksrp-note" class="' + PGR_IN + ' w-56"></div>'
-      + '<button id="ksrp-add" class="filter-btn">Add payment</button></div></div>'
+      + '<button id="ksrp-add" class="filter-btn">Add payment</button>'
+      + '<button id="ksrp-upload" class="filter-btn" title="Read a payment advice or bank receipt (PDF / Excel) and fill the form from it">📄 From PDF / Excel</button>'
+      + '<input type="file" id="ksrp-file" accept=".pdf,.xlsx,.xls,.csv" class="hidden">'
+      + '</div><p class="text-xs text-slate-400 mt-2">Upload reads the file and fills the fields — check them, then Add. Nothing is saved until you do.</p></div>'
       + '<div class="card overflow-hidden"><div class="px-5 py-3 border-b border-slate-100 flex justify-between items-center">'
       + '<h3 class="text-sm font-bold text-slate-700">' + pgrNum(_ksrPay.length) + ' payment(s)</h3>'
-      + '<span class="text-sm font-semibold text-slate-700">' + pgrMoney2(total) + ' total</span></div>'
+      + '<span class="text-sm font-semibold ' + (total < 0 ? 'text-rose-600' : 'text-emerald-700') + '">' + pgrMoney2(total) + ' net</span></div>'
       + '<div class="overflow-x-auto"><table class="w-full text-sm"><thead>'
       + '<tr class="text-xs text-slate-400 uppercase tracking-wide border-b border-slate-200 bg-slate-50">'
-      + '<th class="text-left py-2 px-3">Date</th><th class="text-right px-3">Amount</th>'
-      + '<th class="text-left px-3">Reference</th><th class="text-left px-3">Method</th>'
+      + '<th class="text-left py-2 px-3">Date</th><th class="text-left px-3">Direction</th>'
+      + '<th class="text-right px-3">Amount</th><th class="text-left px-3">Reference</th>'
       + '<th class="text-left px-3">Note</th><th class="text-left px-3">By</th><th class="px-3"></th></tr></thead><tbody>'
       + (_ksrPay.length ? _ksrPay.map(p =>
           '<tr class="border-b border-slate-50"><td class="py-2 px-3">' + _dmy(String(p.payment_date).slice(0, 10)) + '</td>'
-          + '<td class="px-3 text-right tabular-nums font-semibold">' + pgrMoney2(p.amount) + '</td>'
+          + '<td class="px-3"><span class="px-2 py-0.5 rounded-full text-xs font-medium ' + (_ksrPayOut(p) ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700') + '">'
+          + (_ksrPayOut(p) ? 'Paid to KwikShip' : 'Received') + '</span></td>'
+          + '<td class="px-3 text-right tabular-nums font-semibold ' + (_ksrPayOut(p) ? 'text-rose-600' : 'text-emerald-700') + '">'
+          + (_ksrPayOut(p) ? '− ' : '+ ') + pgrMoney2(p.amount) + '</td>'
           + '<td class="px-3 text-slate-500">' + ecEsc(p.reference || '—') + '</td>'
-          + '<td class="px-3 text-slate-500">' + ecEsc(p.method || '—') + '</td>'
           + '<td class="px-3 text-slate-500">' + ecEsc(p.notes || '—') + '</td>'
           + '<td class="px-3 text-slate-400 text-xs">' + ecEsc(String(p.created_by || '').split('@')[0] || '—') + '</td>'
           + '<td class="px-3 text-right"><button class="ksrp-del text-xs font-semibold text-rose-600 hover:underline" data-id="' + p.id + '">Delete</button></td></tr>').join('')
         : '<tr><td colspan="7" class="px-3 py-8 text-center text-sm text-slate-400">No payments recorded yet.</td></tr>')
       + '</tbody></table></div></div>';
     document.getElementById('ksrp-add').addEventListener('click', ksrPayAdd);
-    sec.querySelectorAll('.ksrp-del').forEach(b => b.addEventListener('click', () => ksrPayDel(b.dataset.id)));
+    const pf = document.getElementById('ksrp-file');
+    document.getElementById('ksrp-upload').addEventListener('click', () => pf.click());
+    pf.addEventListener('change', async () => {
+      const f = pf.files && pf.files[0]; if (!f) return;
+      try {
+        showNotification('Reading ' + f.name + '…');
+        const d = await ksrUpload('/api/kwikship-payments/parse', f);
+        const e = d.extracted || {};
+        if (e.payment_date) document.getElementById('ksrp-date').value = e.payment_date;
+        if (e.amount != null) document.getElementById('ksrp-amt').value = e.amount;
+        if (e.reference) document.getElementById('ksrp-ref').value = e.reference;
+        const got = ['payment_date', 'amount', 'reference'].filter(k => e[k] != null && e[k] !== '').length;
+        showNotification(got ? 'Filled ' + got + ' field(s) from ' + f.name + ' — check them before adding.'
+                             : 'Could not read that layout — enter the payment by hand.', !got);
+      } catch (err) { showNotification('Could not read the file: ' + err.message, true); }
+      pf.value = '';
+    });
   } catch (e) { sec.innerHTML = '<p class="text-sm text-rose-600 py-6">' + ecEsc(e.message) + '</p>'; }
 }
 
 async function ksrPayAdd() {
   const body = {
     payment_date: document.getElementById('ksrp-date').value,
+    direction: document.getElementById('ksrp-dir').value,
     amount: document.getElementById('ksrp-amt').value,
     reference: document.getElementById('ksrp-ref').value.trim() || null,
-    method: document.getElementById('ksrp-method').value.trim() || null,
     notes: document.getElementById('ksrp-note').value.trim() || null,
   };
   if (!body.payment_date || !(Number(body.amount) > 0)) return showNotification('Date and a positive amount are required.', true);

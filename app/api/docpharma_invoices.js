@@ -225,3 +225,10 @@ router.delete('/docpharma-invoices/charge/:id', async (req, res) => {
 });
 
 module.exports = router;
+// Shared with kwikship_recon.js so an invoice parser is defined ONCE. Additive only — nothing about
+// the DocPharma behaviour changes, and a second copy of pdfText/parseInvDate is exactly the kind of
+// duplicate that drifts apart silently.
+module.exports.pdfText = pdfText;
+module.exports.parseInvDate = parseInvDate;
+module.exports.rowsFromExcel = rowsFromExcel;
+

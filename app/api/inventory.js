@@ -73,7 +73,7 @@ async function fetchCaseSizes() {
 // data the day this was added: 7 of the 9 recommended SKUs were already fully covered, TE-BDR1 by
 // 27,441 units against a 16,837 recommendation. Optional and defaults to {} so every existing caller
 // behaves exactly as before, which is also the safe degradation when EasyEcom is unreachable.
-function buildReorder(rows, caseSizes, openPo = {}) {
+function buildReorder(rows, caseSizes, openPo = {}, poDetail = {}, poStale = {}) {
     return rows.map(r => {
         const stock = Number(r.available_quantity) || 0;
         const sold = Number(r[`units_sold_${DRR_WINDOW_DAYS}d`]) || 0;
@@ -101,6 +101,9 @@ function buildReorder(rows, caseSizes, openPo = {}) {
             stock, units_sold: sold, drr, doi, status,
             case_size: caseSize, raw_qty: rawQty, order_qty: orderQty,
             open_po: poQty, net_qty: netQty,
+            // Which POs make up `open_po`, so a surprising figure can be read rather than queried.
+            open_po_detail: poDetail[r.sku] || [],
+            open_po_stale: Number(poStale[r.sku]) || 0,
             // Fully covered by what is already on order — listed, but with nothing left to buy.
             poCovered: rawQty > 0 && netQty === 0,
             cases: caseSize && orderQty > 0 ? Math.round(orderQty / caseSize) : 0,
@@ -119,9 +122,10 @@ router.get('/inventory/reorder', async (req, res) => {
         // A failure here degrades to "no subtraction" rather than failing the page; `poSubtracted`
         // tells the client which of the two it is looking at.
         let openPo = {}, poSubtracted = true;
-        try { openPo = (await openPoQtyBySku()).bySku || {}; }
+        let poDetail = {}, poStale = {};
+        try { const po = await openPoQtyBySku(); openPo = po.bySku || {}; poDetail = po.detailBySku || {}; poStale = po.staleBySku || {}; }
         catch (e) { poSubtracted = false; console.warn('[Inventory] open PO lookup failed:', e.message); }
-        const all = buildReorder(rows, caseSizes, openPo)
+        const all = buildReorder(rows, caseSizes, openPo, poDetail, poStale)
             .sort((a, b) => (a.doi == null ? 1e9 : a.doi) - (b.doi == null ? 1e9 : b.doi));
         const order = all.filter(r => r.needsOrder);
         res.json({
@@ -161,12 +165,128 @@ router.get('/inventory/snapshot', async (req, res) => {
 });
 
 // Force a fresh snapshot NOW — invoke the snapshot-inventory edge fn (fetch EasyEcom stock + sales, rebuild). ~1-2 min.
+// ── New products join the dashboard BY THEMSELVES ────────────────────────────────────────────────
+//
+// ⚠️ THE SNAPSHOT'S SKU LIST IS NOT "EVERYTHING WE STOCK" — IT IS THE `base_sku` SET REGISTERED IN
+// `sku_pack_mapping`, AND NOTHING ELSE. Verified on live data: 17 registered base SKUs, 17 SKUs in the
+// snapshot, identical sets. So a product launched last week is invisible everywhere downstream — the
+// Inventory Analytics table, the DRR/DOI charts, the Recommended Order sheet and the 06:30 Teams
+// report — until somebody remembers to hand-add a row to a mapping table. TE-ABD1 (Advanced Brightening
+// Drops, 524 units on the shelf and selling) had been missing exactly that way.
+//
+// The list cannot simply become "every EasyEcom SKU": of the ~60 unmapped SKUs at our own warehouse,
+// all but four are drafts, FBA variants, channel codes, retired SKUs and combos — EasyEcom's own
+// `is_combo` flag does not separate them (it reads false for every one). What DOES separate them is
+// physical stock at OUR warehouse plus a real product name, so that is the test.
+//
+// Pack variants are handled from EVIDENCE, not from the naming convention. EasyEcom expresses one
+// physical pool in each pack's own unit — TE-ABD1 524, TE-ABD2 262, TE-ABD4 131 — so the ratio itself
+// proves the multiplier. Registering TE-ABD2 as its own base instead would TRIPLE-COUNT the same
+// bottles; guessing a multiplier from the trailing digit alone would corrupt DRR silently. Where the
+// three signals (trailing digit, exact stock ratio, shared product name) do not all agree, the SKU is
+// left alone and REPORTED rather than registered on a guess.
+const SHIFUPRO_LOC_CODE = 'wo66194027524';
+// A name that merely repeats the SKU is a channel/listing code, not a product.
+const isCodeName = (sku, name) => !name || String(name).trim().toUpperCase() === String(sku).trim().toUpperCase();
+const NOT_A_PRODUCT = /(-draft|-fba|\btest\b|^test)/i;
+
+async function registerNewProducts({ dryRun = false } = {}) {
+    const [rows, { data: mapRows, error: mapErr }] = await Promise.all([
+        easyEcomInventory(true),
+        supabase.from('sku_pack_mapping').select('pack_sku, base_sku'),
+    ]);
+    if (mapErr) throw new Error(mapErr.message);
+    const known = new Set();
+    (mapRows || []).forEach(m => { if (m.pack_sku) known.add(m.pack_sku); if (m.base_sku) known.add(m.base_sku); });
+
+    // Stock at OUR warehouse only. A SKU we do not physically hold is not something to plan buying for.
+    const qtyBySku = {}, nameBySku = {};
+    rows.forEach(r => {
+        if (String(r.loc) !== SHIFUPRO_LOC_CODE) return;
+        qtyBySku[r.sku] = Math.max(qtyBySku[r.sku] || 0, r.qty);
+        if (r.name && !nameBySku[r.sku]) nameBySku[r.sku] = r.name;
+    });
+    const candidates = Object.keys(qtyBySku).filter(sku =>
+        !known.has(sku) && qtyBySku[sku] > 0
+        && !NOT_A_PRODUCT.test(sku) && !NOT_A_PRODUCT.test(nameBySku[sku] || '')
+        && !isCodeName(sku, nameBySku[sku]));
+
+    // A trailing digit above 1 MIGHT mean a pack of that many. Only EasyEcom's own quantities can say.
+    const stemOf = sku => { const m = String(sku).match(/^(.*?)(\d+)$/); return (m && m[1].length >= 3) ? { stem: m[1], n: parseInt(m[2], 10) } : null; };
+    const baseQty = s => qtyBySku[s] || 0;
+    const newBases = [], newPacks = [], unsure = [];
+    candidates.forEach(sku => {
+        const p = stemOf(sku);
+        if (!p || p.n <= 1) { newBases.push({ sku, name: nameBySku[sku] || null, qty: qtyBySku[sku] }); return; }
+        const base = p.stem + '1';
+        const baseKnown = known.has(base) || candidates.includes(base);
+        const bq = baseQty(base), pq = qtyBySku[sku];
+        const ratioProves = bq > 0 && pq > 0 && bq % pq === 0 && bq / pq === p.n;
+        const sameProduct = (nameBySku[base] || '').slice(0, 25) === (nameBySku[sku] || '').slice(0, 25);
+        if (baseKnown && ratioProves && sameProduct) newPacks.push({ sku, base, n: p.n, qty: pq, baseQty: bq });
+        else unsure.push({ sku, name: nameBySku[sku] || null, qty: pq, base, reason: !baseKnown ? 'no base SKU' : !ratioProves ? `stock ratio ${bq}/${pq} does not prove ×${p.n}` : 'different product name' });
+    });
+    // A pack whose base is itself brand new must not be registered as a base as well.
+    const packSkus = new Set(newPacks.map(x => x.sku));
+    const bases = newBases.filter(b => !packSkus.has(b.sku));
+
+    const inserts = bases.map(b => ({ pack_sku: b.sku, base_sku: b.sku, unit_multiplier: 1 }))
+        .concat(newPacks.map(p => ({ pack_sku: p.sku, base_sku: p.base, unit_multiplier: p.n })));
+    if (!dryRun && inserts.length) {
+        const { error } = await supabase.from('sku_pack_mapping').insert(inserts);
+        if (error) throw new Error(error.message);
+        console.log(`[Inventory] registered ${bases.length} new product(s) and ${newPacks.length} pack variant(s): `
+            + inserts.map(i => i.pack_sku + (i.unit_multiplier > 1 ? `→${i.base_sku}×${i.unit_multiplier}` : '')).join(', '));
+    }
+    if (unsure.length) console.warn('[Inventory] unregistered SKUs needing a human: '
+        + unsure.map(u => `${u.sku} (${u.reason})`).join(', '));
+    return { bases, packs: newPacks, unsure, registered: dryRun ? 0 : inserts.length };
+}
+
 async function refreshSnapshot() {
-    const r = await axios.post(`${config.SUPABASE_URL}/functions/v1/snapshot-inventory`, {}, {
-        headers: { Authorization: `Bearer ${config.SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
-        timeout: 150000, validateStatus: () => true });
-    if (r.status >= 400) throw new Error((r.data && r.data.error) || `snapshot-inventory returned ${r.status}`);
-    return r.data;
+    // ⚠️ REGISTER FIRST, THEN SNAPSHOT. The edge fn builds the snapshot from the base_sku set, so a
+    // product registered after it runs stays invisible for another day. Registering here means the
+    // dashboard Refresh button and the 06:30 cron both pick a new product up the same run — and the
+    // Teams report, which posts straight after this, carries it too.
+    // A failure here must never cost us the snapshot: an un-registered SKU is a missing row, a skipped
+    // snapshot is a stale dashboard for everything.
+    let fresh = { bases: [], packs: [] };
+    try { fresh = await registerNewProducts(); }
+    catch (e) { console.warn('[Inventory] new-product registration failed (snapshot continues):', e.message); }
+
+    const runSnapshot = async () => {
+        const r = await axios.post(`${config.SUPABASE_URL}/functions/v1/snapshot-inventory`, {}, {
+            headers: { Authorization: `Bearer ${config.SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
+            timeout: 150000, validateStatus: () => true });
+        if (r.status >= 400) throw new Error((r.data && r.data.error) || `snapshot-inventory returned ${r.status}`);
+        return r.data;
+    };
+    let out = await runSnapshot();
+
+    // ⚠️ A BRAND-NEW SKU'S FIRST SNAPSHOT CAN COME BACK EMPTY, AND AN EMPTY ROW READS AS "OUT OF STOCK".
+    // Observed on TE-ABD1 the run it was registered: the row appeared with stock 0, warehouse "N/A" and
+    // the SKU echoed back as its own product name, while EasyEcom was reporting 524 units on the shelf.
+    // The next run was correct, so the edge fn does not see a mapping row committed moments earlier.
+    // Left alone it self-heals tomorrow — but tomorrow is after the 06:30 Teams report, which would have
+    // announced a freshly-stocked product as OUT OF STOCK. So the claim is CHECKED against EasyEcom and
+    // the snapshot re-run once, rather than trusted.
+    const added = fresh.bases.map(b => b.sku);
+    if (added.length) {
+        try {
+            const { data } = await supabase.from('inventory_snapshots')
+                .select('sku, available_quantity, warehouse')
+                .eq('snapshot_date', istDate()).in('sku', added);
+            const best = {};
+            (data || []).forEach(r => { best[r.sku] = Math.max(best[r.sku] || 0, Number(r.available_quantity) || 0); });
+            const wrong = fresh.bases.filter(b => b.qty > 0 && !(best[b.sku] > 0));
+            if (wrong.length) {
+                console.warn(`[Inventory] ${wrong.map(w => w.sku).join(', ')} came back with no stock though EasyEcom `
+                    + `reports ${wrong.map(w => w.qty).join(', ')} — re-running the snapshot once.`);
+                out = await runSnapshot();
+            }
+        } catch (e) { console.warn('[Inventory] could not verify the new products landed:', e.message); }
+    }
+    return out;
 }
 
 // ── POST /inventory/refresh-snapshot — force a fresh snapshot NOW (invokes the edge fn, ~1-2 min). ──
@@ -201,9 +321,10 @@ async function sendInventoryTeamsReport() {
         const [{ rows: snapRows }, caseSizes] = await Promise.all([loadLatestSnapshot(), fetchCaseSizes()]);
         // openPoQtyBySku retries once and then serves its last good copy (flagged stale, 2026-08-20) —
         // it only throws when there is no history at all, so this warning became genuinely rare.
-        try { const po = await openPoQtyBySku(); openPo = po.bySku || {}; if (po.stale) poStaleAt = po.fetchedAt; }
+        let poDetail2 = {}, poStale2 = {};
+        try { const po = await openPoQtyBySku(); openPo = po.bySku || {}; poDetail2 = po.detailBySku || {}; poStale2 = po.staleBySku || {}; if (po.stale) poStaleAt = po.fetchedAt; }
         catch (e) { poFailed = true; console.warn('[Inventory] open PO lookup failed — reorder shown WITHOUT PO subtraction:', e.message); }
-        need = buildReorder(snapRows, caseSizes, openPo)
+        need = buildReorder(snapRows, caseSizes, openPo, poDetail2, poStale2)
             .filter(r => r.needsOrder)
             .sort((a, b) => (a.doi == null ? 1e9 : a.doi) - (b.doi == null ? 1e9 : b.doi));
     } catch (e) { console.error('[Inventory] reorder list failed (report still sent):', e.message); }
@@ -571,4 +692,4 @@ router.get('/inventory/count/analysis', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-module.exports = { router, sendInventoryTeamsReport, refreshSnapshot };
+module.exports = { router, sendInventoryTeamsReport, refreshSnapshot, registerNewProducts };

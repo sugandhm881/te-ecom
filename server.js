@@ -116,7 +116,7 @@ const docpharmaOverviewRoutes = require('./app/api/docpharma_overview');
 const docpharmaInventoryRoutes = require('./app/api/docpharma_inventory');
 const { ingestRecentDocpharmaOrders } = require('./app/api/docpharma_portal');
 const { backfillJourneys, syncChargesBatch, auditJourneyIntegrity } = require('./app/api/delivery_journey');
-const { syncKwikship } = require('./app/api/kwikship_sync');
+const { syncKwikship, applyKwikshipCharges } = require('./app/api/kwikship_sync');
 const cron = require('node-cron');
 // Every scheduled job goes through the reporter → the Teams "Cron Response" channel. Failures post a
 // card with the reason (including errors a job caught itself and only console.error'd); successes are
@@ -428,10 +428,11 @@ cronJob('Kwikship (0 2 * * *)', '0 2 * * *', async () => {
     // same freight_* columns the RapidShyp freight lens reads. Pure SQL, no API calls. Runs AFTER the sync
     // so tonight's new shipments — and any whose outcome just became delivered/RTO — are priced correctly;
     // it is idempotent, so re-running only rewrites rows whose cost actually changed.
+    // Costs against the rate card AND then fills anything KwikShip never sent — see applyKwikshipCharges().
     try {
-        const { data, error } = await supabase.rpc('apply_kwikship_charges');
+        const { data, error, filled } = await applyKwikshipCharges();
         if (error) console.error('[Kwikship] charge recalc error:', error.message);
-        else console.log('[Kwikship] charges:', JSON.stringify(data));
+        else console.log('[Kwikship] charges:', JSON.stringify(data), filled ? `· filled ${JSON.stringify(filled)}` : '');
     } catch (e) { console.error('[Kwikship] charge recalc error:', e.message); }
 }, { timezone: 'Asia/Kolkata' });
 
@@ -545,26 +546,85 @@ cronJob('EE Session (*/20 * * * *)', '*/20 * * * *', async () => {
 // "Repeat" tab) on Shopify BEFORE EasyEcom imports them, so they can be phone-confirmed before shipping.
 // The orders/create webhook does this instantly; this cron catches anything the webhook missed. Skips
 // orders already held or manually released. OFF unless SHOPIFY_AUTOHOLD_ENABLED=true.
+// ── ShopifyHold auto-hold backstop, hardened 2026-08-20 ─────────────────────────────────────────
+// Six red cards in one hour on 20 Aug (22:20–23:20), every one a NETWORK error: `TypeError: fetch
+// failed` (Node/undici's wrapper for DNS failures, resets and refused connections) and one axios
+// `timeout of 20000ms exceeded`. Nothing was wrong with the job. Three separate faults made a blip
+// look like an outage, and all three are fixed here:
+//
+//   1. NO OVERLAP GUARD. Two of those runs lasted 148s and 243s against a 120-SECOND schedule, so runs
+//      were overlapping — concurrent batches hammering the same Shopify endpoint, which makes timeouts
+//      MORE likely, which makes runs longer: a spiral that feeds itself. A run now skips if the
+//      previous one is still going.
+//   2. ONE BAD ORDER ABORTED THE BATCH. `holdOrderSmart` does live Shopify + Supabase calls; a throw on
+//      order 7 abandoned the other 43 and surfaced as a whole-cron failure. Each order is isolated now
+//      and its reason counted, so the run finishes and reports once.
+//   3. ANY ERROR RAISED A CARD. `cron_report.js` turns console.error into an immediate ❌ card, and this
+//      cron self-heals in TWO MINUTES — the bar for waking someone has to be higher than one blip. A
+//      transient failure now WARNS; only SH_ALERT_AFTER consecutive failures (≈10 min of continuous
+//      failure) escalate, then once an hour while it stays down. A non-transient error is still loud
+//      immediately — a real bug must never be muffled by this.
+const SH_TRANSIENT = /fetch failed|timeout of \d+ ?ms|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|network error|Bad Gateway|Service Unavailable|Gateway Time/i;
+const shTransient = e => SH_TRANSIENT.test(String((e && e.message) || e));
+const SH_ALERT_AFTER = parseInt(process.env.SH_ALERT_AFTER, 10) || 5;   // × 2 min = 10 minutes down
+let _shRunning = false, _shFails = 0, _shSkippedOverlap = 0;
+
 cronJob('ShopifyHold (*/2 * * * *)', '*/2 * * * *', async () => {
     if (String(process.env.SHOPIFY_AUTOHOLD_ENABLED || '').toLowerCase() !== 'true') return;
+    if (_shRunning) {
+        // Never a card: the previous run is still working, and starting a second one is what turned a
+        // slow window into a spiral. Counted so a persistent overlap is visible in the logs.
+        if (++_shSkippedOverlap % 5 === 1) console.warn(`[ShopifyHold] previous run still going — skipped this tick (${_shSkippedOverlap} in a row)`);
+        return;
+    }
+    _shRunning = true;
     try {
         const { findRepeatCandidates } = require('./app/api/support_console');
         const shopifyHold = require('./app/api/shopify_hold');
         const fromISO = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
         const toISO = new Date().toISOString();
-        const cand = await findRepeatCandidates({ fromISO, toISO });
+        // One retry on a transient lookup failure — "orders lookup failed: TypeError: fetch failed" was
+        // one of the six cards, and a 2s wait clears almost every one of them.
+        let cand;
+        try { cand = await findRepeatCandidates({ fromISO, toISO }); }
+        catch (e1) {
+            if (!shTransient(e1)) throw e1;
+            await new Promise(x => setTimeout(x, 2000));
+            cand = await findRepeatCandidates({ fromISO, toISO });
+        }
         let held = 0, skipped = 0, failed = 0;
+        const reasons = new Map();   // message → count, for ONE summary line instead of a line per order
         for (const c of cand.slice(0, 50)) {
-            const r = await shopifyHold.holdOrderSmart(c.order_name, c.order_id, shopifyHold.reasonNoteFrom(c.reasons), c.created_at);
-            if (r.held) held++; else if (r.skipped) skipped++; else failed++;
-            // Backstop for the sibling hold too — if the webhook missed the burst, catch the batch here.
-            // Anything already imported into EasyEcom is reported as skipped (a Shopify hold is a no-op
-            // there); those stay a manual EasyEcom-hold decision for the team.
-            if (r.held) await shopifyHold.holdSiblingOrders({ phone: c.phone, excludeOrderName: c.order_name, reasonNote: shopifyHold.reasonNoteFrom(c.reasons) });
+            try {
+                const r = await shopifyHold.holdOrderSmart(c.order_name, c.order_id, shopifyHold.reasonNoteFrom(c.reasons), c.created_at);
+                if (r.held) held++; else if (r.skipped) skipped++; else failed++;
+                // Backstop for the sibling hold too — if the webhook missed the burst, catch the batch here.
+                // Anything already imported into EasyEcom is reported as skipped (a Shopify hold is a no-op
+                // there); those stay a manual EasyEcom-hold decision for the team.
+                if (r.held) await shopifyHold.holdSiblingOrders({ phone: c.phone, excludeOrderName: c.order_name, reasonNote: shopifyHold.reasonNoteFrom(c.reasons) });
+            } catch (e) {
+                failed++;
+                const m = String(e.message || e).slice(0, 80);
+                reasons.set(m, (reasons.get(m) || 0) + 1);
+            }
             await new Promise(x => setTimeout(x, 800));   // gentle — one order at a time
         }
         if (held || failed) console.log(`[ShopifyHold] auto-hold backstop: held ${held}, skipped ${skipped}, failed ${failed} of ${cand.length}`);
-    } catch (e) { console.error('[ShopifyHold] cron error:', e.message); }
+        // Per-order failures are a WARN, never a card: the next run is 120 seconds away and retries them.
+        if (reasons.size) console.warn(`[ShopifyHold] ${failed} order(s) failed this run — ` + [...reasons].map(([m, n]) => `${n}× ${m}`).join(' · '));
+        if (_shFails) { console.log(`[ShopifyHold] recovered after ${_shFails} failed run(s)`); _shFails = 0; }
+        _shSkippedOverlap = 0;
+    } catch (e) {
+        _shFails++;
+        if (!shTransient(e)) { console.error('[ShopifyHold] cron error:', e.message); return; }
+        // Transient: warn while it is plausibly a blip, escalate once it is plainly an outage, then
+        // hourly so a long outage is not forgotten after its single card.
+        if (_shFails === SH_ALERT_AFTER || (_shFails > SH_ALERT_AFTER && _shFails % 30 === 0)) {
+            console.error(`[ShopifyHold] cron error: ${e.message} — ${_shFails} consecutive failed runs (~${_shFails * 2} min). Upstream looks down.`);
+        } else {
+            console.warn(`[ShopifyHold] transient failure ${_shFails}/${SH_ALERT_AFTER} (${e.message}) — next run in 2 min`);
+        }
+    } finally { _shRunning = false; }
 }, { timezone: 'Asia/Kolkata' });
 
 // Silent-RTO claim mail → RapidShyp — weekly, Monday 9:30 AM IST, last 30 days ending yesterday.

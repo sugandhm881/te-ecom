@@ -28,6 +28,10 @@ const PAGE_CAP = 300;
 // The lookback is deliberately generous: a purchase order is a live document and an open PO from
 // months ago is precisely the one you must not lose.
 const DEFAULT_LOOKBACK_DAYS = 730;
+// A PO line still owed to us this long after it was raised has, in practice, been forgotten. It stays
+// in the subtraction (EasyEcom still calls it open) but is flagged, because a stale remnant silently
+// suppressing a re-order is the failure mode this number causes.
+const PO_STALE_DAYS = 45;
 
 // EasyEcom is rate-limited and this data changes a few times a day at most, so a short cache keeps the
 // page snappy without hammering them. `?fresh=1` (the Refresh button) always recomputes.
@@ -848,14 +852,34 @@ async function openPoQtyBySku({ days = DEFAULT_LOOKBACK_DAYS, fresh = false } = 
             throw e2;   // no history at all — the caller's warning is the honest outcome
         }
     }
+    // ⚠️ THE TOTAL ALONE IS UNREADABLE, AND THAT IS HOW A DEAD PO HIDES. "Raised PO 549" for TE-BB1
+    // looks wrong to anyone who raised a PO for 500 — it is 500 from PO 69 plus a 49-unit remnant of
+    // PO 38, raised 5 June, 1 of 50 units ever received and still sitting Open 77 days later. The
+    // remnant is real as far as EasyEcom is concerned, so it is still subtracted; what was missing was
+    // any way to SEE it. Every contributing PO now rides along with the number, and a line still
+    // pending past PO_STALE_DAYS is flagged so a forgotten PO can be closed rather than quietly
+    // suppressing the buy for a SKU nobody is actually shipping.
     const bySku = {};
+    const detailBySku = {};
     const pos = rows.map(shapePo).filter(p => p.isOpen);
     pos.forEach(p => p.items.forEach(i => {
         const sku = String(i.sku || '').trim();
         if (!sku || !(i.pending > 0)) return;
         bySku[sku] = (bySku[sku] || 0) + i.pending;
+        const ageDays = p.createdAt ? Math.round((Date.now() - new Date(p.createdAt).getTime()) / 86400000) : null;
+        (detailBySku[sku] = detailBySku[sku] || []).push({
+            po: p.poNumber, poId: p.poId, status: p.status, vendor: p.vendor,
+            ordered: i.qty, received: i.received, pending: i.pending,
+            createdAt: p.createdAt, ageDays, stale: ageDays != null && ageDays > PO_STALE_DAYS,
+        });
     }));
-    const v = { bySku, poCount: pos.length, skuCount: Object.keys(bySku).length, fetchedAt: new Date().toISOString() };
+    Object.values(detailBySku).forEach(l => l.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))));
+    const staleBySku = {};
+    Object.keys(detailBySku).forEach(sku => {
+        const u = detailBySku[sku].filter(x => x.stale).reduce((a, x) => a + x.pending, 0);
+        if (u > 0) staleBySku[sku] = u;
+    });
+    const v = { bySku, detailBySku, staleBySku, poCount: pos.length, skuCount: Object.keys(bySku).length, fetchedAt: new Date().toISOString() };
     _openPoCache = { t: Date.now(), v };
     _lastGoodOpenPo = v;
     return v;

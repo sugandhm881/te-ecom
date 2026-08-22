@@ -256,6 +256,75 @@ async function updateKwikshipJourney(awb, orderName, courier, orderDate, payment
     return true;
 }
 
+// ── Fill what KwikShip did not tell us, from our own order record ───────────────────────────────
+// A shipment missing its VALUE or its applied WEIGHT cannot be fully priced: no weight means the rate
+// card cannot choose a slab, so a real shipment sits outside every total. Our own Shopify order knows
+// both, so fill from there rather than leaving it uncosted.
+//
+// ⚠️ TWO DIFFERENT KINDS OF "MISSING", and conflating them is the bug this fixes:
+//   • VALUE null on a FREE order. TE25-40073 is FOC — Shopify total_price is 0. Its value is genuinely
+//     ZERO, not unknown, and storing null made the recon warn about a shipment with nothing to warn
+//     about. `0` is written deliberately; a `value || null` style guard would turn it back into null,
+//     which is exactly how it got here.
+//   • WEIGHT null. TE25-42790 (a real zone-D COD RTO, ₹1,048) had no weight anywhere in KwikShip's
+//     payload, so `apply_kwikship_charges()` could not price it at all.
+// ⚠️ The weight fill is a SUBSTITUTE, not the courier's billed weight, so it is only ever used when the
+// courier gave us nothing. It is safe here because pricing is SLAB-based: everything at or under the
+// first slab (500 g) costs the same, and these parcels weigh tens of grams — the substitution cannot
+// change the price. On a heavy parcel it could, which is why it never overwrites a courier weight.
+async function backfillKwikshipFromOrders() {
+    const gaps = [];
+    for (let f = 0; ; f += 1000) {
+        const { data, error } = await supabase.from('shipment_journey_ecom')
+            .select('awb, order_name, shipment_value, applied_weight')
+            .eq('source', 'kwikship').or('shipment_value.is.null,applied_weight.is.null')
+            .order('awb', { ascending: true }).range(f, f + 999);
+        if (error) throw new Error(error.message);
+        gaps.push(...(data || []));
+        if (!data || data.length < 1000) break;
+    }
+    if (!gaps.length) return { checked: 0, value: 0, weight: 0 };
+
+    const names = [...new Set(gaps.map(g => String(g.order_name || '').replace('#', '').trim()).filter(Boolean))];
+    const byName = {};
+    for (let i = 0; i < names.length; i += 300) {
+        const part = names.slice(i, i + 300);
+        const { data } = await supabase.from('orders').select('name, total_price, total_weight')
+            .in('name', part.concat(part.map(n => '#' + n)));
+        (data || []).forEach(o => { byName[String(o.name).replace('#', '').trim()] = o; });
+    }
+
+    let value = 0, weight = 0;
+    for (const g of gaps) {
+        const o = byName[String(g.order_name || '').replace('#', '').trim()];
+        if (!o) continue;
+        const patch = {};
+        // total_price 0 is a REAL value (a free order), so test for null/undefined, never truthiness.
+        if (g.shipment_value == null && o.total_price != null) { patch.shipment_value = Number(o.total_price); value++; }
+        if (g.applied_weight == null && Number(o.total_weight) > 0) { patch.applied_weight = Number(o.total_weight); weight++; }
+        if (!Object.keys(patch).length) continue;
+        const { error } = await supabase.from('shipment_journey_ecom').update(patch).eq('awb', g.awb);
+        if (error) console.warn(`[Kwikship backfill] ${g.order_name}: ${error.message}`);
+    }
+    if (value || weight) console.log(`[Kwikship backfill] filled value on ${value}, weight on ${weight} of ${gaps.length} gap row(s)`);
+    return { checked: gaps.length, value, weight };
+}
+
+// ── Cost the shipments, then fill the gaps KwikShip left ────────────────────────────────────────
+// ⚠️ CALL THIS, NEVER `apply_kwikship_charges` DIRECTLY. The RPC recomputes `applied_weight` from the
+// courier payload on every run, so it WIPES any weight we supplied and un-prices that shipment again.
+// The backfill therefore has to follow every single call — and it was called from three places (the
+// nightly cron, a zone upload, a manual remap) with the backfill after only one of them, so TE25-42790
+// came back unpriced the moment anyone re-zoned. One function, so the pairing cannot be forgotten.
+async function applyKwikshipCharges() {
+    const { data, error } = await supabase.rpc('apply_kwikship_charges');
+    if (error) return { data: null, error };
+    let filled = null;
+    try { filled = await backfillKwikshipFromOrders(); }
+    catch (e) { console.warn('[Kwikship] backfill after costing failed:', e.message); }
+    return { data, error: null, filled };
+}
+
 // ── Mirror the journey into `order_tracking` — this is what puts Kwikship INTO the bucket engine ──
 // The `order_buckets` view (Undelivered / Delivered / RTO / age buckets, the Support console, the hold
 // rules) is built ONLY from `order_tracking` + `rapidshyp_tracking_ecom` + `orders.tracking_status`.
@@ -522,7 +591,7 @@ async function syncKwikship({ days = 30, concurrency = 3, sleepMs = 300 } = {}) 
     return { processed: todo.length, updated, none, total: list.length };
 }
 
-module.exports = { classifyKwikStatus, kwikOutcome, parseKwikDate, parseKwikshipJourney, fetchKwikshipShipment, fetchKwikshipPublic, updateKwikshipJourney, syncKwikship, backfillKwikshipNdrReasons, mirrorKwikshipToOrderTracking, backfillKwikshipOrderTracking, reconcileKwikshipTracking };
+module.exports = { classifyKwikStatus, kwikOutcome, parseKwikDate, parseKwikshipJourney, fetchKwikshipShipment, fetchKwikshipPublic, updateKwikshipJourney, syncKwikship, backfillKwikshipNdrReasons, mirrorKwikshipToOrderTracking, backfillKwikshipOrderTracking, reconcileKwikshipTracking, backfillKwikshipFromOrders, applyKwikshipCharges };
 
 // CLI: node app/api/kwikship_sync.js sync [days] [concurrency]
 if (require.main === module && process.argv[2] === 'sync') {

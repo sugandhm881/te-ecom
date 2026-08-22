@@ -492,6 +492,53 @@ function check(name, got, want) {
     // frozen forever - 4,717 phantom inbound units were suppressing reorders (2026-08-20).
     check('open po: a Completed PO never counts as inbound stock',
         /const PO_DEAD = new Set\(\[4, 5, 7\]\)/.test(po), true);
+    // -- A new product must join the dashboard by itself -----------------------------------------
+    // The snapshot's SKU list is the `base_sku` set in sku_pack_mapping and NOTHING else (verified:
+    // 17 registered, 17 in the snapshot, identical sets), so a launched product stayed invisible in the
+    // table, the charts, the reorder sheet and the Teams report until somebody hand-added a mapping row.
+    const invApi = fs.readFileSync(path.join(ROOT, 'app/api/inventory.js'), 'utf8');
+    check('new products: registration happens BEFORE the snapshot is built',
+        invApi.indexOf('registerNewProducts()') < invApi.indexOf('functions/v1/snapshot-inventory'), true);
+    // "Every EasyEcom SKU" would drag in ~60 drafts, FBA variants, channel codes and combos -- and
+    // EasyEcom's own is_combo reads false for every one of them, so it cannot be the filter.
+    check('new products: only real stock at our own warehouse qualifies',
+        [/SHIFUPRO_LOC_CODE/.test(invApi), /qtyBySku\[sku\] > 0/.test(invApi),
+         /NOT_A_PRODUCT/.test(invApi), /isCodeName/.test(invApi)], [true, true, true, true]);
+    // EasyEcom states one physical pool in each pack's unit (524 / 262 / 131), so the RATIO proves the
+    // multiplier. Registering a pack as its own base would triple-count the same bottles; taking the
+    // multiplier from the trailing digit alone would corrupt DRR silently.
+    check('new products: a pack multiplier comes from the stock ratio, never the SKU name alone',
+        /ratioProves = bq > 0 && pq > 0 && bq % pq === 0 && bq \/ pq === p\.n/.test(invApi), true);
+    check('new products: an unproven pack is reported, not registered on a guess',
+        /unsure\.push/.test(invApi) && /needing a human/.test(invApi), true);
+    // A first snapshot that comes back empty reads as OUT OF STOCK, and the 06:30 Teams report would
+    // announce a freshly-stocked product that way. Checked against EasyEcom and re-run once instead.
+    check('new products: an empty first snapshot is verified and re-run, not trusted',
+        /came back with no stock though EasyEcom/.test(invApi) && /out = await runSnapshot\(\);/.test(invApi), true);
+    // Registration must never cost us the snapshot itself.
+    check('new products: a registration failure still leaves the snapshot running',
+        /registration failed \(snapshot continues\)/.test(invApi), true);
+
+    // -- Raised PO must explain itself -----------------------------------------------------------
+    // "Raised PO 549" for TE-BB1 against a PO raised for 500 reads as a bug. It is 500 from PO 69 plus
+    // a 49-unit remnant of PO 38 -- raised 5 Jun, 1 of 50 units ever received, still Open 77 days on.
+    // The sum was right; nothing on the page could explain it.
+    const poApi = fs.readFileSync(path.join(ROOT, 'app/api/purchase_orders.js'), 'utf8');
+    const poUi = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    check('raised po: the figure carries the POs it is made of',
+        [/detailBySku/.test(poApi), /open_po_detail/.test(fs.readFileSync(path.join(ROOT, 'app/api/inventory.js'), 'utf8')), /poTitle/.test(poUi)],
+        [true, true, true]);
+    // A line pending long past its raise date is a forgotten PO. It stays subtracted -- EasyEcom still
+    // calls it open -- but it must be VISIBLE, since a stale remnant suppressing a re-order is exactly
+    // how this number does damage.
+    check('raised po: a long-pending line is flagged stale, not silently dropped',
+        [/const PO_STALE_DAYS = 45;/.test(poApi), /stale: ageDays != null && ageDays > PO_STALE_DAYS/.test(poApi),
+         /bySku\[sku\] = \(bySku\[sku\] \|\| 0\) \+ i\.pending;/.test(poApi)],
+        [true, true, true]);
+    // A tooltip nobody hovers is not a warning: the stale POs are named in the footnotes too.
+    check('raised po: stale POs are named on the page, not only on hover',
+        /stale PO line/.test(poUi) && /close the PO in EasyEcom/.test(poUi), true);
+
     check('open po: the report names the stale copy instead of claiming failure',
         /po\.stale\) poStaleAt = po\.fetchedAt/.test(inv) && /subtracted from the last good copy/.test(inv), true);
 }
@@ -580,6 +627,124 @@ function check(name, got, want) {
         /not a KwikShip invoice/i.test(ui) && /computed: true/.test(api), true);
     // ALL SIX registration points -- adding the permission alone leaves the nav item invisible, which
     // cost a debugging round on the GoKwik PG build (index.html is static).
+    // The window basis is the terminal status date (delivered_at / rto_at), not the order date: freight
+    // is earned when a shipment CLOSES, so a parcel ordered 28 Jul and delivered 3 Aug is August
+    // freight. Live proof at the switch: July held 85 shipments by order date but 8 by close date.
+    check('kwikship: shipments are windowed on the terminal status date, never the order date',
+        [/fetchByDate\('delivered_at'/.test(api) && /fetchByDate\('rto_at'/.test(api),
+         /basis: 'closed_at'/.test(api),
+         /gte\('order_date', fromISO\)/.test(api)],
+        [true, true, false]);
+    // A shipment that has not closed belongs to no window -- it must be COUNTED, not silently absent.
+    check('kwikship: still-moving shipments are surfaced, not dropped in silence',
+        /openShipments\(/.test(api) && /still moving/.test(ui), true);
+    // The close date must agree with the OUTCOME: the fetch matches either timestamp, so a parcel
+    // carrying both would be pulled in by one column and labelled by the other -- across a month
+    // boundary that is an off-by-one indistinguishable from a timezone bug.
+    check('kwikship: an RTO is dated by rto_at even when a delivered_at also exists',
+        /String\(r\.outcome \|\| ''\) === 'rto' \? \(r\.rto_at \|\| r\.delivered_at\)/.test(api), true);
+    check('kwikship: the ledger groups months by the close date too',
+        /istDay\(r\.closed_at \|\| r\.order_date\)/.test(api), true);
+    // -- Ledger: the TWO-SIDED account, not a freight bill list ----------------------------------
+    // KwikShip COLLECTS the COD and remits it net of freight, exactly as DocPharma settles. The first
+    // version carried only the freight side and so announced "3358.72 payable to KwikShip" for a month
+    // in which KwikShip was holding 3.87 LAKH of ours -- the sign of the account was inverted.
+    check('kwikship ledger: both sides of the account are carried, not just freight',
+        [/codCollected/.test(api), /receivable/.test(api), /remitExpected/.test(api), /payableInvoiced/.test(api)],
+        [true, true, true, true]);
+    // An RTO collects no cash, so its value must never enter the receivable.
+    check('kwikship ledger: only DELIVERED COD becomes receivable',
+        /oc === 'delivered'\) \{ b\.codDelivered\+\+; b\.codCollected \+= r\.value \|\| 0; \}/.test(api), true);
+    // A month KwikShip has not billed is not a liability yet -- netting the rate-card estimate would
+    // report money as settled that nobody has actually claimed.
+    check('kwikship ledger: only INVOICED freight is netted, the estimate stays a memo',
+        [/b\.payableActual = b\.invGrand;/.test(api), /unInvoicedMemo/.test(api)], [true, true]);
+    // The old code did `if (months[m]) months[m].payments += ...` -- a remittance in a month with no
+    // closed shipment was silently dropped, making the account look further behind than it was.
+    check('kwikship ledger: a payment in a shipment-less month still lands',
+        /payments\.forEach\(p => \{\s*\n\s*if \(!inWindow/.test(api), true);
+    // ...but only inside the window asked for, or an August bill shows as a phantom month on a July view.
+    check('kwikship ledger: an out-of-window invoice does not invent a month',
+        /const inWindow = m => m !== 'unknown' && m >= mFrom && m <= mTo;/.test(api), true);
+    // FIFO frontier: partners pay lump sums, so "settled through" is the honest reading, not an average.
+    check('kwikship ledger: settlement is FIFO with a stated frontier',
+        [/settledThrough/.test(api), /unsettledMonths/.test(api), /overpaid/.test(api)], [true, true, true]);
+    // tailwind.css is PREBUILT and carries NO responsive grid variants at all -- `lg:grid-cols-3` is a
+    // silent no-op. The ledger must not lean on one.
+    check('kwikship ledger: no uncompiled responsive grid class in the new ledger UI',
+        /(md|lg|sm):grid-cols-/.test(ui.slice(ui.indexOf('function ksrLedger()'), ui.indexOf('function ksrUpload'))), false);
+    // Money moves both ways; a remittance rendered as a payment out inverts the balance.
+    check('kwikship payments: direction is recorded and shown',
+        [/ksrp-dir/.test(ui), /_ksrPayOut/.test(ui), /direction: b\.direction \|\| 'received'/.test(api)], [true, true, true]);
+
+    // -- Invoices: the real bill, held against the computed expectation --------------------------
+    // The invoice parser reads layouts we have never seen, so the one thing it must never do is
+    // produce a WRONG number that looks plausible enough to save unchecked.
+    // The parser leans on a few module-level helpers, so build it with its real dependencies rather
+    // than eval'ing the function alone (which silently loses MONTHS and reports a scope error as a bug).
+    const grabFn = re => api.match(re)[0];
+    const parserSrc = [
+        grabFn(/const MONTHS = [^\n]+\n/),
+        grabFn(/const _n = [^\n]+\n/),
+        grabFn(/const _c = [^\n]+\n/),
+        grabFn(/function monthPeriod[\s\S]*?\n\}\n/),
+        grabFn(/function amountOnLine[\s\S]*?\n\}\n/),
+        grabFn(/function parseInvoiceText[\s\S]*?\n\}\n/),
+        'return { monthPeriod, parseInvoiceText };',
+    ].join('\n');
+    const { monthPeriod, parseInvoiceText: parseInv } =
+        new Function('parseInvDate', parserSrc)(require(path.join(ROOT, 'app/api/docpharma_invoices')).parseInvDate);
+    check('kwikship invoices: a stated month becomes the whole calendar period',
+        [monthPeriod("Jul'26"), monthPeriod('February 2026')],
+        [{ from: '2026-07-01', to: '2026-07-31' }, { from: '2026-02-01', to: '2026-02-28' }]);
+    // `CGST9 (9%) 4,265.79` must yield the AMOUNT, not the 9. Reading a rate as a rupee figure gives a
+    // small, believable number -- the worst kind of parse error.
+    const real = parseInv("Invoice No. : GKHR/2627/018734\nInvoice Date : 01 Aug 2026\nService Period : Jul'26\n"
+        + 'No of Transactions: 2765\nTotal Taxable Amount 47,397.66\nCGST9 (9%) 4,265.79\nSGST9 (9%) 4,265.79\nTotal 55,929.00');
+    check('kwikship invoices: GST reads the amount, never the rate',
+        [real.gst_amount, real.freight_amount, real.shipments, real.period_from], [8531.58, 47397.66, 2765, '2026-07-01']);
+    check('kwikship invoices: a rate-only line yields nothing rather than a wrong total',
+        parseInv('IGST 18%\nTotal 100.00').gst_amount == null, true);
+    // The second real layout (Goexcelsior HR/26-27/0014132) stacks THREE totals: `Sub Total 327.00`,
+    // `Total 386.00`, `Balance Due 386.00`. Reading the first line containing "Total" returned 327 --
+    // the PRE-TAX figure, short by exactly the GST, which is the one number this page exists to check.
+    const stacked = parseInv('Invoice Number : HR/26-27/0014132\nInvoice Date : 07/08/2026\n'
+        + '# Item & Description HSN/SAC Qty Taxable Value (Excl. GST)\n1 Freight Charge 996511 1.00 327.00\n'
+        + 'Total In Words\nIndian Rupee Three Hundred Eighty-Six Only\n'
+        + 'Sub Total 327.00\nCGST (9%) 29.43\nSGST (9%) 29.43\nRounding 0.14\nTotal \u20b9386.00\nBalance Due \u20b9386.00');
+    check('kwikship invoices: a sub-total is never mistaken for the total',
+        [stacked.freight_amount, stacked.gst_amount, stacked.total_amount, stacked.invoice_no],
+        [327, 58.86, 386, 'HR/26-27/0014132']);
+    // A lump-sum freight line has Qty 1.00 -- a line-item count, NOT a shipment count. Inventing
+    // shipments = 1 would show a variance of -1,966 against the month.
+    check('kwikship invoices: a line-item qty is not a shipment count', stacked.shipments, null);
+    // Part-paid: Balance Due is smaller than the bill, and the BILL is what a variance measures.
+    check('kwikship invoices: the invoice total wins over a smaller balance due',
+        parseInv('Sub Total 1000.00\nIGST (18%) 180.00\nTotal 1180.00\nBalance Due 500.00').total_amount, 1180);
+    // A missing table must degrade to a setup message, not a 500. PostgREST answers PGRST205 here --
+    // it never reaches Postgres, so the 42P01 everyone tests for never appears.
+    check('kwikship invoices: a missing table degrades to a setup prompt',
+        /PGRST205/.test(api) && /needsSetup/.test(api) && /needsSetup/.test(ui), true);
+    check('kwikship invoices: parsing never writes -- it fills the form for review',
+        /returns fields for REVIEW, saves nothing|for REVIEW, saves nothing/.test(api), true);
+    // Asked for: Method removed from the payment form, PDF/Excel upload added.
+    check('kwikship payments: the Method field is gone and an upload replaces it',
+        [/ksrp-method/.test(ui), /kwikship-payments\/parse/.test(ui) && /ksrp-file/.test(ui)], [false, true]);
+    // apply_kwikship_charges() RECOMPUTES applied_weight from the courier payload, wiping any weight
+    // we supplied -- so every call must be followed by the backfill or shipments KwikShip never
+    // weighed go straight back to unpriced. It was called from THREE places with the backfill after
+    // only one, so TE25-42790 un-priced itself again the moment anyone re-zoned. One wrapper now.
+    {
+        const sync = fs.readFileSync(path.join(ROOT, 'app/api/kwikship_sync.js'), 'utf8');
+        const zm = fs.readFileSync(path.join(ROOT, 'app/api/zone_mapping.js'), 'utf8');
+        const srv2 = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+        const raw = [sync, zm, srv2].join(' ').match(/rpc\('apply_kwikship_charges'\)/g) || [];
+        check('kwikship: the costing RPC is called in exactly one place', raw.length, 1);
+        check('kwikship: that one place backfills straight after costing',
+            /async function applyKwikshipCharges\(\)[\s\S]{0,600}backfillKwikshipFromOrders\(\)/.test(sync), true);
+        check('kwikship: re-zoning goes through the wrapper, not the raw RPC',
+            (zm.match(/applyKwikshipCharges\(\)/g) || []).length, 2);
+    }
     check('kwikship: every registration point is wired',
         [/require\('\.\/app\/api\/kwikship_recon'\)/.test(srv),
          /kwikship-\(recon\|payments\)/.test(srv),
@@ -588,6 +753,44 @@ function check(name, got, want) {
          /\['kwikship-recon','KwikShip Freight Recon'\]/.test(ui),
          /id="nav-kwikship-recon"/.test(html) && /id="kwikship-recon-view"/.test(html)],
         [true, true, true, true, true, true]);
+}
+
+// -- 4j. ShopifyHold: a */2 cron must not card a network blip ------------------------------------
+// Six red cards in one hour on 20 Aug, every one a network error (`TypeError: fetch failed`, one axios
+// timeout). Nothing was wrong with the job. Two of those runs lasted 148s and 243s against a 120s
+// schedule -- runs were OVERLAPPING, which makes timeouts likelier, which makes runs longer.
+{
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    const SH_TRANSIENT = eval(srv.match(/const SH_TRANSIENT = (\/.+\/i);/)[1]);
+    const shTransient = e => SH_TRANSIENT.test(String((e && e.message) || e));
+    const AFTER = parseInt((srv.match(/SH_ALERT_AFTER, 10\) \|\| (\d+)/) || [])[1], 10);
+
+    // The four real messages from the cards, verbatim.
+    check('shopify hold: the real network failures are classed transient',
+        ['cron error: TypeError: fetch failed', 'orders lookup failed: TypeError: fetch failed',
+         'TypeError: fetch failed', 'timeout of 20000ms exceeded'].map(m => shTransient({ message: m })),
+        [true, true, true, true]);
+    // A genuine bug must never be muffled by the transient path -- that is the failure mode of this
+    // kind of fix, and it is worse than the noise it removes.
+    check('shopify hold: a genuine bug is never classed transient',
+        ["Cannot read properties of undefined (reading 'order_name')", 'holdOrderSmart is not a function',
+         'invalid input syntax for type uuid'].map(m => shTransient({ message: m })),
+        [false, false, false]);
+
+    // Escalation: warn while it is plausibly a blip, card once it is plainly an outage, then hourly.
+    const policy = n => (n === AFTER || (n > AFTER && n % 30 === 0));
+    check('shopify hold: one blip raises no card, a sustained outage does',
+        [policy(1), policy(AFTER - 1), policy(AFTER), policy(30), policy(60)],
+        [false, false, true, true, true]);
+    let cards = 0; for (let n = 1; n <= 30; n++) if (policy(n)) cards++;
+    check('shopify hold: an hour of continuous failure cards twice, not thirty times', cards, 2);
+
+    check('shopify hold: overlapping runs are skipped, not stacked',
+        /_shRunning/.test(srv) && /previous run still going/.test(srv), true);
+    check('shopify hold: one failing order cannot abandon the batch',
+        /holdOrderSmart\([\s\S]{0,700}?\} catch \(e\) \{[\s\S]{0,120}failed\+\+/.test(srv), true);
+    check('shopify hold: the candidate lookup retries a transient failure once',
+        /if \(!shTransient\(e1\)\) throw e1;/.test(srv), true);
 }
 
 // ── 5. RapidShyp sync: transient failures must not raise a cron-failure card ─────────────────────
