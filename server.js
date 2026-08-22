@@ -173,6 +173,13 @@ const _VIEW_PERMS = [
     [/^\/silent-rto-claims/i, 'claims-sla'],
     [/^\/late-deliveries/i, 'claims-sla'],
     [/^\/intransit-late/i, 'claims-sla'],
+    // ⚠ An UNLISTED path falls through to next() — i.e. any signed-in user, whatever their role. These
+    // three were unlisted: /first-ofd-late from the day it shipped, /lost-shipments and the Excel
+    // export from today. The export is the one that matters most: it hands over the whole claims book
+    // — customer city and state, order values, freight — in one file.
+    [/^\/first-ofd-late/i, 'claims-sla'],
+    [/^\/lost-shipments/i, 'claims-sla'],
+    [/^\/claims\//i, 'claims-sla'],
     [/^\/kwikship\//i, 'delivery-perf'],   // manual Kwikship tracking re-sync (cron runs nightly 2 AM)
     // Customer Support console — any support view permission unlocks its API group.
     [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist', 'customer-profile']],

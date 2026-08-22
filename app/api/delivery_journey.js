@@ -135,7 +135,11 @@ function parseRapidshypJourney(scans, currentStatus, courier, zone, statusCode, 
     const rto       = codeOut === 'rto' || !!rtoAt || /\brto|return/.test(status);
     const lost      = codeOut === 'lost' || !!lostAt || /\blost\b/.test(status);   // terminal loss (LST/DMG/DPO codes)
     const reached_delivery = seenOFD || delivered || /out[\s_]for[\s_]delivery/.test(status);
-    const outcome   = delivered ? 'delivered' : rto ? 'rto' : lost ? 'lost' : (ndr_count > 0 ? 'ndr_pending' : 'in_transit');
+    // ⚠ LOST OUTRANKS RTO. A parcel that RTO'd and then went lost/damaged on the way back NEVER CAME
+    // BACK — calling it 'rto' filed it on the Silent-RTO claim list while the Lost tab (which is where
+    // its money is actually recovered) never saw it. 5 live rows sat that way, status LST, outcome rto.
+    // Delivered still wins over both: a delivery is the one outcome later codes cannot un-happen.
+    const outcome   = delivered ? 'delivered' : lost ? 'lost' : rto ? 'rto' : (ndr_count > 0 ? 'ndr_pending' : 'in_transit');
 
     return {
         courier: courier || null,
@@ -202,7 +206,9 @@ function parseDocpharmaJourney(dp) {
     const lost      = /\blost\b|untraceable/.test(status);
     // Out-for-delivery is an attempt in progress, NOT terminal → stays in-transit unless a re-attempt was logged.
     const reached_delivery = delivered || rto || reattempts > 0;
-    const outcome   = delivered ? 'delivered' : rto ? 'rto' : lost ? 'lost' : reached_delivery ? 'ndr_pending' : 'in_transit';
+    // Same priority as the RapidShyp classifier above: lost outranks rto — a return that went lost never
+    // came back, and listing it as RTO double-files it once a Lost view exists.
+    const outcome   = delivered ? 'delivered' : lost ? 'lost' : rto ? 'rto' : reached_delivery ? 'ndr_pending' : 'in_transit';
 
     return {
         courier: ld.delivery_partner_name || ld.service_name || null,
@@ -371,7 +377,22 @@ async function syncRsCharges(awb, opts = {}) {
 // NULL). Runs a small concurrency pool with pacing so RapidShyp isn't throttled. Only final shipments
 // are fetched — freight is stable once delivered/RTO'd, and that's all the reports need.
 // Returns { processed, updated }.
+// A shipment's charges are NOT settled the moment we first read them. RapidShyp re-prices a parcel when
+// it turns around: they add the return leg and REMOVE the COD collection fee (nothing was collected).
+// Proven live on TE25-42151 — our copy said rto ₹0 / cod ₹29.50 / total ₹80.24 while their API said
+// rto ₹50.74 / cod ₹0 / total ₹101.48, one day after the RTO.
+//
+// ⚠⚠ THE OLD SELECT ASKED FOR `charges_fetched_at IS NULL`, i.e. EACH SHIPMENT WAS PRICED ONCE, EVER.
+// After that stamp it was never looked at again, so every parcel that RTO'd *after* it was priced kept
+// its pre-RTO snapshot for good: 982 RTOs carrying no return leg, freight understated by ~₹25,182.
+// Re-pricing is therefore driven by SHAPE, not by age — an RTO with no return leg is unfinished business
+// whatever its date, and re-reading it costs one API call and settles the question.
+const RTO_REPRICE_GRACE_MS = 6 * 60 * 60 * 1000;   // RapidShyp needs a few hours to post the leg
+// After this long a missing return leg is RapidShyp's final answer, not a pending one — checked
+// against their API on returns at 54, 71 and 89 days, all still legless and all matching our copy.
+const RTO_RECHECK_MAX_DAYS = 60;
 async function syncChargesBatch(limit = 500, concurrency = 4) {
+    // 1. Never priced at all.
     const { data, error } = await supabase.from('shipment_journey_ecom')
         .select('awb, first_edd')
         .eq('source', 'rapidshyp').eq('is_final', true)
@@ -379,6 +400,42 @@ async function syncChargesBatch(limit = 500, concurrency = 4) {
         .limit(limit);
     if (error) { console.error('[Charges] batch select error:', error.message); return { processed: 0, updated: 0 }; }
     const rows = data || [];
+    // 2. Priced, but RTO'd with no return leg — the shape we PROVED goes stale. Oldest RTO first, so a
+    //    backlog drains in the order the money went out. The grace window skips a parcel that turned
+    //    around in the last few hours, where a missing leg is genuinely just not posted yet.
+    if (rows.length < limit) {
+        const cutoff = new Date(Date.now() - RTO_REPRICE_GRACE_MS).toISOString();
+        const { data: staleRows, error: staleErr } = await supabase.from('shipment_journey_ecom')
+            .select('awb, first_edd, rto_at, charges_fetched_at')
+            .eq('source', 'rapidshyp').eq('outcome', 'rto').eq('freight_rto', 0)
+            .not('awb', 'is', null)
+            .lte('rto_at', cutoff)
+            .order('rto_at', { ascending: true })
+            .limit((limit - rows.length) * 4);   // over-fetch: most will already be settled
+        if (staleErr) console.warn('[Charges] stale-RTO select failed (new shipments still priced):', staleErr.message);
+        else if (staleRows && staleRows.length) {
+            // ⚠⚠ ONE READ AFTER THE RTO IS NOT ENOUGH, AND ASSUMING IT WAS LEFT MONEY UNBILLED. RapidShyp
+            // charges the return leg when the parcel actually gets BACK, which is days after the RTO is
+            // raised — TE25-40292 and TE25-41443 were still IN_TRANSIT 4 and 5 days in, with no leg yet.
+            // A queue that stopped at the first post-RTO read would never see the leg land.
+            // ⚠ But it must still CLOSE, or it re-reads settled shipments for ever: some returns genuinely
+            // carry no leg at all (verified against RapidShyp's API at 54, 71 and 89 days). So: re-read at
+            // most ONCE A DAY, and give up after RTO_RECHECK_MAX_DAYS — by then the answer is final.
+            // Bounded either way, this is ~20 calls a night. PostgREST cannot compare two columns, so the
+            // dates are compared here.
+            const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+            const oldestWorthAsking = Date.now() - RTO_RECHECK_MAX_DAYS * 24 * 60 * 60 * 1000;
+            const behind = staleRows.filter(r => {
+                if (new Date(r.rto_at).getTime() < oldestWorthAsking) return false;   // settled for good
+                if (!r.charges_fetched_at) return true;                               // never read
+                return new Date(r.charges_fetched_at).getTime() <= dayAgo;            // not read today
+            }).slice(0, limit - rows.length);
+            if (behind.length) {
+                console.log(`[Charges] re-pricing ${behind.length} RTO(s) whose charge snapshot predates the return`);
+                rows.push(...behind);
+            }
+        }
+    }
     let updated = 0, i = 0;
     async function worker() {
         while (i < rows.length) {

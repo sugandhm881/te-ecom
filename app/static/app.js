@@ -4159,13 +4159,15 @@ const _claimsState = {
   late: { rows: [], sortKey: 'days_late', dir: -1 },
   intransit: { rows: [], sortKey: 'days_overdue', dir: -1 },
   ofd: { rows: [], sortKey: 'ofd_late', dir: -1 },
+  // Coldest trail first: a parcel nobody has scanned in four months is the one to chase.
+  lost: { rows: [], sortKey: 'days_silent', dir: -1 },
 };
-const _CLAIMS_TABS = ['srto', 'late', 'intransit', 'ofd'];
-const _CLAIMS_PANEL = { srto: 'claims-panel-srto', late: 'claims-panel-late', intransit: 'claims-panel-intransit', ofd: 'claims-panel-ofd' };
+const _CLAIMS_TABS = ['srto', 'late', 'intransit', 'ofd', 'lost'];
+const _CLAIMS_PANEL = { srto: 'claims-panel-srto', late: 'claims-panel-late', intransit: 'claims-panel-intransit', ofd: 'claims-panel-ofd', lost: 'claims-panel-lost' };
 // Each tab loads independently — its own GET endpoint, tbody, label, and (below) its own date range.
-const _CLAIMS_URL = { srto: '/api/silent-rto-claims', late: '/api/late-deliveries', intransit: '/api/intransit-late', ofd: '/api/first-ofd-late' };
-const _CLAIMS_TBODY = { srto: 'srto-tbody', late: 'late-tbody', intransit: 'itl-tbody', ofd: 'ofd-tbody' };
-const _CLAIMS_LABEL = { srto: 'Silent-RTO Claims', late: 'Late Deliveries', intransit: 'In-transit · Overdue', ofd: 'First-OFD Late' };
+const _CLAIMS_URL = { srto: '/api/silent-rto-claims', late: '/api/late-deliveries', intransit: '/api/intransit-late', ofd: '/api/first-ofd-late', lost: '/api/lost-shipments' };
+const _CLAIMS_TBODY = { srto: 'srto-tbody', late: 'late-tbody', intransit: 'itl-tbody', ofd: 'ofd-tbody', lost: 'lost-tbody' };
+const _CLAIMS_LABEL = { srto: 'Silent-RTO Claims', late: 'Late Deliveries', intransit: 'In-transit · Overdue', ofd: 'First-OFD Late', lost: 'Lost' };
 let _claimsOpenAwb = null;            // the currently-expanded row (one at a time)
 const _claimsDetail = {};             // awb → { loading, journey, scans, dp, live, edd, error }
 const _claimsFilter = { q: '', platform: '', payment: '', courier: '', zone: '' };
@@ -4205,6 +4207,7 @@ function claimsInit(){
     document.getElementById('claims-f-courier')?.addEventListener('change', e => { _claimsFilter.courier = e.target.value; claimsRender(); });
     document.getElementById('claims-f-zone')?.addEventListener('change', e => { _claimsFilter.zone = e.target.value; claimsRender(); });
     document.getElementById('claims-clear')?.addEventListener('click', claimsClearFilters);
+    document.getElementById('claims-export')?.addEventListener('click', claimsExport);
     // Sortable headers (delegated per panel).
     _CLAIMS_TABS.forEach(which => {
       document.getElementById(_CLAIMS_PANEL[which])?.querySelector('thead')?.addEventListener('click', e => {
@@ -4216,7 +4219,10 @@ function claimsInit(){
     });
     if(canSendEmails()){ ['srto-send', 'late-send', 'itl-send', 'ofd-send'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = ''; }); }
     // Click a row to expand its full detail (date log + scan log). Delegated per panel body.
-    ['srto-tbody', 'late-tbody', 'itl-tbody', 'ofd-tbody'].forEach(id => {
+    // ⚠ Driven off _CLAIMS_TBODY, not a hand-typed list — the Lost tab was added to every other
+    // registry and missed here, so its rows silently would not expand while all the code for the
+    // detail row existed and looked correct.
+    Object.values(_CLAIMS_TBODY).forEach(id => {
       document.getElementById(id)?.addEventListener('click', e => {
         if(e.target.closest('a')) return;                       // let links inside the detail work
         const tr = e.target.closest('tr[data-awb]'); if(!tr) return;
@@ -4246,26 +4252,57 @@ async function claimsLoadDetail(awb){
   }catch(e){ _claimsDetail[awb] = { loading: false, error: e.message }; }
   if(_claimsOpenAwb === awb) claimsRender();
 }
-// Expanded detail row (colspan 7): Date log (timeline) + Scan log, plus destination/payment/freight meta.
+// Expanded detail row: Date log (timeline) + Scan log, plus destination/payment/freight meta.
+// ⚠ The colspan is COUNTED FROM THE TABLE, never hardcoded. It was fixed at 7, which was already
+// wrong the moment Silent-RTO gained a Payment column (8) and Lost arrived with 9 — a short colspan
+// leaves the detail panel narrower than the row it belongs to, which reads as a rendering glitch.
 function claimsDetailRow(r, which){
   const d = _claimsDetail[r.awb], j = d && d.journey, ts = (j && j.ts) || {};
   const step = (label, iso, color) => { const on = !!iso; return `<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:${on?color:'#cbd5e1'}"></span><span class="w-28 text-slate-500">${label}</span><span class="tabular-nums ${on?'text-slate-700 font-medium':'text-slate-300'}">${dpFmtTs(iso)}</span></div>`; };
   const eddVal = ts.edd || r.first_edd || (d && d.edd) || null;
   const isRto = which === 'srto' || r.outcome === 'rto';
+  const isLost = which === 'lost' || r.outcome === 'lost';
+  // ⚠ A lost parcel neither delivered NOR returned, so neither of those steps belongs on its timeline.
+  // Showing a greyed-out “Delivered” invites the reader to think it might yet arrive; the honest last
+  // step is the last time anyone scanned it, which is exactly what the claim turns on.
+  const lastStep = isLost
+    ? step('Last scan', ts.lastScan || r.last_heard_at, '#ef4444')
+    : isRto ? step('RTO', ts.rto, '#ef4444') : step('Delivered', ts.delivered || r.delivered_at, '#16a34a');
   const timeline = step('Order placed', ts.order || r.order_date, '#6366f1') + step('Dispatched', ts.dispatched, '#0ea5e9') +
-    step('Out for delivery', ts.ofd, '#f59e0b') +
-    (isRto ? step('RTO', ts.rto, '#ef4444') : step('Delivered', ts.delivered || r.delivered_at, '#16a34a')) +
-    step('Promised EDD', eddVal, '#8b5cf6');
+    step('Out for delivery', ts.ofd, '#f59e0b') + lastStep +
+    step('Promised EDD', eddVal, '#8b5cf6')
+    + (isLost ? `<div class="flex items-center gap-2 py-0.5 text-xs"><span class="w-2 h-2 rounded-full shrink-0" style="background:#ef4444"></span><span class="w-28 text-slate-500">Written off</span><span class="text-rose-600 font-medium">lost — never delivered or returned${r.days_silent != null ? ` · ${r.days_silent}d silent` : ''}</span></div>` : '');
   const dest = [r.dest_city, r.dest_state].filter(Boolean).join(', ');
   const pieces = [`📍 <b class="text-slate-700">${ecEsc(dest || '—')}</b>${r.zone ? ` · Zone ${ecEsc(r.zone)}` : ''}`];
   if(r.payment_mode) pieces.push(`Payment: <b class="text-slate-700">${/cod/i.test(r.payment_mode) ? 'COD' : 'Prepaid'}</b>`);
   if(r.source) pieces.push(`Platform: <b class="text-slate-700">${platformLabel(r.source)}</b>`);
   if(j){ pieces.push(`Attempts: <b class="text-slate-700">${j.attempts || 0}</b>`); pieces.push(`NDRs: <b class="text-slate-700">${j.ndr_count || 0}</b>`); }
-  if(which === 'srto'){
-    pieces.push(`Forward freight: <b class="text-slate-700">${r.freight_forward != null ? _inr(r.freight_forward) : '—'}</b>`);
-    pieces.push(`RTO freight: <b class="text-slate-700">${r.freight_rto != null ? _inr(r.freight_rto) : '—'}</b>`);
-    pieces.push(`Total: <b class="text-rose-600">${r.freight_total != null ? _inr(r.freight_total) : '—'}</b>`);
-    pieces.push(`Invoice: <b class="text-slate-700">${r.shipment_value != null ? _inr(r.shipment_value) : '—'}</b>`);
+  if(which === 'srto' || which === 'lost'){
+    // ⚠ THE PANEL USED TO SHOW forward ₹50.74 + RTO ₹0 AGAINST A TOTAL OF ₹80.24 and never mention the
+    // ₹29.50 in between, so the arithmetic looked broken when it was merely incomplete. Both missing
+    // pieces are named now: the COD fee, and the fact that a return leg RapidShyp has not billed YET
+    // is not the same as a return that was free.
+    // ⚠ RapidShyp posts the return leg within HOURS of the RTO — checked against their live API. A
+    // missing leg here means OUR stored charge predates the return, not that they have not billed it.
+    // Stale means our snapshot predates the RTO. A leg that is missing on a charge we have ALREADY
+    // re-read since the return is RapidShyp's own figure, not our lag — saying "not synced" there is
+    // simply wrong, and it was wrong on all 24 such shipments.
+    const rtoHrs = r.rto_at ? (Date.now() - new Date(r.rto_at).getTime()) / 3600000 : null;
+    const readSince = !!(r.charges_fetched_at && r.rto_at
+      && new Date(r.charges_fetched_at).getTime() > new Date(r.rto_at).getTime());
+    const legStale = Number(r.freight_rto || 0) === 0 && rtoHrs != null && rtoHrs >= 6 && !readSince;
+    pieces.push(`Forward freight: <b class=\"text-slate-700\">${r.freight_forward != null ? _inr(r.freight_forward) : '—'}</b>`);
+    pieces.push(legStale
+      ? `RTO freight: <b class=\"text-amber-600\">not synced yet</b> <span class=\"text-amber-600\">— RapidShyp has billed it; our copy updates on the next charge sync</span>`
+      : `RTO freight: <b class=\"text-slate-700\">${r.freight_rto != null ? _inr(r.freight_rto) : '—'}</b>`);
+    if(r.cod_charges != null && Number(r.cod_charges) > 0){
+      // A COD fee on a returned parcel looks unearned, and on a SETTLED shipment it is. But the two
+      // charges never coexist and the leg replaces the fee, so on a fresh RTO it is simply the only
+      // line billed so far — calling it claimable would invite a re-bill at the higher return rate.
+      pieces.push(`COD fee: <b class=\"${legStale ? 'text-amber-600' : 'text-slate-700'}\">${_inr(r.cod_charges)}</b>${legStale ? ' <span class=\"text-amber-600\">— pre-RTO figure; RapidShyp removes it once the parcel turns around</span>' : ''}`);
+    }
+    pieces.push(`Billed: <b class=\"text-rose-600\">${r.freight_total != null ? _inr(r.freight_total) : '—'}</b>${legStale ? ' <span class=\"text-amber-600\">(understated — return leg not synced)</span>' : ''}`);
+    pieces.push(`Invoice: <b class=\"text-slate-700\">${r.shipment_value != null ? _inr(r.shipment_value) : '—'}</b>`);
   } else if(which === 'late'){ pieces.push(`Days late: <b class="text-rose-600">${r.days_late}</b>`); }
   else if(which === 'ofd'){ pieces.push(`First OFD: <b class="text-slate-700">${_dmy(r.out_for_delivery_at)}</b>`); pieces.push(`RTO date: <b class="text-slate-700">${_dmy(r.terminal_at)}</b>`); pieces.push(`Days late (OFD): <b class="text-rose-600">${r.ofd_late}</b>`); }
   else { pieces.push(`Days overdue: <b class="text-amber-600">${r.days_overdue}</b>`); }
@@ -4283,7 +4320,8 @@ function claimsDetailRow(r, which){
   }
   else if(!d.scans || !d.scans.length) scanHtml = '<div class="text-slate-400 text-xs py-3">No scan log available for this shipment.</div>';
   else scanHtml = `${scanRows(d.scans)}${d.live ? '<div class="text-[10px] text-emerald-500 mt-1">● fetched live from courier</div>' : ''}`;
-  return `<tr class="claims-detail"><td colspan="7" class="px-6 py-4 bg-slate-50 border-b border-slate-100">
+  const cols = document.getElementById(_CLAIMS_TBODY[which])?.closest('table')?.querySelectorAll('thead th').length || 7;
+  return `<tr class="claims-detail"><td colspan="${cols}" class="px-6 py-4 bg-slate-50 border-b border-slate-100">
     <div class="grid md:grid-cols-2 gap-6">
       <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Date log</div>${timeline}${meta}</div>
       <div><div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Scan log</div>${scanHtml}</div>
@@ -4351,7 +4389,7 @@ function claimsApply(which){
     if(f.q){ const q = f.q.toLowerCase(); if(!String(r.order_name || '').toLowerCase().includes(q) && !String(r.awb || '').toLowerCase().includes(q)) return false; }
     return true;
   });
-  const k = st.sortKey, dir = st.dir, dateKeys = ['order_date', 'first_edd', 'delivered_at', 'rto_at', 'out_for_delivery_at', 'terminal_at'], numKeys = ['freight_total', 'shipment_value', 'days_late', 'days_overdue', 'ofd_late'];
+  const k = st.sortKey, dir = st.dir, dateKeys = ['order_date', 'first_edd', 'delivered_at', 'rto_at', 'out_for_delivery_at', 'terminal_at', 'last_heard_at', 'dispatched_at'], numKeys = ['freight_total', 'shipment_value', 'days_late', 'days_overdue', 'ofd_late', 'days_silent', 'ndr_count'];
   rows.sort((a, b) => {
     let av = a[k], bv = b[k];
     if(dateKeys.includes(k)){ av = av ? new Date(av).getTime() : 0; bv = bv ? new Date(bv).getTime() : 0; }
@@ -4369,7 +4407,84 @@ function claimsCaret(which){
     th.classList.toggle('text-slate-700', active);
   });
 }
-function claimsRender(){ if(_claimsTab === 'srto') claimsRenderSrto(); else if(_claimsTab === 'late') claimsRenderLate(); else if(_claimsTab === 'ofd') claimsRenderOfd(); else claimsRenderIntransit(); }
+function claimsRender(){ if(_claimsTab === 'srto') claimsRenderSrto(); else if(_claimsTab === 'late') claimsRenderLate();
+  else if(_claimsTab === 'ofd') claimsRenderOfd(); else if(_claimsTab === 'lost') claimsRenderLost(); else claimsRenderIntransit(); }
+// COD and prepaid are not the same loss and should not read the same. On a lost parcel COD costs us the
+// goods; prepaid costs the goods AND a refund. The chip makes that visible at a glance in every table.
+function claimsPayChip(mode){
+  const m = String(mode || '').trim(); if(!m) return '<span class="text-slate-300">—</span>';
+  const cod = /cod/i.test(m);
+  return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cod?'bg-amber-100 text-amber-700':'bg-emerald-100 text-emerald-700'}">${ecEsc(cod?'COD':'Prepaid')}</span>`;
+}
+// The tab as a real .xlsx. Built on the SERVER from a fresh query — never from the rendered table,
+// which would inherit every cap the page has and produce a file that looks complete and is not.
+//
+// ⚠⚠ IT MUST BE A fetch(), NOT AN <a href>. This app authenticates with a BEARER TOKEN IN A HEADER,
+// and a link navigation carries no headers — so the first version downloaded the server's 401 body as a
+// file called "export" with no extension, which Windows offered to save as a "CUSTOMIZATION File".
+// A failed download that still produces a file is the worst kind: it looks like it worked.
+async function claimsExport(){
+  const st = _claimsState[_claimsTab], f = _claimsFilter;
+  const qs = new URLSearchParams({ tab: _claimsTab, from: st.from || '', to: st.to || '' });
+  ['platform','payment','courier','zone','q'].forEach(k => { if(f[k]) qs.set(k, f[k]); });
+  const btn = document.getElementById('claims-export');
+  if(btn){ btn.dataset.label = btn.dataset.label || btn.textContent; btn.disabled = true; btn.textContent = 'Preparing\u2026'; }
+  try{
+    const r = await fetch(`/api/claims/export.xlsx?${qs.toString()}`, { headers: getAuthHeaders() });
+    if(!r.ok){
+      // The server answers JSON on failure; surface THAT rather than a bare status code.
+      let msg = `Export failed (${r.status})`;
+      try{ const j = await r.json(); if(j && j.error) msg = j.error; }catch(_){}
+      throw new Error(msg);
+    }
+    const blob = await r.blob();
+    if(!blob.size) throw new Error('The server returned an empty file.');
+    // Name it from the server's Content-Disposition so the tab and date travel with the file; a
+    // spreadsheet in someone's Downloads folder called "export" is unidentifiable a week later.
+    const cd = r.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+    const name = (m && decodeURIComponent(m[1])) || `${_claimsTab}.xlsx`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;                     // explicit — an empty download="" lets the
+    document.body.appendChild(a); a.click(); a.remove(); // browser guess, and it guesses badly here
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    showNotification(`Downloaded ${name}`);
+  }catch(e){
+    showNotification(e.message || 'Export failed', true);
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = btn.dataset.label; }
+  }
+}
+function claimsRenderLost(){
+  const rows = claimsApply('lost'), count = rows.length;
+  const value = rows.reduce((a, r) => a + (Number(r.shipment_value) || 0), 0);
+  const prepaid = rows.filter(r => !/cod/i.test(r.payment_mode || ''));
+  const prepaidValue = prepaid.reduce((a, r) => a + (Number(r.shipment_value) || 0), 0);
+  const freight = rows.reduce((a, r) => a + (Number(r.freight_total) || 0), 0);
+  const set = (id, v) => { const el = document.getElementById(id); if(el) el.textContent = v; };
+  set('lost-kpi-count', count);
+  set('lost-kpi-value', _inr(value));
+  set('lost-kpi-prepaid', _inr(prepaidValue));
+  set('lost-kpi-freight', _inr(freight));
+  document.getElementById('lost-tbody').innerHTML = count ? rows.map(r => { const open = r.awb === _claimsOpenAwb;
+    const silent = r.days_silent;
+    let out = `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer ${open?'bg-indigo-50/60':''}" data-awb="${ecEsc(r.awb)}">
+    <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}${eeHoldChip(r.order_name)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
+    <td class="px-4 py-2.5">${claimsPayChip(r.payment_mode)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${_dmy(r.order_date)}</td>
+    <td class="px-4 py-2.5 text-slate-500">${r.last_heard_at ? _dmy(r.last_heard_at) : '<span class="text-slate-300">no scan</span>'}</td>
+    <td class="px-4 py-2.5 text-right font-bold ${silent >= 30 ? 'text-rose-600' : 'text-amber-600'}">${silent != null ? silent + 'd' : '—'}</td>
+    <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.zone || '')}</td>
+    <td class="px-4 py-2.5 text-right text-slate-600">${r.shipment_value != null ? _inr(r.shipment_value) : '—'}</td></tr>`;
+    if(open) out += claimsDetailRow(r, 'lost');
+    return out; }).join('')
+    : '<tr><td colspan="9" class="px-4 py-8 text-center text-slate-400">No lost shipments in this range.</td></tr>';
+  claimsCaret('lost');
+  const cc = document.getElementById('claims-count'); if(cc) cc.textContent = `${count} shown`;
+}
 function claimsRenderSrto(){
   const rows = claimsApply('srto'), count = rows.length;
   const freight = rows.reduce((a, r) => a + (Number(r.freight_total) || 0), 0);
@@ -4377,6 +4492,17 @@ function claimsRenderSrto(){
   const priced = rows.filter(r => r.freight_total != null).length;
   document.getElementById('srto-kpi-count').textContent = count;
   document.getElementById('srto-kpi-freight').textContent = _inr(freight);
+  // ⚠ UNDERSTATED WHERE OUR CHARGE COPY PREDATES THE RETURN. RapidShyp re-prices a parcel within
+  // hours of it turning around — they add the return leg and drop the COD fee — but charges used to be
+  // fetched once per shipment and never re-read, so those rows kept their pre-RTO figures. The charge
+  // sync now re-prices this shape; until it runs, say so rather than presenting a settled-looking sum.
+  const staleLeg = rows.filter(r => Number(r.freight_rto || 0) === 0 && r.rto_at
+    && (Date.now() - new Date(r.rto_at).getTime()) / 3600000 >= 6
+    && !(r.charges_fetched_at && new Date(r.charges_fetched_at).getTime() > new Date(r.rto_at).getTime())).length;
+  const sub = document.getElementById('srto-kpi-freight-sub');
+  if(sub) sub.innerHTML = staleLeg > 0
+    ? `<span class=\"text-amber-600\">${staleLeg} return legs not synced yet</span> — understated until the next charge sync`
+    : '&nbsp;';
   document.getElementById('srto-kpi-value').textContent = _inr(value);
   document.getElementById('srto-kpi-priced').textContent = `${priced}/${count}`;
   document.getElementById('srto-tbody').innerHTML = count ? rows.map(r => { const open = r.awb === _claimsOpenAwb;
@@ -4384,13 +4510,16 @@ function claimsRenderSrto(){
     <td class="px-4 py-2.5 font-medium text-slate-700"><span class="text-slate-300 text-xs mr-1">${open?'▾':'▸'}</span>${ecEsc(r.order_name)}${eeHoldChip(r.order_name)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.awb)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.courier || '')}</td>
+    <td class="px-4 py-2.5">${claimsPayChip(r.payment_mode)}</td>
     <td class="px-4 py-2.5 text-slate-500">${_dmy(r.order_date)}</td>
     <td class="px-4 py-2.5 text-slate-500">${ecEsc(r.zone || '')}</td>
+    <td class="px-4 py-2.5 text-right ${Number(r.freight_rto) > 0 ? 'text-slate-600' : 'text-slate-300'}">${Number(r.freight_rto) > 0 ? _inr(r.freight_rto) : '—'}</td>
+    <td class="px-4 py-2.5 text-right ${Number(r.cod_charges) > 0 ? 'text-amber-600 font-semibold' : 'text-slate-300'}" title="${Number(r.cod_charges) > 0 ? 'A COD collection fee on a parcel that was never attempted — no cash was collected, so it is not due' : ''}">${Number(r.cod_charges) > 0 ? _inr(r.cod_charges) : '—'}</td>
     <td class="px-4 py-2.5 text-right font-semibold text-rose-600">${r.freight_total != null ? _inr(r.freight_total) : '—'}</td>
     <td class="px-4 py-2.5 text-right text-slate-600">${r.shipment_value != null ? _inr(r.shipment_value) : '—'}</td></tr>`;
     if(open) out += claimsDetailRow(r, 'srto');
     return out; }).join('')
-    : '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">No silent RTOs match.</td></tr>';
+    : '<tr><td colspan="10" class="px-4 py-8 text-center text-slate-400">No silent RTOs match.</td></tr>';
   claimsCaret('srto');
   const cc = document.getElementById('claims-count'); if(cc) cc.textContent = `${count} shown`;
 }
@@ -16122,6 +16251,8 @@ const RSRE_FLAG_META = {
   unpriced:       ['Unpriced',           'bg-amber-50 text-amber-800 border-amber-200',      'Delivered/RTO but no charge synced yet — a billing gap'],
   rto_not_rto:    ['RTO fee, no RTO',    'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200','An RTO leg billed on a shipment that never RTOd'],
   cod_on_prepaid: ['COD fee on prepaid', 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200','COD collection fee billed on a prepaid order'],
+  rto_leg_stale:  ['Return leg not synced','bg-amber-50 text-amber-800 border-amber-200','RapidShyp has already billed the return leg — our stored charge predates the RTO and has not caught up. The next charge sync corrects it; the freight shown is understated until then.'],
+  cod_on_rto:     ['COD fee on RTO',     'bg-rose-50 text-rose-700 border-rose-200','Re-read since the return and RapidShyp still bills a COD fee with no return leg — a charge for collecting cash on a parcel that came back. Not our lag; worth asking them about.'],
   no_weight:      ['No weight',          'bg-slate-100 text-slate-600 border-slate-200',     'Billed with no applied weight — cannot be rate-checked'],
 };
 const RSRE_OUT = { delivered: ['Delivered', 'bg-emerald-100 text-emerald-700'], rto: ['RTO', 'bg-red-100 text-red-700'], lost: ['Lost', 'bg-rose-100 text-rose-800'], in_transit: ['In transit', 'bg-sky-100 text-sky-700'], ndr_pending: ['NDR', 'bg-amber-100 text-amber-800'] };
@@ -16174,6 +16305,7 @@ function rsreInit() {
               <option value="all">All shipments</option><option value="any">Flagged only</option>
               <option value="over_rate">Over rate</option><option value="unpriced">Unpriced</option>
               <option value="rto_not_rto">RTO fee, no RTO</option><option value="cod_on_prepaid">COD fee on prepaid</option>
+              <option value="rto_leg_stale">Return leg not synced</option><option value="cod_on_rto">Stale COD fee</option>
             </select>
             <select id="rsre-zone" class="${RSRE_IN}"><option value="all">All zones</option>${['A','B','C','D','E'].map(z => `<option value="${z}">Zone ${z}</option>`).join('')}</select>
             <select id="rsre-outcome" class="${RSRE_IN}"><option value="all">All outcomes</option><option value="delivered">Delivered</option><option value="rto">RTO</option><option value="in_transit">In transit</option></select>
@@ -16262,6 +16394,7 @@ function rsreOverview() {
       <div class="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Needs attention</div>
       <div class="flex flex-wrap gap-2">
         ${k.overRate ? `<button class="rsre-chip px-3 py-1.5 rounded-lg text-xs font-semibold border bg-rose-50 text-rose-700 border-rose-200" data-flag="over_rate">${k.overRate} billed above zone rate · ${RSRE_INR(k.overchargeTotal)} disputable</button>` : ''}
+        ${k.rtoLegStale ? `<button class="rsre-chip px-3 py-1.5 rounded-lg text-xs font-semibold border bg-amber-50 text-amber-800 border-amber-200" data-flag="rto_leg_stale" title="RapidShyp has already billed these return legs — our stored charge predates the RTO. The nightly charge sync re-prices them; until it does, the freight here is understated.">${k.rtoLegStale} returns not yet re-priced · ~${RSRE_INR(k.rtoLegStaleEst)} understated</button>` : ''}
         ${k.unpriced ? `<button class="rsre-chip px-3 py-1.5 rounded-lg text-xs font-semibold border bg-amber-50 text-amber-800 border-amber-200" data-flag="unpriced">${k.unpriced} closed but unbilled — charges sync pending</button>` : ''}
         <button class="rsre-chip px-3 py-1.5 rounded-lg text-xs font-semibold border bg-slate-100 text-slate-600 border-slate-200" data-flag="any">${k.flagged} flagged in total</button>
       </div></div>` : ''}

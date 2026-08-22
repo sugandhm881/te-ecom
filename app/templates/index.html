@@ -1798,6 +1798,7 @@
                     <button data-tab="late" class="claims-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">Late Deliveries</button>
                     <button data-tab="intransit" class="claims-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">In-transit · Overdue</button>
                     <button data-tab="ofd" class="claims-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">First-OFD Late</button>
+                    <button data-tab="lost" class="claims-tab px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700">Lost</button>
                 </div>
             </header>
 
@@ -1811,12 +1812,13 @@
                     <select id="claims-f-zone" class="filter-select"><option value="">All zones</option></select>
                     <button id="claims-clear" class="filter-btn">Clear</button>
                     <span id="claims-count" class="text-sm text-slate-400 ml-1"></span>
+                    <button id="claims-export" class="filter-btn ml-auto" title="Download the rows below as an Excel file — built on the server from a fresh query, so it is never capped by what the page happens to show">⬇ Excel</button>
                 </div>
                 <!-- Silent-RTO panel -->
                 <div id="claims-panel-srto">
                     <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
                         <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Silent RTOs</p><p id="srto-kpi-count" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
-                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Freight (claimable)</p><p id="srto-kpi-freight" class="text-2xl font-bold text-rose-600 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Freight (claimable)</p><p id="srto-kpi-freight" class="text-2xl font-bold text-rose-600 mt-1">—</p><p id="srto-kpi-freight-sub" class="text-xs text-slate-400 mt-1">&nbsp;</p></div>
                         <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Invoice value</p><p id="srto-kpi-value" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
                         <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Priced</p><p id="srto-kpi-priced" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
                     </div>
@@ -1834,12 +1836,15 @@
                                     <th data-sort="order_name" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Order <span class="claims-caret"></span></th>
                                     <th data-sort="awb" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">AWB <span class="claims-caret"></span></th>
                                     <th data-sort="courier" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Courier <span class="claims-caret"></span></th>
+                                    <th data-sort="payment_mode" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Payment <span class="claims-caret"></span></th>
                                     <th data-sort="order_date" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Order date <span class="claims-caret"></span></th>
                                     <th data-sort="zone" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Zone <span class="claims-caret"></span></th>
+                                    <th data-sort="freight_rto" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">RTO freight <span class="claims-caret"></span></th>
+                                    <th data-sort="cod_charges" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">COD fee <span class="claims-caret"></span></th>
                                     <th data-sort="freight_total" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Shipping cost <span class="claims-caret"></span></th>
                                     <th data-sort="shipment_value" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Invoice value <span class="claims-caret"></span></th>
                                 </tr></thead>
-                                <tbody id="srto-tbody"><tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr></tbody>
+                                <tbody id="srto-tbody"><tr><td colspan="10" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr></tbody>
                             </table>
                         </div>
                     </div>
@@ -1940,6 +1945,33 @@
                                     <th data-sort="ofd_late" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Days late (OFD) <span class="claims-caret"></span></th>
                                 </tr></thead>
                                 <tbody id="ofd-tbody"><tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div id="claims-panel-lost" style="display:none">
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Lost shipments</p><p id="lost-kpi-count" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Goods value lost</p><p id="lost-kpi-value" class="text-2xl font-bold text-rose-600 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Prepaid — refund owed</p><p id="lost-kpi-prepaid" class="text-2xl font-bold text-amber-600 mt-1">—</p></div>
+                        <div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Freight paid anyway</p><p id="lost-kpi-freight" class="text-2xl font-bold text-slate-800 mt-1">—</p></div>
+                    </div>
+                    <p class="text-xs text-slate-400 mb-4">Shipments the courier has written off as <b>lost</b> — no delivery, no return. <b>Prepaid</b> loses the goods <i>and</i> owes the customer a refund; <b>COD</b> loses the goods only, since nothing was ever collected. <b>Days silent</b> counts from the last scan (or dispatch, when tracking never started) — the older it gets, the colder the claim. Date range filters on the <b>order date</b>, because a lost parcel has no delivery or RTO date to filter by.</p>
+                    <div class="card overflow-hidden">
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead class="bg-slate-50 text-slate-500 select-none"><tr>
+                                    <th data-sort="order_name" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Order <span class="claims-caret"></span></th>
+                                    <th data-sort="awb" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">AWB <span class="claims-caret"></span></th>
+                                    <th data-sort="courier" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Courier <span class="claims-caret"></span></th>
+                                    <th data-sort="payment_mode" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Payment <span class="claims-caret"></span></th>
+                                    <th data-sort="order_date" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Order date <span class="claims-caret"></span></th>
+                                    <th data-sort="last_heard_at" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Last heard <span class="claims-caret"></span></th>
+                                    <th data-sort="days_silent" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Days silent <span class="claims-caret"></span></th>
+                                    <th data-sort="zone" class="claims-th text-left font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Zone <span class="claims-caret"></span></th>
+                                    <th data-sort="shipment_value" class="claims-th text-right font-semibold px-4 py-3 cursor-pointer hover:text-slate-700">Invoice value <span class="claims-caret"></span></th>
+                                </tr></thead>
+                                <tbody id="lost-tbody"><tr><td colspan="9" class="px-4 py-8 text-center text-slate-400">Loading…</td></tr></tbody>
                             </table>
                         </div>
                     </div>

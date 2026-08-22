@@ -492,6 +492,208 @@ function check(name, got, want) {
     // frozen forever - 4,717 phantom inbound units were suppressing reorders (2026-08-20).
     check('open po: a Completed PO never counts as inbound stock',
         /const PO_DEAD = new Set\(\[4, 5, 7\]\)/.test(po), true);
+    // -- An RTO's charges change, and we used to read them ONCE ----------------------------------
+    // RapidShyp re-prices a parcel when it turns around: they add the return leg and REMOVE the COD
+    // collection fee. Checked against their live API one day after an RTO -- ours said rto 0 / cod
+    // 29.50 / total 80.24, theirs said rto 50.74 / cod 0 / total 101.48.
+    //
+    // The old select asked for `charges_fetched_at IS NULL`, i.e. each shipment was priced ONCE, EVER,
+    // so anything that RTO'd after pricing kept its pre-RTO snapshot: 982 RTOs with no return leg and
+    // freight understated by ~25,182 rupees. (Two earlier theories were wrong before this one: that
+    // RapidShyp was over-charging, then that they billed the leg 45 days later. Both were OUR lag.)
+    const djApi = fs.readFileSync(path.join(ROOT, 'app/api/delivery_journey.js'), 'utf8');
+    const rsApi = fs.readFileSync(path.join(ROOT, 'app/api/rapidshyp_recon.js'), 'utf8');
+    const rsUi = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    check('charges: a shipment is no longer priced once and never re-read',
+        [/\.eq\('outcome', 'rto'\)\.eq\('freight_rto', 0\)/.test(djApi), /RTO_REPRICE_GRACE_MS/.test(djApi)],
+        [true, true]);
+    // Re-pricing is driven by SHAPE, not age -- an RTO with no return leg is unfinished whatever its date.
+    check('charges: the re-price queue is oldest-RTO-first so a backlog drains in order',
+        /\.order\('rto_at', \{ ascending: true \}\)/.test(djApi), true);
+    // A stale-select failure must never stop brand-new shipments being priced.
+    check('charges: a stale-RTO lookup failure still lets new shipments price',
+        /stale-RTO select failed \(new shipments still priced\)/.test(djApi), true);
+    // The recon flag now means "our copy is behind", not "they under-billed" or "wait 45 days".
+    check('rapidshyp recon: a missing return leg reads as OUR sync being behind',
+        [/flags\.push\('rto_leg_stale'\)/.test(rsApi), /RTO_REPRICE_GRACE_HOURS/.test(rsApi),
+         !/RTO_BILL_LAG_DAYS/.test(rsApi)], [true, true, true]);
+    // "Not synced" must mean we have NOT LOOKED since the RTO, not merely that a leg is missing.
+    // Flagging on shape alone warned about all 24 remaining legless RTOs -- every one already re-read
+    // after its RTO and matching RapidShyp exactly, 0.0d to 89.0d old. A warning that fires on correct
+    // data is worse than none, because it teaches people to ignore it.
+    check('rapidshyp recon: stale means our snapshot predates the return, not just a missing leg',
+        [/readSinceRto/.test(rsApi), /legMissing && !readSinceRto/.test(rsApi),
+         /cod > 0 && legMissing && readSinceRto/.test(rsApi)], [true, true, true]);
+    // ...and the claims panel and its KPI line must apply the SAME test, or they disagree with the recon.
+    check('claims: the panel and KPI use the same re-read test as the recon',
+        [/const readSince = /.test(rsUi), /&& !readSince;/.test(rsUi),
+         /!\(r\.charges_fetched_at && new Date\(r\.charges_fetched_at\)/.test(rsUi)], [true, true, true]);
+    // The re-price queue must keep asking while the RETURN is still travelling — RapidShyp bills the
+    // leg when the parcel gets BACK, and TE25-40292 / TE25-41443 were still IN_TRANSIT 4-5 days in —
+    // but it must also CLOSE, or it re-reads settled shipments for ever (returns at 54, 71 and 89 days
+    // genuinely carry no leg). So: at most once a day, and give up after RTO_RECHECK_MAX_DAYS.
+    check('charges: the re-price queue re-checks daily and then gives up',
+        [/const RTO_RECHECK_MAX_DAYS = 60;/.test(djApi),
+         /new Date\(r\.charges_fetched_at\)\.getTime\(\) <= dayAgo/.test(djApi),
+         /new Date\(r\.rto_at\)\.getTime\(\) < oldestWorthAsking/.test(djApi)], [true, true, true]);
+
+    check('rapidshyp recon: the understatement is estimated rather than ignored',
+        [/rtoLegStaleEst/.test(rsApi), rsUi.includes('data-flag=' + String.fromCharCode(34) + 'rto_leg_stale')],
+        [true, true]);
+    // Billed figures are still never rewritten -- the correction comes from re-reading their API.
+    check('rapidshyp recon: the billed figures are never rewritten locally',
+        /cod_charges: c\.cod/.test(rsApi) && !/cod_charges: isRto \? 0/.test(rsApi), true);
+    // The claims panel showed forward + RTO 0 against a bigger total and never named the COD fee.
+    check('claims panel: the COD fee and the un-synced return leg are both named',
+        [/COD fee: /.test(rsUi), /not synced yet/.test(rsUi), /Billed: /.test(rsUi)],
+        [true, true, true]);
+
+    // -- What is ALLOWED onto the Silent-RTO claim list ------------------------------------------
+    // Three admission rules, stated by the user and enforced in the query, not the UI:
+    //   1. the shipment's CURRENT status must itself be an RTO state -- `outcome` remembers that an RTO
+    //      event happened once, it does not notice the courier reverting it (TE25-41443 / TE25-40292
+    //      sat on the claim list while RapidShyp's live status said IN_TRANSIT);
+    //   2. not a single OFD (rto_no_attempt, already enforced);
+    //   3. never a LOST shipment -- lost has its own tab and its own larger claim, and one parcel must
+    //      not be claimed twice.
+    const drApi = fs.readFileSync(path.join(ROOT, 'app/api/delivery_reports.js'), 'utf8');
+    check('silent-rto: the current status must itself be an RTO state',
+        (drApi.match(/\.or\('status_code\.is\.null,status_code\.ilike\.RTO\*'\)/g) || []).length, 2);
+    check('silent-rto: the evidence workbook uses the same admission rule as the claim list',
+        /Same admission rule as the claim list/.test(drApi), true);
+    // In the classifier, LOST now outranks RTO: a return that went lost never came back, and calling it
+    // rto filed it on the claim list while the Lost tab (where its money is recovered) never saw it.
+    const djApi2 = fs.readFileSync(path.join(ROOT, 'app/api/delivery_journey.js'), 'utf8');
+    check('outcome: lost outranks rto in both classifiers, delivered still outranks both',
+        (djApi2.match(/'delivered' : lost \? 'lost' : rto \? 'rto'/g) || []).length, 2);
+    // A lost row with NO order date must still appear -- .gte() silently drops NULLs, which hid two
+    // real lost shipments from every window on the one tab meant to miss nothing.
+    check('lost tab: a null order date cannot hide a lost shipment',
+        /order_date\.is\.null/.test(drApi), true);
+
+    // -- A COD fee on a SILENT RTO is the easiest line in the claim ------------------------------
+    // Nobody attempted delivery, so nobody collected cash, so the collection fee cannot be due. It was
+    // buried inside the freight total, and the claim mail sent RapidShyp a lump sum they could argue
+    // with. Live: 7 of 205 silent RTOs carry one, 207.68 rupees.
+    const clHtml2 = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+    check('silent-rto claim: the COD fee is itemised, not buried in the total',
+        [/codCount: cod\.length/.test(drApi), /totalCod: round2/.test(drApi),
+         /'COD fee', 'Shipping cost', 'Invoice value'/.test(drApi)], [true, true, true]);
+    // The mail has to SAY why it is not due, or it is just another number in a table.
+    check('silent-rto claim: the mail explains why a COD fee cannot be due on an unattempted parcel',
+        /no delivery was attempted, so no cash was ever collected and the fee cannot be due/.test(drApi), true);
+    // And the dashboard must show the split that prompted this -- COD charged, RTO leg not.
+    check('silent-rto table: RTO freight and COD fee are separate columns',
+        [/data-sort="freight_rto"/.test(clHtml2), /data-sort="cod_charges"/.test(clHtml2)], [true, true]);
+    // Two columns added -> the empty-state colspan must move with them, in both files.
+    check('silent-rto table: the empty state still spans the whole row',
+        [/id="srto-tbody"><tr><td colspan="10"/.test(clHtml2),
+         /colspan="10" class="px-4 py-8 text-center text-slate-400">No silent RTOs match/.test(rsUi)],
+        [true, true]);
+
+    // -- Claims: payment, the Lost tab, and the Excel export -------------------------------------
+    const clApi = fs.readFileSync(path.join(ROOT, 'app/api/delivery_reports.js'), 'utf8');
+    const clUi = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    const clHtml = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+    // Built from SOURCE, not require()d: pulling in the router opens a Supabase client and dragged the
+    // whole suite past two minutes. The rules are what is under test, not the module wiring.
+    // CR stripped FIRST: these files are CRLF on disk, so a search for a bare newline-brace-newline
+    // finds nothing and the slice comes back empty -- which fails as "scanRemark is not defined",
+    // a message that points nowhere near the real cause.
+    const clFlat = clApi.split(String.fromCharCode(13)).join('');
+    const remarkSrc = clFlat.slice(clFlat.indexOf('const RTO_REASONS = ['),
+        clFlat.indexOf(String.fromCharCode(10) + '}' + String.fromCharCode(10), clFlat.indexOf('function scanRemark(row)')) + 3);
+    const scanRemark = new Function(remarkSrc + String.fromCharCode(10) + 'return scanRemark;')();
+
+    // The four MOST COMMON scans on an RTO describe the parcel MOVING, not why it turned around:
+    // return_received (198), return_expected (177), Dispatched for RTO (112), RETURN Accepted (93).
+    // Taking "the last RTO-ish scan" would label almost every claim `return_received` -- worse than
+    // blank, because it reads as an answer.
+    check('claims remarks: movement scans are never mistaken for a reason',
+        scanRemark({ raw: { scans: ['return_received', 'return_expected', 'Dispatched for RTO',
+            'RETURN Accepted', 'Return to Origin InTransit'].map(s => ({ scan: s })) } }),
+        'No reason in the scan log');
+    // The reasons the user asked for, verbatim from the live vocabulary.
+    check('claims remarks: the cancellation reasons are read out of the scan log',
+        [scanRemark({ raw: { scans: [{ scan: 'Consignee verified cancellation' }] } }),
+         scanRemark({ raw: { scans: [{ scan: 'Code verified cancellation' }] } })],
+        ['Consignee verified cancellation/RTO', 'Code verified cancellation/RTO']);
+    // A blank cell cannot distinguish "the courier gave no reason" from "we never stored the log", and
+    // those are argued very differently -- 77 of 205 silent-RTOs have no scan log at all.
+    check('claims remarks: a blank says WHICH kind of blank it is',
+        [scanRemark({}), scanRemark({ raw: { scans: [] } })],
+        ['No scan log stored', 'No scan log stored']);
+    // Specific beats generic when several cause scans are present.
+    check('claims remarks: the most specific reason wins',
+        scanRemark({ raw: { scans: [{ scan: 'Undelivered' }, { scan: 'Consignee verified cancellation' }] } }),
+        'Consignee verified cancellation/RTO');
+
+    // The export is built SERVER-side from a fresh query. The PG-recon export was built from the
+    // rendered page and silently produced 5,000 of 5,592 rows -- a file that looks complete and is not.
+    check('claims export: rows are re-fetched on the server, not taken from the page',
+        /cfg\.fetch\(rg\.fromISO, rg\.toISO\)/.test(clApi) && /claimsFilterRows/.test(clApi), true);
+    check('claims export: every tab can be exported, including Lost',
+        ['srto', 'late', 'intransit', 'ofd', 'lost'].every(k => new RegExp(`\\n    ${k}: \\{`).test(clApi)), true);
+    // Dates as real Dates and money as numbers -- a date-shaped string cannot be sorted or filtered,
+    // which is most of the reason to want a spreadsheet rather than a CSV.
+    check('claims export: dates and money keep their types',
+        /kind === 'date'[\s\S]{0,120}new Date\(v\)/.test(clApi) && /numFmt = 'dd-mm-yyyy'/.test(clApi), true);
+    // Scan logs are ~70 entries per shipment; they must not ride along on every page load.
+    check('claims export: scan logs are fetched only for an export, and chunked',
+        /async function remarksByAwb/.test(clApi) && /awbs\.slice\(i, i \+ 200\)/.test(clApi), true);
+
+    // The Lost tab: registered everywhere a tab has to be registered, or it half-works.
+    check('claims: the Lost tab is wired end to end',
+        [/'lost'\]/.test(clUi), /lost: 'claims-panel-lost'/.test(clUi), /lost: '\/api\/lost-shipments'/.test(clUi),
+         /lost: 'lost-tbody'/.test(clUi), /function claimsRenderLost/.test(clUi),
+         /id="claims-panel-lost"/.test(clHtml), /data-tab="lost"/.test(clHtml)],
+        [true, true, true, true, true, true, true]);
+    // A lost parcel has neither delivered_at nor rto_at -- that is what makes it lost -- so order_date
+    // is the only timestamp it reliably has to window on.
+    check('claims: lost shipments are windowed on order_date, the only date they all have',
+        /WINDOWED ON `order_date`, NOT ON A TERMINAL DATE/.test(clApi), true);
+    // The Lost tab was registered in every other registry and MISSED in the row-click list, so its rows
+    // silently would not expand while all the detail-row code existed and looked correct. Driven off
+    // _CLAIMS_TBODY now, so a new tab cannot be half-wired again.
+    check('claims: row expansion is driven off the tbody registry, not a hand-typed list',
+        /Object\.values\(_CLAIMS_TBODY\)\.forEach\(id => \{/.test(clUi), true);
+    // colspan was pinned at 7 while Silent-RTO grew to 8 columns and Lost arrived with 9.
+    check('claims: the detail panel spans the whole row, whatever the column count',
+        /querySelectorAll\('thead th'\)\.length/.test(clUi) && !/claims-detail\"><td colspan=\"7\"/.test(clUi), true);
+    // A lost parcel neither delivered nor returned; a greyed \Delivered\ step invites the reader to
+    // think it might still arrive.
+    check('claims: a lost timeline ends at the last scan, not at a blank Delivered',
+        /const isLost = which === 'lost'/.test(clUi) && /Written off/.test(clUi), true);
+
+    check('claims: payment mode is shown on the tables, not just in the filter',
+        /function claimsPayChip/.test(clUi) && /data-sort="payment_mode"/.test(clHtml), true);
+
+    // ⚠ The download must go through fetch() with the auth header. This app authenticates with a
+    // BEARER TOKEN IN A HEADER, and a link navigation carries no headers -- the first version downloaded
+    // the server 401 body as a file called "export" with no extension. A failed download that still
+    // produces a file is the worst kind, because it looks like it worked.
+    // ExcelJS applies a ROW-level fill across all 16,384 columns, so the indigo header band ran off
+    // past column AH into empty cells. Only the columns that exist may be styled.
+    check('claims export: the header band stops at the last real column',
+        [/for \(let i = 1; i <= cols\.length; i\+\+\) \{/.test(clApi) && /cell\.fill = \{ type: .pattern./.test(clApi),
+         !/head\.fill =/.test(clApi)], [true, true]);
+
+    check('claims export: the download is authenticated, not a bare link',
+        [/export\.xlsx\?[^\n]*headers: getAuthHeaders\(\)/.test(clUi),
+         clUi.includes('a.download = name;'),
+         // the old, broken form: an anchor pointed straight at the endpoint, carrying no token
+         !clUi.includes('a.href = ' + String.fromCharCode(96) + '/api/claims')],
+        [true, true, true]);
+    // An UNLISTED path falls through to next(), i.e. any signed-in user whatever their role. The export
+    // hands over the whole claims book in one file, so it must be gated like the views it comes from.
+    const srvSrc = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8').split(String.fromCharCode(13)).join('');
+    const tblStart = srvSrc.indexOf('const _VIEW_PERMS');
+    const VIEW = new Function('return ' + srvSrc.slice(srvSrc.indexOf('[', tblStart), srvSrc.indexOf(String.fromCharCode(10) + '];', tblStart) + 2))();
+    const gated = p => { for (const [rx, need] of VIEW) if (rx.test(p)) return [].concat(need).includes('claims-sla'); return false; };
+    check('claims: every claims route is behind the claims-sla permission',
+        ['/silent-rto-claims', '/late-deliveries', '/intransit-late', '/first-ofd-late', '/lost-shipments', '/claims/export.xlsx'].map(gated),
+        [true, true, true, true, true, true]);
+
     // -- The snapshot must give the SAME answer twice ---------------------------------------------
     // One fixed 7-day window (15-21 Aug) produced 2,667 units at 06:30, 2,940 at 10:17 and a true
     // 2,830. The window never moved -- the edge fn paged ~10,000 orders with .range() and NO .order()

@@ -586,6 +586,10 @@ router.get('/reports/rto-no-attempt', async (req, res) => {
                 .from('shipment_journey_ecom')
                 .select('order_name, awb, source, courier, payment_mode, zone, order_date, rto_at, attempts, ndr_count, raw')
                 .eq('rto_no_attempt', true)
+                // Same admission rule as the claim list — this workbook is the EVIDENCE pack for that
+                // exact claim, and the two disagreeing is how a wrong row reaches a courier.
+                .eq('outcome', 'rto')
+                .or('status_code.is.null,status_code.ilike.RTO*')
                 .gte('order_date', fromISO).lte('order_date', toISO)
                 .order('rto_at', { ascending: false })
                 .range(offset, offset + PAGE - 1);
@@ -921,6 +925,13 @@ async function fetchSilentRto(fromISO, toISO) {
         const { data, error } = await supabase.from('shipment_journey_ecom')
             .select('awb, order_name, source, courier, order_date, rto_at, updated_at, payment_mode, zone, dest_state, dest_city, freight_total, freight_forward, freight_rto, cod_charges, shipment_value, charges_fetched_at')
             .eq('source', 'rapidshyp').eq('outcome', 'rto').eq('rto_no_attempt', true)
+            // ⚠ THE CURRENT STATUS MUST ITSELF BE AN RTO STATE. `outcome` remembers that an RTO event
+            // happened; it does not notice the courier reverting it. TE25-41443 and TE25-40292 sat on
+            // this CLAIM list while RapidShyp's live status said IN_TRANSIT — the parcel was moving, and
+            // claiming its freight would have been claiming for a delivery still in progress. LST (lost)
+            // is likewise excluded: a lost parcel has its own tab and its own (larger) claim, and one
+            // shipment must never be claimed twice. Legacy rows predate status_code and stay.
+            .or('status_code.is.null,status_code.ilike.RTO*')
             .gte('order_date', fromISO).lte('order_date', toISO)
             .order('order_date', { ascending: false }).range(offset, offset + PAGE - 1);
         if (error) throw new Error(error.message);
@@ -931,10 +942,17 @@ async function fetchSilentRto(fromISO, toISO) {
 }
 function silentRtoSummary(rows) {
     const priced = rows.filter(r => r.freight_total != null);
+    const cod = rows.filter(r => Number(r.cod_charges) > 0);
     return {
         count: rows.length, priced: priced.length,
         totalFreight: round2(rows.reduce((a, r) => a + (Number(r.freight_total) || 0), 0)),
         totalValue: round2(rows.reduce((a, r) => a + (Number(r.shipment_value) || 0), 0)),
+        // A COD COLLECTION FEE ON A PARCEL NOBODY EVER ATTEMPTED IS THE EASIEST LINE IN THIS CLAIM TO
+        // argue, and it was buried inside the freight total. The fee buys collecting cash at the door;
+        // on a silent RTO the door was never reached. Itemised so RapidShyp is answering a specific
+        // charge rather than a lump sum.
+        codCount: cod.length,
+        totalCod: round2(cod.reduce((a, r) => a + (Number(r.cod_charges) || 0), 0)),
     };
 }
 function buildSilentRtoMail(rows, rangeLabel) {
@@ -944,15 +962,18 @@ function buildSilentRtoMail(rows, rangeLabel) {
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.awb)}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${esc(r.courier || '')}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;">${dmy(r.order_date)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;text-align:right;">${Number(r.cod_charges) > 0 ? inr(r.cod_charges) : '—'}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;text-align:right;">${r.freight_total != null ? inr(r.freight_total) : '—'}</td>
         <td style="padding:7px 10px;border-bottom:1px solid #eef2f7;text-align:right;">${r.shipment_value != null ? inr(r.shipment_value) : '—'}</td></tr>`).join('');
-    const totalRow = `<tr style="font-weight:700;background:#eef2ff"><td colspan="4" style="padding:9px 10px;">Total — ${s.count} shipments</td><td style="padding:9px 10px;text-align:right;">${inr(s.totalFreight)}</td><td style="padding:9px 10px;text-align:right;">${inr(s.totalValue)}</td></tr>`;
-    const foot = s.priced < s.count ? `${s.count - s.priced} shipment(s) not yet priced by RapidShyp — shown as "—" and excluded from the freight total.` : '';
+    const totalRow = `<tr style="font-weight:700;background:#eef2ff"><td colspan="4" style="padding:9px 10px;">Total — ${s.count} shipments</td><td style="padding:9px 10px;text-align:right;">${inr(s.totalCod)}</td><td style="padding:9px 10px;text-align:right;">${inr(s.totalFreight)}</td><td style="padding:9px 10px;text-align:right;">${inr(s.totalValue)}</td></tr>`;
+    const notPriced = s.priced < s.count ? `${s.count - s.priced} shipment(s) not yet priced by RapidShyp — shown as "—" and excluded from the freight total. ` : '';
+    const codNote = s.codCount ? `${s.codCount} of these carry a COD collection fee totalling ${inr(s.totalCod)}. A COD fee is charged for collecting cash from the consignee; on these shipments no delivery was attempted, so no cash was ever collected and the fee cannot be due. ` : '';
+    const foot = notPriced + codNote;
     const html = mailShell('Silent RTO — Claim Report',
-        'Shipments returned to origin with no delivery attempt. Forward + RTO freight is disputable.',
+        'Shipments returned to origin with no delivery attempt. Forward + RTO freight is disputable, and any COD collection fee on them is not due at all.',
         rangeLabel,
-        ['Order', 'AWB', 'Courier', 'Order date', 'Shipping cost', 'Invoice value'],
-        [4, 5], body + totalRow, foot);
+        ['Order', 'AWB', 'Courier', 'Order date', 'COD fee', 'Shipping cost', 'Invoice value'],
+        [4, 5, 6], body + totalRow, foot);
     return { subject: `Silent RTO Claim — ${s.count} shipments, ${inr(s.totalFreight)} freight (${rangeLabel})`, html };
 }
 async function sendSilentRtoReport(opts = {}) {
@@ -1152,6 +1173,54 @@ function mailShell(title, subtitle, rangeLabel, headers, rightCols, bodyRows, fo
       <table style="border-collapse:collapse;width:100%;font-size:12px;"><thead><tr>${th}</tr></thead><tbody>${bodyRows}</tbody></table>
       ${footNote ? `<p style="margin:14px 0 0;color:#94a3b8;font-size:11px;">${esc(footNote)}</p>` : ''}
       <p style="margin:18px 0 0;color:#94a3b8;font-size:11px;">— Ecom Central</p></div>`;
+}
+
+// ── Lost shipments ──────────────────────────────────────────────────────────
+// A lost parcel is the worst outcome there is: the customer has no goods, the money is gone and no
+// courier is going to bring it back. It was reachable only as a 2-shipment chip on Delivery Performance,
+// so it gets its own tab here alongside the other things worth claiming for.
+//
+// ⚠️ WINDOWED ON `order_date`, NOT ON A TERMINAL DATE. A lost shipment has neither `delivered_at` nor
+// `rto_at` — that is precisely what makes it lost — so there is no close date to bucket it by. Most also
+// have no `last_scan_at`: the tracking simply stops. Order date is the only timestamp every lost
+// shipment actually has, and it is the same basis the Silent-RTO tab uses, so the date picker means the
+// same thing on both.
+const LOST_COLS = 'awb, order_name, source, courier, outcome, order_date, dispatched_at, out_for_delivery_at, '
+    + 'last_scan_at, updated_at, payment_mode, zone, dest_state, dest_city, ndr_count, status_code, '
+    + 'freight_total, freight_forward, freight_rto, cod_charges, shipment_value, first_edd';
+async function fetchLost(fromISO, toISO, source) {
+    const rows = []; const PAGE = 1000;
+    for (let offset = 0; ; offset += PAGE) {
+        // ⚠ A LOST ROW WITH NO ORDER DATE MUST STILL APPEAR. Two live rows carry order_date NULL, and a
+        // date-window .gte() silently drops NULLs — which made those two invisible in EVERY window, on the
+        // one tab whose whole purpose is that nothing lost goes unseen. They ride along in every window.
+        let q = supabase.from('shipment_journey_ecom').select(LOST_COLS)
+            .eq('outcome', 'lost')
+            .or(`and(order_date.gte.${fromISO},order_date.lte.${toISO}),order_date.is.null`);
+        if (source) q = q.eq('source', source);
+        const { data, error } = await q.order('order_date', { ascending: false }).range(offset, offset + PAGE - 1);
+        if (error) throw new Error(error.message);
+        rows.push(...(data || []));
+        if (!data || data.length < PAGE) break;
+    }
+    // Days since anything was heard about the parcel — the number that says how cold the trail is.
+    const today = Date.now();
+    return rows.map(r => {
+        const heard = r.last_scan_at || r.out_for_delivery_at || r.dispatched_at || r.order_date;
+        return { ...r, last_heard_at: heard, days_silent: heard ? Math.max(0, Math.floor((today - new Date(heard).getTime()) / 86400000)) : null };
+    });
+}
+function lostSummary(rows) {
+    const cod = rows.filter(r => /cod/i.test(r.payment_mode || ''));
+    return {
+        count: rows.length,
+        // COD value is a loss of GOODS only (nothing was collected); prepaid is goods AND a refund we owe.
+        codCount: cod.length, prepaidCount: rows.length - cod.length,
+        totalValue: round2(rows.reduce((a, r) => a + (Number(r.shipment_value) || 0), 0)),
+        prepaidValue: round2(rows.filter(r => !/cod/i.test(r.payment_mode || '')).reduce((a, r) => a + (Number(r.shipment_value) || 0), 0)),
+        totalFreight: round2(rows.reduce((a, r) => a + (Number(r.freight_total) || 0), 0)),
+        maxSilent: rows.reduce((m, r) => Math.max(m, r.days_silent || 0), 0),
+    };
 }
 
 // ── Endpoints ───────────────────────────────────────────────────────────────
@@ -1704,4 +1773,223 @@ router.sendLateDeliveriesReport = sendLateDeliveriesReport;
 router.sendIntransitLateReport = sendIntransitLateReport;
 router.sendFirstOfdReport = sendFirstOfdReport;
 
+// ── Why did this come back? ─────────────────────────────────────────────────────────────────────
+//
+// A claim list that says "RTO" and nothing else is unarguable with a courier: "returned" is not a
+// reason, it is an outcome. The scan log DOES carry the reason, buried among the movement scans, and
+// these are the strings it actually uses (counted across 4,175 real RTOs, not guessed):
+//
+//     Consignee refused to accept/order cancelled   65      Code verified cancellation          5
+//     Returned as per Client Instructions           37      Customer Refused To Accept          3
+//     Undelivered                                   21      Returned. Ageing limit crossed      3
+//     Returned as per Security Instructions         17      Consignee verified cancellation     2
+//     Undeliverable                                  9      Returned Due To Poor Packaging      1
+//
+// ⚠️ THE MOVEMENT SCANS MUST NOT BE MISTAKEN FOR REASONS. `return_received` (198), `return_expected`
+// (177), `Dispatched for RTO` (112) and `RETURN Accepted` (93) are the four MOST COMMON scans on an RTO
+// and every one of them describes the parcel travelling, not why it turned around. Taking "the last
+// RTO-ish scan" would therefore label almost every claim `return_received`, which is worse than blank:
+// it reads as an answer. Only cause-bearing scans qualify, most specific first, and anything else
+// leaves the remark empty for a human to chase.
+const RTO_REASONS = [
+    [/consignee verified cancellation/i, 'Consignee verified cancellation/RTO'],
+    [/code verified cancellation/i, 'Code verified cancellation/RTO'],
+    [/consignee refused to accept|customer refused to accept|refused to accept|\brefused\b/i, 'Consignee refused / order cancelled'],
+    [/returned as per client instructions/i, 'Returned on our own instruction'],
+    [/returned as per security instructions/i, 'Returned on security instruction'],
+    [/ageing limit crossed/i, 'Returned — ageing limit crossed'],
+    [/poor packaging/i, 'Returned — poor packaging'],
+    [/bad\/?\s*incomplete address|incomplete address|address.*(?:wrong|invalid)/i, 'Bad / incomplete address'],
+    [/consignee (?:not available|unavailable)|customer (?:not available|unavailable)/i, 'Consignee unavailable'],
+    [/\bundeliverable\b|\bundelivered\b/i, 'Undelivered'],
+    [/order cancelled|\bcancelled\b|\bcancellation\b/i, 'Cancelled'],
+];
+// Scans that describe MOVEMENT, checked first so a cause pattern can never match one by accident
+// (`return_undelivered_attempted` contains "undelivered" but is a leg of the return journey).
+const MOVEMENT_SCAN = /^(?:return_|rto)|return (?:received|expected|accepted|delivered|undelivered)|dispatched for rto|return to origin|returninitiated|rto notified|out for delivery/i;
+
+function scanRemark(row) {
+    const scans = (row && row.raw && Array.isArray(row.raw.scans)) ? row.raw.scans : [];
+    let best = null;
+    for (const s of scans) {
+        const text = String((s && (s.scan || s.description || s.shipper_remark)) || '').trim();
+        if (!text || MOVEMENT_SCAN.test(text)) continue;
+        for (let i = 0; i < RTO_REASONS.length; i++) {
+            if (!RTO_REASONS[i][0].test(text)) continue;
+            // Lower index = more specific. Ties keep the LATEST scan, which is the one that stuck.
+            if (!best || i < best.rank) best = { rank: i, label: RTO_REASONS[i][1], text, at: s.scan_datetime || s.status_datetime || null };
+            break;
+        }
+    }
+    // The courier phrasing is only appended when it ADDS something. "Returned. Ageing limit crossed"
+    // next to "Returned — ageing limit crossed" is noise in a cell someone has to read.
+    if (best) {
+        const flat = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+        return flat(best.text) === flat(best.label) || flat(best.label).includes(flat(best.text))
+            ? best.label : `${best.label} — "${best.text}"`;
+    }
+    // No cause scan: fall back to whatever NDR reason the courier did record, else say nothing.
+    const ndr = Array.isArray(row && row.ndr_reasons) ? row.ndr_reasons.filter(Boolean) : [];
+    if (ndr.length) return `NDR: ${[...new Set(ndr.map(String))].join(' · ')}`;
+    // ⚠ A BLANK CELL IS AMBIGUOUS AND THE AMBIGUITY MATTERS FOR A CLAIM. "The courier gave no reason"
+    // and "we never stored the scan log" look identical when both are empty, and they are argued very
+    // differently: the first is the courier's problem, the second is ours. 77 of 205 silent-RTOs have
+    // no scan log at all, so the file says which it is.
+    if (!scans.length) return 'No scan log stored';
+    return 'No reason in the scan log';
+}
+// Scan logs are big (70+ scans per shipment), so they are fetched ONLY for an export and only for the
+// AWBs being exported — never on the table endpoints, which would make every page load carry them.
+async function remarksByAwb(awbs) {
+    const out = {};
+    for (let i = 0; i < awbs.length; i += 200) {                    // chunked: `.in()` is capped like any select
+        const part = awbs.slice(i, i + 200);
+        const { data, error } = await supabase.from('shipment_journey_ecom')
+            .select('awb, raw, ndr_reasons').in('awb', part);
+        if (error) throw new Error(error.message);
+        (data || []).forEach(r => { out[r.awb] = scanRemark(r); });
+    }
+    return out;
+}
+
+// ── GET /claims/export.xlsx — the visible tab as a real Excel file ──────────────────────────────
+//
+// ⚠️ THE ROWS ARE RE-FETCHED HERE, NEVER TAKEN FROM THE BROWSER. An export built from what the page
+// rendered inherits every cap and filter quirk the page has — the PG-recon export did exactly that and
+// silently produced 5,000 of 5,592 rows, which is worse than no export because it looks complete. The
+// server re-runs the same query and re-applies the same filters, so the file is the whole answer.
+const CLAIMS_EXPORT = {
+    srto: {
+        title: 'Silent-RTO Claims', fetch: fetchSilentRto,
+        cols: [['Order', 'order_name'], ['AWB', 'awb'], ['Platform', 'source'], ['Courier', 'courier'],
+            ['Payment', 'payment_mode'], ['Order date', 'order_date', 'date'], ['RTO date', 'rto_at', 'date'],
+            ['Zone', 'zone'], ['City', 'dest_city'], ['State', 'dest_state'],
+            ['Shipping cost', 'freight_total', 'money'], ['Forward', 'freight_forward', 'money'],
+            ['RTO freight', 'freight_rto', 'money'], ['COD fee', 'cod_charges', 'money'],
+            ['Invoice value', 'shipment_value', 'money']],
+    },
+    late: {
+        title: 'Late Deliveries', fetch: fetchLateDeliveries,
+        cols: [['Order', 'order_name'], ['AWB', 'awb'], ['Platform', 'source'], ['Courier', 'courier'],
+            ['Payment', 'payment_mode'], ['Order date', 'order_date', 'date'], ['Promised EDD', 'first_edd', 'date'],
+            ['Delivered', 'delivered_at', 'date'], ['Days late', 'days_late', 'num'], ['Zone', 'zone'],
+            ['City', 'dest_city'], ['State', 'dest_state'], ['Invoice value', 'shipment_value', 'money']],
+    },
+    intransit: {
+        title: 'In-transit Overdue', fetch: fetchIntransitLate,
+        cols: [['Order', 'order_name'], ['AWB', 'awb'], ['Platform', 'source'], ['Courier', 'courier'],
+            ['Payment', 'payment_mode'], ['Order date', 'order_date', 'date'], ['Promised EDD', 'first_edd', 'date'],
+            ['Days overdue', 'days_overdue', 'num'], ['Zone', 'zone'], ['City', 'dest_city'],
+            ['State', 'dest_state'], ['Invoice value', 'shipment_value', 'money']],
+    },
+    ofd: {
+        title: 'First-OFD Late', fetch: fetchFirstOfdLate,
+        cols: [['Order', 'order_name'], ['AWB', 'awb'], ['Platform', 'source'], ['Courier', 'courier'],
+            ['Payment', 'payment_mode'], ['Order date', 'order_date', 'date'], ['Promised EDD', 'first_edd', 'date'],
+            ['First OFD', 'out_for_delivery_at', 'date'], ['RTO date', 'terminal_at', 'date'],
+            ['Days late (OFD)', 'ofd_late', 'num'], ['Zone', 'zone'], ['City', 'dest_city'], ['State', 'dest_state']],
+    },
+    lost: {
+        title: 'Lost Shipments', fetch: fetchLost,
+        cols: [['Order', 'order_name'], ['AWB', 'awb'], ['Platform', 'source'], ['Courier', 'courier'],
+            ['Payment', 'payment_mode'], ['Order date', 'order_date', 'date'], ['Dispatched', 'dispatched_at', 'date'],
+            ['Last heard', 'last_heard_at', 'date'], ['Days silent', 'days_silent', 'num'],
+            ['NDRs', 'ndr_count', 'num'], ['Zone', 'zone'], ['City', 'dest_city'], ['State', 'dest_state'],
+            ['Shipping cost', 'freight_total', 'money'], ['Invoice value', 'shipment_value', 'money']],
+    },
+};
+// The SAME predicate the table uses, so the file matches the screen it was exported from.
+function claimsFilterRows(rows, f) {
+    const q = String(f.q || '').toLowerCase();
+    return rows.filter(r => {
+        if (f.platform && String(r.source || '').toLowerCase() !== String(f.platform).toLowerCase()) return false;
+        if (f.payment && String(r.payment_mode || '').toLowerCase() !== String(f.payment).toLowerCase()) return false;
+        if (f.courier && String(r.courier || '') !== f.courier) return false;
+        if (f.zone && String(r.zone || '') !== f.zone) return false;
+        if (q && !String(r.order_name || '').toLowerCase().includes(q) && !String(r.awb || '').toLowerCase().includes(q)) return false;
+        return true;
+    });
+}
+router.get('/lost-shipments', async (req, res) => {
+    try {
+        const rg = resolveRange(req);
+        const rows = await fetchLost(rg.fromISO, rg.toISO);
+        res.json({ success: true, range: { from: rg.fromLabel, to: rg.toLabel }, summary: lostSummary(rows), rows });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.get('/claims/export.xlsx', async (req, res) => {
+    try {
+        const which = String(req.query.tab || 'srto');
+        const cfg = CLAIMS_EXPORT[which];
+        if (!cfg) return res.status(400).json({ success: false, error: `unknown tab "${which}"` });
+        const rg = resolveRange(req);
+        const all = await cfg.fetch(rg.fromISO, rg.toISO);
+        const rows = claimsFilterRows(all, req.query);
+        // Remarks last, so the reason sits at the end of the row where a reader looks for it.
+        const remarks = await remarksByAwb(rows.map(r => r.awb).filter(Boolean));
+        const cols = cfg.cols.concat([['Remarks', '__remark']]);
+        rows.forEach(r => { r.__remark = remarks[r.awb] || ''; });
+
+        const ExcelJS = require('exceljs');
+        const wb = new ExcelJS.Workbook();
+        wb.creator = 'Ecom Central';
+        const ws = wb.addWorksheet(cfg.title.slice(0, 31));
+
+        // A title band, because a spreadsheet that lands in someone's inbox has to say what window it
+        // covers and what was filtered — otherwise two exports are indistinguishable a week later.
+        const applied = ['platform', 'payment', 'courier', 'zone', 'q']
+            .filter(k => req.query[k]).map(k => `${k}=${req.query[k]}`).join(' · ');
+        ws.mergeCells(1, 1, 1, cols.length);
+        ws.getCell(1, 1).value = `${cfg.title} · ${rg.fromLabel} to ${rg.toLabel}${applied ? ` · filters: ${applied}` : ''} · ${rows.length} row(s)`;
+        ws.getCell(1, 1).font = { bold: true, size: 12, color: { argb: 'FF1E293B' } };
+        ws.getRow(1).height = 22;
+
+        ws.addRow(cols.map(c => c[0]));
+        const head = ws.getRow(2);
+        // ⚠ STYLE THE CELLS, NOT THE ROW. `row.fill = ...` in ExcelJS is a ROW-level style, and Excel
+        // paints it across all 16,384 columns — the header band ran off past column AM into empty space.
+        // Only the columns that actually exist get the fill.
+        for (let i = 1; i <= cols.length; i++) {
+            const cell = head.getCell(i);
+            cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4338CA' } };
+            cell.alignment = { vertical: 'middle', wrapText: false };
+        }
+        head.height = 18;
+
+        for (const r of rows) {
+            ws.addRow(cols.map(([, key, kind]) => {
+                const v = r[key];
+                if (v == null || v === '') return null;
+                // Dates go in as REAL dates, not strings — a date-shaped string cannot be sorted or
+                // filtered in Excel, which is most of the reason to want a spreadsheet at all.
+                if (kind === 'date') { const d = new Date(v); return isNaN(d.getTime()) ? String(v) : d; }
+                if (kind === 'money' || kind === 'num') { const n = Number(v); return isFinite(n) ? n : null; }
+                return String(v);
+            }));
+        }
+        cols.forEach(([label, , kind], i) => {
+            const col = ws.getColumn(i + 1);
+            col.width = label === 'Remarks' ? 46 : Math.min(24, Math.max(11, label.length + 4));
+            if (kind === 'date') col.numFmt = 'dd-mm-yyyy';
+            else if (kind === 'money') col.numFmt = '#,##0.00';
+        });
+        ws.views = [{ state: 'frozen', ySplit: 2 }];                 // headers stay put while scrolling
+        ws.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: cols.length } };
+
+        const stamp = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${which}-${stamp}.xlsx"`);
+        await wb.xlsx.write(res);
+        res.end();
+    } catch (e) {
+        console.error('[Claims export]', e.message);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 module.exports = router;
+// Exported for the selftest: the remark rules are the one part of the export a wrong regex can quietly
+// falsify, and testing them through a spreadsheet is not testing them.
+module.exports.scanRemark = scanRemark;

@@ -18,6 +18,8 @@
 //   unpriced      — final (delivered/RTO) but no charge synced yet  → a billing gap
 //   rto_not_rto   — an RTO leg billed on a shipment that never RTO'd
 //   cod_on_prepaid— a COD collection fee billed on a prepaid order
+//   rto_leg_stale — an RTO whose return leg RapidShyp HAS billed but our copy has not picked up yet
+//   cod_on_rto    — the same row's COD fee: the pre-RTO figure, already zeroed on their side
 //   no_weight     — billed with no applied weight, so it can't be rate-checked
 // ─────────────────────────────────────────────────────────────────────────────
 const express = require('express');
@@ -81,6 +83,14 @@ function buildBenchmark(rows) {
     return table;
 }
 
+// ⚠ AN EARLIER VERSION OF THIS FILE BLAMED A 45-DAY 'RAPIDSHYP BILLING LAG'. THAT WAS WRONG.
+// Checked against their live API: one day after an RTO they already report the return leg and have
+// zeroed the COD fee (TE25-42151 — ours said rto ₹0 / cod ₹29.50, theirs said rto ₹50.74 / cod ₹0).
+// The lag was OURS: charges were fetched once per shipment and never re-read, so any parcel that
+// turned around after pricing kept its pre-RTO snapshot for good. `syncChargesBatch` now re-prices
+// this exact shape, so a missing leg means our copy is behind by at most one sync — not that the
+// money is in dispute. The grace window only avoids flagging a parcel that turned around hours ago.
+const RTO_REPRICE_GRACE_HOURS = 6;
 function classify(r, bench) {
     const slab = slabOf(r.applied_weight);
     const fwd = num(r.freight_forward) || 0;
@@ -99,6 +109,29 @@ function classify(r, bench) {
     if (expected != null && fwd > expected * (1 + OVER_TOLERANCE)) flags.push('over_rate');
     if (rto > 0 && !isRto) flags.push('rto_not_rto');
     if (cod > 0 && isPrepaid) flags.push('cod_on_prepaid');
+    // ⚠⚠ A COD FEE ON A FRESH RTO IS A BILLING LAG, NOT AN OVER-CHARGE — AND THE FIRST VERSION OF THIS
+    // FLAG GOT IT BACKWARDS. It fired on all 952 RTOs that showed a COD fee and no return leg, and called
+    // ₹27,130 “claimable”. The age curve says otherwise: of RapidShyp RTOs under a week old, 72% carry no
+    // RTO leg; by 45–60 days it is 0% and 99% have one; past 60 days, 100%. RapidShyp bills the COD fee
+    // first and adds the return leg once the parcel finishes travelling back — and the two NEVER appear
+    // together (0 of 3,308 rows have both), so the leg REPLACES the fee. Disputing a fresh one would have
+    // invited them to re-bill it correctly at ~₹50.74 instead of ₹29.50: ₹20,220 MORE across those 952.
+    // So a young one is INFORMATIONAL — it means our cost figure is incomplete, not wrong — and only one
+    // that outlives the lag is worth arguing about.
+    // ⚠⚠ "NOT SYNCED" MUST MEAN WE HAVE NOT LOOKED SINCE THE RTO — NOT MERELY THAT A LEG IS MISSING.
+    // The first version flagged on shape alone and warned about all 24 remaining legless RTOs; every one
+    // had been re-read AFTER its RTO and matched RapidShyp exactly (checked against their API, 0.0d to
+    // 89.0d old). A warning that fires on correct data is worse than none: it trains people to ignore it.
+    // The honest test is whether our charge snapshot PREDATES the return.
+    const rtoAgeHours = r.rto_at ? (Date.now() - new Date(r.rto_at).getTime()) / 3600000 : null;
+    const readSinceRto = !!(r.charges_fetched_at && r.rto_at
+        && new Date(r.charges_fetched_at).getTime() > new Date(r.rto_at).getTime());
+    const legMissing = isRto && rto === 0 && rtoAgeHours != null && rtoAgeHours >= RTO_REPRICE_GRACE_HOURS;
+    // Our copy predates the return — the next charge sync will correct it.
+    if (legMissing && !readSinceRto) flags.push('rto_leg_stale');
+    // Our copy IS current and RapidShyp still bills a COD fee with no return leg. That is not our lag;
+    // it is a charge for collecting cash on a parcel that came back, and it is worth asking about.
+    if (cod > 0 && legMissing && readSinceRto) flags.push('cod_on_rto');
     return { slab, fwd, rto, cod, total, expected, variance, flags, isRto, isPrepaid };
 }
 
@@ -163,6 +196,9 @@ function summarize(ships) {
         shipments: 0, delivered: 0, rto: 0, inTransit: 0, codShipments: 0, inFlight: 0,
         freightForward: 0, freightRto: 0, codFees: 0, billed: 0,
         unpriced: 0, flagged: 0, overRate: 0, overchargeTotal: 0, gmv: 0,
+        // RTOs whose stored charge predates the return — our freight figure is understated by roughly
+        // one forward leg each until the next charge sync picks them up.
+        rtoLegStale: 0, rtoLegStaleEst: 0, codOnRto: 0, codOnRtoTotal: 0,
     };
     ships.forEach(s => {
         k.shipments++;
@@ -180,8 +216,12 @@ function summarize(ships) {
         if (!s.priced) { if (s.isFinal) k.unpriced++; else k.inFlight++; }
         if (s.flags.length) k.flagged++;
         if (s.flags.includes('over_rate')) { k.overRate++; k.overchargeTotal += Math.max(0, s.variance || 0); }
+        if (s.flags.includes('cod_on_rto')) { k.codOnRto++; k.codOnRtoTotal += s.cod_charges || 0; }
+        // The forward leg is the best available estimate of the return leg — they are the same
+        // journey, and RapidShyp's own median for both is ₹50.74.
+        if (s.flags.includes('rto_leg_stale')) { k.rtoLegStale++; k.rtoLegStaleEst += s.freight_forward || 0; }
     });
-    ['freightForward', 'freightRto', 'codFees', 'billed', 'overchargeTotal', 'gmv'].forEach(f => k[f] = round2(k[f]));
+    ['freightForward', 'freightRto', 'codFees', 'billed', 'overchargeTotal', 'gmv', 'codOnRtoTotal', 'rtoLegStaleEst'].forEach(f => k[f] = round2(k[f]));
     k.gst = round2(k.billed * GST_RATE);                 // RapidShyp bills 18% GST on freight
     k.billedWithGst = round2(k.billed + k.gst);
     k.avgFreight = k.shipments ? round2(k.billed / k.shipments) : 0;
