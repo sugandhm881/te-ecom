@@ -9981,7 +9981,7 @@ function dpRender(d){
     dpStatus(d.statusBreakdown, c);
     dpRto(d.rtoBreakdown, c);
     dpTransit(d.transitBreakdown, c);
-    dpMulti('zone', d.zones); dpMulti('state', d.states); dpCouriers(d.couriers); dpTat(d.tat, c);
+    dpMulti('zone', d.zones); dpMulti('state', d.states); dpCouriers(d.couriers); dpTat(d.tat, c); dpZoneMix(d.zones);
     dpFasr(d.fasrTrend); dpFunnel(d.ndrFunnel); dpCourier(d.rtoByCourier); dpPaymentSplit(d.byPayment); dpTableRender(); dpLoadLikelyFake();
 }
 // Populate the Zone dropdown from the window's zones (preserves current selection).
@@ -9997,7 +9997,15 @@ function dpMulti(key, options){
     const valid=new Set(opts.map(o=>o.v)); for(let i=cfg.sel.length-1;i>=0;i--){ if(!valid.has(cfg.sel[i])) cfg.sel.splice(i,1); }
     btn.innerHTML = (cfg.sel.length===0 ? `<span class="text-slate-400">${cfg.all}</span>`
       : cfg.sel.length===1 ? cfg.sel[0] : `${cfg.word}: ${cfg.sel.length}`) + ' <span class="text-slate-400">▾</span>';
-    const items = opts.map(o=>`<label class="dp-multi-item" data-s="${o.l.toLowerCase().replace(/"/g,'&quot;')}"><input type="checkbox" value="${o.v.replace(/"/g,'&quot;')}" ${cfg.sel.includes(o.v)?'checked':''}><span class="flex-1">${o.l}</span><span class="dp-multi-count">${o.c}</span></label>`).join('');
+    // A bare count answers "how many", never "how much of the total" -- and the zone MIX is the thing
+    // you actually act on (Zone D at 2,412 means nothing until you see it is 38% of everything shipped).
+    // The share is of the options SHOWN, so it always adds to 100% and cannot be read against a
+    // different denominator than the one on screen.
+    const optTotal = opts.reduce((a,o)=>a+(Number(o.c)||0),0);
+    const share = c => optTotal>0 ? (Number(c)||0)/optTotal*100 : 0;
+    // <1% would render as "0.0%" and read as none at all, so it gets its own marker.
+    const shareTxt = c => { const p=share(c); return p>0 && p<0.1 ? '<0.1%' : p.toFixed(1)+'%'; };
+    const items = opts.map(o=>`<label class="dp-multi-item" data-s="${o.l.toLowerCase().replace(/"/g,'&quot;')}"><input type="checkbox" value="${o.v.replace(/"/g,'&quot;')}" ${cfg.sel.includes(o.v)?'checked':''}><span class="flex-1">${o.l}</span><span class="dp-multi-count">${Number(o.c||0).toLocaleString('en-IN')}</span><span class="dp-multi-share" title="${shareTxt(o.c)} of ${optTotal.toLocaleString('en-IN')} shown">${shareTxt(o.c)}</span></label>`).join('');
     panel.innerHTML =
       `<div class="dp-multi-head">`+
         `<input type="text" class="dp-multi-search" placeholder="Search…" value="${_dpMultiSearch[key].replace(/"/g,'&quot;')}">`+
@@ -10043,6 +10051,41 @@ function dpTatCard(title,sub,t,prevAvg,filterable){ if(!t){ return ''; }
           <div class="text-right"><div><span class="text-2xl font-bold text-slate-800 tabular-nums">${t.avg}</span><span class="text-xs text-slate-400 ml-1">avg ${unitLbl}</span></div>${dpNumDelta(t.avg,prevAvg,suffix)}</div></div>
         <p class="text-xs text-slate-400 mb-3">${sub} · ${tot} shipments${hint}</p>
         <div class="space-y-1.5">${bars}</div></div>`;
+}
+// Zone mix — where the shipments actually go. The zone dropdown carried these counts, but a count in a
+// closed menu is not a picture: Zone D being 2,412 says nothing until you can see it is 38% of the book
+// and that A+B together are under 7%. Bars are ordered biggest-first, because the question this answers
+// is "where is the weight", not "what is the alphabet". Clicking a zone drives the SAME `_dpZone` filter
+// the dropdown uses, so the two can never disagree about what is selected.
+const DP_ZONE_TINT = ['#4f46e5', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#a855f7', '#64748b'];
+function dpZoneMix(zones){
+    const el = document.getElementById('dp-zonemix'); if(!el) return;
+    const rows = (zones||[]).map(z=>({ z:String(z.zone), n:Number(z.count)||0 })).filter(r=>r.z);
+    const total = rows.reduce((a,r)=>a+r.n,0);
+    if(!total){ el.innerHTML='<div class="text-slate-400 text-sm py-8 text-center">No shipments in range</div>'; return; }
+    rows.sort((a,b)=>b.n-a.n);
+    const max = rows[0].n || 1;
+    // Bar width is share of the LARGEST zone so the shape stays readable when one zone dominates;
+    // the number beside it is always the share of the TOTAL, which is the figure being compared.
+    el.innerHTML = rows.map((r,i)=>{
+        const pct = r.n/total*100;
+        const txt = pct>0 && pct<0.1 ? '<0.1%' : pct.toFixed(1)+'%';
+        const on = _dpZone.includes(r.z);
+        return `<button type="button" class="dp-zonebar w-full flex items-center gap-2 text-xs rounded-md px-1 py-0.5 -mx-1 cursor-pointer transition-colors ${on?'':'hover:bg-slate-50'}" data-zone="${escapeHtml(r.z)}"`
+          + (on?` style="background:#eef2ff;box-shadow:inset 0 0 0 2px #6366f1"`:'')
+          + ` title="Zone ${escapeHtml(r.z)} — ${r.n.toLocaleString('en-IN')} of ${total.toLocaleString('en-IN')} shipments (${txt})">`
+          + `<span class="w-14 text-slate-500 text-left">Zone ${escapeHtml(r.z)}</span>`
+          + `<div class="flex-1 h-4 bg-slate-100 rounded overflow-hidden"><div class="h-4 rounded" style="width:${Math.max(2, r.n/max*100)}%;background:${DP_ZONE_TINT[i%DP_ZONE_TINT.length]}"></div></div>`
+          + `<span class="w-20 text-right text-slate-600 tabular-nums">${r.n.toLocaleString('en-IN')} · ${txt}</span></button>`;
+    }).join('');
+    el.innerHTML = `<div class="space-y-1.5">${el.innerHTML}</div>`
+      + `<p class="text-xs text-slate-400 mt-3">${rows.length} zone${rows.length===1?'':'s'} · ${total.toLocaleString('en-IN')} shipments`
+      + (_dpZone.length?` · <span class="text-indigo-500 font-semibold">filtered to ${_dpZone.length}</span>`:'') + `</p>`;
+    el.querySelectorAll('.dp-zonebar').forEach(b=>b.addEventListener('click',()=>{
+        const z=b.dataset.zone; const i=_dpZone.indexOf(z);
+        if(i>=0) _dpZone.splice(i,1); else _dpZone.push(z);
+        dpLoad();
+    }));
 }
 function dpTat(t,c){ const el=document.getElementById('dp-tat'); if(!el) return; if(!t){ el.innerHTML=''; return; }
     el.innerHTML =
@@ -19109,8 +19152,10 @@ const KSR_SETTLE = {
   outstanding: ['Pending', 'bg-rose-100 text-rose-700'],
   na: ['—', 'bg-slate-100 text-slate-500'],
 };
-// Responsive without Tailwind: tailwind.css is PREBUILT and carries no `md:`/`lg:` grid variants at all,
-// so `lg:grid-cols-3` silently does nothing. auto-fit does the same job and cannot rot.
+// Responsive without a fixed column count. (An earlier comment here claimed tailwind.css carries no
+// `lg:` grid variants — that was WRONG: `.lg\:grid-cols-3` and friends ARE compiled; the grep that
+// "proved" otherwise had lost its backslash to shell escaping.) auto-fit is still the better fit for a
+// KPI strip whose card count varies, because it reflows on content rather than on a breakpoint.
 const KSR_AUTOGRID = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:1rem';
 const KSR_MICRO = 'font-size:11px;line-height:1.45';               // text-[11px] is not compiled either
 function ksrLedMonth(ym) {

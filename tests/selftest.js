@@ -492,6 +492,33 @@ function check(name, got, want) {
     // frozen forever - 4,717 phantom inbound units were suppressing reorders (2026-08-20).
     check('open po: a Completed PO never counts as inbound stock',
         /const PO_DEAD = new Set\(\[4, 5, 7\]\)/.test(po), true);
+    // -- The snapshot must give the SAME answer twice ---------------------------------------------
+    // One fixed 7-day window (15-21 Aug) produced 2,667 units at 06:30, 2,940 at 10:17 and a true
+    // 2,830. The window never moved -- the edge fn paged ~10,000 orders with .range() and NO .order()
+    // while the order sync was updating those rows, so whole PAGES were double-counted or dropped.
+    // That is why every SKU moved by the same ~10-15% instead of moving independently.
+    const edgeFn = fs.readFileSync(path.join(ROOT, 'supabase/functions/snapshot-inventory/index.ts'), 'utf8');
+    check('snapshot: paging is ordered, so two runs of one window agree',
+        /\.order\("order_id", \{ ascending: true \}\)[\s\S]{0,80}\.range\(from/.test(edgeFn), true);
+    // The same warehouse arrives as "Shifupro Technologies Pvt. Ltd." before dispatch and "rapidshyp"
+    // after. Mapping only one split it in two and made DRR climb as the dispatch queue was worked.
+    check('snapshot: both names of the Shifupro warehouse credit the same bucket',
+        /"shifupro technologies pvt\. ltd\.": "wo66194027524"/.test(edgeFn), true);
+    // A stock-0 placeholder shares the upsert key with the real stock row, so a partial EasyEcom feed
+    // overwrote 502 real units with a zero and the dashboard read Out of Stock.
+    check('snapshot: a placeholder never overwrites a real stock row',
+        /if \(locsWithInventory\.has\(loc\)\) continue;/.test(edgeFn), true);
+    check('snapshot: a partial inventory feed leaves yesterday alone rather than writing zeros',
+        /skusWithStock\.size < baseSkus\.size \* 0\.6/.test(edgeFn) && /skipped: true/.test(edgeFn), true);
+    // It lived only in Supabase until 2026-08-22, which is why this took a day to explain.
+    check('snapshot: the edge fn is in the repo, not only in Supabase',
+        /Deno\.serve/.test(edgeFn) && /SOURCE OF TRUTH/.test(edgeFn), true);
+    // Zone counts carry their share of the total -- the MIX is what gets acted on.
+    const dpUi = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    const dpCss = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+    check('delivery performance: zone/state options show a share, not just a count',
+        [/dp-multi-share/.test(dpUi), /optTotal/.test(dpUi), /\.dp-multi-share \{/.test(dpCss)], [true, true, true]);
+
     // -- A new product must join the dashboard by itself -----------------------------------------
     // The snapshot's SKU list is the `base_sku` set in sku_pack_mapping and NOTHING else (verified:
     // 17 registered, 17 in the snapshot, identical sets), so a launched product stayed invisible in the
@@ -669,10 +696,25 @@ function check(name, got, want) {
     // FIFO frontier: partners pay lump sums, so "settled through" is the honest reading, not an average.
     check('kwikship ledger: settlement is FIFO with a stated frontier',
         [/settledThrough/.test(api), /unsettledMonths/.test(api), /overpaid/.test(api)], [true, true, true]);
-    // tailwind.css is PREBUILT and carries NO responsive grid variants at all -- `lg:grid-cols-3` is a
-    // silent no-op. The ledger must not lean on one.
-    check('kwikship ledger: no uncompiled responsive grid class in the new ledger UI',
-        /(md|lg|sm):grid-cols-/.test(ui.slice(ui.indexOf('function ksrLedger()'), ui.indexOf('function ksrUpload'))), false);
+    // The ledger strip uses an auto-fit grid, which reflows on CONTENT rather than on a breakpoint --
+    // right for a KPI row whose card count varies. (This test once asserted that `lg:` grid classes are
+    // not compiled at all; that was false and is corrected in tailwind-audit below.)
+    check('kwikship ledger: the KPI strip sizes itself from content, not a fixed column count',
+        /repeat\(auto-fit,minmax\(215px,1fr\)\)/.test(ui), true);
+    // What IS true about the prebuilt stylesheet, checked against the file rather than remembered.
+    const tw = fs.readFileSync(path.join(ROOT, 'app/static/tailwind.css'), 'utf8');
+    check('tailwind-audit: the responsive grid classes the dashboard uses ARE compiled',
+        ['lg\\:grid-cols-2', 'lg\\:grid-cols-3', 'lg\\:grid-cols-4', 'lg\\:col-span-2'].map(k => tw.includes(k)),
+        [true, true, true, true]);
+    // ...and the ones that genuinely are NOT. Checked against the FILE, because every guess about
+    // this stylesheet has been wrong in one direction or the other: text-[10px], text-[11px],
+    // z-[90] and hover:bg-* all ARE compiled; opacity modifiers, gap-y, pl-8 and `lift` are not.
+    check('tailwind-audit: what is genuinely missing from the prebuilt stylesheet',
+        ['.bg-emerald-50\\/30', '.bg-white\\/10', '.gap-y-2{', '.pl-8{', '.lift{'].map(k => tw.includes(k)),
+        [false, false, false, false, false]);
+    check('tailwind-audit: and what IS present, contrary to earlier belief',
+        ['.text-\\[10px\\]', '.text-\\[11px\\]', '.z-\\[90\\]', '.hover\\:bg-slate-50:hover'].map(k => tw.includes(k)),
+        [true, true, true, true]);
     // Money moves both ways; a remittance rendered as a payment out inverts the balance.
     check('kwikship payments: direction is recorded and shown',
         [/ksrp-dir/.test(ui), /_ksrPayOut/.test(ui), /direction: b\.direction \|\| 'received'/.test(api)], [true, true, true]);

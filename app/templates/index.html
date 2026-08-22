@@ -221,12 +221,15 @@
     #delivery-perf-view .dp-multi { position:relative; }
     #delivery-perf-view .dp-multi-btn { height:38px; min-width:130px; text-align:left; font-size:.875rem; padding:0 .8rem; border:1px solid #e2e8f0; border-radius:.6rem; background:#fff; color:#334155; display:flex; align-items:center; justify-content:space-between; gap:.4rem; cursor:pointer; transition:border-color .15s; white-space:nowrap; }
     #delivery-perf-view .dp-multi-btn:hover { border-color:#c7d2fe; }
-    #delivery-perf-view .dp-multi-panel { position:absolute; z-index:40; top:calc(100% + 4px); left:0; min-width:200px; max-height:280px; overflow:auto; background:#fff; border:1px solid #e2e8f0; border-radius:.6rem; box-shadow:0 12px 30px -10px rgba(15,23,42,.25); padding:4px; }
+    #delivery-perf-view .dp-multi-panel { position:absolute; z-index:40; top:calc(100% + 4px); left:0; min-width:250px; max-height:280px; overflow:auto; background:#fff; border:1px solid #e2e8f0; border-radius:.6rem; box-shadow:0 12px 30px -10px rgba(15,23,42,.25); padding:4px; }
     #delivery-perf-view .dp-multi-panel.hidden { display:none; }
     #delivery-perf-view .dp-multi-item { display:flex; align-items:center; gap:.5rem; padding:.35rem .5rem; border-radius:.4rem; font-size:.8rem; color:#334155; cursor:pointer; }
     #delivery-perf-view .dp-multi-item:hover { background:#f1f5f9; }
     #delivery-perf-view .dp-multi-item input { accent-color:#4f46e5; width:15px; height:15px; }
-    #delivery-perf-view .dp-multi-count { font-size:.7rem; color:#94a3b8; font-variant-numeric:tabular-nums; }
+    #delivery-perf-view .dp-multi-count { font-size:.7rem; color:#94a3b8; font-variant-numeric:tabular-nums; text-align:right; min-width:3.2rem; }
+    /* Share of the options shown. Fixed width + tabular figures so the column reads down the list
+       instead of jittering with each value; real CSS because tailwind.css here is PREBUILT. */
+    #delivery-perf-view .dp-multi-share { font-size:.68rem; font-weight:600; color:#6366f1; font-variant-numeric:tabular-nums; text-align:right; min-width:2.9rem; }
     #delivery-perf-view .dp-multi-head { position:sticky; top:-4px; background:#fff; padding:2px 2px 6px; border-bottom:1px solid #f1f5f9; margin-bottom:4px; z-index:1; }
     #delivery-perf-view .dp-multi-search { width:100%; height:32px; padding:0 .6rem; font-size:.8rem; border:1px solid #e2e8f0; border-radius:.4rem; color:#334155; outline:none; }
     #delivery-perf-view .dp-multi-search:focus { border-color:#a5b4fc; box-shadow:0 0 0 3px rgba(99,102,241,.12); }
@@ -2738,7 +2741,9 @@
               <div id="dp-transit" class="flex flex-wrap items-center gap-2"></div>
             </div>
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4" id="dp-tat"></div>
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <!-- 4 columns, not 3: the trend keeps half the row and the funnel gives up a third of its
+                 width so the zone mix fits on the same line instead of pushing the page longer. -->
+            <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
               <div class="card p-5 lg:col-span-2">
                 <h2 class="text-sm font-bold text-slate-700">First-Attempt Strike Rate — trend</h2>
                 <p class="text-xs text-slate-400 mb-3">Daily % of shipments delivered on the first attempt</p>
@@ -2748,6 +2753,11 @@
                 <h2 class="text-sm font-bold text-slate-700">NDR outcome funnel</h2>
                 <p class="text-xs text-slate-400 mb-3">Where failed-attempt (NDR) shipments ended up</p>
                 <div id="dp-funnel"></div>
+              </div>
+              <div class="card p-5">
+                <h2 class="text-sm font-bold text-slate-700">Zone mix</h2>
+                <p class="text-xs text-slate-400 mb-3">Share of shipments by delivery zone · <span class="text-indigo-400">click to filter</span></p>
+                <div id="dp-zonemix"></div>
               </div>
             </div>
             <div class="card p-5">
