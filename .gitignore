@@ -25,3 +25,4 @@ tally-bridge/agent.log*
 *Account Statement*.xlsx
 *Account Statement*.xls
 *Account Statement*.csv
+tests/out/

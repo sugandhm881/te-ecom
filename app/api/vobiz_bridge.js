@@ -1,0 +1,594 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Vobiz ⇄ Sarvam bridge — the browser voice agent's pipeline, on a REAL phone call.
+//
+// Vobiz places the call (POST /api/v1/Account/{id}/Call/) and, once answered, fetches our
+// /vobiz/answer webhook, which returns a <Stream> XML pointing at our WebSocket. From then on:
+//
+//   caller audio  →  Vobiz media frames (L16 @16k, base64, ~20ms)  →  Sarvam realtime STT (VAD)
+//   transcript.final  →  Sarvam chat (SSE, cut at sentence/clause boundaries)
+//   sentences  →  Sarvam TTS WS (bulbul:v3, linear16 @24k)  →  Vobiz playAudio (L16 @24k)
+//
+// The formats line up on BOTH legs (L16/16k in = exactly what Sarvam STT eats; linear16/24k out =
+// exactly what Vobiz playAudio accepts), so the bridge moves base64 strings, not transcoded audio.
+// ⚠ VOBIZ_L16_SWAP exists because "L16" classically means big-endian while Sarvam speaks
+// little-endian raw PCM — if first-call transcripts are garbage and the voice is static, set it
+// ('in', 'out' or 'both') instead of touching code.
+//
+// Turn-taking is VAD (a phone call has no push-to-talk): Sarvam's endpointing=vad emits
+// vad.speech_start / transcript.final; a speech_start while the agent is talking = BARGE-IN →
+// Vobiz gets {"type":"clearAudio"} (drops its buffered speech instantly) and the in-flight
+// chat/TTS turn is aborted.
+//
+// ⚠ TEST SAFETY: outbound calls are refused for any phone not on MSG91_COD_ALLOWLIST while that
+// var is set — same turnstile as WhatsApp, same standing instruction ("test only what I said").
+// ⚠ PROMPTS are a compact server-side copy of the rules living in voice-agent.html (spoken style,
+// persona, brand closing). If the page's prompts evolve, this file must follow — drift risk noted.
+// ─────────────────────────────────────────────────────────────────────────────
+const express = require('express');
+const router = express.Router();
+const axios = require('axios');
+const crypto = require('crypto');
+const { WebSocketServer, WebSocket } = require('ws');
+const { supabase } = require('../supabase');
+const config = require('../../config');
+const { resolveOrderFields, allowlistBlocks } = require('./msg91_wa');
+
+const SARVAM_KEY = () => String(process.env.SARVAM_API_KEY || '').trim().split(/\s+/)[0];
+const V_AUTH_ID = () => String(process.env.VOBIZ_AUTH_ID || '').trim();
+const V_AUTH_TOKEN = () => String(process.env.VOBIZ_AUTH_TOKEN || '').trim();
+const V_FROM = () => String(process.env.VOBIZ_FROM_NUMBER || '').replace(/\D/g, '');
+const V_BASE = () => String(process.env.VOBIZ_PUBLIC_BASE || '').trim().replace(/\/$/, '');
+const V_TOKEN = () => String(process.env.VOBIZ_WEBHOOK_TOKEN || '').trim();
+const L16_SWAP = () => String(process.env.VOBIZ_L16_SWAP || 'none').trim();
+const vobizConfigured = () => !!(V_AUTH_ID() && V_AUTH_TOKEN() && V_FROM() && V_BASE() && V_TOKEN() && SARVAM_KEY());
+
+// ── sessions: one per placed call, keyed by sid carried through webhook + WS URLs ──
+const sessions = new Map();
+setInterval(() => { const cut = Date.now() - 3600e3; for (const [k, s] of sessions) if (s.createdAt < cut) sessions.delete(k); }, 600e3).unref();
+
+// ── spoken-style + persona rules (compact copy of voice-agent.html — see drift note above) ──
+const SPEAKERS = {
+    priya: { name: 'Priya', gender: 'female' }, neha: { name: 'Neha', gender: 'female' },
+    simran: { name: 'Simran', gender: 'female' }, kavya: { name: 'Kavya', gender: 'female' },
+    shreya: { name: 'Shreya', gender: 'female' }, ishita: { name: 'Ishita', gender: 'female' },
+    rahul: { name: 'Rahul', gender: 'male' }, amit: { name: 'Amit', gender: 'male' },
+    rohan: { name: 'Rohan', gender: 'male' }, dev: { name: 'Dev', gender: 'male' },
+};
+const THANKS_RX = /धन्यवाद|ধন্যবাদ|நன்றி|ధన్యవాద|ಧನ್ಯವಾದ|നന്ദി|આભાર|ਧੰਨਵਾਦ|शुक्रिया|थैंक|नंदी|नन्दी|thank/i;
+const HI_CLOSE = 'The Element को चुनने के लिए आपका धन्यवाद। आपका दिन शुभ हो।';
+
+// The PANEL the button was pressed on decides what the call is FOR — three purposes, one voice.
+const PURPOSES = {
+    cod_confirm: {
+        intro: 'on a REAL outbound call to verify a Cash on Delivery order the customer placed, BEFORE it is dispatched.',
+        objectives: 'Objectives: greet by first name and introduce yourself; mention their order briefly (product and amount) and ask them to CONFIRM that they placed it and want it delivered; if they confirm, tell them it will be dispatched soon and close with thanks; if they say they did not order it or want to cancel, note it politely and close. Do NOT ask about delivery-time availability — this call is only about confirming the order itself.',
+    },
+    undelivered: {
+        intro: 'on a REAL outbound call because the courier could NOT complete the delivery of their order.',
+        objectives: 'Objectives: greet and introduce yourself; tell them politely that the delivery attempt for their order failed; ask what happened and when they will be available for a re-attempt; reassure them the courier will try again; thank and close. If they no longer want the order, note it politely and close.',
+    },
+    cod_rejected: {
+        intro: 'on a REAL outbound call because the customer replied REJECT to our WhatsApp order-confirmation message.',
+        objectives: 'Objectives: greet and introduce yourself; say softly that we received their cancellation reply for the order and you are calling to confirm; if they truly want to cancel, confirm politely that it is noted and nothing will be charged; if they changed their mind, confirm the order will be delivered as planned; thank and close. NEVER pressure them.',
+    },
+};
+function buildPrompt(s) {
+    const sp = SPEAKERS[s.voice] || SPEAKERS.kavya;
+    const langName = LANG_NAMES[s.lang] || 'Hindi';
+    const forms = sp.gender === 'male' ? 'कर रहा हूँ / बोल रहा हूँ' : 'कर रही हूँ / बोल रही हूँ';
+    const purpose = PURPOSES[s.callType] || PURPOSES.cod_confirm;
+    return `You are ${sp.name}, a ${sp.gender} phone agent for The Element, an Ayurvedic skincare brand, ${purpose.intro}
+Order: ${s.ctx.product || 'their order'} for Rs.${s.ctx.amount || ''}. Customer first name: ${s.ctx.firstName}.
+${purpose.objectives}
+If the customer indicates IN ANY WAY that they prefer or only understand another language (a direct ask, or statements like they only know Bengali), switch to that language IMMEDIATELY and continue the whole call in it.
+TONE: courteous, professional and calm from the greeting to the goodbye — a trained customer-care executive, never a friend. No slang, no jokes, no cheeky or over-familiar phrases (never things like \u0905\u0930\u0947 \u0935\u093e\u0939, \u0915\u094d\u092f\u093e \u092c\u093e\u0924 \u0939\u0948, \u091a\u093f\u0932, boss, dear). Warmth comes from politeness, not casualness.
+SPOKEN DELIVERY RULES (your words go DIRECTLY to a voice synthesizer):
+- Respond ONLY in ${langName}. Max 2 short sentences per turn. Only speakable words: no emoji, symbols, dashes, brackets, quotes or lists.
+- NEVER read out a full order ID. Amounts stay in digits. Every sentence carries its own SUBJECT.
+- Your OWN first-person ${langName === 'Hindi' ? 'Hindi verb forms are your gender’s: ' + forms : 'voice is ' + sp.gender}.
+- Address the customer as FIRST NAME + ${langName === 'Hindi' ? 'जी' : '"ji"'}; for the customer always respectful plural forms (रहेंगे/करेंगे/होंगे) — NEVER feminine forms for the customer: रहेंगी, होंगी, चाहती, करेंगी are all FORBIDDEN — always चाहेंगे/रहेंगे.
+- Asking for their time is a QUESTION: "क्या आपके पास दो मिनट हैं?" — never "बस दो मिनट का time है".
+- CLOSING: ${langName === 'Hindi' ? `"${HI_CLOSE}"` : '"Thank you for choosing The Element. Have a great day!"'} — never a bare goodbye. Never repeat a sentence twice in the call.`;
+}
+
+function sanitizeReply(t) {
+    let s = String(t || '');
+    s = s.replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/gi, ' ');
+    s = s.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, ' ');
+    s = s.replace(/<[^>]{1,80}>/g, ' ');
+    s = s.replace(/[*_#]{1,3}/g, '');
+    return s.replace(/\s+/g, ' ').trim();
+}
+function toSpokenText(t) {
+    return String(t || '')
+        .replace(/[—–]/g, ', ')
+        .replace(/["“”‘’'`]/g, '')
+        .replace(/[()\[\]{}<>#*_~^|\\\/]/g, ' ')
+        .replace(/\s+([,.!?।])/g, '$1')
+        .replace(/\s+/g, ' ').trim();
+}
+function swap16(buf) { const b = Buffer.from(buf); b.swap16(); return b; }
+
+// ── streamed chat with the same sentence/clause splitter as the page ──
+async function chatStream(history, systemPrompt, onSentence, signal) {
+    const r = await fetch('https://api.sarvam.ai/v1/chat/completions', {
+        method: 'POST', signal,
+        headers: { 'Content-Type': 'application/json', 'api-subscription-key': SARVAM_KEY() },
+        body: JSON.stringify({ model: 'sarvam-105b-conversations', stream: true, max_tokens: 200, temperature: 0.6, reasoning_effort: null,
+            messages: [{ role: 'system', content: systemPrompt }, ...history] }),
+    });
+    if (!r.ok) throw new Error(`chat ${r.status}: ${(await r.text()).slice(0, 150)}`);
+    let full = '', buf = '', emitted = false;
+    const isBoundary = (s, i) => {
+        const ch = s[i];
+        if (ch === '\n' || ch === '।' || ch === '!' || ch === '?') return true;
+        if (ch === '.') return i + 1 < s.length && /\s/.test(s[i + 1]);
+        return false;
+    };
+    const drain = (force) => {
+        let work = buf, held = '';
+        const lt = work.lastIndexOf('<');
+        if (lt >= 0 && work.indexOf('>', lt) < 0 && !force) { held = work.slice(lt); work = work.slice(0, lt); }
+        for (;;) {
+            let cut = -1;
+            for (let i = 0; i < work.length; i++) {
+                const hard = isBoundary(work, i);
+                const soft = !emitted && (work[i] === ',' || work[i] === ';') && i + 1 < work.length && /\s/.test(work[i + 1]);
+                const min = emitted ? 60 : (soft ? 18 : 1);
+                if ((hard || soft) && i + 1 >= min) { cut = i + 1; break; }
+            }
+            if (cut < 0) break;
+            const clean = sanitizeReply(work.slice(0, cut));
+            if (clean) { onSentence(clean); emitted = true; }
+            work = work.slice(cut);
+        }
+        if (force && work.trim()) { const c2 = sanitizeReply(work); if (c2) { onSentence(c2); emitted = true; } work = ''; }
+        buf = work + held;
+    };
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let sse = '';
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sse += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = sse.indexOf('\n')) >= 0) {
+            const line = sse.slice(0, nl).trim(); sse = sse.slice(nl + 1);
+            if (!line.startsWith('data:')) continue;
+            const p = line.slice(5).trim();
+            if (p === '[DONE]') continue;
+            try { const d = JSON.parse(p).choices?.[0]?.delta?.content; if (d) { full += d; buf += d; drain(false); } } catch (_) {}
+        }
+    }
+    drain(true);
+    return sanitizeReply(full) || HI_CLOSE;
+}
+
+// ── one live call ──
+class VoiceCall {
+    constructor(vobizWs, session) {
+        this.vobiz = vobizWs;
+        this.s = session;
+        this.history = [];
+        this.speaking = false;
+        this.turnAbort = null;
+        this.ttsWs = null;
+        this.streamId = null;                      // from the start event — REQUIRED on every send
+        this.closingDone = false;                  // brand closing spoken — next pleasantry ends the call
+        this.closed = false;
+        this.startedAt = Date.now();
+        this.sttOpen();
+    }
+    log(...a) { console.log(`[vobiz ${this.s.sid.slice(0, 6)}]`, ...a); }
+
+    // caller → Sarvam. Frames are already linear16 @16k; VAD does the turn-taking.
+    sttOpen() {
+        const url = 'wss://api.sarvam.ai/speech-to-text-realtime/ws?language_code=' + encodeURIComponent(this.s.lang)
+            + '&model=saaras:v3-realtime&endpointing=vad&stream_type=fast&encoding=linear16&sample_rate=16000'
+            + '&silence_duration_ms=700&min_speech_duration_ms=200';
+        this.stt = new WebSocket(url, ['api-subscription-key.' + SARVAM_KEY()]);
+        this.stt.on('message', (m) => {
+            let d; try { d = JSON.parse(m.toString()); } catch { return; }
+            if (d.event === 'vad.speech_start' && this.speaking) this.bargeIn();
+            if (d.event === 'transcript.final' && d.text && d.text.trim()) this.onCustomer(d.text.trim());
+        });
+        this.stt.on('error', (e) => this.log('stt error:', e.message));
+        this.stt.on('close', () => { if (!this.closed) this.log('stt closed mid-call'); });
+    }
+    feedCaller(b64) {
+        if (!this.stt || this.stt.readyState !== 1) return;
+        let payload = b64;
+        if (L16_SWAP() === 'in' || L16_SWAP() === 'both') payload = swap16(Buffer.from(b64, 'base64')).toString('base64');
+        this.stt.send(JSON.stringify({ event: 'audio_input', audio: payload }));
+    }
+
+    bargeIn() {
+        this.log('barge-in — customer spoke over the agent');
+        try { this.vobiz.send(JSON.stringify({ event: 'clearAudio', streamId: this.streamId })); } catch (_) {}
+        if (this.turnAbort) { try { this.turnAbort.abort(); } catch (_) {} this.turnAbort = null; }
+        if (this.ttsWs) { try { this.ttsWs.close(); } catch (_) {} this.ttsWs = null; }
+        this.speaking = false;
+    }
+
+    playToCaller(b64linear16) {
+        if (!this.streamId) return;                // start event not seen yet — nothing to address
+        let buf = Buffer.from(b64linear16, 'base64');
+        if (L16_SWAP() === 'out' || L16_SWAP() === 'both') buf = swap16(buf);
+        // 20–60ms per message (their guide) — 60ms @ 24k L16 = 2880 bytes; also keeps barge-in snappy.
+        const SLICE = 2880;
+        for (let i = 0; i < buf.length; i += SLICE) {
+            const payload = buf.subarray(i, Math.min(buf.length, i + SLICE)).toString('base64');
+            try { this.vobiz.send(JSON.stringify({ event: 'playAudio', streamId: this.streamId, media: { contentType: 'audio/x-l16', sampleRate: 24000, payload } })); } catch (_) { return; }
+        }
+    }
+
+    // one agent turn: streamed chat → per-sentence TTS WS → playAudio frames
+    async speakTurn(userMsgOrNull) {
+        if (userMsgOrNull) this.history.push({ role: 'user', content: userMsgOrNull });
+        const abort = new AbortController();
+        this.turnAbort = abort;
+        this.speaking = true;
+        let lastChunkAt = 0, sentAny = false;
+        const tts = new WebSocket('wss://api.sarvam.ai/text-to-speech/ws?model=bulbul:v3', ['api-subscription-key.' + SARVAM_KEY()]);
+        this.ttsWs = tts;
+        const ttsReady = new Promise((res) => {
+            tts.on('open', () => {
+                tts.send(JSON.stringify({ type: 'config', data: { speaker: this.s.voice, target_language_code: this.s.lang, output_audio_codec: 'linear16', speech_sample_rate: 24000, enable_preprocessing: true, pace: 1 } }));
+                res(true);
+            });
+            tts.on('error', () => res(false));
+        });
+        tts.on('message', (m) => {
+            try { const d = JSON.parse(m.toString()); const b64 = (d.data && d.data.audio) || d.audio;
+                if (b64) { lastChunkAt = Date.now(); this.playToCaller(b64); } } catch (_) {}
+        });
+        try {
+            const wsOk = await ttsReady;
+            const say = (sentence) => {
+                const spoken = toSpokenText(sentence);
+                if (!spoken) return;
+                if (wsOk && tts.readyState === 1) { sentAny = true; tts.send(JSON.stringify({ type: 'text', data: { text: spoken } })); tts.send(JSON.stringify({ type: 'flush' })); }
+            };
+            const prompt = buildPrompt(this.s);
+            const messages = userMsgOrNull ? this.history
+                : [{ role: 'user', content: `Open the call now. Greet ${this.s.ctx.firstName} warmly, introduce yourself by your first name, and ask if they have two minutes. 1-2 short sentences.` }];
+            const text = await chatStream(messages, prompt, say, abort.signal);
+            this.history.push({ role: 'assistant', content: text });
+            this.s.transcript.push('Agent: ' + text);
+            // brand name + a thanks word (any call language) = the goodbye was just delivered
+            if (/The Element/i.test(text) && THANKS_RX.test(text)) this.closingDone = true;
+            // identical reply twice in a row = the model is looping — treat as the close
+            const prevA = [...this.history].reverse().slice(1).find(m => m.role === 'assistant');
+            if (prevA && prevA.content.trim() === text.trim()) this.closingDone = true;
+            // the socket has no end-of-stream event — the turn is over when chunks stop coming
+            await new Promise((res) => {
+                const started = Date.now();
+                const t = setInterval(() => {
+                    const gotAll = sentAny ? (lastChunkAt > 0 && Date.now() - lastChunkAt > 1200) : true;
+                    if (gotAll || Date.now() - started > 20000 || abort.signal.aborted) { clearInterval(t); res(); }
+                }, 200);
+            });
+        } catch (e) {
+            if (!abort.signal.aborted) this.log('turn failed:', e.message);
+        } finally {
+            try { tts.close(); } catch (_) {}
+            if (this.ttsWs === tts) this.ttsWs = null;
+            if (this.turnAbort === abort) this.turnAbort = null;
+            // audio is queued inside Vobiz — speaking ends a beat after the last frame is sent
+            setTimeout(() => { if (!this.turnAbort) this.speaking = false; }, 1500);
+            // fallback: if the customer says nothing after the goodbye, end the call once the
+            // closing audio has had time to play out of Vobiz's buffer
+            if (this.closingDone) this.hangup(9000);
+        }
+    }
+
+    hangup(delayMs) {
+        setTimeout(() => {
+            if (this.closed) return;
+            this.log('conversation complete — hanging up');
+            try { this.vobiz.close(); } catch (_) {}
+        }, delayMs || 0);
+    }
+
+    async playOpening() {
+        this.speaking = true;
+        let pcm = null;
+        try { pcm = await Promise.race([this.s.openingPcmP, new Promise(res => setTimeout(() => res(null), 3000))]); } catch (_) {}
+        if (!pcm) { this.log('opening not pre-synthesized — falling back to live turn'); return this.speakTurn(null); }
+        this.history.push({ role: 'assistant', content: this.s.openingText });
+        this.s.transcript.push('Agent: ' + this.s.openingText);
+        this.playToCaller(pcm);
+        this.log('opening played from pre-synth' + (this.s.tAnswer ? ` (+${Date.now() - this.s.tAnswer}ms after answer webhook)` : ''));
+        const durMs = Math.round(Buffer.from(pcm, 'base64').length / 48) + 500;   // bytes / (24000*2) → ms
+        setTimeout(() => { if (!this.turnAbort) this.speaking = false; }, durMs);
+    }
+
+    onCustomer(text) {
+        this.s.transcript.push('Customer: ' + text);
+        this.log('customer:', text.slice(0, 60));
+        if (this.closingDone) {
+            const t = text.trim();
+            const substantial = /[?？]/.test(t) || (t.length >= 25 && !THANKS_RX.test(t));
+            if (!substantial) {
+                this.hangup(800);               // any short, question-free reply after the goodbye ends the call
+                return;
+            }
+            this.closingDone = false;           // a real question after the goodbye — answer it
+        }
+        const wantLang = requestedLanguage(text, this.s.lang);
+        if (wantLang) this.switchLanguage(wantLang);
+        if (this.turnAbort) this.bargeIn();     // they answered before the agent finished
+        this.speakTurn(text).catch(e => this.log('turn error:', e.message));
+    }
+
+    // Every layer flips together: STT live (config.update), prompt via s.lang next turn, TTS on the
+    // next per-turn socket. The history keeps the old-language turns — the model handles that fine.
+    switchLanguage(code) {
+        this.log(`language switch: ${this.s.lang} → ${code} (customer asked)`);
+        this.s.lang = code;
+        try { if (this.stt && this.stt.readyState === 1) this.stt.send(JSON.stringify({ event: 'config.update', language_code: code })); } catch (_) {}
+        this.s.transcript.push(`[language switched to ${LANG_NAMES[code] || code}]`);
+    }
+
+    async close(reason) {
+        if (this.closed) return;
+        this.closed = true;
+        this.log('call closed:', reason);
+        try { this.stt && this.stt.close(); } catch (_) {}
+        try { this.ttsWs && this.ttsWs.close(); } catch (_) {}
+        if (this.turnAbort) { try { this.turnAbort.abort(); } catch (_) {} }
+        try {
+            const mech = `${Math.round((Date.now() - this.startedAt) / 1000)}s call to ${this.s.phone} (${reason})`;
+            let summary = mech;
+            if (this.s.transcript.length >= 2) {
+                try { summary = (await summarizeCall(this.s.transcript.join('\n'))) + '\n' + mech; }
+                catch (e) { this.log('summarizer failed:', e.message); }
+            }
+            await supabase.from('agent_call_logs').insert({
+                order_id: this.s.ctx.order_name || null,
+                customer_name: this.s.ctx.customer_name || null,
+                call_type: (this.s.callType || 'cod_confirm') + '_vobiz',
+                language: this.s.lang,
+                transcript: this.s.transcript.join('\n'),
+                summary,
+                exchanges: Math.ceil(this.s.transcript.length / 2),
+                recording_url: this.s.recordingUrl || null,
+            });
+        } catch (e) { this.log('log save failed:', e.message); }
+    }
+}
+
+// Session creation is separate from the Vobiz API call so the LOCAL SIMULATOR
+// (tests/vobiz_call_sim.js) can exercise the whole bridge without a Vobiz account.
+function createSession({ phone, ctx, lang, voice, callType }) {
+    const sid = crypto.randomBytes(8).toString('hex');
+    sessions.set(sid, { sid, phone, ctx, lang: lang || 'hi-IN', voice: voice || 'kavya', callType: PURPOSES[callType] ? callType : 'cod_confirm', transcript: [], createdAt: Date.now() });
+    return sid;
+}
+
+function openingLine(s) {
+    if (!['hi-IN', 'en-IN'].includes(s.lang || 'hi-IN')) return null;   // unvetted-language greeting is worse than a slower correct one
+    const sp = SPEAKERS[s.voice] || SPEAKERS.kavya;
+    const verb = sp.gender === 'male' ? 'बोल रहा हूँ' : 'बोल रही हूँ';
+    if ((s.lang || 'hi-IN') === 'en-IN')
+        return `Hello ${s.ctx.firstName} ji, this is ${sp.name} from The Element. Do you have two minutes?`;
+    return `नमस्ते ${s.ctx.firstName} जी! मैं ${sp.name} ${verb} The Element से। क्या आपके पास दो मिनट हैं?`;
+}
+async function synthOpening(s) {
+    const r = await axios.post('https://api.sarvam.ai/text-to-speech', {
+        inputs: [s.openingText], target_language_code: TTS_LANG(s.lang), speaker: s.voice,
+        model: 'bulbul:v3', speech_sample_rate: 24000, enable_preprocessing: true, output_audio_codec: 'wav',
+    }, { headers: { 'api-subscription-key': SARVAM_KEY(), 'Content-Type': 'application/json' }, timeout: 15000 });
+    const b64 = r.data && r.data.audios && r.data.audios[0];
+    if (!b64) throw new Error('opening synth: no audio');
+    return Buffer.from(b64, 'base64').subarray(44).toString('base64');   // strip WAV header → raw L16 @24k
+}
+// The ORDER'S REGION picks the call language (asked for with the language-texture work): a Tamil
+// Nadu order gets a Tamil call, and the persona rules already make each language speak its own
+// native register. States not mapped fall back to Hindi. Explicit lang in the request wins.
+const REGION_LANG = [
+    [/tamil nadu|puducherry|pondicherry/i, 'ta-IN'],
+    [/karnataka/i, 'kn-IN'],
+    [/kerala|lakshadweep/i, 'ml-IN'],
+    [/andhra|telangana/i, 'te-IN'],
+    [/west bengal|tripura/i, 'bn-IN'],
+    [/maharashtra|goa/i, 'mr-IN'],
+    [/gujarat|dadra|daman/i, 'gu-IN'],
+    [/punjab|chandigarh/i, 'pa-IN'],
+];
+async function langForOrder(orderId) {
+    try {
+        const { data: addr } = await supabase.from('order_shipping_addresses')
+            .select('province').eq('order_id', orderId).maybeSingle();
+        const state = String((addr && addr.province) || '');
+        for (const [rx, lang] of REGION_LANG) if (rx.test(state)) return lang;
+    } catch (_) {}
+    return 'hi-IN';
+}
+const LANG_REQUEST = [
+    [/english|\u0905\u0902\u0917\u094d\u0930\u0947\u091c|\u0907\u0902\u0917\u094d\u0932\u093f\u0936/i, 'en-IN'],
+    [/hindi|\u0939\u093f\u0928\u094d\u0926\u0940|\u0939\u093f\u0902\u0926\u0940/i, 'hi-IN'],
+    [/tamil|\u0924\u092e\u093f\u0932/i, 'ta-IN'], [/telugu|\u0924\u0947\u0932\u0941\u0917\u0941/i, 'te-IN'],
+    [/kannada|\u0915\u0928\u094d\u0928\u0921\u093c/i, 'kn-IN'], [/malayalam/i, 'ml-IN'],
+    [/bengali|bangla|\u092c\u093e\u0902\u0917\u094d\u0932\u093e|\u092c\u0902\u0917\u093e\u0932|\u092c\u0902\u0917\u0932\u093e/i, 'bn-IN'], [/marathi|\u092e\u0930\u093e\u0920\u0940/i, 'mr-IN'],
+    [/gujarati|\u0917\u0941\u091c\u0930\u093e\u0924\u0940/i, 'gu-IN'], [/punjabi|\u092a\u0902\u091c\u093e\u092c\u0940/i, 'pa-IN'],
+];
+const LANG_CUE = /(\u092e\u0947\u0902|mein|me)\s*(\u092c\u093e\u0924|\u092c\u094b\u0932)|speak|talk|language|only|\u092d\u093e\u0937\u093e|samajh|\u0938\u092e\u091d|\u0906\u0924|\u091c\u093e\u0928|\u0938\u093f\u0930\u094d\u092b|\u092a\u0924\u093e/i;   // आत=aata, जान=jaan, सिर्फ=sirf
+function requestedLanguage(text, currentLang) {
+    if (!LANG_CUE.test(text)) return null;
+    for (const [rx, code] of LANG_REQUEST) if (rx.test(text) && code !== currentLang) return code;
+    return null;
+}
+
+const LANG_NAMES = { 'hi-IN': 'Hindi', 'en-IN': 'English', 'ta-IN': 'Tamil', 'kn-IN': 'Kannada', 'ml-IN': 'Malayalam',
+    'te-IN': 'Telugu', 'bn-IN': 'Bengali', 'mr-IN': 'Marathi', 'gu-IN': 'Gujarati', 'pa-IN': 'Punjabi' };
+
+const TTS_LANG = (l) => (['hi-IN', 'ta-IN', 'kn-IN', 'ml-IN', 'te-IN', 'bn-IN', 'mr-IN', 'gu-IN', 'pa-IN', 'en-IN'].includes(l) ? l : 'hi-IN');
+function armOpening(s) {
+    s.openingText = openingLine(s);
+    if (!s.openingText) return;                 // no vetted template for this language — live turn opens
+    s.openingPcmP = synthOpening(s).catch(e => { console.log('[vobiz] opening pre-synth failed (will fall back to live turn):', e.message); return null; });
+}
+
+// ── HTTP: place a call ──
+router.post('/vobiz/call', async (req, res) => {
+    try {
+        if (!vobizConfigured()) return res.status(400).json({ success: false, error: 'Vobiz not configured — set VOBIZ_AUTH_ID / VOBIZ_AUTH_TOKEN / VOBIZ_FROM_NUMBER / VOBIZ_PUBLIC_BASE / VOBIZ_WEBHOOK_TOKEN in .env' });
+        const b = req.body || {};
+        let ctx = { customer_name: b.customer_name || '', product: b.product || '', amount: b.amount || '', order_name: b.order_name || '' };
+        let orderRow = null, orderPhone = '';
+        if (b.order_name) {
+            try { const { order, fields } = await resolveOrderFields(b.order_name);
+                orderRow = order;
+                orderPhone = fields.phone || '';
+                ctx = { customer_name: fields.customer_name, product: fields.product, amount: fields.amount, order_name: fields.order_name }; } catch (_) {}
+        }
+        const phone = String(b.phone || orderPhone || '').replace(/\D/g, '').slice(-10);
+        if (!/^[6-9]\d{9}$/.test(phone)) return res.status(400).json({ success: false, error: b.order_name ? `no usable phone on ${b.order_name}` : 'valid 10-digit phone required' });
+        // Same test turnstile as WhatsApp: while the allowlist is set, only listed numbers ring.
+        const gate = allowlistBlocks(b.order_name || '', phone);
+        if (gate) return res.status(403).json({ success: false, error: gate });
+        ctx.firstName = String(ctx.customer_name || 'ji').trim().split(/\s+/)[0];
+        const lang = b.lang || (orderRow ? await langForOrder(orderRow.id) : 'hi-IN');
+        const sid = createSession({ phone, ctx, lang, voice: b.voice || 'kavya', callType: b.call_type });
+        armOpening(sessions.get(sid));            // synthesize the greeting while the phone rings
+        const answerUrl = `${V_BASE()}/api/vobiz/answer?token=${V_TOKEN()}&sid=${sid}`;
+        const r = await axios.post(`https://api.vobiz.ai/api/v1/Account/${V_AUTH_ID()}/Call/`, {
+            from: V_FROM(), to: '91' + phone,
+            answer_url: answerUrl, answer_method: 'POST',
+            hangup_url: `${V_BASE()}/api/vobiz/hangup?token=${V_TOKEN()}&sid=${sid}`,
+        }, { headers: { 'X-Auth-ID': V_AUTH_ID(), 'X-Auth-Token': V_AUTH_TOKEN(), 'Content-Type': 'application/json' }, timeout: 20000, validateStatus: () => true });
+        if (r.status >= 300) return res.status(502).json({ success: false, error: `Vobiz ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}` });
+        res.json({ success: true, sid, vobiz: r.data });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── webhooks (public path — token-checked here) ──
+// Vobiz posts call params form-encoded (From/To/CallUUID) — parse both shapes on this router only.
+router.use(express.urlencoded({ extended: false }));
+function xml(res, body) { res.set('Content-Type', 'application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>\n<Response>${body}</Response>`); }
+const recordXml = () => '';   // retired: the XML Record verb captured only the agent leg AND slowed stream setup
+async function startCallRecording(callId, tag, session) {
+    if (String(process.env.VOBIZ_RECORD || 'true') === 'false' || !callId) return;
+    try {
+        const r = await axios.post(`https://api.vobiz.ai/api/v1/Account/${V_AUTH_ID()}/Call/${callId}/Record/`,
+            { file_format: 'mp3' },
+            { headers: { 'X-Auth-ID': V_AUTH_ID(), 'X-Auth-Token': V_AUTH_TOKEN(), 'Content-Type': 'application/json' }, timeout: 10000, validateStatus: () => true });
+        console.log(`[vobiz ${tag}] record API:`, r.status, JSON.stringify(r.data || {}).slice(0, 140));
+        if (session && r.data) session.recordingUrl = r.data.recording_url || r.data.url || null;
+    } catch (e) { console.log(`[vobiz ${tag}] record API failed:`, e.message); }
+}
+
+// The outcome, auto-captured: a short model pass over the transcript ("confirmed / wants cancel /
+// reattempt Tuesday…") — the mechanical line stays as fallback so a summarizer outage never loses a log.
+async function summarizeCall(transcriptText) {
+    const r = await fetch('https://api.sarvam.ai/v1/chat/completions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'api-subscription-key': SARVAM_KEY() },
+        body: JSON.stringify({ model: 'sarvam-105b-conversations', max_tokens: 120, temperature: 0.2, reasoning_effort: null,
+            messages: [
+                { role: 'system', content: 'You summarize customer support phone calls. Reply in English only, max 2 short lines: line 1 = OUTCOME (confirmed / wants cancel / will reattempt / no clear answer / other): then 5-10 words of detail. Line 2 = promise or follow-up needed, or "none".' },
+                { role: 'user', content: transcriptText.slice(0, 4000) },
+            ] }),
+    });
+    if (!r.ok) throw new Error('summarizer ' + r.status);
+    const d = await r.json();
+    return sanitizeReply(d.choices?.[0]?.message?.content || '').slice(0, 400);
+}
+router.all('/vobiz/answer', async (req, res) => {
+    const q = req.query || {};
+    console.log('[vobiz] answer webhook hit — sid:', q.sid || '(none)', 'From:', (req.body && req.body.From) || q.From || '?', 'token ok:', q.token === V_TOKEN());
+    if (q.sid && sessions.has(q.sid)) sessions.get(q.sid).tAnswer = Date.now();
+    if (q.token !== V_TOKEN()) return xml(res, '<Hangup/>');
+    // INCOMING call (no pre-created sid): the customer dialled OUR number. The session is built
+    // from the CALLER: allowlist-gated while testing, order context pinned by
+    // VOBIZ_INBOUND_TEST_ORDER (the real-order test) — later this becomes a latest-order lookup
+    // by caller phone. Anyone not allowlisted gets a plain hangup, never the agent.
+    if (!q.sid || !sessions.has(q.sid)) {
+        const from = String((req.body && req.body.From) || q.From || '').replace(/\D/g, '').slice(-10);
+        const pinnedOrder = String(process.env.VOBIZ_INBOUND_TEST_ORDER || '').trim();
+        if (!from || allowlistBlocks(pinnedOrder, from)) {
+            console.log('[vobiz] inbound call refused (caller ' + (from || 'unknown') + ' not allowlisted)');
+            return xml(res, '<Hangup/>');
+        }
+        let ctx = { customer_name: '', product: '', amount: '', order_name: pinnedOrder };
+        if (pinnedOrder) {
+            try { const { fields } = await resolveOrderFields(pinnedOrder);
+                ctx = { customer_name: fields.customer_name, product: fields.product, amount: fields.amount, order_name: fields.order_name }; }
+            catch (e) { console.log('[vobiz] inbound order lookup failed:', e.message); }
+        }
+        ctx.firstName = String(ctx.customer_name || 'ji').trim().split(/\s+/)[0];
+        const sid = createSession({ phone: from, ctx, lang: process.env.VOBIZ_INBOUND_LANG || 'hi-IN', voice: process.env.VOBIZ_INBOUND_VOICE || 'kavya' });
+        armOpening(sessions.get(sid));
+        console.log(`[vobiz ${sid.slice(0, 6)}] INBOUND call from ${from} — order ${ctx.order_name || '(none)'}`);
+        const wssIn = `${V_BASE().replace(/^https/, 'wss')}/api/vobiz/media?token=${V_TOKEN()}&amp;sid=${sid}`;
+        return xml(res, `${recordXml()}<Stream bidirectional="true" audioTrack="inbound" contentType="audio/x-l16;rate=16000" keepCallAlive="true">${wssIn}</Stream>`);
+    }
+    const wssUrl = `${V_BASE().replace(/^https/, 'wss')}/api/vobiz/media?token=${V_TOKEN()}&amp;sid=${q.sid}`;
+    xml(res, `${recordXml()}<Stream bidirectional="true" audioTrack="inbound" contentType="audio/x-l16;rate=16000" keepCallAlive="true">${wssUrl}</Stream>`);
+});
+router.all('/vobiz/hangup', (req, res) => {
+    const s = sessions.get((req.query || {}).sid);
+    if (s && s.call) s.call.close('hangup webhook');
+    res.json({ ok: true });
+});
+
+// The dashboard plays recordings THROUGH us: media.vobiz.ai needs the account auth headers,
+// which must never reach the browser. Only vobiz.ai hosts are proxied.
+router.get('/vobiz/recording', async (req, res) => {
+    try {
+        const u = String(req.query.u || '');
+        let parsed;
+        try { parsed = new URL(u); } catch { return res.status(400).json({ success: false, error: 'bad url' }); }
+        if (!/\.vobiz\.ai$/.test(parsed.hostname)) return res.status(400).json({ success: false, error: 'not a vobiz media url' });
+        const r = await axios.get(u, { headers: { 'X-Auth-ID': V_AUTH_ID(), 'X-Auth-Token': V_AUTH_TOKEN() },
+            responseType: 'stream', timeout: 30000, validateStatus: () => true });
+        if (r.status >= 300) return res.status(502).json({ success: false, error: 'vobiz media ' + r.status });
+        res.set('Content-Type', r.headers['content-type'] || 'audio/mpeg');
+        if (r.headers['content-length']) res.set('Content-Length', r.headers['content-length']);
+        r.data.pipe(res);
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── the media WebSocket ──
+function attachVobizWs(httpServer) {
+    const wss = new WebSocketServer({ noServer: true });
+    httpServer.on('upgrade', (req, socket, head) => {
+        let u;
+        try { u = new URL(req.url, 'http://x'); } catch { socket.destroy(); return; }
+        console.log('[vobiz] ws upgrade attempt:', u.pathname);
+        if (u.pathname !== '/api/vobiz/media') return;                 // other upgrades are not ours
+        const token = u.searchParams.get('token'), sid = u.searchParams.get('sid');
+        if (token !== V_TOKEN() || !sessions.has(sid)) { socket.destroy(); return; }
+        wss.handleUpgrade(req, socket, head, (ws) => {
+            const s = sessions.get(sid);
+            const call = new VoiceCall(ws, s);
+            s.call = call;
+            console.log(`[vobiz ${sid.slice(0, 6)}] media stream connected for ${s.phone}` + (s.tAnswer ? ` (+${Date.now() - s.tAnswer}ms after answer webhook)` : ''));
+            let seen = 0, opened = false;
+            ws.on('message', (m) => {
+                let d; try { d = JSON.parse(m.toString()); } catch { call.log('non-JSON frame', m.length, 'bytes'); return; }
+                // The docs say {type:"start"} / {type:"media", media:"…"} — log the first frames so a
+                // different real-world shape (event-keyed, nested payload) is visible, not guessed at.
+                if (seen < 4 && d.type !== 'media' && d.event !== 'media') { call.log('frame[' + seen + ']:', JSON.stringify(d).slice(0, 220)); }
+                if (!call.streamId) { const sid2 = d.streamId || (d.start && d.start.streamId); if (sid2) { call.streamId = sid2; call.log('streamId captured'); } }
+                if (!call.callId) { const cid = d.callId || (d.start && d.start.callId); if (cid) { call.callId = cid; startCallRecording(cid, sid.slice(0, 6), s); } }
+                if (d.type === 'media' || d.event === 'media') {
+                    if (seen < 4) call.log('frame[' + seen + '] media keys:', Object.keys(d).join(','), typeof d.media === 'object' ? 'media keys: ' + Object.keys(d.media || {}).join(',') : 'media: string(' + String(d.media || '').length + ')');
+                    const payload = typeof d.media === 'string' ? d.media
+                        : (d.media && (d.media.payload || d.media.audio)) || d.payload || d.audio || null;
+                    if (payload) call.feedCaller(payload);
+                    // Some providers never send an explicit start — the first media frame IS the start.
+                    if (!opened) { opened = true; call.playOpening().catch(e => call.log('opening failed:', e.message)); }
+                } else if (d.type === 'start' || d.event === 'start' || d.event === 'connected') {
+                    if (!opened) { opened = true; call.playOpening().catch(e => call.log('opening failed:', e.message)); }
+                }
+                seen++;
+            });
+            ws.on('close', () => call.close('stream closed'));
+            ws.on('error', (e) => call.log('vobiz ws error:', e.message));
+        });
+    });
+}
+
+module.exports = { router, attachVobizWs, createSession, sessions };

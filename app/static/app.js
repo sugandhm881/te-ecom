@@ -5551,7 +5551,7 @@ async function supOrderModal(orderId){
         <div><div class="flex items-center gap-2 flex-wrap"><span class="font-mono text-lg font-bold text-slate-800">${escapeHtml(o.order_name||o.order_id)}</span>${supBadge(o.bucket)}
           ${o.msg91_confirmed?'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}${eeHoldChip(o.order_name)}</div>
           <p class="text-xs text-slate-400 mt-1">Placed ${new Date(o.created_at).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})} · ${days} days ago</p></div>
-        <div class="flex items-center gap-2"><button id="supd-logcall" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">📞 Log a call</button>
+        <div class="flex items-center gap-2"><span id="supd-aicall"></span><button id="supd-logcall" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">📞 Log a call</button>
           <button class="supd-close text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div></div>
       <div class="grid md:grid-cols-2 gap-6 mt-5">
         <div class="space-y-4">
@@ -5574,8 +5574,17 @@ async function supOrderModal(orderId){
         </div>
       </div>
       <div class="grid md:grid-cols-2 gap-6 mt-5">
-        <div class="card p-4"><div class="flex items-center justify-between mb-2"><p id="supd-calls-count" class="text-xs font-bold text-slate-500 uppercase tracking-wide">Call history (${(d.calls||[]).length})</p></div>
-          <div id="supd-calls-list" class="space-y-2 max-h-52 overflow-auto">${(d.calls||[]).map(cl=>`<div class="rounded-lg border border-slate-100 p-2.5 text-xs">
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><p id="supd-calls-count" class="text-xs font-bold text-slate-500 uppercase tracking-wide">Call history (${(d.calls||[]).length+(d.ai_calls||[]).length})</p></div>
+          <div id="supd-calls-list" class="space-y-2 max-h-52 overflow-auto">${(d.ai_calls||[]).map((ac,i)=>`<div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-2.5 text-xs">
+            <div class="flex items-center gap-2 flex-wrap"><span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">\u{1F916} AI call</span>
+              <span class="text-slate-400">${escapeHtml((ac.call_type||'').replace('_vobiz','').replace(/_/g,' '))} · ${escapeHtml(ac.language||'')} · ${ac.called_at?new Date(ac.called_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span></div>
+            ${ac.summary?`<p class="text-slate-700 mt-1 whitespace-pre-wrap">${escapeHtml(ac.summary)}</p>`:''}
+            <div class="flex items-center gap-2 mt-1.5">
+              ${ac.recording_url?`<button class="supd-aic-play px-2 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700" data-u="${escapeHtml(ac.recording_url)}">\u25B6 Play recording</button>`:''}
+              ${ac.transcript?`<button class="supd-aic-tr px-2 py-1 rounded-lg text-[11px] font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300" data-i="${i}">Transcript</button>`:''}
+            </div>
+            ${ac.transcript?`<pre class="supd-aic-tx hidden mt-2 text-[11px] leading-relaxed whitespace-pre-wrap text-slate-600" data-i="${i}">${escapeHtml(ac.transcript)}</pre>`:''}
+          </div>`).join('')}${(d.calls||[]).map(cl=>`<div class="rounded-lg border border-slate-100 p-2.5 text-xs">
             <div class="flex items-center gap-2"><span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">${supOutcomeLbl(cl.outcome)}</span><span class="text-slate-400">${escapeHtml(cl.agent_name||'')} · ${new Date(cl.called_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span></div>
             ${cl.notes?`<p class="text-slate-600 mt-1">${escapeHtml(cl.notes)}</p>`:''}${cl.next_followup_at?`<p class="text-amber-600 mt-1">Follow up: ${new Date(cl.next_followup_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</p>`:''}</div>`).join('')||'<p class="text-sm text-slate-400">No calls yet</p>'}</div></div>
         <div class="card p-4"><div class="flex items-center justify-between mb-2"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide">WhatsApp chat (MSG91)</p>
@@ -5621,6 +5630,20 @@ async function supOrderModal(orderId){
     document.getElementById('supd-notes').addEventListener('click',()=>supNotesModal(o.order_id,o.order_name));
     wrap.querySelectorAll('.supd-cust-row').forEach(row=>{ if(row.dataset.oid!==o.order_id) row.addEventListener('click',()=>supOrderModal(row.dataset.oid)); });
     supWaButtons(o.order_name||o.order_id, ()=>supOrderModal(orderId));
+    supAiCallMount(o);
+    wrap.querySelectorAll('.supd-aic-tr').forEach(b=>b.addEventListener('click',()=>{
+      wrap.querySelector(`.supd-aic-tx[data-i="${b.dataset.i}"]`)?.classList.toggle('hidden');
+    }));
+    wrap.querySelectorAll('.supd-aic-play').forEach(b=>b.addEventListener('click',async()=>{
+      b.disabled=true; b.textContent='Loading\u2026';
+      try{
+        const r=await fetch('/api/vobiz/recording?u='+encodeURIComponent(b.dataset.u),{headers:getAuthHeaders()});
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        const audio=document.createElement('audio'); audio.controls=true; audio.className='w-full mt-1';
+        audio.src=URL.createObjectURL(await r.blob());
+        b.replaceWith(audio); audio.play().catch(()=>{});
+      }catch(e){ b.disabled=false; b.textContent='\u25B6 Play (failed: '+e.message+')'; }
+    }));
     supWaChat(o.order_name||o.order_id, document.getElementById('supd-wachat'));
     document.getElementById('supd-wachat-full')?.addEventListener('click',()=>supWaChatModal(o.order_name||o.order_id));
   }catch(e){ wrap.firstElementChild.innerHTML=`<div class="text-rose-500 text-sm">${escapeHtml(e.message)}</div><button class="filter-btn mt-3" onclick="document.getElementById('sup-order-modal').remove()">Close</button>`; }
@@ -5689,7 +5712,34 @@ async function supWaPreview(orderName, seq, refresh){
   }catch(e){ wrap.firstElementChild.innerHTML=`<div class="text-sm text-rose-600">${escapeHtml(e.message)}</div><button class="filter-btn mt-3" onclick="document.getElementById('supd-wa-preview').remove()">Close</button>`; }
 }
 
-// ── WhatsApp chat viewers ────────────────────────────────────────────────────
+// ── AI phone call (Vobiz bridge) — the PANEL the popup was opened from decides the purpose ──
+// Hold Orders → confirm the COD order; Undelivered → failed-delivery follow-up; Rejected COD →
+// verify the written rejection. The server enforces the same purpose in the agent's prompt, and the
+// test allowlist still gates who can actually be rung until cut-over.
+const SUP_AI_CALL_BY_TAB={ repeat:{type:'cod_confirm',label:'confirm the COD order'},
+                           und:{type:'undelivered',label:'follow up on the failed delivery'},
+                           rejected:{type:'cod_rejected',label:'verify the rejection'} };
+function supAiCallMount(o){
+  const host=document.getElementById('supd-aicall'); if(!host) return;
+  const map=(currentView==='support-queue' && SUP_AI_CALL_BY_TAB[_supTab]) || SUP_AI_CALL_BY_TAB.repeat;
+  if(!o.order_name) return;
+  host.innerHTML=`<button id="supd-aicall-btn" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700" title="The AI agent calls the customer to ${escapeHtml(map.label)}">🤖 AI Call</button>`;
+  document.getElementById('supd-aicall-btn').addEventListener('click',()=>{
+    supConfirm({
+      title:`AI agent will call the customer`, icon:'🤖', tone:'go', confirmLabel:'Place the call',
+      message:`Purpose: ${map.label} (${o.order_name}). The agent speaks in the configured voice and the call is recorded.`,
+      busyTitle:'Placing the call…', successTitle:'Ringing',
+      successMessage:'The customer\'s phone is ringing. The transcript will appear in the call logs when the call ends.',
+      work: async ()=>{
+        const r=await supFetch('/api/vobiz/call',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({order_name:o.order_name,call_type:map.type})});
+        if(!r.success) throw new Error(r.error||'call failed');
+      },
+    });
+  });
+}
+
+// ── WhatsApp chat viewers ─// ── WhatsApp chat viewers ────────────────────────────────────────────────────
 // The sent-chip popup: the exact message a version delivered, from the send-time snapshot.
 function supWaSentView(label, v){
   document.getElementById('supd-wa-sentview')?.remove();

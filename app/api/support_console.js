@@ -887,11 +887,13 @@ router.get('/support/order/:orderId', async (req, res) => {
         const last10 = String(b.phone || '').replace(/\D/g, '').slice(-10);
         const custEmail = String(b.email || '').trim();
         const CUST_SEL = 'order_id, order_name, bucket, created_at, total_price, tracking_status, courier, awb_number, phone, email';
-        const [items, addr, tracking, calls, notes, contactsAll, custByPhone, custByEmail] = await Promise.all([
+        const [items, addr, tracking, calls, aiCalls, notes, contactsAll, custByPhone, custByEmail] = await Promise.all([
             supabase.from('order_line_items').select('title, variant_title, sku, quantity, price').eq('order_id', oid),
             supabase.from('order_shipping_addresses').select('*').eq('order_id', oid).maybeSingle(),
             supabase.from('order_tracking').select('tracking_status, courier_name, awb_number, last_tracked_at, edd').eq('order_id', oid).order('last_tracked_at', { ascending: false }),
             supabase.from('call_logs').select('id, outcome, notes, called_at, next_followup_at, agent_id').eq('order_id', oid).order('called_at', { ascending: false }),
+            // REAL AI phone calls (Vobiz bridge) — keyed by order NAME in agent_call_logs
+            supabase.from('agent_call_logs').select('call_type, language, summary, transcript, exchanges, recording_url, called_at').eq('order_id', String(b.order_name || '').replace(/^#/, '')).order('called_at', { ascending: false }).limit(10),
             supabase.from('order_notes').select('id, content, created_at, agent_id').eq('order_id', oid).order('created_at', { ascending: false }),
             supabase.from('escalation_contacts').select('*'),
             last10 ? supabase.from('order_buckets').select(CUST_SEL).ilike('phone', `%${last10}`).order('created_at', { ascending: false }).limit(30) : Promise.resolve({ data: [] }),
@@ -966,6 +968,7 @@ router.get('/support/order/:orderId', async (req, res) => {
         res.json({ success: true, order: b, items: items.data || [], address: addr.data || null,
             tracking: tracking.data || [], msg91,
             calls: (calls.data || []).map(c => ({ ...c, agent_name: nameById[c.agent_id] || null })),
+            ai_calls: (aiCalls.data || []),
             notes: (notes.data || []).map(n => ({ ...n, agent_name: nameById[n.agent_id] || null, mine: n.agent_id === myId })),
             escalation, customer_orders: custOrders.data || [],   // includes the current order (marked client-side)
             holdLog, isAdmin: isAdmin(req) });

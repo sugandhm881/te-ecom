@@ -10,6 +10,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <link rel="preconnect" href="https://api.sarvam.ai" crossorigin>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>The Element - Voice Agent</title>
@@ -168,6 +169,29 @@
             <option value="gu-IN">Gujarati</option>
             <option value="pa-IN">Punjabi</option>
             <option value="en-IN">English</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="voice-select">Voice</label>
+          <select id="voice-select">
+            <option value="kavya">Kavya (F)</option>
+            <option value="priya">Priya (F)</option>
+            <option value="neha">Neha (F)</option>
+            <option value="simran">Simran (F)</option>
+            <option value="shreya">Shreya (F)</option>
+            <option value="ishita">Ishita (F)</option>
+            <option value="rahul">Rahul (M)</option>
+            <option value="amit">Amit (M)</option>
+            <option value="rohan">Rohan (M)</option>
+            <option value="dev">Dev (M)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="pace-select">Pace</label>
+          <select id="pace-select">
+            <option value="0.9">Calm (0.9x)</option>
+            <option value="1" selected>Natural (1x)</option>
+            <option value="1.1">Brisk (1.1x)</option>
           </select>
         </div>
         <div class="field" style="position:relative">
@@ -448,6 +472,37 @@ const LANG_LABELS = {
 
 const TTS_SUPPORTED = ["hi-IN","ta-IN","kn-IN","ml-IN","te-IN","bn-IN","mr-IN","gu-IN","pa-IN","en-IN"];
 
+// The picked VOICE is the agent's identity — the model must speak in that person's gender.
+// A real call had Rahul's (male) voice saying "\u092c\u093e\u0924 \u0915\u0930 \u0930\u0939\u0940 \u0939\u0942\u0901" because the prompt never said who was talking.
+const SPEAKER_INFO = {
+  priya: { name: "Priya", gender: "female" }, neha: { name: "Neha", gender: "female" },
+  simran: { name: "Simran", gender: "female" }, kavya: { name: "Kavya", gender: "female" },
+  shreya: { name: "Shreya", gender: "female" }, ishita: { name: "Ishita", gender: "female" },
+  rahul: { name: "Rahul", gender: "male" }, amit: { name: "Amit", gender: "male" },
+  rohan: { name: "Rohan", gender: "male" }, dev: { name: "Dev", gender: "male" },
+};
+function agentPersona() {
+  const sp = SPEAKER_INFO[getSpeaker()] || { name: "Kavya", gender: "female" };
+  const lang = getLangLabel();
+  const forms = sp.gender === "male"
+    ? "\u0915\u0930 \u0930\u0939\u093e \u0939\u0942\u0901 / \u092c\u094b\u0932 \u0930\u0939\u093e \u0939\u0942\u0901 / \u0915\u0930\u0942\u0901\u0917\u093e (male forms, ALWAYS)"
+    : "\u0915\u0930 \u0930\u0939\u0940 \u0939\u0942\u0901 / \u092c\u094b\u0932 \u0930\u0939\u0940 \u0939\u0942\u0901 / \u0915\u0930\u0942\u0901\u0917\u0940 (female forms, ALWAYS)";
+  // Language texture is PER LANGUAGE — a static "everyday Hinglish" rule dragged even English
+  // calls into Hindi (caught live). Hindi gets Hinglish + gendered first-person forms; every
+  // other language gets its own native phone-call register and a hard no-Hindi guard.
+  const identity = lang === "Hindi"
+    ? `You are ${sp.name}, a ${sp.gender} calling agent. Your OWN first-person Hindi verb forms are your own gender's: ${forms}. Talk like a real Indian phone agent: everyday Hinglish, Hindi in Devanagari, common English words (order, delivery, confirm) left in English. For the CUSTOMER always use respectful plural forms with \u0906\u092a (\u0930\u0939\u0947\u0902\u0917\u0947, \u0915\u0930\u0947\u0902\u0917\u0947, \u0939\u094b\u0902\u0917\u0947) — NEVER gendered guesses: \u0939\u094b\u0902\u0917\u0940, \u0930\u0939\u0947\u0902\u0917\u0940, \u0915\u0930\u0947\u0902\u0917\u0940 are FORBIDDEN for the customer. When asking for the customer's time, ask a proper QUESTION about THEIR time: "\u0915\u094d\u092f\u093e \u0906\u092a\u0915\u0947 \u092a\u093e\u0938 \u0926\u094b \u092e\u093f\u0928\u091f \u0939\u0948\u0902?" — never the malformed "\u092c\u0938 \u0926\u094b \u092e\u093f\u0928\u091f \u0915\u093e time \u0939\u0948".`
+    : `You are ${sp.name}, a ${sp.gender} calling agent. Speak ${lang} ONLY — never slip into Hindi or any other language. Use the first-person forms of your own gender wherever ${lang} marks gender. Common English commerce words (order, delivery, confirm) may stay in English.`;
+  return `
+
+YOUR IDENTITY: ${identity} Introduce yourself by first name naturally when opening.
+ADDRESSING THE CUSTOMER: use FIRST NAME with the natural respectful honorific of ${lang} ("Sugandh \u091c\u0940" in Hindi, "Sugandh ji" in English — never Devanagari script inside a non-Hindi sentence) — a real person never reads out someone's full three-part name on a call. Acknowledge replies like a human (\u091c\u0940 \u092c\u093f\u0932\u094d\u0915\u0941\u0932, \u0905\u091a\u094d\u091b\u093e, \u092c\u0922\u093c\u093f\u092f\u093e) and mirror the customer's tone — warm with warm, brief with brief.
+GRAMMAR: every line must be a well-formed, natural sentence in the call language — when unsure, choose simpler words. A request for the customer's time or availability is always a polite QUESTION, never a statement fragment.
+CLOSING THE CALL: end by thanking them for choosing the brand, in the call language — Hindi: "The Element को चुनने के लिए आपका धन्यवाद। आपका दिन शुभ हो।"; English: "Thank you for choosing The Element. Have a great day!" — never a bare "अच्छा दिन हो".
+COMPLETE SENTENCES: spoken words vanish — every sentence must carry its own SUBJECT. Say "आपका order 3 से 5 दिन में पहुँच जाएगा", NEVER a bare "पहुँच जाएगा" — a real caller heard exactly that and it felt broken.
+LANGUAGE TEXTURE: speak ${lang} exactly the way it is spoken on real phone calls in India — that language's own rhythm, politeness particles and everyday phrasing, never a word-for-word translation from Hindi or English. For English, use a warm Indian English conversational register.`;
+}
+
 const PRODUCT_KNOWLEDGE = `
 PRODUCT KNOWLEDGE - The Element:
 Philosophy: Ayurveda + modern science. "Skin from within" - topical actives combined with Ayurvedic ingestibles. Made in India, no parabens, no sulphates, cruelty free. Works for Indian skin tones and Indian climate.
@@ -465,6 +520,20 @@ Complementary pairs:
 
 If customer asks about ingredients, how to use, expected results, or how products work together - answer naturally from the above. Keep it to 1-2 sentences on a call. If customer is hesitant, use product benefit to reinforce value before offering any discount.
 `;
+
+// Appended to every call-type prompt: the model's text goes DIRECTLY to a voice synthesizer,
+// so it must write what a human agent would SAY, not what a chatbot would type. Born from a real
+// test call: the agent read out symbols and a full order ID, guessed the customer's gender in verb
+// forms, and repeated the same goodbye twice.
+const SPOKEN_STYLE = `
+
+TONE: courteous, professional and calm from greeting to goodbye \u2014 a trained customer-care executive, never a friend. No slang, no jokes, no cheeky or over-familiar phrases. Warmth comes from politeness, not casualness.
+SPOKEN DELIVERY RULES (your words are spoken aloud by a voice synthesizer, exactly as written):
+- Write ONLY speakable words: no emoji, no symbols, no dashes, no brackets, no quotes, no lists.
+- NEVER read out a full order ID or tracking number unless the customer explicitly asks for it. Say "\u0906\u092a\u0915\u093e order" instead.
+- Amounts stay in digits (1047 \u0930\u0941\u092a\u092f\u0947) \u2014 the synthesizer says them correctly.
+- Always use the respectful register for the customer, and never guess the customer's gender from their name.
+- One thought per turn, maximum 2 short sentences. Vary your wording \u2014 never say the same sentence twice in one call.`;
 
 const SYSTEM_PROMPTS = {
   cod_confirm: (lang, o) => `You are a friendly, professional call agent from The Element, an Ayurvedic skincare brand based in India. You are making an outbound call to confirm a Cash on Delivery (COD) order.
@@ -621,9 +690,11 @@ Rules:
 // State
 let selectedCallType = "cod_confirm";
 let chatHistory = [];
-let mediaRecorder = null;
-let audioChunks = [];
 let isRecording = false;
+let micStream = null, micCtx = null, micSrc = null, micNode = null;   // live PCM capture
+let pcmParts = [];                                                     // this utterance, for the REST fallback
+let sttLive = null;                                                    // realtime STT socket (per call)
+let sttStreamedThisTurn = false;
 let turnCount = 0;
 let currentApiKey = "";
 let supabaseUrl = "";
@@ -698,44 +769,42 @@ function getOrderInfo() {
 }
 
 function getLangCode() { return document.getElementById("lang-select").value; }
+function getSpeaker() { return document.getElementById("voice-select")?.value || "kavya"; }
+function getPace() { return Number(document.getElementById("pace-select")?.value) || 1; }
+// What reaches the synthesizer is SPEECH, not typography: dashes become a breath, quotes/brackets
+// and stray symbols vanish. The transcript bubble keeps the original text — punctuation was never
+// going to be "spoken" anyway, so this fixes the speak side without touching the read side.
+function toSpokenText(t) {
+  return String(t || "")
+    .replace(/[\u2014\u2013]/g, ", ")
+    .replace(/["\u201C\u201D\u2018\u2019'\u0060]/g, "")
+    .replace(/[()\[\]{}<>#*_~^|\\\/]/g, " ")
+    .replace(/\s+([,.!?\u0964])/g, "$1")
+    .replace(/\s+/g, " ").trim();
+}
 function getLangLabel() { return LANG_LABELS[getLangCode()]; }
 
-// ⚠ SARVAM'S STT CANNOT READ THE BROWSER'S NATIVE RECORDING. MediaRecorder produces webm/opus, and
-// /speech-to-text answers 400 "Failed to read the file, please check the audio format" for it — while
-// the SAME request with WAV bytes passes under every model param, even with a .webm filename, so the
-// server judges the bytes, not the name (verified against the live API, 2026-08-24). The recording is
-// therefore converted client-side: decode → mono → 16 kHz → PCM16 WAV, the shape every STT accepts.
-async function blobToWav(blob) {
-  const raw = await blob.arrayBuffer();
-  const AC = window.AudioContext || window.webkitAudioContext;
-  const decodeCtx = new AC();
-  const decoded = await decodeCtx.decodeAudioData(raw);
-  decodeCtx.close();
+// ── LIVE TRANSCRIPTION (2026-08-25, stage 2 of "make it fast like real human conversation") ──
+// The mic no longer records-then-uploads. While the button is held, raw 16 kHz PCM streams over
+// Sarvam's realtime STT WebSocket (saaras:v3-realtime, endpointing=manual — push-to-talk IS manual
+// endpointing); on release, speech_end finalizes what the server already heard. Measured live: the
+// final transcript lands ~130-300ms after release, where the old record → WAV-convert → upload →
+// transcribe path took 1-1.5s. Partials stream in while talking and show in the status bar.
+// ⚠ The WAV lesson still stands for the FALLBACK: if the socket is down, the SAME captured PCM is
+// wrapped in a WAV header (Sarvam's REST STT judges bytes, not filenames) and posted to /speech-to-text.
+function pcmToWav(pcm) {
   const SR = 16000;
-  const frames = Math.max(1, Math.ceil(decoded.duration * SR));
-  // OfflineAudioContext does the resample; a mono destination does the downmix.
-  const off = new OfflineAudioContext(1, frames, SR);
-  const src = off.createBufferSource();
-  src.buffer = decoded;
-  src.connect(off.destination);
-  src.start();
-  const rendered = await off.startRendering();
-  const pcm = rendered.getChannelData(0);
   const out = new DataView(new ArrayBuffer(44 + pcm.length * 2));
   const str = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
   str(0, "RIFF"); out.setUint32(4, 36 + pcm.length * 2, true); str(8, "WAVE");
   str(12, "fmt "); out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true);
   out.setUint32(24, SR, true); out.setUint32(28, SR * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
   str(36, "data"); out.setUint32(40, pcm.length * 2, true);
-  for (let i = 0; i < pcm.length; i++) {
-    const s = Math.max(-1, Math.min(1, pcm[i]));
-    out.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-  }
+  for (let i = 0; i < pcm.length; i++) out.setInt16(44 + i * 2, pcm[i], true);
   return new Blob([out.buffer], { type: "audio/wav" });
 }
 
-async function callSTT(blob) {
-  const wav = await blobToWav(blob);
+async function callSTTRest(wav) {
   const fd = new FormData();
   fd.append("file", wav, "audio.wav");
   fd.append("model", "saaras:v3");
@@ -751,6 +820,101 @@ async function callSTT(blob) {
   return d.transcript || "";
 }
 
+class SttLive {
+  open() {
+    return new Promise((res) => {
+      let settled = false;
+      try {
+        const url = SARVAM_BASE.replace("https", "wss")
+          + "/speech-to-text-realtime/ws?language_code=" + encodeURIComponent(getLangCode())
+          + "&model=saaras:v3-realtime&endpointing=manual&stream_type=fast&encoding=linear16&sample_rate=16000";
+        // Browser WebSocket cannot set headers — the key rides as a subprotocol (documented, echoed back).
+        const ws = new WebSocket(url, ["api-subscription-key." + currentApiKey]);
+        ws.onmessage = (m) => {
+          let d; try { d = JSON.parse(m.data); } catch { return; }
+          if (d.event === "session.begin" && !settled) { settled = true; res(true); }
+          if (d.event === "transcript.partial" && d.text && this.onPartial) this.onPartial(d.text);
+          if (d.event === "transcript.final" && this._resolveFinal) { this._resolveFinal(d.text || ""); this._resolveFinal = null; }
+        };
+        ws.onerror = () => { if (!settled) { settled = true; res(false); } };
+        ws.onclose = () => { this.ws = null; if (this._resolveFinal) { this._resolveFinal(null); this._resolveFinal = null; } };
+        this.ws = ws;
+        this._ping = setInterval(() => { try { if (ws.readyState === 1) ws.send(JSON.stringify({ event: "ping" })); } catch {} }, 25000);
+        setTimeout(() => { if (!settled) { settled = true; res(this.ws && this.ws.readyState === 1); } }, 4000);
+      } catch { res(false); }
+    });
+  }
+  ready() { return !!(this.ws && this.ws.readyState === 1); }
+  speechStart() { this.ws.send(JSON.stringify({ event: "speech_start" })); }
+  feed(pcm) {
+    let bin = "";
+    const u8 = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+    for (let i = 0; i < u8.length; i += 8192) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+    this.ws.send(JSON.stringify({ event: "audio_input", audio: btoa(bin) }));
+  }
+  // Resolves with the final transcript, or null on socket death/timeout (caller falls back to REST).
+  speechEnd(timeoutMs) {
+    return new Promise((res) => {
+      this._resolveFinal = res;
+      try { this.ws.send(JSON.stringify({ event: "speech_end" })); } catch { this._resolveFinal = null; res(null); return; }
+      setTimeout(() => { if (this._resolveFinal) { this._resolveFinal = null; res(null); } }, timeoutMs || 3500);
+    });
+  }
+  close() { try { clearInterval(this._ping); if (this.ws) { this.ws.send(JSON.stringify({ event: "end" })); this.ws.close(); } } catch {} this.ws = null; }
+}
+
+// Capture: one shared mic stream per call; a ScriptProcessor taps device-rate audio, resampled to
+// 16 kHz mono PCM16 in JS (an AudioContext({sampleRate:16000}) is not honored everywhere).
+function resampleTo16k(f32, fromRate) {
+  if (fromRate === 16000) return f32;
+  const ratio = fromRate / 16000;
+  const n = Math.floor(f32.length / ratio);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(f32.length, Math.floor((i + 1) * ratio) || a + 1);
+    let s = 0, k = 0;
+    for (let j = a; j < b; j++) { s += f32[j]; k++; }
+    out[i] = k ? s / k : f32[a] || 0;
+  }
+  return out;
+}
+function f32ToPcm16(f32) {
+  const o = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) { const s = Math.max(-1, Math.min(1, f32[i])); o[i] = s < 0 ? s * 0x8000 : s * 0x7FFF; }
+  return o;
+}
+async function ensureMic() {
+  if (micStream && micStream.getTracks().some(t => t.readyState === "live")) return;
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+}
+async function startCapture(onChunk) {
+  await ensureMic();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  micCtx = new AC();
+  if (micCtx.state === "suspended") await micCtx.resume();
+  micSrc = micCtx.createMediaStreamSource(micStream);
+  micNode = micCtx.createScriptProcessor(4096, 1, 1);
+  micNode.onaudioprocess = (e) => {
+    const pcm = f32ToPcm16(resampleTo16k(e.inputBuffer.getChannelData(0), micCtx.sampleRate));
+    pcmParts.push(pcm);
+    onChunk(pcm);
+  };
+  micSrc.connect(micNode);
+  micNode.connect(micCtx.destination);   // ScriptProcessor only fires when connected; it outputs silence
+}
+function stopCapture() {
+  try { if (micNode) micNode.disconnect(); if (micSrc) micSrc.disconnect(); } catch {}
+  try { if (micCtx) micCtx.close(); } catch {}
+  micCtx = micSrc = micNode = null;
+}
+function concatPcm(parts) {
+  const n = parts.reduce((a, p) => a + p.length, 0);
+  const out = new Int16Array(n);
+  let o = 0;
+  parts.forEach(p => { out.set(p, o); o += p.length; });
+  return out;
+}
+
 // ⚠ THE MODEL INVENTS TOOL CALLS, AND THE PAGE ONCE SPOKE THEM ALOUD. `sarvam-105b-conversations`
 // is agentic-tuned: at a call's natural close it emitted `<tool_call>close_positive …</tool_call>` —
 // a protocol NOTHING here defines (`close_positive` appears nowhere in this codebase) — and the reply
@@ -761,8 +925,8 @@ async function callSTT(blob) {
 const CLOSING_LINE = {
   // Only languages whose line a native reader has effectively vetted (Hindi is the default the
   // agent already speaks; English is English). A mistranslated goodbye is worse than the default.
-  "hi-IN": "धन्यवाद, आपका दिन शुभ हो!",
-  "en-IN": "Thank you for your time. Have a great day!",
+  "hi-IN": "The Element को चुनने के लिए आपका धन्यवाद। आपका दिन शुभ हो।",
+  "en-IN": "Thank you for choosing The Element. Have a great day!",
 };
 function sanitizeReply(text) {
   let t = String(text || "");
@@ -773,23 +937,302 @@ function sanitizeReply(text) {
   return t.replace(/\s+/g, " ").trim();
 }
 
-async function callChat(history, systemPrompt) {
+// ── THE LATENCY PIPELINE (2026-08-25, "make it fast like real human conversation") ──
+// The old flow was fully serial: STT → wait for the WHOLE chat completion → TTS the WHOLE reply →
+// only then audio. Measured live: chat first token 445ms but full completion 1.6s; TTS 1.65s for one
+// sentence vs 4.1s for a full reply — so a long turn meant ~6s of dead air. Now the chat STREAMS
+// (SSE), the reply is cut at sentence boundaries as tokens arrive, each sentence goes to TTS the
+// moment it completes (later sentences synthesize while the first plays), and playback is gapless
+// through one AudioContext. Time-to-first-audio ≈ STT + first sentence + one short TTS.
+async function callChatStream(history, systemPrompt, onSentence) {
   const r = await fetch(`${SARVAM_BASE}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "api-subscription-key": currentApiKey },
     body: JSON.stringify({
       model: SARVAM_CHAT_MODEL,
       messages: [{ role: "system", content: systemPrompt }, ...history],
-      max_tokens: 300,
+      max_tokens: 200,
       temperature: 0.75,
-      reasoning_effort: null
+      reasoning_effort: null,
+      stream: true
     })
   });
   if (!r.ok) { const t = await r.text(); throw new Error(`Chat ${r.status}: ${t.slice(0, 200)}`); }
-  const d = await r.json();
-  const clean = sanitizeReply(d.choices[0].message.content);
+
+  let full = "", buf = "", emittedAny = false;
+  // A '.' only ends a sentence before whitespace — "Rs.50" must never be cut into a TTS chunk.
+  const isBoundary = (s, i) => {
+    const ch = s[i];
+    if (ch === "\n" || ch === "।" || ch === "!" || ch === "?") return true;
+    if (ch === ".") return i + 1 < s.length && /\s/.test(s[i + 1]);
+    return false;
+  };
+  const drain = (force) => {
+    // Never emit through an unclosed '<' — tool-call machinery is sanitized as a BLOCK; splitting
+    // it across sentences would speak half a tag (the exact accident sanitizeReply exists for).
+    let work = buf, held = "";
+    const lt = work.lastIndexOf("<");
+    if (lt >= 0 && work.indexOf(">", lt) < 0 && !force) { held = work.slice(lt); work = work.slice(0, lt); }
+    // First sentence leaves ASAP (latency); later ones batch to ~60+ chars (prosody + fewer calls).
+    for (;;) {
+      let cut = -1;
+      for (let i = 0; i < work.length; i++) {
+        const hard = isBoundary(work, i);
+        // The very first chunk may leave at a comma/semicolon clause (>=18 chars) — the voice
+        // starts on "Namaste Sugandh-ji," while the rest of the sentence is still being written.
+        const soft = !emittedAny && (work[i] === "," || work[i] === ";") && i + 1 < work.length && /\s/.test(work[i + 1]);
+        const min = emittedAny ? 60 : (soft ? 18 : 1);
+        if ((hard || soft) && i + 1 >= min) { cut = i + 1; break; }
+      }
+      if (cut < 0) break;
+      const clean = sanitizeReply(work.slice(0, cut));
+      if (clean) { onSentence(clean); emittedAny = true; }
+      work = work.slice(cut);
+    }
+    if (force && work.trim()) { const clean = sanitizeReply(work); if (clean) { onSentence(clean); emittedAny = true; } work = ""; }
+    buf = work + held;
+  };
+
+  const ct = r.headers.get("content-type") || "";
+  if (ct.includes("event-stream") && r.body) {
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let sse = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sse += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = sse.indexOf("\n")) >= 0) {
+        const line = sse.slice(0, nl).trim(); sse = sse.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") continue;
+        try {
+          const delta = JSON.parse(payload).choices?.[0]?.delta?.content;
+          if (delta) { full += delta; buf += delta; drain(false); }
+        } catch { /* keep-alive / partial frame */ }
+      }
+    }
+  } else {
+    // The endpoint answered non-streamed (proxy, API change) — same pipeline, one big drain.
+    const d = await r.json();
+    full = d.choices?.[0]?.message?.content || "";
+    buf = full;
+  }
+  drain(true);
+  const clean = sanitizeReply(full);
   // A reply that was ONLY machinery still has to end the turn like a human would.
   return clean || CLOSING_LINE[getLangCode()] || CLOSING_LINE["hi-IN"];
+}
+
+// Gapless ordered playback: every sentence's TTS request fires the moment the sentence exists
+// (concurrent), but the audio is SCHEDULED in order on one AudioContext timeline — no per-chunk
+// <audio> element, no gap between sentences, and stop() cuts everything mid-word for barge-in.
+class SpeechPlayer {
+  constructor() {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC();
+    this.nextAt = 0; this.stopped = false; this.finished = false;
+    this.queue = Promise.resolve(); this.lastEnd = null; this.sources = [];
+    this.onFirstAudio = null;
+    this._resolveDone = null;
+    this.done = new Promise(res => { this._resolveDone = res; });
+  }
+  speak(text) {
+    if (this.stopped || !text || !text.trim()) return;
+    const fetchP = callTTS(text).catch(e => { console.error("TTS failed:", e.message); return null; });
+    this.queue = this.queue.then(async () => {
+      const b64 = await fetchP;
+      if (this.stopped || !b64) return;
+      try {
+        if (this.ctx.state === "suspended") await this.ctx.resume();
+        const bytes = Uint8Array.from(atob(b64), ch => ch.charCodeAt(0));
+        const audioBuf = await this.ctx.decodeAudioData(bytes.buffer);
+        if (this.stopped) return;
+        if (this.onFirstAudio) { const cb = this.onFirstAudio; this.onFirstAudio = null; cb(); }
+        const src = this.ctx.createBufferSource();
+        src.buffer = audioBuf;
+        src.connect(this.ctx.destination);
+        const at = Math.max(this.ctx.currentTime + 0.03, this.nextAt);
+        src.start(at);
+        this.nextAt = at + audioBuf.duration;
+        this.sources.push(src);
+        this.lastEnd = new Promise(res => { src.onended = res; });
+      } catch (e) { console.error("audio decode failed:", e.message); }
+    });
+  }
+  // Streaming-TTS inlet: chunks arrive in order on one socket, so they schedule directly on the
+  // timeline (no ordering queue needed). linear16 needs no decodeAudioData — bytes become samples.
+  feedPcm16(b64, rate) {
+    if (this.stopped || !b64) return;
+    try {
+      if (this.ctx.state === "suspended") this.ctx.resume();
+      let bin = atob(b64);
+      if (bin.slice(0, 4) === "RIFF") bin = bin.slice(44);   // tolerate a WAV-headered first chunk
+      const n = bin.length >> 1;
+      if (!n) return;
+      const buf = this.ctx.createBuffer(1, n, rate || 24000);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) {
+        let v = (bin.charCodeAt(2 * i + 1) << 8) | bin.charCodeAt(2 * i);
+        if (v >= 0x8000) v -= 0x10000;
+        ch[i] = v / 0x8000;
+      }
+      if (this.onFirstAudio) { const cb = this.onFirstAudio; this.onFirstAudio = null; cb(); }
+      const src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(this.ctx.destination);
+      const at = Math.max(this.ctx.currentTime + 0.03, this.nextAt);
+      src.start(at);
+      this.nextAt = at + buf.duration;
+      this.sources.push(src);
+      this.lastEnd = new Promise(res => { src.onended = res; });
+    } catch (e) { console.error("pcm feed failed:", e.message); }
+  }
+  finish() {   // no more sentences coming — done resolves when the last scheduled chunk ends
+    this.finished = true;
+    this.queue.then(() => this.lastEnd || null).then(() => this._resolveDone());
+  }
+  stop() {     // barge-in / call end: silence NOW
+    this.stopped = true;
+    this.sources.forEach(s => { try { s.stop(); } catch {} });
+    try { this.ctx.close(); } catch {}
+    this._resolveDone();
+  }
+}
+let currentPlayer = null;
+let currentTts = null;
+
+// Streaming TTS: one socket per agent turn, opened IN PARALLEL with the chat request. Sentences go
+// out as they exist; audio comes back as linear16 chunks ~0.5s after each flush (measured), fed
+// straight onto the player timeline. If the socket won't open, every sentence falls back to the
+// REST path (player.speak) — same voice, just the old per-sentence latency.
+class TtsStream {
+  constructor(player) {
+    this.player = player;
+    this.mode = "pending";
+    this.lastChunkAt = 0;
+    this.sentAny = false;
+    this.readyP = new Promise((res) => {
+      try {
+        const ws = new WebSocket(SARVAM_BASE.replace("https", "wss") + "/text-to-speech/ws?model=bulbul:v3",
+          ["api-subscription-key." + currentApiKey]);
+        let settled = false;
+        ws.onopen = () => {
+          const lang = TTS_SUPPORTED.includes(getLangCode()) ? getLangCode() : "hi-IN";
+          // enable_preprocessing is what makes digits, order amounts and mixed English come out as
+          // natural speech — the REST path always had it; the stream launched without it and the
+          // voice read text-ish fragments (user-reported "text and speak mismatch").
+          ws.send(JSON.stringify({ type: "config", data: { speaker: getSpeaker(), target_language_code: lang, output_audio_codec: "linear16", speech_sample_rate: 24000, enable_preprocessing: true, pace: getPace() } }));
+          this.mode = "ws"; settled = true; res();
+        };
+        ws.onmessage = (m) => {
+          try {
+            const d = JSON.parse(m.data);
+            const b64 = (d.data && d.data.audio) || d.audio;
+            if (b64) { this.lastChunkAt = Date.now(); this.player.feedPcm16(b64, 24000); }
+          } catch {}
+        };
+        ws.onerror = () => { if (!settled) { settled = true; this.mode = "rest"; res(); } };
+        ws.onclose = () => { if (!settled) { settled = true; this.mode = "rest"; res(); } };
+        this.ws = ws;
+      } catch { this.mode = "rest"; res(); }
+    });
+  }
+  async speak(text) {
+    await this.readyP;
+    const spoken = toSpokenText(text);
+    if (!spoken) return;
+    if (this.mode === "ws" && this.ws.readyState === 1) {
+      this.sentAny = true;
+      this.ws.send(JSON.stringify({ type: "text", data: { text: spoken } }));
+      this.ws.send(JSON.stringify({ type: "flush" }));
+    } else {
+      this.player.speak(spoken);
+    }
+  }
+  async finishTurn() {
+    await this.readyP;
+    if (this.mode !== "ws") { this.player.finish(); return; }
+    if (!this.sentAny) { try { this.ws.close(); } catch {} this.player.finish(); return; }
+    // The socket has no reliable end-of-stream signal — the turn is over when chunks stop coming.
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const gotAll = this.lastChunkAt > 0 && Date.now() - this.lastChunkAt > 1200;
+      const gaveUp = Date.now() - started > 20000;
+      if (gotAll || gaveUp) {
+        clearInterval(timer);
+        try { this.ws.close(); } catch {}
+        this.player.finish();
+      }
+    }, 300);
+  }
+  stop() { try { if (this.ws) this.ws.close(); } catch {} }
+}
+
+// Everything that silences the agent goes through here — barge-in, call end, a new turn starting.
+function stopSpeech() {
+  if (currentTts) { currentTts.stop(); currentTts = null; }
+  if (currentPlayer) { currentPlayer.stop(); currentPlayer = null; }
+}
+
+// A bubble that fills in as the agent speaks — the transcript keeps pace with the voice.
+function liveAgentBubble() {
+  const area = document.getElementById("chat-area");
+  const empty = document.getElementById("chat-empty");
+  if (empty) empty.remove();
+  const row = document.createElement("div");
+  row.className = "bubble-row agent";
+  const av = document.createElement("div");
+  av.className = "agent-avatar"; av.textContent = "\uD83C\uDFA7";
+  row.appendChild(av);
+  const b = document.createElement("div");
+  b.className = "bubble agent";
+  row.appendChild(b);
+  area.appendChild(row);
+  return { set(t) { b.textContent = t; area.scrollTop = area.scrollHeight; },
+           remove() { row.remove(); } };
+}
+
+// One turn of the agent talking: stream → speak → live bubble. Resolves with the full text as soon
+// as the TEXT is complete (history can advance); `played` resolves when the AUDIO finishes — and the
+// mic re-enables on the FIRST audio chunk, so the customer can barge in mid-sentence like a real call.
+async function agentSpeak(history, systemPrompt) {
+  stopSpeech();
+  const player = new SpeechPlayer();
+  currentPlayer = player;
+  const tts = new TtsStream(player);   // socket opens WHILE the chat request is in flight
+  currentTts = tts;
+  player.onFirstAudio = () => {
+    setStatus("Speaking — hold the button to interrupt");
+    setDot("active");
+    setMicEnabled(true);
+  };
+  const bubble = liveAgentBubble();
+  let shown = "";
+  let text;
+  try {
+    text = await callChatStream(history, systemPrompt, (sentence) => {
+      tts.speak(sentence);
+      shown += (shown ? " " : "") + sentence;
+      bubble.set(shown);
+    });
+  } catch (e) { bubble.remove(); stopSpeech(); throw e; }
+  // The machinery-only fallback returns the SAME closing line every time — and a real call hit
+  // it twice in a row (the customer said thank-you, the model emitted only a close marker, and the
+  // agent repeated its goodbye verbatim). If the previous agent turn already said this exact line,
+  // vary it instead of parroting.
+  if (!shown) {
+    const lastAgent = [...history].reverse().find(m => m.role === "assistant");
+    if (lastAgent && lastAgent.content.trim() === text.trim()) {
+      text = { "hi-IN": "\u091c\u0940, \u0936\u0941\u0915\u094d\u0930\u093f\u092f\u093e! \u0928\u092e\u0938\u094d\u0924\u0947\u0964", "en-IN": "Thank you so much, goodbye!" }[getLangCode()] || "\u091c\u0940, \u0936\u0941\u0915\u094d\u0930\u093f\u092f\u093e!";
+    }
+    tts.speak(text);
+  }
+  bubble.set(text);
+  tts.finishTurn();
+  return { text, played: player.done };
 }
 
 async function callTTS(text) {
@@ -801,7 +1244,8 @@ async function callTTS(text) {
     body: JSON.stringify({
       inputs: [text],
       target_language_code: ttsLang,
-      speaker: "priya",
+      speaker: getSpeaker(),
+      pace: getPace(),
       model: "bulbul:v3",
       speech_sample_rate: 24000,
       enable_preprocessing: true,
@@ -811,15 +1255,6 @@ async function callTTS(text) {
   if (!r.ok) { const t = await r.text(); throw new Error(`TTS ${r.status}: ${t.slice(0, 200)}`); }
   const d = await r.json();
   return d.audios?.[0] || null;
-}
-
-function playAudio(b64) {
-  return new Promise((resolve, reject) => {
-    const audio = new Audio("data:audio/wav;base64," + b64);
-    audio.onended = resolve;
-    audio.onerror = reject;
-    audio.play().catch(reject);
-  });
 }
 
 function addBubble(role, text) {
@@ -885,6 +1320,11 @@ async function startCall() {
   document.getElementById("mic-btn").classList.remove("hidden");
   setDot("active");
 
+  // Warm the slow parts while the order loads: mic permission, and the realtime STT socket.
+  ensureMic().catch(() => {});
+  sttLive = new SttLive();
+  sttLive.open();
+
   setStatus("Fetching order from database...");
   liveOrderData = await fetchOrderFromSupabase(order.orderId);
   if (liveOrderData && liveOrderData.order) {
@@ -897,17 +1337,15 @@ async function startCall() {
   }
 
   setStatus("Agent is opening the call...");
-  const systemPrompt = SYSTEM_PROMPTS[selectedCallType](langLabel, order) + buildOrderContext(liveOrderData);
-  const openingInstruction = `Open the call now. Greet ${order.customerName} warmly in ${langLabel} only. Keep it to 1-2 short sentences.`;
+  const systemPrompt = SYSTEM_PROMPTS[selectedCallType](langLabel, order) + SPOKEN_STYLE + agentPersona() + buildOrderContext(liveOrderData);
+  const custFirst = String(order.customerName || "").trim().split(/\s+/)[0] || "the customer";
+  const openingInstruction = `Open the call now. Greet ${custFirst} warmly in ${langLabel} only, introducing yourself by your first name. Keep it to 1-2 short sentences.`;
 
   try {
-    const agentText = await callChat([{ role: "user", content: openingInstruction }], systemPrompt);
-    addBubble("assistant", agentText);
+    const { text: agentText, played } = await agentSpeak([{ role: "user", content: openingInstruction }], systemPrompt);
     chatHistory.push({ role: "assistant", content: agentText });
     turnCount++;
-    setStatus("Speaking...");
-    const audio = await callTTS(agentText);
-    if (audio) await playAudio(audio);
+    await played;
     setStatus("Hold the button below to respond");
     setMicEnabled(true);
   } catch (e) {
@@ -919,12 +1357,21 @@ async function startCall() {
 
 async function startRecording() {
   if (isRecording) return;
+  // Barge-in: like a real call, speaking over the agent cuts it off mid-word.
+  stopSpeech();
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-    audioChunks = [];
-    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
-    mediaRecorder.start(100);
+    pcmParts = [];
+    sttStreamedThisTurn = false;
+    // (Re)open the realtime socket if it is not live — ~200ms, only on the unlucky turn.
+    if (!sttLive || !sttLive.ready()) { sttLive = new SttLive(); await sttLive.open(); }
+    if (sttLive.ready()) {
+      sttLive.onPartial = (t) => { if (isRecording) setStatus("You: " + t); };
+      sttLive.speechStart();
+      sttStreamedThisTurn = true;
+    }
+    await startCapture((pcm) => {
+      if (sttStreamedThisTurn && sttLive && sttLive.ready()) { try { sttLive.feed(pcm); } catch {} }
+    });
     isRecording = true;
     const btn = document.getElementById("mic-btn");
     btn.textContent = "🔴 Release to send";
@@ -937,7 +1384,7 @@ async function startRecording() {
 }
 
 async function stopRecording() {
-  if (!isRecording || !mediaRecorder) return;
+  if (!isRecording) return;
   isRecording = false;
   const btn = document.getElementById("mic-btn");
   btn.textContent = "🎙️ Hold to speak";
@@ -945,17 +1392,20 @@ async function stopRecording() {
   setMicEnabled(false);
   setDot("processing");
   setStatus("Transcribing...");
-  mediaRecorder.stop();
-  mediaRecorder.stream.getTracks().forEach(t => t.stop());
-  await new Promise(r => mediaRecorder.onstop = r);
+  stopCapture();
 
   const order = getOrderInfo();
   const langLabel = getLangLabel();
-  const systemPrompt = SYSTEM_PROMPTS[selectedCallType](langLabel, order);
+  const systemPrompt = SYSTEM_PROMPTS[selectedCallType](langLabel, order) + SPOKEN_STYLE + agentPersona();
 
   try {
-    const blob = new Blob(audioChunks, { type: "audio/webm" });
-    const transcript = await callSTT(blob);
+    // The server heard the speech LIVE — speech_end just finalizes it (~130-300ms measured).
+    let transcript = null;
+    if (sttStreamedThisTurn && sttLive && sttLive.ready()) transcript = await sttLive.speechEnd(3500);
+    if (transcript === null) {
+      // Socket died mid-utterance — the SAME captured PCM goes the REST way, nothing is lost.
+      transcript = await callSTTRest(pcmToWav(concatPcm(pcmParts)));
+    }
     if (!transcript || !transcript.trim()) {
       setStatus("Didn't catch that - try again");
       setMicEnabled(true);
@@ -980,14 +1430,10 @@ async function stopRecording() {
     chatHistory.push({ role: "user", content: enrichedTranscript });
     turnCount++;
     setStatus("Agent thinking...");
-    const agentReply = await callChat(chatHistory, systemPrompt);
-    addBubble("assistant", agentReply);
+    const { text: agentReply, played } = await agentSpeak(chatHistory, systemPrompt);
     chatHistory.push({ role: "assistant", content: agentReply });
     turnCount++;
-    setStatus("Speaking...");
-    setDot("processing");
-    const audio = await callTTS(agentReply);
-    if (audio) await playAudio(audio);
+    await played;
     setStatus("Hold the button to respond");
     setDot("active");
     setMicEnabled(true);
@@ -1000,7 +1446,10 @@ async function stopRecording() {
 }
 
 async function endCall() {
-  if (mediaRecorder) { try { mediaRecorder.stop(); mediaRecorder.stream?.getTracks().forEach(t => t.stop()); } catch {} }
+  stopSpeech();
+  stopCapture();
+  if (sttLive) { sttLive.close(); sttLive = null; }
+  if (micStream) { try { micStream.getTracks().forEach(t => t.stop()); } catch {} micStream = null; }
   isRecording = false;
   setDot("ended");
   setStatus("");
@@ -1392,6 +1841,29 @@ function renderLogs(logs) {
       tBox.style.cssText = 'font-size:12px;line-height:1.6;font-family:inherit;white-space:pre-wrap;color:var(--text);margin:0 0 10px';
       tBox.textContent = log.transcript;
       body.appendChild(tBox);
+    }
+    if (log.recording_url) {
+      // Playback goes through OUR proxy (the Vobiz media URL needs account auth, which stays
+      // server-side); an <audio src> cannot carry a bearer token, so fetch → blob → play.
+      const playBtn = document.createElement('button');
+      playBtn.textContent = '\u25B6 Play recording';
+      playBtn.className = 'btn btn-secondary';
+      playBtn.style.cssText = 'margin:0 8px 10px 0;font-size:12px';
+      playBtn.onclick = async () => {
+        playBtn.disabled = true; playBtn.textContent = 'Loading\u2026';
+        try {
+          const tok = localStorage.getItem('authToken') || '';
+          const r = await fetch('/api/vobiz/recording?u=' + encodeURIComponent(log.recording_url), { headers: { 'Authorization': 'Bearer ' + tok } });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const audio = document.createElement('audio');
+          audio.controls = true;
+          audio.src = URL.createObjectURL(await r.blob());
+          audio.style.cssText = 'width:100%;margin:0 0 10px';
+          playBtn.replaceWith(audio);
+          audio.play().catch(() => {});
+        } catch (e) { playBtn.disabled = false; playBtn.textContent = '\u25B6 Play recording (failed: ' + e.message + ')'; }
+      };
+      body.appendChild(playBtn);
     }
     const trainBtn = document.createElement('button');
     trainBtn.textContent = '+ Use as training example';

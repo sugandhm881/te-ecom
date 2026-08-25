@@ -42,6 +42,7 @@ app.enable('trust proxy');
 // sources were removed once Tailwind was pre-built and Chart.js self-hosted (no external scripts remain).
 const CSP = [
     "default-src 'self'",
+    "media-src 'self' blob:",          // AI-call recordings play in the order popup (fetch → blob)
     "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com data:",
@@ -142,7 +143,7 @@ const { tokenRequired: _apiAuth, requirePermission } = require('./app/auth');
 // Microsoft's published signing keys and requires audience == our App ID before acting on anything.
 // ONLY the messaging endpoint is public — `/bot/health` reports configuration and stays behind our
 // own JWT. A blanket /bot/ exemption would have published that diagnostic to the internet.
-const PUBLIC_API = [/^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/, /^\/tally\/bridge\//, /^\/bot\/messages$/];
+const PUBLIC_API = [/^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/, /^\/tally\/bridge\//, /^\/bot\/messages$/, /^\/vobiz\/(answer|hangup)$/];
 app.use('/api', (req, res, next) => {
     if (req.method === 'OPTIONS') return next();
     if (PUBLIC_API.some(rx => rx.test(req.path))) return next();
@@ -190,6 +191,7 @@ const _VIEW_PERMS = [
     // shared with live, so users carry both until the old key is retired.
     [/^\/customer\//i, ['customer-profile', 'support-blacklist']],
     [/^\/voice-(config|order-lookup|order-list)/i, 'support-voice'],   // Voice Agent tool endpoints — permitted users / admins only
+    [/^\/vobiz\/(call|recording)$/i, ['support-voice', 'support-queue']],   // real outbound AI call + recording playback (Vobiz bridge)
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
     // Inventory Analytics. Stock Count (WH-only) + its deep Count Analysis (manager-only) are separate perms —
@@ -318,6 +320,8 @@ app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll
 app.use('/api', require('./app/api/support_console'));        // Customer Support console (queue/calls/notes/contacts)
 app.use('/api', require('./app/api/msg91_wa').router);   // manual WhatsApp sends (template sequences) — /support/wa/*
+const vobizBridge = require('./app/api/vobiz_bridge');    // real phone calls: Vobiz telephony ⇄ Sarvam voice agent
+app.use('/api', vobizBridge.router);
 app.use('/api', require('./app/api/user_activity').router);   // activity logging (POST /activity — any signed-in user)
 app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
 app.use('/api', require('./app/api/inventory').router);       // Inventory Analytics (daily snapshot dashboard + Teams report)
@@ -817,6 +821,9 @@ setTimeout(async () => {
 }, 8000);
 
 // --- Start Server ---
-app.listen(config.PORT, '0.0.0.0', () => {
+const httpServer = app.listen(config.PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${config.PORT}`);
 });
+// Vobiz ⇄ Sarvam real-call bridge: the media WebSocket rides the same HTTP server (wss upgrade on
+// /api/vobiz/media). The proxy in front must forward Upgrade headers (Traefik does by default).
+vobizBridge.attachVobizWs(httpServer);

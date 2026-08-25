@@ -718,10 +718,127 @@ function check(name, got, want) {
         [/function sanitizeReply/.test(va), /tool_call/.test(va), /CLOSING_LINE/.test(va),
          /SPOKEN TEXT ONLY\. You have NO tools\./.test(va)],
         [true, true, true, true]);
-    check('voice agent: the mic recording is converted to WAV before it reaches STT',
-        [/async function blobToWav/.test(va), /fd\.append\("file", wav, "audio\.wav"\)/.test(va),
-         /OfflineAudioContext\(1, frames, SR\)/.test(va)],
+    // Stage 2 (2026-08-25, "delay still happen"): the mic no longer records-then-uploads. While the
+    // button is held, 16 kHz PCM streams over the realtime STT socket (manual endpointing — push-to-
+    // talk IS manual endpointing); speech_end finalizes in ~130-330ms where the old path took 1-1.5s.
+    // Full-turn proof with the page's own extracted classes and REAL synthesized Hindi speech:
+    // release → transcript.final 327ms → first chat chunk 922ms → FIRST AUDIO 1,166ms (was ~6.7s).
+    check('voice agent: speech streams to the realtime STT socket while the button is held',
+        [/speech-to-text-realtime\/ws/.test(va), /endpointing=manual/.test(va),
+         /class SttLive/.test(va), /api-subscription-key\." \+ currentApiKey/.test(va)],
+        [true, true, true, true]);
+    // ⚠ The WAV lesson survives in the FALLBACK: if the socket dies mid-utterance, the SAME captured
+    // PCM is wrapped in a WAV header (Sarvam REST judges bytes, not filenames) and posted — the
+    // customer's words are never lost to a transport failure.
+    check('voice agent: a dead socket falls back to REST STT with the same captured audio',
+        [/function pcmToWav/.test(va), /fd\.append\("file", wav, "audio\.wav"\)/.test(va),
+         /callSTTRest\(pcmToWav\(concatPcm\(pcmParts\)\)\)/.test(va)],
         [true, true, true]);
+    // TTS also streams: one socket per agent turn, opened in parallel with the chat request; audio
+    // chunks (linear16, first at ~0.5s measured) feed straight onto the player timeline; socket
+    // failure degrades to the REST per-sentence path, never to silence.
+    check('voice agent: streaming TTS with a REST fallback, torn down by every stopSpeech path',
+        [/text-to-speech\/ws\?model=bulbul:v3/.test(va), /class TtsStream/.test(va),
+         /feedPcm16/.test(va), /function stopSpeech/.test(va)],
+        [true, true, true, true]);
+    // Voice-quality round (user test call): the STREAM launched without enable_preprocessing while
+    // REST always had it — digits and mixed English came out text-ish ("text and speak mismatch").
+    // Both paths now carry preprocessing + the picked speaker/pace, everything spoken passes
+    // toSpokenText (dashes → a breath, quotes/brackets/symbols vanish — verified on the exact
+    // utterances from the real call), and every prompt carries the SPOKEN_STYLE rules: no symbols,
+    // never read a full order ID, respectful gender-neutral verb forms, never repeat a sentence.
+    check('voice agent: the stream speaks like the REST path — preprocessing, speaker, pace, normalizer',
+        [/enable_preprocessing: true, pace: getPace\(\)/.test(va), /function toSpokenText/.test(va),
+         /const spoken = toSpokenText\(text\)/.test(va), /SPOKEN_STYLE/.test(va),
+         /speaker: getSpeaker\(\)/.test(va), /id="voice-select"/.test(va)],
+        [true, true, true, true, true, true]);
+    // A real call ended with the identical goodbye twice (machinery-only reply → same fallback).
+    check('voice agent: the goodbye fallback never repeats itself verbatim',
+        [/lastAgent\.content\.trim\(\) === text\.trim\(\)/.test(va)], [true]);
+    // The picked VOICE is the agent's identity: a male voice was saying "कर रही हूँ" because the
+    // prompt never said who was talking. agentPersona() injects the speaker's name + gender with the
+    // correct first-person verb forms, and the customer is greeted by FIRST name + जी only — proven
+    // live: rahul → "मैं Rahul बोल रहा हूँ", priya → "मैं Priya बात कर रही हूँ", full name never read.
+    check('voice agent: the prompt knows the voice\'s gender and greets by first name',
+        [/const SPEAKER_INFO/.test(va), /function agentPersona/.test(va),
+         /SPOKEN_STYLE \+ agentPersona\(\)/.test(va),
+         /order\.customerName \|\| ""\)\.trim\(\)\.split\(/.test(va)],
+        [true, true, true, true]);
+    // REAL calls (Vobiz bridge, 2026-08-25): the same Sarvam pipeline server-side. Formats align on
+    // both legs (Vobiz L16/16k in = Sarvam STT's linear16; bulbul linear16/24k out = Vobiz playAudio
+    // L16/24k) so the bridge forwards base64, not transcoded audio; VAD does turn-taking (no
+    // push-to-talk on a phone); a vad.speech_start while the agent talks sends clearAudio (barge-in);
+    // webhooks are public-path but token-gated (bad token → <Hangup/>); and the SAME allowlist that
+    // guards WhatsApp guards who can be rung while testing.
+    {
+        const vb = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+        const srvV = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+        check('vobiz bridge: caller audio flows to VAD STT and TTS flows back, with barge-in',
+            [/endpointing=vad/.test(vb), /clearAudio/.test(vb), /playAudio/.test(vb),
+             /sampleRate: 24000/.test(vb), /allowlistBlocks\(/.test(vb),
+             /VOBIZ_L16_SWAP/.test(vb)], [true, true, true, true, true, true]);
+        // THE WIRE FORMAT, as learned across seven real calls (the docs' concepts page is STALE):
+        // frames are EVENT-keyed ({event:"start"/"media"}, media payload nested at media.payload);
+        // playAudio must be event-keyed WITH the streamId from the start event (type-keyed frames
+        // are ignored SILENTLY — the caller heard nothing while the whole pipeline ran); audio goes
+        // out in ~60ms slices; the wss URL inside the XML must escape & as &amp; (a raw ampersand
+        // made Vobiz's parser reject the document — calls cut 3s after answer); and the webhook
+        // host must be reachable from India (trycloudflare is ISP-blocked; pinggy worked).
+        check('vobiz bridge: the wire format that actually worked on a real call',
+            [/event: 'playAudio', streamId: this\.streamId/.test(vb), /&amp;sid=/.test(vb),
+             /const SLICE = 2880/.test(vb), /d\.start && d\.start\.streamId/.test(vb),
+             /d\.media\.payload \|\| d\.media\.audio/.test(vb)], [true, true, true, true, true]);
+        // "Customer thank you mean call should be end": once the brand closing is spoken, a short
+        // thanks/bye hangs up (a real question still gets answered); a fallback timer ends the call
+        // even if the customer stays silent after the goodbye.
+        // Recording is the live-call API, not the XML verb: the verb recorded ONLY the agent leg
+        // (user listened: customer side silent) and sat in the XML critical path; the API starts a
+        // both-legs recording AFTER the stream is up (202 "call recording started", proven live).
+        check('vobiz bridge: recording via live-call API, off the XML critical path',
+            [/startCallRecording/.test(vb), /Call\/\${callId}\/Record\//.test(vb.replace(/\`/g,'')) || /\/Record\//.test(vb),
+             /recordXml = \(\) => ''/.test(vb)], [true, true, true]);
+        check('vobiz bridge: the goodbye ends the call, not just the sentence',
+            [/closingDone/.test(vb), /hangup\(800\)/.test(vb), /this\.hangup\(9000\)/.test(vb)],
+            [true, true, true]);
+        check('vobiz bridge: wired into the server — public webhooks, gated call route, WS upgrade',
+            [/\/vobiz\\\/\(answer\|hangup\)\$\//.test(srvV.replace(/\\/g, '\\\\')) || /vobiz\\\/\(answer\|hangup\)/.test(srvV),
+             /vobiz.{0,30}call\|recording.{0,60}'support-voice', 'support-queue'/.test(srvV),
+             /attachVobizWs\(httpServer\)/.test(srvV)], [true, true, true]);
+    }
+    // Language texture is PER LANGUAGE: a static "everyday Hinglish" rule dragged even English
+    // calls into Hindi (caught live before shipping). The Hindi branch carries Hinglish + the
+    // respectful-plural customer forms (a real call guessed होंगी); every other language gets its
+    // own native register, a hard no-Hindi guard, and a language-matched honorific ("Sugandh ji"
+    // in Roman for English — a जी was leaking Devanagari into English and Tamil turns). Proven
+    // live: English opens in pure Indian English, Tamil in colloquial phone-Tamil, zero Devanagari
+    // outside Hindi. And sentences must carry their SUBJECT — a real call said a bare "पहुँच जाएगा".
+    check('voice agent: each language speaks its own texture, never translated Hindi',
+        [/lang === "Hindi"/.test(va), /Speak \$\{lang\} ONLY/.test(va),
+         /never Devanagari script inside a non-Hindi sentence/.test(va),
+         /NEVER gendered guesses/.test(va), /COMPLETE SENTENCES/.test(va),
+         /LANGUAGE TEXTURE/.test(va)],
+        [true, true, true, true, true, true]);
+    // "Make it fast like real human conversation" (2026-08-25). The old flow was serial — whole chat
+    // completion, then TTS of the whole reply, then audio: ~6s dead air on a long turn (measured:
+    // first token 445ms vs full 1.6s; TTS 1.65s/sentence vs 4.1s/reply). Now the chat STREAMS, the
+    // reply is cut at sentence boundaries as tokens arrive (first sentence ASAP, later ones batched),
+    // each sentence TTSes while earlier ones play, gapless on one AudioContext — and the mic
+    // re-enables on the FIRST audio chunk so the customer can barge in mid-sentence.
+    check('voice agent: streamed chat + sentence-pipelined TTS replace the serial turn',
+        [/stream: true/.test(va), /async function callChatStream/.test(va), /class SpeechPlayer/.test(va),
+         /function playAudio/.test(va), /const agentReply = await callChat\(/.test(va)],
+        [true, true, true, false, false]);
+    // Two spoken-text safety rules inside the splitter: a '.' only ends a sentence before whitespace
+    // ("Rs.50" must never be cut into a TTS chunk), and nothing is emitted past an unclosed '<' —
+    // tool-call machinery split across stream deltas is held back whole for sanitizeReply (verified
+    // against a simulated stream: machinery split over 4 deltas, zero leakage into spoken chunks).
+    check('voice agent: the sentence splitter cannot speak half a number or half a tool call',
+        [/i \+ 1 < s\.length && \/\\s\/\.test\(s\[i \+ 1\]\)/.test(va),
+         /work\.lastIndexOf\("<"\)/.test(va)], [true, true]);
+    // Barge-in: pressing the mic (or ending the call) silences the agent NOW, mid-word.
+    check('voice agent: the mic button interrupts the agent like a real call',
+        [/if \(currentPlayer\) \{ currentPlayer\.stop\(\); currentPlayer = null; \}/.test(va),
+         /onFirstAudio/.test(va)], [true, true]);
 
     // -- PG recon identifies GoKwik by SHOPIFY TAGS ----------------------------------------------
     // Asked for directly: tags, not EasyEcom, not gateway labels. The GoKwik tag covers ~98% of orders
