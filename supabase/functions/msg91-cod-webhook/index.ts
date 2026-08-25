@@ -117,10 +117,20 @@ Deno.serve(async (req) => {
     console.log(`[msg91-cod] content-type=${req.headers.get("content-type")} raw=${rawText.slice(0, 2000)}`);
 
     // ── extract reply text + phone — MSG91 "On Inbound Request Received" exact fields, with fallbacks ──
-    // Text replies land in `text`; button/interactive/caption cover the other WhatsApp reply widgets.
+    // ⚠⚠ A BUTTON TAP IS NOT TEXT. On a quick-reply tap MSG91 sends contentType:"button", text:"" and
+    // button:'{"payload":"REJECT","text":"REJECT"}' — a JSON STRING, not an object. The old extractor
+    // took that raw string, the classifier read its first word as "payload", matched nothing and skipped
+    // — so every button reply was silently dropped while typed replies worked (caught live 2026-08-24,
+    // the REJECT test from 7289804108). The button/interactive fields are unwrapped before classifying.
+    const unwrapButton = (v: unknown): string => {
+      if (!v) return "";
+      if (typeof v === "object") { const o = v as Record<string, unknown>; return String(o.text || o.payload || o.title || ""); }
+      const s = String(v).trim();
+      if (s.startsWith("{")) { try { const o = JSON.parse(s); return String(o.text || o.payload || o.title || ""); } catch (_e) { /* raw */ } }
+      return s;
+    };
     const replyText = String(
-      payload.text || payload.button || payload.caption ||
-      (payload.interactive && (payload.interactive.title || payload.interactive.body || payload.interactive)) ||
+      payload.text || unwrapButton(payload.button) || payload.caption || unwrapButton(payload.interactive) ||
       pick(payload, ["text", "message", "body", "content", "reply", "msg", "response", "answer"]) || ""
     ).trim();
     // `customerNumber` is the customer (NOT `integratedNumber`, which is your WA business number).

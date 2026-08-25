@@ -548,6 +548,203 @@ function check(name, got, want) {
         [/COD fee: /.test(rsUi), /not synced yet/.test(rsUi), /Billed: /.test(rsUi)],
         [true, true, true]);
 
+    // -- COD confirmation is sent DIRECT via MSG91, not through n8n + a Google Sheet --------------
+    // Asked for: "make it with our own system direct, not with any workflow". Ships DISABLED: n8n is
+    // still sending today, and running both double-messages every customer.
+    const mc = fs.readFileSync(path.join(ROOT, 'app/api/msg91_cod.js'), 'utf8');
+    const wh = fs.readFileSync(path.join(ROOT, 'app/api/webhook_handler.js'), 'utf8');
+    const srv3 = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    check('msg91 cod: disabled until every credential AND the enable flag are set',
+        /MSG91_COD_SEND_ENABLED/.test(mc) && /&& !!AUTH\(\) && !!WA_NUMBER\(\)/.test(mc), true);
+    // The template name is CODE, not configuration — it is not a secret, and renaming the message this
+    // feature exists to send should be reviewed like a code change (user, 2026-08-24).
+    check('msg91 cod: the template name lives in code, not in .env',
+        /const COD_TEMPLATE_NAME = 'cod_confirmation_v1';/.test(mc) && !/process\.env\.MSG91_COD_TEMPLATE/.test(mc), true);
+    // The language code must match the template's registration EXACTLY. Sends with 'en'/'en_US' were
+    // accepted with status:success and never delivered -- WhatsApp drops a language-mismatched template
+    // at delivery with no error back through MSG91. en_GB and the namespace come from MSG91's own curl.
+    check('msg91 cod: language and namespace match the registered template',
+        [/const COD_TEMPLATE_LANG = 'en_GB';/.test(mc),
+         /const COD_TEMPLATE_NAMESPACE = '76ec8535_ee9d_416e_b89d_8c2362647b62';/.test(mc),
+         /language: \{ code: COD_TEMPLATE_LANG/.test(mc)], [true, true, true]);
+    // Insert-then-send with a UNIQUE order_name: a crash can lose one message, never send it twice.
+    check('msg91 cod: the send log is written BEFORE the API call and dedupes on order_name',
+        [/Log BEFORE sending/.test(mc), /23505/.test(mc),
+         /unique/.test(fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260824_cod_confirm_sends.sql'), 'utf8'))],
+        [true, true, true]);
+    // ⚠ THE PLAN CHANGED THE SAME DAY IT SHIPPED: no automatic sending, ever. The webhook trigger and
+    // the 15-min backstop cron were REMOVED — messages go out only from the Call Queue popup, after the
+    // agent approves a rendered preview. These assert the auto-paths stay dead.
+    check('msg91: no automatic sending — webhook and cron triggers are gone',
+        [/sendForWebhookOrder\(o\)/.test(wh), /MSG91-COD backstop/.test(srv3)], [false, false]);
+    const wa = fs.readFileSync(path.join(ROOT, 'app/api/msg91_wa.js'), 'utf8');
+    const waUi = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    // Templates are ROWS: name, exact language, namespace, variable mapping and preview body all live in
+    // wa_template_sequences_msg91 — adding V2/V3 or a whole new sequence is an INSERT, never a deploy.
+    check('msg91 wa: templates and sequences are data, resolved from the registry table',
+        [/wa_template_sequences_msg91/.test(wa), /variables \|\| \[\]/.test(wa), /body_text/.test(wa)],
+        [true, true, true]);
+    // The button IS the progression: the server picks the first unsent version, and the UNIQUE
+    // (order,sequence,version) row is the turnstile — two agents cannot both send V1.
+    check('msg91 wa: the server decides the next version and the unique key blocks double-sends',
+        [/find\(t => !done\.has\(t\.version\)\)/.test(wa), /23505/.test(wa),
+         /sequence complete/.test(wa)], [true, true, true]);
+    // Nothing sends without the agent seeing the rendered message first.
+    check('msg91 wa: a rendered preview gates every send',
+        [/renderPreview/.test(wa), /supWaPreview/.test(waUi), /Send V\$\{d\.version\} now/.test(waUi)],
+        [true, true, true]);
+    // The test allowlist still guards the manual path — 41 customers were messaged once already.
+    // The operator's stated flow, encoded server-side: V1 free; V(n+1) only after a NO-ANSWER call
+    // logged since V(n) went out. Proven live: send while locked -> HTTP 423 with the reason; one
+    // no_answer call row -> V2 unlocked and its preview rendered.
+    check('msg91 wa: later versions unlock only after a no-answer call since the previous send',
+        [/NO_CONTACT_OUTCOMES/.test(wa), /nextAvailable/.test(wa), /423/.test(wa),
+         /cl\.called_at\)\.getTime\(\) > prevAt/.test(wa)], [true, true, true, true]);
+    // Logging a call updates the modal IN PLACE (user: the page must not reload) and re-evaluates the
+    // WhatsApp buttons -- a no-answer log is exactly what unlocks the next version.
+    check('call queue: logging a call never rebuilds the modal, and refreshes the WA buttons',
+        [/supd-calls-list/.test(waUi), /insertAdjacentHTML\('afterbegin'/.test(waUi),
+         /supWaButtons\(o\.order_name\|\|o\.order_id/.test(waUi)], [true, true, true]);
+    check('msg91 wa: the allowlist guards manual sends too',
+        /allowlistBlocks\(orderName, order\.phone\)/.test(wa), true);
+    // Only genuine live COD with a reachable phone; every skip carries its reason.
+    // ⚠ 41 real customers were double-messaged when the enable flag met a fresh server start: the
+    // backstop read its 24h lookback as “missed” orders. The lookback was meant as the blast limiter
+    // and it WAS the blast. The rule now: an un-logged order older than the 2h send window is SEALED
+    // (status seeded, nothing sent) — a webhook miss is caught in minutes; older is history, and
+    // history is never messaged. Holds across flag flips, restarts and downtime.
+    // The operator's explicit instruction after 41 customers were messaged during testing: "Test only
+    // that which I said -- mobile number or order." While MSG91_COD_ALLOWLIST is set, anything not on
+    // it is refused regardless of every other flag -- the accident is structurally impossible.
+    check('msg91 cod: the test allowlist blocks everyone not explicitly named',
+        [/function allowlistBlocks/.test(mc), /MSG91_COD_ALLOWLIST/.test(mc),
+         /const gate = allowlistBlocks\(orderName, phone\);/.test(mc)], [true, true, true]);
+    check('msg91 cod: the backstop can only ever send orders younger than the send window',
+        [/BACKSTOP_SEND_WINDOW_MS = 2 \* 60 \* 60 \* 1000/.test(mc), /status: 'seeded'/.test(mc),
+         /history is never messaged/.test(mc)], [true, true, true]);
+    check('msg91 cod: prepaid, cancelled, test and phone-less orders are refused with a reason',
+        [/not COD \(financial_status=/.test(mc), /'cancelled'/.test(mc), /'test order'/.test(mc), /'no usable phone'/.test(mc)],
+        [true, true, true, true]);
+
+    // A sent chip is a RECEIPT: clicking it shows the exact message that went out, rendered from
+    // the fields snapshotted at send time — not today's values, which may have drifted since.
+    check('msg91 wa: sent chips carry the send-time message text and open a viewer',
+        [/sent_text: sentText/.test(wa), /done\.payload\.fields \? renderPreview\(t, done\.payload\.fields\)/.test(wa),
+         /supd-wa-chip/.test(waUi), /function supWaSentView/.test(waUi)], [true, true, true, true]);
+    // The chat is merged by PHONE from the only three stores that hold pieces of it: msg91_messages
+    // (outbound mirror — direction is ALWAYS '1', it holds no replies), wa_sends_msg91 (our manual
+    // sends with rendered text), cod_confirmations_msg91 (the sole inbound store). Our send and its
+    // sync mirror are the same message — the ±5 min dedupe keeps it from showing twice.
+    check('msg91 wa: /support/wa/chat merges outbound mirror + our sends + replies, deduped',
+        [/router\.get\('\/support\/wa\/chat'/.test(wa), /cod_confirmations_msg91/.test(wa),
+         /mirrored/.test(wa), /< 5 \* 60000/.test(wa),
+         /data->>Shipping Phone Number/.test(wa)], [true, true, true, true, true]);
+    // The order popup's message card is a real chat (mini, scrollable, newest visible) with a
+    // full-history popup — replacing a card that was permanently "No messages" because it queried
+    // by orders.phone, which is null here; the chat endpoint resolves the ADDRESS phone.
+    check('msg91 wa: the order popup shows a chat fed by the address phone, plus a full-chat popup',
+        [/function supWaChat\(/.test(waUi), /function supWaChatModal/.test(waUi),
+         /supd-wachat-full/.test(waUi), /host\.scrollTop=host\.scrollHeight/.test(waUi),
+         /Recent MSG91 messages/.test(waUi)], [true, true, true, true, false]);
+    // "I want to see complete chat, not cod_confirmation_v1 (text not stored)": the sync stopped
+    // copying variables into the content column, but they always ride in raw_data.content — the chat
+    // reads both, and any template whose body_text is in the registry renders the COMPLETE sentence
+    // regardless of who sent it (our button, n8n, a campaign). Our own send-time render outranks the
+    // mirror's bare variables when the two are merged.
+    check('msg91 wa: chat recovers text from raw_data and renders registry templates in full',
+        [/raw_content:raw_data->>content/.test(wa), /renderFromVars/.test(wa),
+         /bodyByName/.test(wa), /if \(text && !mirror\.text\) mirror\.text = text/.test(wa)],
+        [true, true, true, true]);
+    // Placement (user, twice): not at the bottom, and not in the top header — the WhatsApp send
+    // button and sent chips live INSIDE the WhatsApp chat card, with the conversation they belong to.
+    check('msg91 wa: the send button and chips live in the chat card, not the modal header',
+        [/id="supd-wa" class="flex items-center gap-1\.5 flex-wrap mb-2"/.test(waUi),
+         /supd-wa"[^\n]*supd-logcall/.test(waUi)], [true, false]);
+    // "I want real template" — the registered bodies are synced from MSG91's get-template-client
+    // (control.msg91.com, path param; recovered from the docs page source after every api.msg91.com
+    // guess 404'd) into msg91_template_catalog, and the catalog OVERRIDES registry body_text when
+    // rendering the chat: every known template shows the message the customer actually received,
+    // body + footer. MSG91 lists a name+language twice when a rejected draft sits beside the
+    // approved revision — deduped before upsert (approved wins) or Postgres refuses the batch.
+    check('msg91 wa: template catalog synced from MSG91 and preferred for chat rendering',
+        [/get-template-client\//.test(wa), /msg91_template_catalog/.test(wa),
+         /catalogSyncedAt/.test(wa), /approved/.test(wa),
+         /footer_text \? '\\n\\n' \+ t\.footer_text/.test(wa)], [true, true, true, true, true]);
+    // Sends that predate field snapshots render with the order's CURRENT fields instead of
+    // "(text not stored)" — name, product, order and amount do not change after the fact.
+    check('msg91 wa: snapshot-less sends fall back to current order fields',
+        [/fieldsCache/.test(wa), /resolveOrderFields\(s2\.order_name\)/.test(wa)], [true, true]);
+    // WhatsApp shows *text* as bold; the bubbles do too — escaped FIRST, bolded after.
+    check('msg91 wa: bubbles render WhatsApp bold, escape-then-substitute',
+        [/function supWaMd/.test(waUi), /escapeHtml\(t\)\.replace\(\/\\\*/.test(waUi)], [true, true]);
+    // The reply decision arrives as CONFIRMED (webhook vocabulary), the reject as CANCEL — the chat
+    // chips must accept both spellings or the confirm chip silently never renders.
+    check('msg91 wa: chat decision chips match the stored vocabulary (CONFIRMED / CANCEL)',
+        [/decU\.startsWith\('CONFIRM'\)/.test(waUi), /decU==='CANCEL'\|\|decU==='REJECT'/.test(waUi)],
+        [true, true]);
+
+    // -- Rejected COD: the customer's written "no" gets its own queue tab -------------------------
+    // A tapped REJECT on the MSG91 WhatsApp template writes a CANCEL confirmation; by explicit
+    // instruction the tab takes NO automatic action -- no hold, no Shopify cancel -- it exists so the
+    // team SEES every rejection (shipping a told-you-so parcel is a guaranteed RTO).
+    const scApi = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+    const scUi = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    const scHtml = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+    check('rejected cod: the tab is wired end to end and takes no automatic action',
+        [/tab === 'rejected'/.test(scApi), /Confirmation received', 'CANCEL'/.test(scApi),
+         /data-tab="rejected"/.test(scHtml), /isRejTab/.test(scUi),
+         !/cancelOrder|holdOrderSmart/.test(scApi.slice(scApi.indexOf("tab === 'rejected'"), scApi.indexOf("tab === 'changed'")))],
+        [true, true, true, true, true]);
+    // A rejection the webhook could not pin to an order must still appear -- an invisible rejection is
+    // how the parcel ships anyway.
+    check('rejected cod: phone-only rejections still get a row',
+        /matched by phone only/.test(scUi) && /PHONE:/.test(scApi.slice(0, 4000)) || /still gets a stub row/.test(scApi), true);
+
+    // -- Voice agent: the chat model is one constant, and not the reasoning variant ---------------
+    // `sarvam-30b` was hardcoded at two call sites and its deprecation broke the agent mid-call. Of the
+    // replacements, `sarvam-105b` is a reasoning model -- tested live, it spent a whole 40-token budget
+    // thinking and returned content:null, which on a voice call is dead air.
+    const va = fs.readFileSync(path.join(ROOT, 'app/static/voice-agent.html'), 'utf8');
+    check('voice agent: one model constant, no hardcoded model at the call sites',
+        [(va.match(/model: SARVAM_CHAT_MODEL,/g) || []).length, /sarvam-30b",/.test(va),
+         /SARVAM_CHAT_MODEL = "sarvam-105b-conversations"/.test(va)],
+        [2, false, true]);
+    // Sarvam's STT cannot read MediaRecorder's webm/opus -- 400 "check the audio format" -- while WAV
+    // bytes pass under every model param (verified live). The recording is converted before upload.
+    // The agentic-tuned model invents tool calls (`<tool_call>close_positive ...`) that NOTHING here
+    // defines, and the page once spoke that markup aloud to a customer. Angle-bracket machinery is
+    // stripped before display/TTS, and an all-machinery reply falls back to a real goodbye.
+    check('voice agent: invented tool calls are stripped before anything is spoken',
+        [/function sanitizeReply/.test(va), /tool_call/.test(va), /CLOSING_LINE/.test(va),
+         /SPOKEN TEXT ONLY\. You have NO tools\./.test(va)],
+        [true, true, true, true]);
+    check('voice agent: the mic recording is converted to WAV before it reaches STT',
+        [/async function blobToWav/.test(va), /fd\.append\("file", wav, "audio\.wav"\)/.test(va),
+         /OfflineAudioContext\(1, frames, SR\)/.test(va)],
+        [true, true, true]);
+
+    // -- PG recon identifies GoKwik by SHOPIFY TAGS ----------------------------------------------
+    // Asked for directly: tags, not EasyEcom, not gateway labels. The GoKwik tag covers ~98% of orders
+    // in every month of 2026 and needs no sync; orders.gateway had 103 July / 466 August nulls. The
+    // July COD invoice (2,765 tx / 47,397.66) only converges once abandoned-cart orders are excluded
+    // and the fee base excludes shipping: 47,808 computed, 0.87% apart, vs 12.7% before.
+    const pgApi = fs.readFileSync(path.join(ROOT, 'app/api/pg_recon.js'), 'utf8');
+    const pgMig = fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260824_pg_recon_tags.sql'), 'utf8');
+    check('pg recon: classification is tags-first, in SQL, with the gateway reading only as fallback',
+        [/,gokwik,/.test(pgMig), /,kc_abc,/.test(pgMig), /gk_member/.test(pgMig),
+         /Tagless fallback/.test(pgMig)], [true, true, true, true]);
+    // Membership decides billability: a manual or Cashfree COD must never be charged to GoKwik.
+    check('pg recon: only GoKwik-processed orders are charged',
+        /c\.gk_member and not c\.is_abc/.test(pgMig), true);
+    // The ABC exclusion is an ASSUMPTION (evidence-based, unconfirmed by GoKwik) -- so it must be a
+    // visible number everywhere, never a silent subtraction.
+    check('pg recon: the abandoned-cart exclusion is visible in summary, CSV and UI',
+        [/abc_orders/.test(pgMig), /'ABC'/.test(pgApi), /abandoned-cart/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8'))],
+        [true, true, true]);
+    // A tag-identified order with no gateway label must still resolve the gokwik% prepaid rate.
+    check('pg recon: a tag-only order still finds its rate',
+        /GoKwik \(by tag\)/.test(pgMig), true);
+
     // -- What is ALLOWED onto the Silent-RTO claim list ------------------------------------------
     // Three admission rules, stated by the user and enforced in the query, not the UI:
     //   1. the shipment's CURRENT status must itself be an RTO state -- `outcome` remembers that an RTO
@@ -814,6 +1011,24 @@ function check(name, got, want) {
     const api = fs.readFileSync(path.join(ROOT, 'app/api/kwikship_recon.js'), 'utf8');
     const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
     const html = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+
+    // Influencer video metrics refresh themselves weekly — Friday 11 PM IST (asked for 2026-08-25).
+    // ⚠ Orchestrated from NODE, never the edge fn: the old refresh-recent-video-metrics fn dispatched
+    // fetch-reel-metrics with the edge runtime's injected key and EVERY dispatch 401'd at the gateway
+    // ("Refresh: dispatched 0/32") while this server's legacy service JWT passes (202, proven live).
+    // The cron and the panel's bulk Refresh share the same Node dispatcher, so they cannot disagree —
+    // and the video-list query pages past the silent 1000-row cap with .order per page.
+    {
+        const inf = fs.readFileSync(path.join(ROOT, 'app/api/influencer_crm.js'), 'utf8');
+        check('influencer: Friday 11 PM IST cron refreshes recent video metrics from Node',
+            [/InfVideos \(0 23 \* \* 5\)/.test(srv), /'0 23 \* \* 5'/.test(srv),
+             /refreshVideoMetrics/.test(srv), /module\.exports\.refreshVideoMetrics = refreshVideoMetrics/.test(inf),
+             /invokeFn\('fetch-reel-metrics', \{ url: v\.video_url, videoId: v\.id \}/.test(inf),
+             /makeQ\(\)\.range\(from, from \+ 999\)/.test(inf)], [true, true, true, true, true, true]);
+        check('influencer: the panel bulk refresh uses the same Node dispatcher (edge orchestration retired)',
+            [/refreshVideoMetrics\(\{ scope: b\.scope, influencerId: b\.influencerId, days: b\.days \}\)/.test(inf),
+             /invokeFn\('refresh-recent-video-metrics'/.test(inf)], [true, false]);
+    }
 
     const cfg = { gst_pct: 18, cod_pct: 1.3, cod_min: 25 };
     const rows = [

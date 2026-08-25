@@ -624,6 +624,44 @@ router.get('/support/queue', async (req, res) => {
             // a call to make.
             const done = await terminalByAwb(rows);
             if (done.size) rows = rows.filter(r => !done.has(String(r.awb_number || '').trim()));
+        } else if (tab === 'rejected') {
+            // ⚠ COD REJECTIONS COME FROM THE CUSTOMER, NOT THE COURIER. The MSG91 WhatsApp webhook writes
+            // a CANCEL row when the customer taps REJECT on the confirmation template. By explicit
+            // instruction this tab takes NO automatic action — no hold, no Shopify cancel — it exists so
+            // the team SEES every rejection and decides. A tapped button means the customer told us, in
+            // writing, that they do not want the parcel; shipping it anyway is a guaranteed RTO.
+            const cancels = await fetchPaged((f, t) => supabase.from('cod_confirmations_msg91')
+                .select('id_key, data, updated_at')
+                .eq('data->>Confirmation received', 'CANCEL')
+                .order('updated_at', { ascending: false })
+                .range(f, t));
+            const inWindow = cancels.filter(r => {
+                const at = (r.data && (r.data['Received At'] || r.updated_at)) || r.updated_at;
+                return at >= fromISO && at <= toISO;
+            });
+            // Resolve rejections to real orders for the queue columns. A rejection the webhook could not
+            // pin to an order (id_key "PHONE:…") still gets a stub row — an invisible rejection is how a
+            // told-you-so parcel ships anyway.
+            const names = [...new Set(inWindow.map(r => String((r.data && r.data['Order Number']) || '').trim()).filter(Boolean))];
+            const byName = new Map();
+            (await chunkedIn('order_buckets', SEL, 'order_name', names)).forEach(o => byName.set(o.order_name, o));
+            rows = inWindow.map(r => {
+                const d = r.data || {};
+                const name = String(d['Order Number'] || '').trim();
+                const o = byName.get(name);
+                return Object.assign({
+                    order_id: name || r.id_key, order_name: name || null,
+                    phone: d['Shipping Phone Number'] || null, email: null,
+                    total_price: null, created_at: d['Received At'] || r.updated_at,
+                    fulfillment_status: null, tracking_status: null, partner: null, courier: null,
+                    awb_number: null, bucket: null, msg91_confirmed: false, is_repeat_customer: null,
+                    dispatch_at: null, edd: null,
+                }, o || {}, {
+                    rejected_at: d['Received At'] || r.updated_at,
+                    reject_reply: d['Raw Reply'] || null,
+                    reject_customer: d['Customer Name'] || null,
+                });
+            });
         } else if (tab === 'changed') {
             // Put on record everything the COURIER says went undelivered in this window, so the tab does
             // not depend on who happened to have the Undelivered tab open — see syncUndeliveredFromJourney().

@@ -5027,6 +5027,9 @@ function supQueueTable(){
   // Click a column header to sort (asc/desc toggle); the caret shows the active column + direction.
   // The "Last scan" column is only meaningful for Undelivered (in-transit) orders — hidden on Repeat/Status-changed.
   const showScan=_supTab==='und';
+  // Rejected COD rows are customer replies, mostly pre-dispatch: no shipment columns, and a Rejected
+  // column carrying WHEN and the exact words — the reply text is the evidence the row exists.
+  const isRejTab=_supTab==='rejected';
   const showBucket=_supTab!=='repeat';   // every Repeat row is order_to_dispatch → the Bucket column is noise
   // Payment (COD / Prepaid) — shown on Undelivered + Status-changed. Hidden on Repeat, which is COD-only
   // by definition (fully-prepaid orders are never repeat candidates), so the column would be noise there.
@@ -5035,7 +5038,10 @@ function supQueueTable(){
   const showPlat=_supTab!=='repeat';
   // On the shipped tabs the Bucket column said "Undelivered" on every single row — the tab already tells
   // you that. It now shows the order's LATEST COURIER STATUS, which is the thing that actually differs.
-  const COLS=[{h:'Order',k:'order_name',d:1},{h:'Customer',k:null},
+  const COLS=isRejTab
+    ?[{h:'Order',k:'order_name',d:1},{h:'Customer',k:null},{h:'Rejected',k:'rejected_at',d:-1},
+      {h:'Reply',k:null},{h:'Status',k:'tracking_status',d:1},{h:'Age',k:'created_at',d:1},{h:'Actions',k:null}]
+    :[{h:'Order',k:'order_name',d:1},{h:'Customer',k:null},
     ...(showBucket?[showPlat?{h:'Status',k:'tracking_status',d:1}:{h:'Bucket',k:'bucket',d:1}]:[]),
     ...(showPay?[{h:'Payment',k:'payment',d:1}]:[]),{h:'Age',k:'created_at',d:1},{h:'Courier',k:'courier',d:1},
     ...(showScan?[{h:'Last scan',k:'last_scan_at',d:-1}]:[]),
@@ -5048,6 +5054,25 @@ function supQueueTable(){
   const _phoneCount={}; list.forEach(x=>{ const p=String(x.phone||'').replace(/\D/g,'').slice(-10); if(p) _phoneCount[p]=(_phoneCount[p]||0)+1; });
   c.innerHTML=`<table class="w-full"><thead><tr>${thHtml}</tr></thead><tbody>${
     list.slice(0,500).map(r=>{ const ph=String(r.phone||'').replace(/\D/g,'').slice(-10); const dupN=ph?(_phoneCount[ph]||0):0;
+      if(isRejTab){
+        // The customer said no, in writing. The reply text IS the row's reason to exist, so it is shown
+        // verbatim; a rejection the webhook could not pin to an order still appears (phone-only row) —
+        // an invisible rejection is how a told-you-so parcel ships anyway.
+        return `<tr class="sup-row cursor-pointer hover:bg-slate-50" data-oid="${escapeHtml(r.order_id)}">
+        <td class="${TD} font-mono font-semibold">${r.order_name?escapeHtml(r.order_name)+eeHoldChip(r.order_name):'<span class="text-slate-400" title="The reply carried no order number — matched by phone only">unmatched</span>'}</td>
+        <td class="${TD}"><div class="flex items-center gap-1.5 flex-wrap">
+          ${ph?`<a href="tel:+91${ph}" onclick="event.stopPropagation()" class="text-indigo-600 font-semibold hover:underline tabular-nums">${ph}</a>`:'<span class="text-slate-300">no phone</span>'}
+          ${r.reject_customer?`<span class="text-xs text-slate-500">${escapeHtml(r.reject_customer)}</span>`:''}
+        </div></td>
+        <td class="${TD} whitespace-nowrap"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-100 text-rose-700">Rejected</span>
+          <div class="text-[10px] text-slate-500 tabular-nums mt-0.5">${supDT(r.rejected_at)}</div></td>
+        <td class="${TD}"><span class="text-xs text-slate-600 italic">“${escapeHtml(r.reject_reply||'—')}”</span></td>
+        <td class="${TD}">${r.tracking_status?supStatusChip(r):'<span class="text-slate-300" title="Not dispatched — the rejection arrived before the parcel moved">not dispatched</span>'}</td>
+        <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.rejected_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.rejected_at)}</span></td>
+        <td class="${TD}"><div class="flex items-center gap-1.5 flex-wrap">${r.order_name?supHoldControl(r):''}
+          <button style="flex-shrink:0" class="sup-note-btn inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors ${r.note_count?'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100':'bg-white text-slate-400 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="${r.note_count?'View / add notes':'Add a note'}">📝${r.note_count?` <span class="min-w-[16px] h-4 px-1 rounded-full bg-amber-200/80 text-amber-800 text-[10px] leading-4 text-center">${r.note_count}</span>`:' <span class="font-medium">+</span>'}</button>
+        </div></td></tr>`;
+      }
       return `<tr class="sup-row cursor-pointer hover:bg-slate-50 ${r.msg91_confirmed?'bg-sky-50/50':''}" data-oid="${escapeHtml(r.order_id)}">
       <td class="${TD} font-mono font-semibold"${dupN>1?' style="border-left:4px solid #d946ef"':''}>${escapeHtml(r.order_name||r.order_id)}${_supTab!=='repeat'?eeHoldChip(r.order_name):''}</td>
       <td class="${TD}">
@@ -5454,11 +5479,16 @@ function supLogCallModal(orderId, orderName, onDone){
   wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
   document.getElementById('supc-save').addEventListener('click',async()=>{
     const st=document.getElementById('supc-status');
+    // Capture the form BEFORE close() — close() removes the modal from the DOM, and reading the
+    // fields after it left the freshly-logged row blank (empty outcome chip, no notes).
+    const outcome=document.getElementById('supc-outcome').value;
+    const notes=document.getElementById('supc-notes').value.trim();
+    const follow=document.getElementById('supc-follow').value;
     try{ await supFetch('/api/support/calls',{method:'POST',body:JSON.stringify({
-        order_id:orderId, outcome:document.getElementById('supc-outcome').value,
-        notes:document.getElementById('supc-notes').value.trim(),
-        next_followup_at:document.getElementById('supc-follow').value?new Date(document.getElementById('supc-follow').value).toISOString():null })});
-      showNotification('Call logged'); close(); if(onDone) onDone();
+        order_id:orderId, outcome, notes,
+        next_followup_at:follow?new Date(follow).toISOString():null })});
+      showNotification('Call logged'); close();
+      if(onDone) onDone({ outcome, notes, next_followup_at:follow?new Date(follow):null });
       if(currentView==='support-calls') supCallsLoad();          // calls table behind the modal stays fresh
       if(currentView==='support-dashboard') supDashInit();       // "Calls today" KPI stays fresh
     }
@@ -5544,15 +5574,14 @@ async function supOrderModal(orderId){
         </div>
       </div>
       <div class="grid md:grid-cols-2 gap-6 mt-5">
-        <div class="card p-4"><div class="flex items-center justify-between mb-2"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide">Call history (${(d.calls||[]).length})</p></div>
-          <div class="space-y-2 max-h-52 overflow-auto">${(d.calls||[]).map(cl=>`<div class="rounded-lg border border-slate-100 p-2.5 text-xs">
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><p id="supd-calls-count" class="text-xs font-bold text-slate-500 uppercase tracking-wide">Call history (${(d.calls||[]).length})</p></div>
+          <div id="supd-calls-list" class="space-y-2 max-h-52 overflow-auto">${(d.calls||[]).map(cl=>`<div class="rounded-lg border border-slate-100 p-2.5 text-xs">
             <div class="flex items-center gap-2"><span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">${supOutcomeLbl(cl.outcome)}</span><span class="text-slate-400">${escapeHtml(cl.agent_name||'')} · ${new Date(cl.called_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span></div>
             ${cl.notes?`<p class="text-slate-600 mt-1">${escapeHtml(cl.notes)}</p>`:''}${cl.next_followup_at?`<p class="text-amber-600 mt-1">Follow up: ${new Date(cl.next_followup_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</p>`:''}</div>`).join('')||'<p class="text-sm text-slate-400">No calls yet</p>'}</div></div>
-        <div class="card p-4"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Recent MSG91 messages</p>
-          <div class="space-y-2 max-h-52 overflow-auto">${(d.msg91||[]).map(m=>{ const tx=supMsgText(m.content);
-            return `<div class="text-xs"><span class="px-1.5 py-0.5 rounded ${m.direction==='inbound'?'bg-emerald-50 text-emerald-700':'bg-slate-100 text-slate-600'} font-semibold">${escapeHtml(m.direction||'')}</span>
-            <span class="text-slate-400">${escapeHtml(m.template_name||'')} · ${m.sent_at?new Date(m.sent_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span>
-            ${tx?`<p class="text-slate-600 mt-0.5">${escapeHtml(tx.slice(0,160))}</p>`:''}</div>`; }).join('')||'<p class="text-sm text-slate-400">No messages</p>'}</div></div>
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><p class="text-xs font-bold text-slate-500 uppercase tracking-wide">WhatsApp chat (MSG91)</p>
+          <button id="supd-wachat-full" class="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800">Full chat ↗</button></div>
+          <div id="supd-wa" class="flex items-center gap-1.5 flex-wrap mb-2"></div>
+          <div id="supd-wachat" class="space-y-1.5 max-h-52 overflow-auto"><p class="text-sm text-slate-400">Loading chat…</p></div></div>
       </div>
       ${holdLogHtml}
       <div class="card p-4 mt-5">
@@ -5574,13 +5603,160 @@ async function supOrderModal(orderId){
         <button id="supd-notes" class="filter-btn">📝 Notes (${(d.notes||[]).length})</button>
       </div>`;
     wrap.querySelector('.supd-close').addEventListener('click',close);
-    document.getElementById('supd-logcall').addEventListener('click',()=>supLogCallModal(o.order_id,o.order_name,()=>supOrderModal(orderId)));
+    // No rebuild on save (user: “page is going reloaded — it should not”). Logging a call updates IN
+    // PLACE, the way Hold/Release do: the new call is prepended to the history card and the WhatsApp
+    // buttons re-evaluate — which matters, because a no-answer log is exactly what unlocks V2.
+    document.getElementById('supd-logcall').addEventListener('click',()=>supLogCallModal(o.order_id,o.order_name,(logged)=>{
+      const list=document.getElementById('supd-calls-list');
+      if(list&&logged){
+        // The freshly-saved row must read exactly like it will after a reload: outcome chip, who,
+        // the real time, notes, follow-up — "just now" with a blank chip looked like a broken save.
+        list.insertAdjacentHTML('afterbegin',`<div class="rounded-lg border border-emerald-100 bg-emerald-50/40 p-2.5 text-xs ec-fade">
+          <div class="flex items-center gap-2"><span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">${supOutcomeLbl(logged.outcome)}</span><span class="text-slate-400">${escapeHtml(currentUser?.username||'')} · ${new Date().toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span></div>
+          ${logged.notes?`<p class="text-slate-600 mt-1">${escapeHtml(logged.notes)}</p>`:''}${logged.next_followup_at?`<p class="text-amber-600 mt-1">Follow up: ${logged.next_followup_at.toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</p>`:''}</div>`);
+        const cnt=document.getElementById('supd-calls-count'); if(cnt) cnt.textContent='Call history ('+(parseInt(cnt.textContent.replace(/[^0-9]/g,''),10)+1)+')';
+      }
+      supWaButtons(o.order_name||o.order_id, ()=>supOrderModal(orderId));
+    }));
     document.getElementById('supd-notes').addEventListener('click',()=>supNotesModal(o.order_id,o.order_name));
     wrap.querySelectorAll('.supd-cust-row').forEach(row=>{ if(row.dataset.oid!==o.order_id) row.addEventListener('click',()=>supOrderModal(row.dataset.oid)); });
+    supWaButtons(o.order_name||o.order_id, ()=>supOrderModal(orderId));
+    supWaChat(o.order_name||o.order_id, document.getElementById('supd-wachat'));
+    document.getElementById('supd-wachat-full')?.addEventListener('click',()=>supWaChatModal(o.order_name||o.order_id));
   }catch(e){ wrap.firstElementChild.innerHTML=`<div class="text-rose-500 text-sm">${escapeHtml(e.message)}</div><button class="filter-btn mt-3" onclick="document.getElementById('sup-order-modal').remove()">Close</button>`; }
 }
 
-// ── Support Orders (search page) ───────────────────────────────────────────
+// ── Manual WhatsApp sends (template sequences) ──────────────────────────────
+// One button per sequence, and the button IS the progression: it offers the NEXT unsent version
+// (V1 → V2 → V3), shows an amber LOCK while V(n+1) waits for a no-answer call, and retires to an
+// honest "n/N sent" chip — "all sent" with only V1 configured read as if V2/V3 had happened
+// (user-reported). NOTHING sends without the agent approving a rendered preview of the message.
+async function supWaButtons(orderName, refresh){
+  const host=document.getElementById('supd-wa'); if(!host) return;
+  try{
+    const d=await supFetch('/api/support/wa/state?order='+encodeURIComponent(orderName));
+    if(!d.sequences||!d.sequences.length) return;
+    host.innerHTML=d.sequences.map(s=>{
+      // Each chip opens the message that ACTUALLY went out — rendered from the fields captured at
+      // send time, so it stays true even after the order data changes.
+      const sentChips=s.versions.filter(v=>v.sent_at).map(v=>`<button class="supd-wa-chip px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 cursor-pointer" data-seq="${escapeHtml(s.sequence_key)}" data-ver="${v.version}" title="Sent ${new Date(v.sent_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}${v.sent_by?' by '+escapeHtml(supPrettyUser(v.sent_by)):''} — click to view the message">V${v.version} sent</button>`).join('');
+      const sentN=s.versions.filter(v=>v.sent_at).length, totalV=s.versions.length;
+      let btn;
+      if(s.next) btn=`<button class="supd-wa-send px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700" data-seq="${escapeHtml(s.sequence_key)}" ${d.configured?'':'disabled title="MSG91 not configured on this server"'}>WhatsApp: ${escapeHtml(s.label)} — send V${s.next}</button>`;
+      else if(s.locked) btn=`<span class="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200" title="${escapeHtml(s.locked.reason)}">V${s.locked.version} locked — ${escapeHtml(s.locked.reason)}</span>`;
+      else btn=`<span class="px-2 py-1 rounded-lg text-xs font-semibold bg-slate-100 text-slate-500" title="Every configured version has been sent">WhatsApp: ${escapeHtml(s.label)} — ${sentN}/${totalV} sent</span>`;
+      return `<span class="inline-flex items-center gap-1.5">${btn}${sentChips}</span>`;
+    }).join('');
+    host.querySelectorAll('.supd-wa-send').forEach(b=>b.addEventListener('click',()=>supWaPreview(orderName,b.dataset.seq,refresh)));
+    host.querySelectorAll('.supd-wa-chip').forEach(ch=>ch.addEventListener('click',()=>{
+      const s=(d.sequences||[]).find(x=>x.sequence_key===ch.dataset.seq);
+      const v=s&&s.versions.find(x=>String(x.version)===ch.dataset.ver);
+      if(v) supWaSentView(s.label,v);
+    }));
+  }catch(e){ host.innerHTML=`<span class="text-xs text-rose-500">WhatsApp: ${escapeHtml(e.message)}</span>`; }
+}
+// The approval gate: show EXACTLY what will be sent, to whom, before anything moves.
+async function supWaPreview(orderName, seq, refresh){
+  document.getElementById('supd-wa-preview')?.remove();
+  const wrap=document.createElement('div'); wrap.id='supd-wa-preview';
+  wrap.className='fixed inset-0 flex items-center justify-center bg-slate-900/60 p-4'; wrap.style.zIndex='95';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">${brandLoaderSm('Preparing preview…')}</div>`;
+  document.body.appendChild(wrap);
+  const close=()=>wrap.remove();
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  try{
+    const d=await supFetch(`/api/support/wa/preview?order=${encodeURIComponent(orderName)}&sequence=${encodeURIComponent(seq)}`);
+    const body=wrap.firstElementChild;
+    body.innerHTML=`
+      <div class="flex items-center justify-between"><h3 class="text-sm font-bold text-slate-800">WhatsApp preview — V${d.version}</h3>
+        <button class="supd-wap-x text-slate-400 hover:text-slate-700 text-lg">✕</button></div>
+      <p class="text-xs text-slate-400 mt-0.5">To <b class="text-slate-600">${escapeHtml(d.phone||'—')}</b> · template <b class="text-slate-600">${escapeHtml(d.template_name)}</b></p>
+      ${d.blocked?`<div class="mt-3 p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">Test mode: this number is not on the allowlist — Send will be refused.</div>`:''}
+      <div class="mt-3 rounded-xl p-3.5 text-sm leading-relaxed whitespace-pre-wrap" style="background:#e7f6ee;border:1px solid #bbe3cd;color:#1f2937">${d.preview?escapeHtml(d.preview):'<i class="text-slate-400">No preview text on file for this template — the send will still use the mapped values.</i>'}</div>
+      <div class="mt-4 flex justify-end gap-2">
+        <button class="supd-wap-x filter-btn">Cancel</button>
+        <button id="supd-wap-send" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700">Send V${d.version} now</button>
+      </div>`;
+    body.querySelectorAll('.supd-wap-x').forEach(x=>x.addEventListener('click',close));
+    document.getElementById('supd-wap-send').addEventListener('click',async ()=>{
+      const btn=document.getElementById('supd-wap-send'); btn.disabled=true; btn.textContent='Sending…';
+      try{
+        const r=await supFetch('/api/support/wa/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_name:orderName,sequence_key:seq})});
+        showNotification(`Sent V${r.sent}${r.next?` — next is V${r.next}`:''}`);
+        close(); supWaButtons(orderName, refresh);
+      }catch(e){ btn.disabled=false; btn.textContent='Send failed — retry'; showNotification(e.message,true); }
+    });
+  }catch(e){ wrap.firstElementChild.innerHTML=`<div class="text-sm text-rose-600">${escapeHtml(e.message)}</div><button class="filter-btn mt-3" onclick="document.getElementById('supd-wa-preview').remove()">Close</button>`; }
+}
+
+// ── WhatsApp chat viewers ────────────────────────────────────────────────────
+// The sent-chip popup: the exact message a version delivered, from the send-time snapshot.
+function supWaSentView(label, v){
+  document.getElementById('supd-wa-sentview')?.remove();
+  const wrap=document.createElement('div'); wrap.id='supd-wa-sentview';
+  wrap.className='fixed inset-0 flex items-center justify-center bg-slate-900/60 p-4'; wrap.style.zIndex='96';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
+    <div class="flex items-center justify-between"><h3 class="text-sm font-bold text-slate-800">${escapeHtml(label)} — V${v.version} (sent)</h3>
+      <button class="supd-wsv-x text-slate-400 hover:text-slate-700 text-lg">✕</button></div>
+    <p class="text-xs text-slate-400 mt-0.5">Sent ${v.sent_at?new Date(v.sent_at).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—'}${v.sent_by?' by '+escapeHtml(supPrettyUser(v.sent_by)):''} · template <b class="text-slate-600">${escapeHtml(v.template_name||'')}</b></p>
+    <div class="mt-3 rounded-xl p-3.5 text-sm leading-relaxed whitespace-pre-wrap" style="background:#e7f6ee;border:1px solid #bbe3cd;color:#1f2937">${v.sent_text?supWaMd(v.sent_text):'<i class="text-slate-400">No message text on file for this send (sent before message snapshots were kept).</i>'}</div>
+    <div class="mt-4 flex justify-end"><button class="supd-wsv-x filter-btn">Close</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) wrap.remove(); });
+  wrap.querySelectorAll('.supd-wsv-x').forEach(x=>x.addEventListener('click',()=>wrap.remove()));
+}
+// One renderer for both the in-card mini chat and the full-chat popup: outbound right/green,
+// customer replies left/white — the shape everyone already reads fluently in WhatsApp itself.
+// WhatsApp renders *text* as bold — the bubbles should read like the phone, not show asterisks.
+// Escape FIRST, then bold: the substitution runs on already-safe text.
+function supWaMd(t){ return escapeHtml(t).replace(/\*([^*\n]+)\*/g,'<b>$1</b>'); }
+function supWaChatHtml(msgs){
+  const fmt=t=>t?new Date(t).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'';
+  return msgs.map(m=>{
+    if(m.dir==='in'){
+      const decU=String(m.decision||'').toUpperCase();
+      const dec=decU.startsWith('CONFIRM')?'<span class="ml-1 px-1 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-700">CONFIRM</span>':((decU==='CANCEL'||decU==='REJECT')?'<span class="ml-1 px-1 py-0.5 rounded text-[9px] font-bold bg-rose-100 text-rose-700">REJECT</span>':'');
+      return `<div class="flex"><div class="rounded-xl px-2.5 py-1.5 text-xs leading-relaxed" style="max-width:85%;border-bottom-left-radius:4px;background:#fff;border:1px solid #e2e8f0;color:#1f2937">
+        <span class="whitespace-pre-wrap">${escapeHtml(m.text||'')}</span>${dec}<div class="text-[9px] text-slate-400 mt-0.5">Customer · ${fmt(m.at)}</div></div></div>`;
+    }
+    const tx=m.text||supMsgText(m.raw);
+    return `<div class="flex justify-end"><div class="rounded-xl px-2.5 py-1.5 text-xs leading-relaxed" style="max-width:85%;border-bottom-right-radius:4px;background:#e7f6ee;border:1px solid #bbe3cd;color:#1f2937">
+      ${tx?`<span class="whitespace-pre-wrap">${supWaMd(tx)}</span>`:`<i class="text-slate-400">${escapeHtml(m.template||'message')} (text not stored)</i>`}
+      <div class="text-[9px] text-slate-400 mt-0.5">${escapeHtml(m.template||'')}${m.order_name?' · '+escapeHtml(m.order_name):''} · ${fmt(m.at)}</div></div></div>`;
+  }).join('')||'<p class="text-sm text-slate-400">No WhatsApp messages for this customer yet.</p>';
+}
+async function supWaChat(orderName, host){
+  if(!host) return;
+  try{
+    const d=await supFetch('/api/support/wa/chat?order='+encodeURIComponent(orderName));
+    supWaChatCache[orderName]=d;
+    host.innerHTML=supWaChatHtml(d.messages||[]);
+    host.scrollTop=host.scrollHeight;
+  }catch(e){ host.innerHTML=`<p class="text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
+}
+const supWaChatCache={};
+// The full-chat popup: the customer's complete MSG91 thread, every template ever sent to this
+// phone (n8n era included) plus their replies — not just this order's messages.
+async function supWaChatModal(orderName){
+  document.getElementById('supd-wa-chatmodal')?.remove();
+  const wrap=document.createElement('div'); wrap.id='supd-wa-chatmodal';
+  wrap.className='fixed inset-0 flex items-center justify-center bg-slate-900/60 p-4'; wrap.style.zIndex='95';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col p-5">${brandLoaderSm('Loading chat…')}</div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) wrap.remove(); });
+  try{
+    const d=supWaChatCache[orderName]||await supFetch('/api/support/wa/chat?order='+encodeURIComponent(orderName));
+    const body=wrap.firstElementChild;
+    body.innerHTML=`<div class="flex items-center justify-between mb-1"><h3 class="text-sm font-bold text-slate-800">WhatsApp chat — MSG91</h3>
+        <button id="supd-wcm-x" class="text-slate-400 hover:text-slate-700 text-lg">✕</button></div>
+      <p class="text-xs text-slate-400 mb-3">${d.phone?`+91 ${escapeHtml(d.phone)}`:'No phone on this order'} · ${(d.messages||[]).length} message${(d.messages||[]).length===1?'':'s'} · whole customer history, all orders</p>
+      <div id="supd-wcm-list" class="space-y-1.5 overflow-y-auto rounded-xl p-3" style="background:#f1f5f9;min-height:120px;max-height:60vh">${supWaChatHtml(d.messages||[])}</div>`;
+    document.getElementById('supd-wcm-x').addEventListener('click',()=>wrap.remove());
+    const list=document.getElementById('supd-wcm-list'); list.scrollTop=list.scrollHeight;
+  }catch(e){ wrap.firstElementChild.innerHTML=`<div class="text-sm text-rose-600">${escapeHtml(e.message)}</div><button class="filter-btn mt-3" onclick="document.getElementById('supd-wa-chatmodal').remove()">Close</button>`; }
+}
+
+// ── Support Orders (search page) ─// ── Support Orders (search page) ─// ── Support Orders (search page) ───────────────────────────────────────────
 let _supoFilters={page:1}, _supoWired=false, _supoSummary=null;
 function supOrdersInit(){
   supRenderRange('sup-range-orders', ()=>{ _supoFilters.page=1; supOrdersLoad(); });
@@ -18601,7 +18777,8 @@ function pgrOverview() {
     + pgrCard('PG fee', pgrMoney2(t.fee), 'excluding GST', 'text-rose-600')
     + pgrCard('GST on fee', pgrMoney2(t.gst), 'charged on the fee', 'text-amber-600')
     + pgrCard('Total charge', pgrMoney2(t.charge), 'fee + GST')
-    + pgrCard('Charged orders', pgrNum(t.charged_orders), pgrNum(t.excluded_orders) + ' not charged')
+    + pgrCard('Charged orders', pgrNum(t.charged_orders), pgrNum(t.excluded_orders) + ' not charged'
+        + (t.abc_orders ? ' · incl ' + pgrNum(t.abc_orders) + ' abandoned-cart' : ''))
     + pgrCard('Effective rate', (Number(t.gross) > 0 ? (Number(t.charge) / Number(t.gross) * 100).toFixed(2) : '0') + '%', 'of order value')
     + '</div>'
     + '<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">'

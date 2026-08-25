@@ -10,12 +10,22 @@
 //   COD      2.00% of order value
 //   partial  2.50% of order value EXCLUDING shipping — a COD order whose COD/shipping fee was paid online
 //
-// ⚠️ THE GATEWAY MUST COME FROM SHOPIFY, NOT EASYECOM. EasyEcom leaves `payment_gateway_name` blank on a
-// large share of rows (124 of August's prepaid orders, ₹93,351). Sampling those against Shopify showed 7
-// of 9 were GoKwik — but one was Cashfree and one was manual, so treating "blank" as GoKwik would bill
-// GoKwik for payments it never processed. `syncOrderGateways()` fills `orders.gateway` from Shopify's
-// `paymentGatewayNames`, and anything still unresolved is reported as `unclassified` rather than being
-// quietly folded into the bill.
+// ⚠⚠ IDENTIFICATION IS BY SHOPIFY TAGS, NOT EASYECOM AND NOT GATEWAY LABELS (2026-08-24, asked for
+// directly). GoKwik's checkout stamps every order it processes — the `GoKwik` tag covers ~98% of orders
+// in every month of 2026, `COD` / `UPI` / `Cards` / `Gokwik_ppcod` carry the payment method, and every
+// manual / Cashfree order carries none of them. Tags arrive WITH the order at ingest, so unlike
+// `orders.gateway` (a per-order GraphQL sync that still had 103 July / 466 August nulls) they need no
+// sync and have no holes: July went from 103 unclassified to 0. The classification itself lives in SQL
+// (`pg_recon_rows`, migration 20260824_pg_recon_tags.sql): tags first, the old gateway/status reading
+// kept only as the fallback for the ~2% of rows without tags. Three rules the tags made enforceable:
+//   * membership — an order is only billable to GoKwik if GoKwik processed it (GoKwik tag or a gokwik%
+//     gateway label); a manual or Cashfree COD is excluded VISIBLY instead of being charged by default;
+//   * abandoned-cart recovery (KC_ABC / ABC_tellephant) is excluded from the charge — GoKwik's July COD
+//     invoice (2,765 tx / ₹47,397.66) only converges once ABC is out and the fee base excludes shipping
+//     (their own customer-collected COD fee): ₹47,808 computed, 0.87% apart, vs 12.7% before;
+//   * the COD fee base EXCLUDES shipping (config `base_excludes_shipping`), for that same reason.
+// `syncOrderGateways()` stays: the gateway label is still the best display string, it is just no longer
+// what decides who gets billed.
 // ─────────────────────────────────────────────────────────────────────────────
 const express = require('express');
 const router = express.Router();
@@ -210,11 +220,11 @@ router.get('/pg-recon/export.csv', async (req, res) => {
         const rows = pgrFilter(await pgrAllRows(rng.args), {
             type: req.query.type, charged: req.query.charged, q: req.query.q,
         });
-        const head = ['Order', 'Date', 'Status', 'Payment type', 'Charged', 'Gateway', 'Order value',
+        const head = ['Order', 'Date', 'Status', 'Payment type', 'Charged', 'ABC', 'Gateway', 'Order value',
             'Fee base', 'Rate %', 'GST %', 'Fee', 'GST', 'Total charge'];
         const csv = [head.join(',')].concat(rows.map(r => [
             r.order_name, String(r.created_at).slice(0, 10), r.financial_status, r.payment_type,
-            r.charged ? 'yes' : 'no', '"' + String(r.gateway || '').replace(/"/g, '""') + '"',
+            r.charged ? 'yes' : 'no', r.abc ? 'yes' : '', '"' + String(r.gateway || '').replace(/"/g, '""') + '"',
             r.order_value, r.fee_base == null ? '' : r.fee_base, r.fee_percent == null ? '' : r.fee_percent,
             r.gst_percent == null ? '' : r.gst_percent, r.fee == null ? '' : r.fee,
             r.gst == null ? '' : r.gst, r.total_charge == null ? '' : r.total_charge,

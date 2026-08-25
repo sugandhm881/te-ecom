@@ -327,6 +327,8 @@ router.post('/shopify-order', async (req, res) => {
             const { upsertShopifyOrder } = require('./orders_ingest');
             const ing = await upsertShopifyOrder(o);
             if (!ing.ok) console.warn(`[OrderSync] ${orderName}: dashboard upsert failed — ${ing.error}`);
+            // (Automatic COD-confirmation sending was removed here 2026-08-24 — sends are MANUAL now,
+            // from the Call Queue popup: app/api/msg91_wa.js.)
             // Auto-hold repeat COD orders.
             const phone = (o.shipping_address && o.shipping_address.phone) || (o.customer && o.customer.phone) || o.phone || null;
             const sa = o.shipping_address || {};

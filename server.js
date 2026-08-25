@@ -317,6 +317,7 @@ app.use('/api', amazonFbaRoutes);
 app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll
 app.use('/api', require('./app/api/support_console'));        // Customer Support console (queue/calls/notes/contacts)
+app.use('/api', require('./app/api/msg91_wa').router);   // manual WhatsApp sends (template sequences) — /support/wa/*
 app.use('/api', require('./app/api/user_activity').router);   // activity logging (POST /activity — any signed-in user)
 app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
 app.use('/api', require('./app/api/inventory').router);       // Inventory Analytics (daily snapshot dashboard + Teams report)
@@ -403,6 +404,9 @@ cronJob('Charges (15 3 * * *)', '15 3 * * *', async () => {
     const r = await syncChargesBatch(2500).catch(e => { console.error('[Charges] nightly error:', e.message); return null; });
     if (r) console.log(`[Charges] nightly done — processed ${r.processed}, updated ${r.updated}`);
 }, { timezone: 'Asia/Kolkata' });
+
+// (The automatic COD-confirmation sender was removed 2026-08-24 — the plan changed to MANUAL sends
+// from the Call Queue popup via app/api/msg91_wa.js. See wa_template_sequences_msg91.)
 
 // Daily inventory report → Microsoft Teams @ 06:30 IST. First re-syncs live from EasyEcom (rebuilds the
 // snapshot) so the morning report reflects CURRENT stock, then posts the DOI image. (The Supabase pg_cron
@@ -508,6 +512,15 @@ cronJob('WH Report (every 2h)', process.env.WH_REPORT_CRON || '30 8-20/2 * * *',
 // Kept from the old 8 PM job, now standalone at 20:00 so it lands 30 min BEFORE the last report of the
 // day: refresh the RapidShyp cache for ALL recent EasyEcom AWBs (forced — nothing skipped as "fresh")
 // so the evening report is built on the freshest courier status.
+// Influencer video metrics — every Friday 11:00 PM IST, refresh the last-30-days videos so the
+// panel's views/likes/comments are at most a week stale without anyone pressing "Refresh".
+cronJob('InfVideos (0 23 * * 5)', '0 23 * * 5', async () => {
+    console.log('[InfVideos] Friday 11 PM IST — refreshing recent influencer video metrics…');
+    const { refreshVideoMetrics } = require('./app/api/influencer_crm');
+    const { scheduled } = await refreshVideoMetrics();
+    console.log(`[InfVideos] scheduled ${scheduled} video metric fetches`);
+}, { timezone: 'Asia/Kolkata' });
+
 cronJob('RS cache full refresh (0 20 * * *)', '0 20 * * *', async () => {
     console.log('[RS-EC Sync] 8:00 PM IST — full forced RapidShyp cache refresh…');
     await syncRsCacheEasyecom(30, { force: true }).catch(e => console.error('[RS-EC Sync] 8PM error:', e.message));

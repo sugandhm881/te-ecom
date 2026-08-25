@@ -311,17 +311,14 @@ router.post('/inf/videos/:id/metrics', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// Bulk refresh recent reel metrics ("Refresh Last N Days") — returns how many were scheduled
+// Bulk refresh recent reel metrics ("Refresh Last N Days") — returns how many were scheduled.
+// Same Node-side dispatcher as the Friday cron (see refreshVideoMetrics above for why the old
+// edge-fn orchestration was dispatching 0: its runtime key 401'd at the gateway).
 router.post('/inf/refresh-videos', async (req, res) => {
     try {
         const b = req.body || {};
-        const payload = {};
-        if (b.scope === 'all') payload.scope = 'all';
-        if (b.influencerId) payload.influencerId = b.influencerId;
-        if (b.days) payload.days = Number(b.days);
-        const r = await invokeFn('refresh-recent-video-metrics', payload, 30000);
-        if (r.status >= 400) return res.status(502).json({ success: false, error: (r.data && r.data.error) || `refresh returned ${r.status}` });
-        res.json({ success: true, scheduled: (r.data && r.data.scheduled) || 0, startedAt: new Date().toISOString() });
+        const { scheduled, startedAt } = await refreshVideoMetrics({ scope: b.scope, influencerId: b.influencerId, days: b.days });
+        res.json({ success: true, scheduled, startedAt });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
@@ -1157,6 +1154,60 @@ router.post('/inf/email/poll', async (req, res) => {
     catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// Weekly video-metrics refresh (Friday 11 PM IST cron in server.js) and the panel's bulk Refresh.
+// ⚠ ORCHESTRATED FROM NODE, NOT THE EDGE FN — proven necessary 2026-08-25: the old
+// refresh-recent-video-metrics edge fn dispatched fetch-reel-metrics with the edge runtime's
+// injected SUPABASE_SERVICE_ROLE_KEY, and every single dispatch 401'd at the gateway
+// ("Refresh: dispatched 0/32") — the runtime key no longer passes verify_jwt, while this server's
+// legacy service JWT does (202, verified). Edge→edge chaining is the fragile link (and the same
+// class as the recurring Lovable-republish auth wipes), so the video list and the dispatch loop
+// live HERE: query last-N-days videos, call fetch-reel-metrics per video ~1.5s apart with
+// rate-limit retries. fetch-reel-metrics itself (Apify → influencer_videos) is unchanged.
+const sleepMs = (ms) => new Promise(r => setTimeout(r, ms));
+async function refreshVideoMetrics(opts = {}) {
+    const days = Math.max(1, Number(opts.days) || 30);
+    const makeQ = () => {
+        let q = supabase.from('influencer_videos')
+            .select('id, video_url')
+            .not('video_url', 'is', null).neq('video_url', '')
+            .order('created_at', { ascending: false });
+        if (opts.influencerId) {
+            q = q.eq('influencer_id', opts.influencerId);
+        } else if (opts.scope !== 'all') {
+            const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+            q = q.or(`created_at.gte.${cutoff},live_date.gte.${cutoff.split('T')[0]}`);
+        }
+        return q;
+    };
+    // Page past the silent 1000-row cap (scope:'all' can exceed it); fresh builder + .order per page
+    const list = [];
+    for (let from = 0; ; from += 1000) {
+        const { data, error } = await makeQ().range(from, from + 999);
+        if (error) throw new Error(error.message);
+        list.push(...(data || []));
+        if (!data || data.length < 1000) break;
+    }
+    const startedAt = new Date().toISOString();
+    (async () => {
+        let ok = 0;
+        for (const v of list) {
+            for (let attempt = 0; attempt <= 6; attempt++) {
+                try {
+                    const r = await invokeFn('fetch-reel-metrics', { url: v.video_url, videoId: v.id }, 30000);
+                    if (r.status === 429 || r.status === 503) { await sleepMs(4000 + attempt * 2000); continue; }
+                    if (r.status < 400) ok++;
+                    else console.error(`[InfVideos] dispatch failed for video ${v.id}: ${r.status}`);
+                    break;
+                } catch (e) { console.error(`[InfVideos] dispatch error for video ${v.id}: ${e.message}`); break; }
+            }
+            await sleepMs(1500);
+        }
+        console.log(`[InfVideos] dispatched ${ok}/${list.length}`);
+    })().catch(e => console.error('[InfVideos] dispatch loop error:', e.message));
+    return { scheduled: list.length, startedAt };
+}
+
 module.exports = router;
 module.exports.pollInfluencerReplies = pollInfluencerReplies;
+module.exports.refreshVideoMetrics = refreshVideoMetrics;
 
