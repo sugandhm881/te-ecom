@@ -806,7 +806,8 @@ function check(name, got, want) {
         // proves a person and cancels the timers. All ten languages have a vetted hello line.
         check('vobiz bridge: a silent customer gets a hello-check then a 15s auto-hangup',
             [/const HELLO_CHECK/.test(vb), /this\.presence = true/.test(vb),
-             /el >= 9000 && !this\.speaking/.test(vb), /el >= 15000/.test(vb),
+             /el >= 9000 && !this\.speaking && !this\.screenerSeen/.test(vb),
+             /this\.screenerSeen \? 60000 : this\.sawVoice \? 30000 : 15000/.test(vb),
              (vb.match(/-IN': '/g) || []).length >= 20], [true, true, true, true, true]);
         // A hum is not a yes — but it IS presence: fillers mark the person before being ignored.
         check('vobiz bridge: fillers are ignored as turns but counted as presence',

@@ -186,16 +186,19 @@ class VoiceCall {
         // me?" in the call's language; still silence at 15s from start → auto-hangup.
         this.presence = false;
         this.helloDone = false;
+        this.sawVoice = false;                     // any VAD activity — a slow screener counts
+        this.screenerSeen = false;                 // a screening robot answered; human still pending
         this.presenceTimer = setInterval(() => {
             if (this.closed || this.presence) { clearInterval(this.presenceTimer); return; }
             const el = Date.now() - this.startedAt;
-            if (!this.helloDone && el >= 9000 && !this.speaking) {
+            if (!this.helloDone && el >= 9000 && !this.speaking && !this.screenerSeen) {
                 this.helloDone = true;
                 this.sayLine(HELLO_CHECK[this.s.lang] || HELLO_CHECK['hi-IN']).catch(() => {});
             }
-            if (el >= 15000) {
+            const limit = this.screenerSeen ? 60000 : this.sawVoice ? 30000 : 15000;
+            if (el >= limit) {
                 clearInterval(this.presenceTimer);
-                this.log('no customer response in 15s — ending call');
+                this.log(`no customer response in ${Math.round(limit / 1000)}s — ending call`);
                 this.s.transcript.push('[no response from customer — call auto-ended]');
                 this.hangup(500);
             }
@@ -212,7 +215,10 @@ class VoiceCall {
         this.stt = new WebSocket(url, ['api-subscription-key.' + SARVAM_KEY()]);
         this.stt.on('message', (m) => {
             let d; try { d = JSON.parse(m.toString()); } catch { return; }
-            if (d.event === 'vad.speech_start' && this.speaking) this.bargeIn();
+            if (d.event === 'vad.speech_start') {
+                this.sawVoice = true;
+                if (this.speaking) this.bargeIn();
+            }
             if (d.event === 'transcript.final' && d.text && d.text.trim()) this.onCustomer(d.text.trim());
         });
         this.stt.on('error', (e) => this.log('stt error:', e.message));
@@ -334,7 +340,13 @@ class VoiceCall {
         this.speaking = true;
         let pcm = null;
         try { pcm = await Promise.race([this.s.openingPcmP, new Promise(res => setTimeout(() => res(null), 3000))]); } catch (_) {}
-        if (!pcm) { this.log('opening not pre-synthesized — falling back to live turn'); return this.speakTurn(null); }
+        if (!pcm) {
+            this.log('opening not pre-synthesized — falling back to live turn');
+            return this.speakTurn(null).catch(e => {
+                this.log('opening turn failed:', e.message, '— last-resort direct line');
+                return this.sayLine(openingLine(this.s) || HELLO_CHECK[this.s.lang] || HELLO_CHECK['hi-IN']);
+            });
+        }
         this.history.push({ role: 'assistant', content: this.s.openingText });
         this.s.transcript.push('Agent: ' + this.s.openingText);
         this.playToCaller(pcm);
@@ -344,7 +356,13 @@ class VoiceCall {
     }
 
     onCustomer(text) {
-        this.presence = true;               // any transcript proves a person is on the line
+        const SCREENER_RX = /screening|name and reason|reason for calling|stay on the line|स्क्रीनिंग|रीजन फॉर|स्टे ऑन द|कॉलिंग/i;
+        if (SCREENER_RX.test(text)) {
+            this.screenerSeen = true;           // a robot answered — the REAL customer hasn't talked yet
+            this.log('screening assistant detected — waiting for the human (60s cap)');
+        } else {
+            this.presence = true;               // a genuine human utterance — countdown over
+        }
         const FILLER_RX = /^[\s]*(हम(्?म)*|म्म+|उम+|हूँ|हुं|आं*|hm+m*|um+|uh+|mm+)[\s।,.!]*$/i;
         if (FILLER_RX.test(text)) { this.log('filler ignored:', text.slice(0, 20)); return; }
         this.s.transcript.push('Customer: ' + text);
