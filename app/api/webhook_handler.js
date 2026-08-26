@@ -327,8 +327,10 @@ router.post('/shopify-order', async (req, res) => {
             const { upsertShopifyOrder } = require('./orders_ingest');
             const ing = await upsertShopifyOrder(o);
             if (!ing.ok) console.warn(`[OrderSync] ${orderName}: dashboard upsert failed — ${ing.error}`);
-            // (Automatic COD-confirmation sending was removed here 2026-08-24 — sends are MANUAL now,
-            // from the Call Queue popup: app/api/msg91_wa.js.)
+            // Automatic COD confirmation is BACK by plan (2026-08-26): cod_confirmation_v2 goes out
+            // the instant a COD order lands — allowlist-gated until cut-over, logged in wa_sends_msg91,
+            // turnstile-deduped. Fire-and-forget: a WhatsApp hiccup must never break the hold flow.
+            require('./msg91_wa').autoCodOnCreate(o).catch(e => console.error('[WA auto] webhook hook error:', e.message));
             // Auto-hold repeat COD orders.
             const phone = (o.shipping_address && o.shipping_address.phone) || (o.customer && o.customer.phone) || o.phone || null;
             const sa = o.shipping_address || {};

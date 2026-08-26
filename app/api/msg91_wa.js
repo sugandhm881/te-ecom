@@ -1,10 +1,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Manual WhatsApp sends via MSG91 — template sequences, driven by DATA.
 //
-// THE PLAN (2026-08-24, superseding the automatic sender the same day): messages NEVER go out on their
-// own. The team calls the customer; when a call goes unanswered they press ONE button in the Call Queue
-// order popup, which sends the NEXT version of a template sequence — V1 first, then V2, then V3, then
-// the button retires. "Next" is decided HERE from the send log, not by the browser, so two agents with
+// THE PLAN (2026-08-26, superseding 08-24's manual-only rule): AUTOMATIC sequences are back by
+// explicit plan — cod_auto (instant on order create + 30-min reminder) and ndr_auto (delivery-attempt
+// driven) are sent by the system; MANUAL sequences stay as popup buttons (cod_confirmation call
+// ladder; cod_hold, which exists only while the order is held). mode/gate/requires_hold live on the
+// registry rows. "Next" is decided HERE from the send log, not by the browser, so two agents with
 // the same popup open cannot both send V1: the UNIQUE(order,sequence,version) row is the turnstile.
 //
 // TEMPLATES ARE ROWS, NOT CODE (`wa_template_sequences_msg91`). Adding template V2, or an entirely new
@@ -75,6 +76,13 @@ async function resolveOrderFields(orderName) {
 }
 
 async function callMsg91Template(tpl, fields, phone) {
+    // ⚠ WhatsApp accepts a send whose variable count differs from the registered template's
+    // placeholders — and then silently never delivers it (cod_order_cancelled_unconfirmed_v1 had
+    // 3 placeholders, we sent 4, the customer got nothing). Fail LOUDLY instead.
+    const phMax = Math.max(0, ...[...String(tpl.body_text || '').matchAll(/\{\{(\d+)\}\}/g)].map(m => Number(m[1])));
+    if (tpl.body_text && phMax !== (tpl.variables || []).length) {
+        throw new Error(`template ${tpl.template_name}: body has ${phMax} placeholders but registry maps ${(tpl.variables || []).length} variables — fix the registry row`);
+    }
     const components = {};
     (tpl.variables || []).forEach((key, i) => {
         components[`body_${i + 1}`] = { type: 'text', value: String(fields[key] != null ? fields[key] : '') };
@@ -121,7 +129,7 @@ async function nextAvailable(orderId, orderName, sequenceKey) {
     const done = new Map(okSends.map(s => [s.version, s]));
     const tpl = (tpls || []).find(t => !done.has(t.version));
     if (!tpl) return { tpl: null, locked: null, tpls: tpls || [], done };
-    if (tpl.version > 1) {
+    if (tpl.version > 1 && (tpl.gate || 'call') !== 'seq') {
         const prev = done.get(tpl.version - 1);
         const prevAt = prev ? new Date(prev.created_at).getTime() : 0;
         const tried = (calls || []).some(cl => new Date(cl.called_at).getTime() > prevAt);
@@ -164,7 +172,7 @@ router.get('/support/wa/state', async (req, res) => {
             .map(s => [`${s.sequence_key}|${s.version}`, s]));
         const seqs = {};
         (tpls || []).forEach(t => {
-            const s = seqs[t.sequence_key] || (seqs[t.sequence_key] = { sequence_key: t.sequence_key, label: t.label, versions: [], next: null });
+            const s = seqs[t.sequence_key] || (seqs[t.sequence_key] = { sequence_key: t.sequence_key, label: t.label, versions: [], next: null, mode: t.mode || 'manual', gate: t.gate || 'call', requires_hold: !!t.requires_hold });
             const done = sent.get(`${t.sequence_key}|${t.version}`) || null;
             // The chip is CLICKABLE: it shows the exact message that went out, rendered from the
             // fields stored AT SEND TIME — not today's values, which may have drifted since.
@@ -183,13 +191,24 @@ router.get('/support/wa/state', async (req, res) => {
             s.next = null; s.locked = null;
             if (!cand) return;                                     // every configured version sent
             if (cand.version === 1) { s.next = 1; return; }
+            if (s.gate === 'seq') { s.next = cand.version; return; }   // sequential: prev sent → next open
             const prev = s.versions.find(v => v.version === cand.version - 1);
             const prevAt = prev && prev.sent_at ? new Date(prev.sent_at).getTime() : 0;
             const tried = (calls || []).some(cl => new Date(cl.called_at).getTime() > prevAt);
             if (tried) s.next = cand.version;
             else s.locked = { version: cand.version, reason: 'log a no-answer call to unlock V' + cand.version };
         });
-        res.json({ success: true, configured: configured(), sequences: Object.values(seqs) });
+        // Hold-gated sequences (cod_hold): buttons exist only while the order is HELD on Shopify.
+        const seqList = Object.values(seqs);
+        if (seqList.some(s => s.requires_hold)) {
+            try {
+                const holds = await require('./shopify_hold').getHoldStates([orderName]);
+                const h = holds[orderName] || holds['#' + orderName] || null;
+                const held = !!(h && h.status === 'held');
+                seqList.forEach(s => { if (s.requires_hold && !held) s.hidden = true; });
+            } catch (e) { seqList.forEach(s => { if (s.requires_hold) s.hidden = true; }); }
+        }
+        res.json({ success: true, configured: configured(), sequences: seqList });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
@@ -209,6 +228,12 @@ router.post('/support/wa/send', express.json(), async (req, res) => {
         const { tpl, locked, tpls, done } = await nextAvailable(order.id, orderName, sequenceKey);
         if (locked) return res.status(423).json({ success: false, error: locked.reason });
         if (!tpl) return res.status(409).json({ success: false, error: 'sequence complete — every version already sent' });
+        if ((tpl.mode || 'manual') === 'auto') return res.status(403).json({ success: false, error: 'this sequence is sent automatically by the system' });
+        if (tpl.requires_hold) {
+            const holds = await require('./shopify_hold').getHoldStates([orderName]).catch(() => ({}));
+            const h = holds[orderName] || holds['#' + orderName] || null;
+            if (!(h && h.status === 'held')) return res.status(403).json({ success: false, error: 'this message is only for orders currently held on Shopify' });
+        }
 
         // Log-then-send; the unique key is the two-agents-one-popup turnstile.
         const ins = await supabase.from('wa_sends_msg91').insert({
@@ -234,7 +259,139 @@ router.post('/support/wa/send', express.json(), async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// ── The template catalog: the REAL registered bodies, synced from MSG91 ──
+// ── AUTOMATIC SENDS (2026-08-26 plan) — every send logs to wa_sends_msg91, the UNIQUE
+// (order, sequence, version) row is the double-send turnstile, and MSG91_COD_ALLOWLIST gates
+// EVERYTHING until cut-over ("use the same till test is done").
+//   cod_auto  V1 cod_confirmation_v2      — instant on Shopify orders/create (COD only)
+//   cod_auto  V2 cod_confirm_reminder_v1  — 30 min later if NO reply (CONFIRM or REJECT both count)
+//   ndr_auto  V1 ndr_msg                  — 1st failed delivery attempt (shipment_journey_ecom)
+//   ndr_auto  V2 ndr_final_attempt_v1     — 2nd failed attempt
+//   ndr_auto  V3 order_rto_v1             — RTO initiated
+// ⚠ SEEDING (the 41-customer lesson): on the NDR engine's first ever run, everything ALREADY in a
+// trigger state is sealed as 'seeded' — history is never messaged; only new transitions send.
+async function performAutoSend(orderName, sequenceKey, version, extraFields) {
+    if (!configured()) return { skip: 'MSG91 not configured' };
+    const { fields, order } = await resolveOrderFields(orderName);
+    Object.assign(fields, extraFields || {});
+    const gate = allowlistBlocks(orderName, order.phone);
+    if (gate) return { skip: gate };
+    if (last10(order.phone).length !== 10) return { skip: 'no usable phone' };
+    const { data: tpl } = await supabase.from('wa_template_sequences_msg91').select('*')
+        .eq('sequence_key', sequenceKey).eq('version', version).eq('active', true).maybeSingle();
+    if (!tpl) return { skip: `no active template for ${sequenceKey} v${version}` };
+    const ins = await supabase.from('wa_sends_msg91').insert({
+        order_name: orderName, sequence_key: sequenceKey, version,
+        template_name: tpl.template_name, phone: last10(order.phone),
+        payload: { fields, variables: tpl.variables, auto: true }, sent_by: 'auto',
+    }).select('id').single();
+    if (ins.error) {
+        if (String(ins.error.code) === '23505') return { skip: 'already sent/sealed' };
+        throw new Error(ins.error.message);
+    }
+    try {
+        const resp = await callMsg91Template(tpl, fields, order.phone);
+        await supabase.from('wa_sends_msg91').update({ status: 'sent', response: resp }).eq('id', ins.data.id);
+        console.log(`[WA auto] ${orderName} ${sequenceKey} V${version} → ${last10(order.phone)}`);
+        return { sent: true };
+    } catch (e) {
+        await supabase.from('wa_sends_msg91').update({ status: 'failed', response: { error: e.message } }).eq('id', ins.data.id);
+        return { skip: 'send failed: ' + e.message };
+    }
+}
+
+// Shopify orders/create → instant COD confirmation. Payload comes straight from the webhook.
+async function autoCodOnCreate(o) {
+    try {
+        const orderName = String(o.name || '').replace(/^#/, '').trim();
+        if (!orderName) return;
+        if (String(o.financial_status) !== 'pending') return console.log(`[WA auto] ${orderName}: not COD (financial_status=${o.financial_status || 'none'}) — no confirm message`);
+        if (o.test) return console.log(`[WA auto] ${orderName}: test order — skipped`);
+        if (o.cancelled_at) return console.log(`[WA auto] ${orderName}: already cancelled — skipped`);
+        const r = await performAutoSend(orderName, 'cod_auto', 1);
+        if (r.skip) console.log(`[WA auto] ${orderName}: cod_auto V1 skipped — ${r.skip}`);
+    } catch (e) { console.error('[WA auto] order-create send failed:', e.message); }
+}
+
+// Every 5 min: V1 sent 30min–6h ago, no reply of ANY kind, no V2 yet → reminder. The 6h ceiling is
+// the age seal: anything older is history and history is never messaged.
+async function codReminderTick() {
+    const from = new Date(Date.now() - 6 * 3600e3).toISOString();
+    const to = new Date(Date.now() - 30 * 60e3).toISOString();
+    const { data: v1s } = await supabase.from('wa_sends_msg91')
+        .select('order_name, phone, created_at')
+        .eq('sequence_key', 'cod_auto').eq('version', 1).eq('status', 'sent')
+        .gte('created_at', from).lte('created_at', to).order('created_at').limit(100);
+    let sent = 0;
+    for (const row of (v1s || [])) {
+        const { data: v2 } = await supabase.from('wa_sends_msg91').select('id')
+            .eq('order_name', row.order_name).eq('sequence_key', 'cod_auto').eq('version', 2).limit(1);
+        if (v2 && v2.length) continue;
+        // The reply must be NEWER than the V1 send — an old reply about a previous order from the
+        // same phone must not silence reminders for a new order forever.
+        const { data: reply } = await supabase.from('cod_confirmations_msg91').select('id_key')
+            .or(`id_key.eq.${row.order_name},data->>Shipping Phone Number.eq.${row.phone}`)
+            .gte('updated_at', row.created_at).limit(1);
+        if (reply && reply.length) continue;                       // they replied — no reminder
+        const r = await performAutoSend(row.order_name, 'cod_auto', 2);
+        if (r.sent) { sent++; await new Promise(rs => setTimeout(rs, 1200)); }
+    }
+    if (sent) console.log(`[WA auto] reminder tick: ${sent} sent`);
+}
+
+// NDR triggers from shipment_journey_ecom.
+function ndrTargets(row) {
+    const t = [];
+    if ((row.ndr_count || 0) >= 1) t.push(1);
+    if ((row.ndr_count || 0) >= 2) t.push(2);
+    if (row.outcome === 'rto' || row.rto_at || /^RTO/i.test(String(row.status_code || ''))) t.push(3);
+    return t;
+}
+function ndrReason(row) {
+    const list = Array.isArray(row.ndr_reasons) ? row.ndr_reasons : [];
+    const last = [...list].reverse().find(x => x && !/reattempt|instruction|created|client/i.test(String(x)));
+    return String(last || 'Delivery could not be completed').slice(0, 120);
+}
+async function ndrJourneys(sinceDays, freshHours) {
+    const cutOrder = new Date(Date.now() - sinceDays * 86400e3).toISOString();
+    let q = supabase.from('shipment_journey_ecom')
+        .select('order_name, ndr_count, ndr_reasons, outcome, status_code, rto_at')
+        .gte('order_date', cutOrder).neq('outcome', 'delivered')
+        .or('ndr_count.gte.1,outcome.eq.rto')
+        .order('updated_at', { ascending: false }).limit(500);
+    if (freshHours) q = q.gte('updated_at', new Date(Date.now() - freshHours * 3600e3).toISOString());
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    return data || [];
+}
+async function ndrSeed() {
+    const rows = await ndrJourneys(90, 0);
+    const seeds = [];
+    rows.forEach(row => ndrTargets(row).forEach(v => seeds.push({
+        order_name: row.order_name, sequence_key: 'ndr_auto', version: v,
+        template_name: 'seed', phone: '', status: 'seeded', payload: { seeded: true }, sent_by: 'seed',
+    })));
+    for (let i = 0; i < seeds.length; i += 500) {
+        await supabase.from('wa_sends_msg91').upsert(seeds.slice(i, i + 500), { onConflict: 'order_name,sequence_key,version', ignoreDuplicates: true });
+    }
+    console.log(`[WA auto] NDR bootstrap: sealed ${seeds.length} pre-existing trigger states — history is never messaged`);
+}
+async function ndrTick() {
+    const { count } = await supabase.from('wa_sends_msg91').select('*', { count: 'exact', head: true }).eq('sequence_key', 'ndr_auto');
+    if (!count) await ndrSeed();                                    // first ever run → seal the backlog
+    const rows = await ndrJourneys(30, 48);
+    let sent = 0;
+    for (const row of rows) {
+        if (sent >= 25) break;                                      // per-tick blast cap
+        for (const v of ndrTargets(row)) {
+            const extra = v === 3 ? {} : { ndr_reason: ndrReason(row) };
+            const r = await performAutoSend(row.order_name, 'ndr_auto', v, extra);
+            if (r.sent) { sent++; await new Promise(rs => setTimeout(rs, 1200)); }
+        }
+    }
+    if (sent) console.log(`[WA auto] NDR tick: ${sent} sent`);
+}
+
+// ── The template catalog: the REAL registered bodies, synced from MSG91 ──// ── The template catalog: the REAL registered bodies, synced from MSG91 ──
 // control.msg91.com/api/v5/whatsapp/get-template-client/:number returns every template with its
 // registered components (the endpoint the docs hide — recovered from the docs page source; the
 // api.msg91.com variants all 404). Body + footer land in msg91_template_catalog so the chat shows
@@ -354,4 +511,4 @@ router.get('/support/wa/chat', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-module.exports = { router, resolveOrderFields, allowlistBlocks };module.exports = { router, resolveOrderFields, allowlistBlocks };
+module.exports = { router, resolveOrderFields, allowlistBlocks, autoCodOnCreate, codReminderTick, ndrTick };

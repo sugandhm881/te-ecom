@@ -302,7 +302,7 @@ function _otpShow(data) {
     document.getElementById('auth-toggle')?.classList.add('hidden');
     document.getElementById('otp-form')?.classList.remove('hidden');
     const h = document.querySelector('#login-view h1'); if (h) h.textContent = 'Verify it’s you';
-    const hint = document.getElementById('otp-hint'); if (hint) hint.textContent = data.email_hint || 'your email';
+    const hint = document.getElementById('otp-hint'); if (hint) hint.textContent = data.channel === 'whatsapp' ? ('WhatsApp ' + (data.wa_hint || '')) : (data.email_hint || 'your email');
     const inp = document.getElementById('otp-input'); if (inp) { inp.value = ''; inp.focus(); }
     _otpCountdown(30);
 }
@@ -5659,13 +5659,18 @@ async function supWaButtons(orderName, refresh){
   try{
     const d=await supFetch('/api/support/wa/state?order='+encodeURIComponent(orderName));
     if(!d.sequences||!d.sequences.length) return;
-    host.innerHTML=d.sequences.map(s=>{
+    host.innerHTML=d.sequences.filter(s=>{
+      if(s.hidden) return false;                            // hold-gated sequence on an un-held order
+      if(s.mode==='auto') return s.versions.some(v=>v.sent_at);   // auto: chips only, and only if something went out
+      return true;
+    }).map(s=>{
       // Each chip opens the message that ACTUALLY went out — rendered from the fields captured at
       // send time, so it stays true even after the order data changes.
       const sentChips=s.versions.filter(v=>v.sent_at).map(v=>`<button class="supd-wa-chip px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 cursor-pointer" data-seq="${escapeHtml(s.sequence_key)}" data-ver="${v.version}" title="Sent ${new Date(v.sent_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}${v.sent_by?' by '+escapeHtml(supPrettyUser(v.sent_by)):''} — click to view the message">V${v.version} sent</button>`).join('');
       const sentN=s.versions.filter(v=>v.sent_at).length, totalV=s.versions.length;
       let btn;
-      if(s.next) btn=`<button class="supd-wa-send px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700" data-seq="${escapeHtml(s.sequence_key)}" ${d.configured?'':'disabled title="MSG91 not configured on this server"'}>WhatsApp: ${escapeHtml(s.label)} — send V${s.next}</button>`;
+      if(s.mode==='auto') btn=`<span class="px-2 py-1 rounded-lg text-[10px] font-semibold bg-sky-50 text-sky-700" title="Sent automatically by the system">auto</span>`;
+      else if(s.next) btn=`<button class="supd-wa-send px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700" data-seq="${escapeHtml(s.sequence_key)}" ${d.configured?'':'disabled title="MSG91 not configured on this server"'}>WhatsApp: ${escapeHtml(s.label)} — send V${s.next}</button>`;
       else if(s.locked) btn=`<span class="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200" title="${escapeHtml(s.locked.reason)}">V${s.locked.version} locked — ${escapeHtml(s.locked.reason)}</span>`;
       else btn=`<span class="px-2 py-1 rounded-lg text-xs font-semibold bg-slate-100 text-slate-500" title="Every configured version has been sent">WhatsApp: ${escapeHtml(s.label)} — ${sentN}/${totalV} sent</span>`;
       return `<span class="inline-flex items-center gap-1.5">${btn}${sentChips}</span>`;
@@ -11417,7 +11422,9 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('forgot-email')?.addEventListener('keypress', e => { if (e.key === 'Enter') handleForgotSend(); });
     document.getElementById('forgot-otp')?.addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6); });
     document.getElementById('forgot-new-password')?.addEventListener('keypress', e => { if (e.key === 'Enter') handleReset(); });
-    _bindPwMeter(document.getElementById('login-password'), document.getElementById('login-pw-meter'));
+    // NO strength meter on the sign-in field: you don't rate an existing password at login, and
+    // browser autofill made it pop up 'Strong' on a fresh logout screen (user-reported).
+    document.getElementById('login-pw-meter')?.classList.add('hidden');
     _bindPwMeter(document.getElementById('signup-password'), document.getElementById('signup-pw-meter'));
     _bindPwMeter(document.getElementById('forgot-new-password'), document.getElementById('forgot-pw-meter'));
     logoutBtn?.addEventListener('click', signOut);

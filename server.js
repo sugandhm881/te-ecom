@@ -516,6 +516,17 @@ cronJob('WH Report (every 2h)', process.env.WH_REPORT_CRON || '30 8-20/2 * * *',
 // Kept from the old 8 PM job, now standalone at 20:00 so it lands 30 min BEFORE the last report of the
 // day: refresh the RapidShyp cache for ALL recent EasyEcom AWBs (forced — nothing skipped as "fresh")
 // so the evening report is built on the freshest courier status.
+// WhatsApp automation (MSG91): the 30-min COD reminder sweep and the NDR/RTO event sweep.
+// Both engines are allowlist-gated until cut-over and every send logs to wa_sends_msg91.
+cronJob('WA CodReminder (*/5 * * * *)', '*/5 * * * *', async () => {
+    const { codReminderTick } = require('./app/api/msg91_wa');
+    await codReminderTick().catch(e => console.error('[WA auto] reminder cron error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+cronJob('WA NDR (*/15 * * * *)', '*/15 * * * *', async () => {
+    const { ndrTick } = require('./app/api/msg91_wa');
+    await ndrTick().catch(e => console.error('[WA auto] NDR cron error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
 // Influencer video metrics — every Friday 11:00 PM IST, refresh the last-30-days videos so the
 // panel's views/likes/comments are at most a week stale without anyone pressing "Refresh".
 cronJob('InfVideos (0 23 * * 5)', '0 23 * * 5', async () => {

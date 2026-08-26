@@ -3,9 +3,36 @@
 // voids pending OTPs), and mailed via the shared sendMail — so it goes out from the sender
 // configured in Settings → Email (digital@theelement.skin), with .env EMAIL_* as fallback.
 const crypto = require('crypto');
+const axios = require('axios');
 const { ImapFlow } = require('imapflow');
 const config = require('../config');
 const { getEmailConfig, sendMail } = require('./api/email_settings');
+const { supabase } = require('./supabase');
+
+// ── WhatsApp OTP (2026-08-26): dashboard OTPs go to the user's WhatsApp first — the
+// dashboard_otp_v1 AUTHENTICATION template (fixed WhatsApp format: code in body_1 AND the
+// copy-code button). Email stays as the automatic fallback so a template hiccup can never lock
+// the team out. Staff numbers are deliberately NOT gated by MSG91_COD_ALLOWLIST — that list
+// protects customers; logins must work for the whole team.
+const WA_AUTH = () => String(process.env.MSG91_AUTHKEY || '').trim().split(/\s/)[0];
+const WA_NUM = () => String(process.env.MSG91_WA_NUMBER || '').replace(/\D/g, '');
+const waConfigured = () => !!WA_AUTH() && !!WA_NUM();
+async function sendOtpWhatsApp(mobile10, otp) {
+    const template = {
+        name: 'dashboard_otp_v2',
+        language: { code: 'en', policy: 'deterministic' },
+        namespace: '76ec8535_ee9d_416e_b89d_8c2362647b62',
+        to_and_components: [{ to: ['91' + mobile10], components: {
+            body_1: { type: 'text', value: String(otp) },
+            button_1: { subtype: 'url', type: 'text', value: String(otp) },
+        } }],
+    };
+    const r = await axios.post('https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/',
+        { integrated_number: WA_NUM(), content_type: 'template', payload: { messaging_product: 'whatsapp', type: 'template', template } },
+        { headers: { authkey: WA_AUTH(), 'Content-Type': 'application/json' }, timeout: 15000, validateStatus: () => true });
+    if (r.status >= 400 || (r.data && r.data.hasError)) throw new Error(`MSG91 OTP ${r.status}: ${JSON.stringify(r.data).slice(0, 150)}`);
+    return r.data;
+}
 
 const TTL_MS = 5 * 60 * 1000;      // OTP validity
 const MAX_ATTEMPTS = 5;            // wrong tries before the OTP is voided
@@ -16,8 +43,11 @@ const _store = new Map();          // email -> { hash, exp, attempts, lastSentAt
 
 const hmac = otp => crypto.createHmac('sha256', String(config.SECRET_KEY)).update(String(otp)).digest('hex');
 
-// 2FA is active whenever the portal can send mail at all.
-async function configured() { try { return !!(await getEmailConfig()); } catch (_) { return false; } }
+// 2FA is active whenever ANY OTP channel works — WhatsApp or email.
+async function configured() {
+    if (waConfigured()) return true;
+    try { return !!(await getEmailConfig()); } catch (_) { return false; }
+}
 
 async function sendOtp(email, opts = {}) {
     const now = Date.now();
@@ -25,12 +55,28 @@ async function sendOtp(email, opts = {}) {
     if (cur && now - cur.lastSentAt < RESEND_GAP_MS) {
         // A duplicate /login within the gap (double-submit, second tab) reuses the OTP already
         // in flight instead of erroring — the user just typed the code they received.
-        if (opts.reuseIfRecent && now < cur.exp) return 'reused';
+        if (opts.reuseIfRecent && now < cur.exp) return { ok: true, channel: cur.channel || 'email', hint: cur.hint || null, reused: true };
         throw new Error('Please wait a few seconds before requesting another OTP.');
     }
     if (_store.size > 500) for (const [k, v] of _store) if (v.exp < now) _store.delete(k);
     const otp = String(crypto.randomInt(100000, 1000000));
-    _store.set(email, { hash: hmac(otp), exp: now + TTL_MS, attempts: 0, lastSentAt: now });
+    const rec = { hash: hmac(otp), exp: now + TTL_MS, attempts: 0, lastSentAt: now };
+    _store.set(email, rec);
+    // WhatsApp first: the user's stored mobile from app_users_ecom.
+    if (waConfigured()) {
+        try {
+            const { data: u } = await supabase.from('app_users_ecom').select('mobile').eq('email', email).maybeSingle();
+            const m10 = String((u && u.mobile) || '').replace(/\D/g, '').slice(-10);
+            if (m10.length === 10) {
+                await sendOtpWhatsApp(m10, otp);
+                rec.channel = 'whatsapp';
+                rec.hint = '+91 \u2022\u2022\u2022\u2022\u2022\u2022' + m10.slice(-4);
+                console.log(`[2FA] OTP \u2192 WhatsApp ${rec.hint} for ${email}`);
+                return { ok: true, channel: 'whatsapp', hint: rec.hint };
+            }
+        } catch (e) { console.warn('[2FA] WhatsApp OTP failed, falling back to email:', e.message); }
+    }
+    rec.channel = 'email';
     try {
         await sendMail({
             to: [email],
@@ -56,7 +102,7 @@ async function sendOtp(email, opts = {}) {
     }
     // Once this OTP has expired, wipe its copy from the sender's Sent folder.
     setTimeout(() => sweepOtpSent('scheduled'), TTL_MS + 15 * 1000).unref();
-    return true;
+    return { ok: true, channel: 'email' };
 }
 
 // Delete expired OTP emails from the sender mailbox (digital@theelement.skin): find them in

@@ -51,14 +51,15 @@ function rateLimit(req, res, next) {
 // with a server-side warning.
 async function issueOrChallenge(res, user) {   // user = { email, role, permissions }
     if (await otpMail.configured()) {
-        try { await otpMail.sendOtp(user.email, { reuseIfRecent: true }); }
+        let otpRes = null;
+        try { otpRes = await otpMail.sendOtp(user.email, { reuseIfRecent: true }); }
         catch (e) {
             console.error('[2FA] OTP email send failed for', user.email, '-', e.message);
             return res.status(503).json({ message: 'Could not send the OTP email right now. Please try again in a minute.' });
         }
         // Short-lived pre-auth token — proves the password step passed; carries NO permissions.
         const otp_token = jwt.sign({ stage: 'otp2fa', email: user.email }, config.SECRET_KEY, { expiresIn: '5m' });
-        return res.json({ otp_required: true, otp_token, email_hint: emailHint(user.email) });
+        return res.json({ otp_required: true, otp_token, email_hint: emailHint(user.email), channel: (otpRes && otpRes.channel) || 'email', wa_hint: (otpRes && otpRes.hint) || null });
     }
     console.warn('[2FA] login without OTP — email/SMTP not configured (Settings → Email)');
     return res.json({ token: generateToken({ email: user.email, role: user.role, permissions: user.permissions || [], name: user.name || null }) });
@@ -114,8 +115,9 @@ router.post('/login/resend-otp', rateLimit, async (req, res) => {
     let claims;
     try { claims = jwt.verify(otp_token, config.SECRET_KEY); } catch (_) { return res.status(401).json({ message: 'This OTP session has expired — please sign in again.' }); }
     if (claims.stage !== 'otp2fa') return res.status(401).json({ message: 'Invalid OTP session.' });
-    try { await otpMail.sendOtp(claims.email); } catch (e) { return res.status(503).json({ message: e.message }); }
-    res.json({ ok: true });
+    let r2 = null;
+    try { r2 = await otpMail.sendOtp(claims.email); } catch (e) { return res.status(503).json({ message: e.message }); }
+    res.json({ ok: true, channel: (r2 && r2.channel) || 'email', wa_hint: (r2 && r2.hint) || null });
 });
 
 // Open signup → creates a PENDING account with no access. Admin must approve + grant dashboards.
@@ -165,12 +167,14 @@ router.post('/forgot-password', rateLimit, async (req, res) => {
     if (u.status === 'pending')  return res.status(403).json({ message: 'This account is still pending admin approval.' });
     if (u.status === 'disabled') return res.status(403).json({ message: 'This account has been disabled — please contact your admin.' });
     // Active account → email the reset code.
-    try { await otpMail.sendOtp(u.email, { reuseIfRecent: true }); }
+    let fr = null;
+    try { fr = await otpMail.sendOtp(u.email, { reuseIfRecent: true }); }
     catch (e) {
         console.error('[forgot-pw] OTP send failed for', email, '-', e.message);
         return res.status(503).json({ message: 'Could not send the reset code right now. Please try again in a minute.' });
     }
-    return res.json({ ok: true, message: 'A 6-digit reset code has been sent to your email.' });
+    const via = fr && fr.channel === 'whatsapp' ? `your WhatsApp (${fr.hint})` : 'your email';
+    return res.json({ ok: true, message: `A 6-digit reset code has been sent to ${via}.` });
 });
 
 // ── Forgot password — step 2: verify the code + set a new password ─────────────────────

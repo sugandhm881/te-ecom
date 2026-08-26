@@ -660,6 +660,50 @@ function check(name, got, want) {
     check('msg91 wa: the send button and chips live in the chat card, not the modal header',
         [/id="supd-wa" class="flex items-center gap-1\.5 flex-wrap mb-2"/.test(waUi),
          /supd-wa"[^\n]*supd-logcall/.test(waUi)], [true, false]);
+    // Dashboard OTPs go WHATSAPP-FIRST (2026-08-26): dashboard_otp_v1 AUTHENTICATION template,
+    // code in body_1 AND the copy-code button; email is the automatic fallback so a template
+    // hiccup can never lock the team out; 2FA counts as configured if EITHER channel works; and
+    // staff numbers are deliberately NOT gated by the customer allowlist. Proven live: real OTP
+    // delivered to the admin's WhatsApp.
+    {
+        const om = fs.readFileSync(path.join(ROOT, 'app/otp_mail.js'), 'utf8');
+        check('otp: WhatsApp-first with email fallback, both channels count as configured',
+            [/dashboard_otp_v2/.test(om), /button_1: \{ subtype: 'url'/.test(om),
+             /falling back to email/.test(om), /if \(waConfigured\(\)\) return true;/.test(om),
+             /NOT gated by MSG91_COD_ALLOWLIST/.test(om)],
+            [true, true, true, true, true]);
+    }
+    // AUTOMATIC WhatsApp (2026-08-26 plan): cod_auto (instant V1 on Shopify orders/create +
+    // 30-min V2 reminder if no reply), ndr_auto (attempt-driven V1/V2 + RTO V3 from
+    // shipment_journey_ecom), cod_hold (manual, hold-gated, sequential unlock). All proven live:
+    // instant send + reminder delivered to the allowlisted phone; NDR bootstrap sealed 1,008
+    // pre-existing trigger states as 'seeded' — history is never messaged; re-ticks are silent.
+    check('wa auto: engines exist, allowlist-gated, turnstile-logged, seed-sealed',
+        [/async function performAutoSend/.test(wa), /autoCodOnCreate/.test(wa),
+         /codReminderTick/.test(wa), /ndrSeed/.test(wa), /status: 'seeded'/.test(wa),
+         /allowlistBlocks\(orderName, order\.phone\)/.test(wa)],
+        [true, true, true, true, true, true]);
+    // The reminder's reply-check is RECENT-only: an old reply about a previous order from the same
+    // phone must not silence reminders for a new order forever.
+    // WhatsApp accepts-then-drops a send whose variable count mismatches the registered
+    // placeholders (the cancelled-template lesson: 3 placeholders, 4 variables, nothing arrived).
+    check('wa: a placeholder/variable mismatch fails loudly instead of silently not delivering',
+        [/phMax !== \(tpl\.variables \|\| \[\]\)\.length/.test(wa)], [true]);
+    check('wa auto: only a reply NEWER than the V1 send cancels the reminder',
+        [/gte\('updated_at', row\.created_at\)/.test(wa)], [true]);
+    // Gate rules are DATA: gate='seq' unlocks on previous-sent (no call needed), mode='auto' is
+    // never a popup button (chips only, and refused by the manual send route), requires_hold
+    // sequences exist only while the order is held on Shopify (server-checked via getHoldStates).
+    check('wa auto: sequence gates — seq unlock, auto refusal, hold requirement',
+        [/\(tpl\.gate \|\| 'call'\) !== 'seq'/.test(wa), /this sequence is sent automatically/.test(wa),
+         /only for orders currently held on Shopify/.test(wa),
+         /s\.mode==='auto'/.test(waUi), /s\.hidden/.test(waUi)],
+        [true, true, true, true, true]);
+    // The webhook hook is back, deliberately (plan change): instant COD confirm on orders/create.
+    check('wa auto: orders/create webhook fires the instant COD confirmation',
+        [/autoCodOnCreate\(o\)/.test(fs.readFileSync(path.join(ROOT, 'app/api/webhook_handler.js'), 'utf8'))],
+        [true]);
+
     // "I want real template" — the registered bodies are synced from MSG91's get-template-client
     // (control.msg91.com, path param; recovered from the docs page source after every api.msg91.com
     // guess 404'd) into msg91_template_catalog, and the catalog OVERRIDES registry body_text when
