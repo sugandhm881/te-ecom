@@ -800,6 +800,18 @@ function check(name, got, want) {
         check('vobiz bridge: the goodbye ends the call, not just the sentence',
             [/closingDone/.test(vb), /hangup\(800\)/.test(vb), /this\.hangup\(9000\)/.test(vb)],
             [true, true, true]);
+        // Presence check (2026-08-26): a silent line gets "Hello? can you hear me?" in the CALL'S
+        // language at ~9s and an auto-hangup at 15s from start — proven with a silent-customer sim
+        // (opening t+1.7s → hello-check t+10s → ended t+15.7s). Any transcript, hums included,
+        // proves a person and cancels the timers. All ten languages have a vetted hello line.
+        check('vobiz bridge: a silent customer gets a hello-check then a 15s auto-hangup',
+            [/const HELLO_CHECK/.test(vb), /this\.presence = true/.test(vb),
+             /el >= 9000 && !this\.speaking/.test(vb), /el >= 15000/.test(vb),
+             (vb.match(/-IN': '/g) || []).length >= 20], [true, true, true, true, true]);
+        // A hum is not a yes — but it IS presence: fillers mark the person before being ignored.
+        check('vobiz bridge: fillers are ignored as turns but counted as presence',
+            [/FILLER_RX/.test(vb), /filler ignored/.test(vb),
+             vb.indexOf('this.presence = true') < vb.indexOf('FILLER_RX')], [true, true, true]);
         check('vobiz bridge: wired into the server — public webhooks, gated call route, WS upgrade',
             [/\/vobiz\\\/\(answer\|hangup\)\$\//.test(srvV.replace(/\\/g, '\\\\')) || /vobiz\\\/\(answer\|hangup\)/.test(srvV),
              /vobiz.{0,30}call\|recording.{0,60}'support-voice', 'support-queue'/.test(srvV),

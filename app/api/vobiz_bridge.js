@@ -179,6 +179,25 @@ class VoiceCall {
         this.closingDone = false;                  // brand closing spoken — next pleasantry ends the call
         this.closed = false;
         this.startedAt = Date.now();
+        // Presence: until the customer produces ANY transcript (a hum counts — it proves a person),
+        // the agent must not push the script. ~9s from start with silence → "Hello? can you hear
+        // me?" in the call's language; still silence at 15s from start → auto-hangup.
+        this.presence = false;
+        this.helloDone = false;
+        this.presenceTimer = setInterval(() => {
+            if (this.closed || this.presence) { clearInterval(this.presenceTimer); return; }
+            const el = Date.now() - this.startedAt;
+            if (!this.helloDone && el >= 9000 && !this.speaking) {
+                this.helloDone = true;
+                this.sayLine(HELLO_CHECK[this.s.lang] || HELLO_CHECK['hi-IN']).catch(() => {});
+            }
+            if (el >= 15000) {
+                clearInterval(this.presenceTimer);
+                this.log('no customer response in 15s — ending call');
+                this.s.transcript.push('[no response from customer — call auto-ended]');
+                this.hangup(500);
+            }
+        }, 500);
         this.sttOpen();
     }
     log(...a) { console.log(`[vobiz ${this.s.sid.slice(0, 6)}]`, ...a); }
@@ -202,6 +221,23 @@ class VoiceCall {
         let payload = b64;
         if (L16_SWAP() === 'in' || L16_SWAP() === 'both') payload = swap16(Buffer.from(b64, 'base64')).toString('base64');
         this.stt.send(JSON.stringify({ event: 'audio_input', audio: payload }));
+    }
+
+    async sayLine(text) {
+        try {
+            const r = await axios.post('https://api.sarvam.ai/text-to-speech', {
+                inputs: [text], target_language_code: TTS_LANG(this.s.lang), speaker: this.s.voice,
+                model: 'bulbul:v3', speech_sample_rate: 24000, enable_preprocessing: true, output_audio_codec: 'wav',
+            }, { headers: { 'api-subscription-key': SARVAM_KEY(), 'Content-Type': 'application/json' }, timeout: 15000 });
+            const b64 = r.data && r.data.audios && r.data.audios[0];
+            if (!b64 || this.closed) return;
+            const pcm = Buffer.from(b64, 'base64').subarray(44).toString('base64');
+            this.s.transcript.push('Agent: ' + text);
+            this.speaking = true;
+            this.playToCaller(pcm);
+            const durMs = Math.round(Buffer.from(pcm, 'base64').length / 48) + 500;
+            setTimeout(() => { if (!this.turnAbort) this.speaking = false; }, durMs);
+        } catch (e) { this.log('sayLine failed:', e.message); }
     }
 
     bargeIn() {
@@ -306,6 +342,7 @@ class VoiceCall {
     }
 
     onCustomer(text) {
+        this.presence = true;               // any transcript proves a person is on the line
         const FILLER_RX = /^[\s]*(हम(्?म)*|म्म+|उम+|हूँ|हुं|आं*|hm+m*|um+|uh+|mm+)[\s।,.!]*$/i;
         if (FILLER_RX.test(text)) { this.log('filler ignored:', text.slice(0, 20)); return; }
         this.s.transcript.push('Customer: ' + text);
@@ -337,6 +374,7 @@ class VoiceCall {
     async close(reason) {
         if (this.closed) return;
         this.closed = true;
+        if (this.presenceTimer) clearInterval(this.presenceTimer);
         this.log('call closed:', reason);
         try { this.stt && this.stt.close(); } catch (_) {}
         try { this.ttsWs && this.ttsWs.close(); } catch (_) {}
@@ -423,6 +461,21 @@ function requestedLanguage(text, currentLang) {
     for (const [rx, code] of LANG_REQUEST) if (rx.test(text) && code !== currentLang) return code;
     return null;
 }
+
+// "Hello? Can you hear me?" in each call language — spoken when the customer has made no sound
+// after the opening. Simple standard phrasing on purpose.
+const HELLO_CHECK = {
+    'hi-IN': 'हेलो? क्या आपको मेरी आवाज़ आ रही है?',
+    'en-IN': 'Hello? Can you hear me?',
+    'bn-IN': 'হ্যালো? আপনি কি আমার কথা শুনতে পাচ্ছেন?',
+    'ta-IN': 'ஹலோ? என் குரல் கேட்கிறதா?',
+    'te-IN': 'హలో? నా మాట వినిపిస్తుందా?',
+    'kn-IN': 'ಹಲೋ? ನನ್ನ ಧ್ವನಿ ಕೇಳಿಸುತ್ತಿದೆಯಾ?',
+    'ml-IN': 'ഹലോ? എന്റെ ശബ്ദം കേൾക്കുന്നുണ്ടോ?',
+    'mr-IN': 'हॅलो? माझा आवाज येतोय का?',
+    'gu-IN': 'હેલો? મારો અવાજ સંભળાય છે?',
+    'pa-IN': 'ਹੈਲੋ? ਕੀ ਤੁਹਾਨੂੰ ਮੇਰੀ ਆਵਾਜ਼ ਆ ਰਹੀ ਹੈ?',
+};
 
 const LANG_NAMES = { 'hi-IN': 'Hindi', 'en-IN': 'English', 'ta-IN': 'Tamil', 'kn-IN': 'Kannada', 'ml-IN': 'Malayalam',
     'te-IN': 'Telugu', 'bn-IN': 'Bengali', 'mr-IN': 'Marathi', 'gu-IN': 'Gujarati', 'pa-IN': 'Punjabi' };
