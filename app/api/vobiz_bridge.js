@@ -82,6 +82,7 @@ Order: ${s.ctx.product || 'their order'} for Rs.${s.ctx.amount || ''}. Customer 
 ${purpose.objectives}
 If the customer indicates IN ANY WAY that they prefer or only understand another language (a direct ask, or statements like they only know Bengali), switch to that language IMMEDIATELY and continue the whole call in it.
 TONE: courteous, professional and calm from the greeting to the goodbye — a trained customer-care executive, never a friend. No slang, no jokes, no cheeky or over-familiar phrases (never things like \u0905\u0930\u0947 \u0935\u093e\u0939, \u0915\u094d\u092f\u093e \u092c\u093e\u0924 \u0939\u0948, \u091a\u093f\u0932, boss, dear). Warmth comes from politeness, not casualness.
+CONFIRMATION DISCIPLINE: sounds like hmm / haan-haan WHILE you are still explaining are listening signals, NOT confirmation. A confirmation counts ONLY as a clear affirmative (जी हाँ / हाँ / yes) given AFTER you finish asking the confirm question. If the reply is unclear or just a hum, politely ask once more for a clear हाँ या ना — never assume agreement.
 SPOKEN DELIVERY RULES (your words go DIRECTLY to a voice synthesizer):
 - Respond ONLY in ${langName}. Max 2 short sentences per turn. Only speakable words: no emoji, symbols, dashes, brackets, quotes or lists.
 - NEVER read out a full order ID. Amounts stay in digits. Every sentence carries its own SUBJECT.
@@ -305,6 +306,8 @@ class VoiceCall {
     }
 
     onCustomer(text) {
+        const FILLER_RX = /^[\s]*(हम(्?म)*|म्म+|उम+|हूँ|हुं|आं*|hm+m*|um+|uh+|mm+)[\s।,.!]*$/i;
+        if (FILLER_RX.test(text)) { this.log('filler ignored:', text.slice(0, 20)); return; }
         this.s.transcript.push('Customer: ' + text);
         this.log('customer:', text.slice(0, 60));
         if (this.closingDone) {
