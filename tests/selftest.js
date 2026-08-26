@@ -798,7 +798,7 @@ function check(name, got, want) {
             [/startCallRecording/.test(vb), /Call\/\${callId}\/Record\//.test(vb.replace(/\`/g,'')) || /\/Record\//.test(vb),
              /recordXml = \(\) => ''/.test(vb)], [true, true, true]);
         check('vobiz bridge: the goodbye ends the call, not just the sentence',
-            [/closingDone/.test(vb), /hangup\(800\)/.test(vb), /this\.hangup\(9000\)/.test(vb)],
+            [/closingDone/.test(vb), /hangup\(800\)/.test(vb), /scheduleGoodbyeCut/.test(vb) && /this\.vadActive && el < 18000/.test(vb)],
             [true, true, true]);
         // Presence check (2026-08-26): a silent line gets "Hello? can you hear me?" in the CALL'S
         // language at ~9s and an auto-hangup at 15s from start — proven with a silent-customer sim

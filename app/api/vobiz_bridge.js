@@ -77,15 +77,22 @@ function buildPrompt(s) {
     const langName = LANG_NAMES[s.lang] || 'Hindi';
     const forms = sp.gender === 'male' ? 'कर रहा हूँ / बोल रहा हूँ' : 'कर रही हूँ / बोल रही हूँ';
     const purpose = PURPOSES[s.callType] || PURPOSES.cod_confirm;
+    const offer = s.offerAsk
+        ? `\nLANGUAGE OFFER: the customer's last reply appears to be in ${LANG_NAMES[s.offerAsk] || s.offerAsk}. In THIS reply, ask ONE short polite question — in both ${langName} and ${LANG_NAMES[s.offerAsk] || s.offerAsk} — whether they would prefer to continue in ${LANG_NAMES[s.offerAsk] || s.offerAsk}. Nothing else in this turn.`
+        : '';
+    if (s.offerAsk) s.offerAsk = null;
+    const override = s.langSwitched
+        ? `\nLANGUAGE OVERRIDE: the customer has asked for ${langName}. Earlier turns were in a different language — that no longer matters. From your very next word, reply ONLY in ${langName}.`
+        : '';
     return `You are ${sp.name}, a ${sp.gender} phone agent for The Element, an Ayurvedic skincare brand, ${purpose.intro}
 Order: ${s.ctx.product || 'their order'} for Rs.${s.ctx.amount || ''}. Customer first name: ${s.ctx.firstName}.
-${purpose.objectives}
+${purpose.objectives}${override}${offer}
 If the customer indicates IN ANY WAY that they prefer or only understand another language (a direct ask, or statements like they only know Bengali), switch to that language IMMEDIATELY and continue the whole call in it.
 TONE: courteous, professional and calm from the greeting to the goodbye — a trained customer-care executive, never a friend. No slang, no jokes, no cheeky or over-familiar phrases (never things like \u0905\u0930\u0947 \u0935\u093e\u0939, \u0915\u094d\u092f\u093e \u092c\u093e\u0924 \u0939\u0948, \u091a\u093f\u0932, boss, dear). Warmth comes from politeness, not casualness.
-CALL SCREENING: some phones answer with an automated screening assistant that asks for your name and the reason for the call (usually in English: "your name and reason for calling", "please stay on the line"). When you hear that: reply in the SAME language the assistant used, with ONE short sentence only — "This is ${sp.name} from The Element, calling ${s.ctx.firstName} about their order confirmation." Then stop speaking and wait silently for the real person; never speak stage directions. Do NOT ask the order-confirmation question to the assistant, and do NOT repeat yourself to it. When the real customer then speaks (a hello or greeting), start fresh with your normal greeting and run the call normally.
+CALL SCREENING: some phones answer with an automated screening assistant that asks for your name and the reason for the call (usually in English: "your name and reason for calling", "please stay on the line"). When you hear that: reply in the SAME language the assistant used, with ONE short sentence only — "This is ${sp.name} from The Element, calling ${s.ctx.firstName} about their order confirmation." Then stop speaking and wait silently for the real person; never speak stage directions. Do NOT ask the order-confirmation question to the assistant, and do NOT repeat yourself to it. When the real customer then speaks (a hello or greeting), start fresh: your FIRST sentence is only the greeting and your introduction (your name and The Element); the order details and the confirmation question come in the NEXT sentence — never all in one breath.
 CONFIRMATION DISCIPLINE: sounds like hmm / haan-haan WHILE you are still explaining are listening signals, NOT confirmation. A confirmation counts ONLY as a clear affirmative (जी हाँ / हाँ / yes) given AFTER you finish asking the confirm question. If the reply is unclear or just a hum, politely ask once more for a clear हाँ या ना — never assume agreement.
 SPOKEN DELIVERY RULES (your words go DIRECTLY to a voice synthesizer):
-- Respond ONLY in ${langName}. Max 2 short sentences per turn. Only speakable words: no emoji, symbols, dashes, brackets, quotes or lists.
+- Respond ONLY in ${langName} (if the customer asks for another supported language, switching is REQUIRED, never refused). Max 2 short sentences per turn. Only speakable words: no emoji, symbols, dashes, brackets, quotes or lists.
 - NEVER read out a full order ID. Amounts stay in digits. Every sentence carries its own SUBJECT.
 - Your OWN first-person ${langName === 'Hindi' ? 'Hindi verb forms are your gender’s: ' + forms : 'voice is ' + sp.gender}.
 - Address the customer as FIRST NAME + ${langName === 'Hindi' ? 'जी' : '"ji"'}; for the customer always respectful plural forms (रहेंगे/करेंगे/होंगे) — NEVER feminine forms for the customer: रहेंगी, होंगी, चाहती, करेंगी are all FORBIDDEN — always चाहेंगे/रहेंगे.
@@ -98,6 +105,7 @@ function sanitizeReply(t) {
     s = s.replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/gi, ' ');
     s = s.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, ' ');
     s = s.replace(/<[^>]{1,80}>/g, ' ');
+    s = s.replace(/\([^)]{0,80}\)/g, ' ');           // stage directions — never speech, never transcript
     s = s.replace(/[*_#]{1,3}/g, '');
     return s.replace(/\s+/g, ' ').trim();
 }
@@ -217,8 +225,10 @@ class VoiceCall {
             let d; try { d = JSON.parse(m.toString()); } catch { return; }
             if (d.event === 'vad.speech_start') {
                 this.sawVoice = true;
+                this.vadActive = true;
                 if (this.speaking) this.bargeIn();
             }
+            if (d.event === 'vad.speech_end') this.vadActive = false;
             if (d.event === 'transcript.final' && d.text && d.text.trim()) this.onCustomer(d.text.trim());
         });
         this.stt.on('error', (e) => this.log('stt error:', e.message));
@@ -322,10 +332,26 @@ class VoiceCall {
             if (this.turnAbort === abort) this.turnAbort = null;
             // audio is queued inside Vobiz — speaking ends a beat after the last frame is sent
             setTimeout(() => { if (!this.turnAbort) this.speaking = false; }, 1500);
-            // fallback: if the customer says nothing after the goodbye, end the call once the
-            // closing audio has had time to play out of Vobiz's buffer
-            if (this.closingDone) this.hangup(9000);
+            // Goodbye grace: ~3s for the closing audio to play out of Vobiz's buffer + a 5s
+            // listening window. A customer mid-sentence (VAD active) is never cut off — their
+            // finished sentence routes through the post-close logic (thanks → hang up politely,
+            // a real question → reopen). Pure silence after the window → cut.
+            if (this.closingDone) this.scheduleGoodbyeCut();
         }
+    }
+
+    scheduleGoodbyeCut() {
+        if (this.goodbyeTimer) return;
+        const started = Date.now();
+        this.goodbyeTimer = setInterval(() => {
+            if (this.closed || !this.closingDone) { clearInterval(this.goodbyeTimer); this.goodbyeTimer = null; return; }
+            const el = Date.now() - started;
+            if (el < 8000) return;                        // ~3s audio tail + the 5s response window
+            if (this.vadActive && el < 18000) return;     // they are mid-sentence — let them finish
+            clearInterval(this.goodbyeTimer); this.goodbyeTimer = null;
+            this.log('no response after the goodbye — ending call');
+            this.hangup(200);
+        }, 500);
     }
 
     hangup(delayMs) {
@@ -375,9 +401,25 @@ class VoiceCall {
                 return;
             }
             this.closingDone = false;           // a real question after the goodbye — answer it
+            if (this.goodbyeTimer) { clearInterval(this.goodbyeTimer); this.goodbyeTimer = null; }
         }
         const wantLang = requestedLanguage(text, this.s.lang);
-        if (wantLang) this.switchLanguage(wantLang);
+        if (wantLang) {
+            this.switchLanguage(wantLang);
+            this.s.offeredLang = null;
+        } else if (this.s.offeredLang && AFFIRM_RX.test(text) && text.trim().length < 16) {
+            this.switchLanguage(this.s.offeredLang);   // they accepted the offered language
+            this.s.offeredLang = null;
+        } else {
+            const seen = scriptLangOf(text);
+            if (seen && seen !== this.s.lang && this.s.offeredLang !== seen) {
+                this.s.offeredLang = seen;             // reply came in another script — OFFER it
+                this.s.offerAsk = seen;                // consumed by the next prompt build
+                this.log('customer replied in ' + (LANG_NAMES[seen] || seen) + ' — offering the switch');
+            } else if (this.s.offeredLang && text.trim().length >= 16) {
+                this.s.offeredLang = null;             // they carried on substantively — offer lapsed
+            }
+        }
         if (this.turnAbort) this.bargeIn();     // they answered before the agent finished
         this.speakTurn(text).catch(e => this.log('turn error:', e.message));
     }
@@ -387,6 +429,7 @@ class VoiceCall {
     switchLanguage(code) {
         this.log(`language switch: ${this.s.lang} → ${code} (customer asked)`);
         this.s.lang = code;
+        this.s.langSwitched = true;
         try { if (this.stt && this.stt.readyState === 1) this.stt.send(JSON.stringify({ event: 'config.update', language_code: code })); } catch (_) {}
         this.s.transcript.push(`[language switched to ${LANG_NAMES[code] || code}]`);
     }
@@ -395,6 +438,7 @@ class VoiceCall {
         if (this.closed) return;
         this.closed = true;
         if (this.presenceTimer) clearInterval(this.presenceTimer);
+        if (this.goodbyeTimer) clearInterval(this.goodbyeTimer);
         this.log('call closed:', reason);
         try { this.stt && this.stt.close(); } catch (_) {}
         try { this.ttsWs && this.ttsWs.close(); } catch (_) {}
@@ -475,7 +519,7 @@ const LANG_REQUEST = [
     [/bengali|bangla|\u092c\u093e\u0902\u0917\u094d\u0932\u093e|\u092c\u0902\u0917\u093e\u0932|\u092c\u0902\u0917\u0932\u093e/i, 'bn-IN'], [/marathi|\u092e\u0930\u093e\u0920\u0940/i, 'mr-IN'],
     [/gujarati|\u0917\u0941\u091c\u0930\u093e\u0924\u0940/i, 'gu-IN'], [/punjabi|\u092a\u0902\u091c\u093e\u092c\u0940/i, 'pa-IN'],
 ];
-const LANG_CUE = /(\u092e\u0947\u0902|mein|me)\s*(\u092c\u093e\u0924|\u092c\u094b\u0932)|speak|talk|language|only|\u092d\u093e\u0937\u093e|samajh|\u0938\u092e\u091d|\u0906\u0924|\u091c\u093e\u0928|\u0938\u093f\u0930\u094d\u092b|\u092a\u0924\u093e/i;   // आत=aata, जान=jaan, सिर्फ=sirf
+const LANG_CUE = /(\u092e\u0947\u0902|mein|me)\s*(\u092c\u093e\u0924|\u092c\u094b\u0932)|speak|talk|language|only|\u092d\u093e\u0937\u093e|samajh|\u0938\u092e\u091d|\u0906\u0924|\u091c\u093e\u0928|\u0938\u093f\u0930\u094d\u092b|\u092a\u0924\u093e|बता|बोलो/i;   // आत=aata, जान=jaan, सिर्फ=sirf
 function requestedLanguage(text, currentLang) {
     if (!LANG_CUE.test(text)) return null;
     for (const [rx, code] of LANG_REQUEST) if (rx.test(text) && code !== currentLang) return code;
@@ -496,6 +540,20 @@ const HELLO_CHECK = {
     'gu-IN': 'હેલો? મારો અવાજ સંભળાય છે?',
     'pa-IN': 'ਹੈਲੋ? ਕੀ ਤੁਹਾਨੂੰ ਮੇਰੀ ਆਵਾਜ਼ ਆ ਰਹੀ ਹੈ?',
 };
+
+const SCRIPT_LANG = [
+    [/[\u0980-\u09FF]/, 'bn-IN'], [/[\u0A00-\u0A7F]/, 'pa-IN'], [/[\u0A80-\u0AFF]/, 'gu-IN'],
+    [/[\u0B80-\u0BFF]/, 'ta-IN'], [/[\u0C00-\u0C7F]/, 'te-IN'], [/[\u0C80-\u0CFF]/, 'kn-IN'],
+    [/[\u0D00-\u0D7F]/, 'ml-IN'],
+];
+function scriptLangOf(text) {
+    for (const [rx, lang] of SCRIPT_LANG) {
+        const hits = (String(text).match(new RegExp(rx.source, 'g')) || []).length;
+        if (hits >= 3) return lang;                 // a few real letters, not stray noise
+    }
+    return null;
+}
+const AFFIRM_RX = /\u0939\u093e\u0901|\u091c\u0940|yes|ok|\u0a39\u0a3e\u0a02|\u09b9\u09cd\u09af\u09be\u0981|\u0b86\u0bae\u0bcd|\u0b86\u0bae\u093e|\u0c05\u0c35\u0c41\u0c28\u0c41|\u0cb9\u0ccc\u0ca6\u0cc1|\u0d05\u0d24\u0d46|\u0ab9\u0abe/i;
 
 const LANG_NAMES = { 'hi-IN': 'Hindi', 'en-IN': 'English', 'ta-IN': 'Tamil', 'kn-IN': 'Kannada', 'ml-IN': 'Malayalam',
     'te-IN': 'Telugu', 'bn-IN': 'Bengali', 'mr-IN': 'Marathi', 'gu-IN': 'Gujarati', 'pa-IN': 'Punjabi' };
