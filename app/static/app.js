@@ -194,9 +194,65 @@ function createFallbackImage(itemName) {
 
 // Branded loaders — EVERY loading state shows the Ecom Central logo (spinning ring + logo).
 // brandLoader = large centered (tables, KPI strips, modals) · brandLoaderSm = compact inline (small panels).
-function brandLoader(label = 'Loading…') {
-    return `<div class="flex flex-col items-center justify-center gap-3 py-8"><span class="relative inline-flex items-center justify-center w-12 h-12"><span class="absolute w-12 h-12 rounded-full border-[3px] border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/ecom-logo.png" class="w-8 h-8 rounded-lg"></span><span class="text-slate-400 text-sm font-medium">${escapeHtml(label)}</span></div>`;
+// ⚠️ brandLoader IS the app-wide loading popup now (user, 2026-08-27: "apply this same for entire
+// software … loader design should same"). Every dashboard already calls it with its own label, so
+// hooking it here gives all ~35 call sites the centred dark-premium card with zero per-page edits.
+// It returns a MARKER shim for the container (keeps layout height, carries no visuals); a watcher
+// polls for visible markers and hides the overlay the moment the last one is replaced by real
+// content — which is exactly when the old inline loader used to disappear. A marker inside a
+// hidden view (navigated away, closed modal) has no offsetParent and does not hold the overlay open.
+let _eclWatch = null;
+function _eclWatchStart() {
+    if (_eclWatch) return;
+    _eclWatch = setInterval(() => {
+        let live = false;
+        document.querySelectorAll('[data-ec-loading]').forEach(m => { if (m.offsetParent !== null) live = true; });
+        if (!live) { clearInterval(_eclWatch); _eclWatch = null; ecLoadingHide(); }
+    }, 300);
 }
+function brandLoader(label = 'Loading…') {
+    try { ecLoadingShow(label); _eclWatchStart(); } catch (_) {}
+    return `<div data-ec-loading class="py-10"></div>`;
+}
+// Centred loading POPUP in the app's dark-premium identity — the SAME card language as the welcome
+// splash and the signout page (first cut was a bare white box; user: "this is not our standard").
+// The page's previous content stays dimly visible behind the blur, so a refresh reads as updating.
+function ecLoadingShow(label = 'Loading…') {
+    if (!document.getElementById('ec-loading-style')) {
+        const st = document.createElement('style');
+        st.id = 'ec-loading-style';
+        st.textContent = `
+          @keyframes eclBackIn { from { opacity:0 } to { opacity:1 } }
+          @keyframes eclCardIn { 0% { opacity:0; transform:translateY(16px) scale(.95) } 100% { opacity:1; transform:translateY(0) scale(1) } }
+          @keyframes eclSpin { to { transform:rotate(360deg) } }
+          @keyframes eclSheen { from { background-position:-200% center } to { background-position:200% center } }
+          @keyframes eclDots { 0%,20% { content:'' } 40% { content:'.' } 60% { content:'..' } 80%,100% { content:'...' } }
+          #ec-loading-overlay .ecl-label::after { content:''; animation:eclDots 1.6s steps(1) infinite; }
+          @media (prefers-reduced-motion: reduce) { #ec-loading-overlay * { animation-duration:.01ms !important; animation-iteration-count:1 !important } }`;
+        document.head.appendChild(st);
+    }
+    let el = document.getElementById('ec-loading-overlay');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'ec-loading-overlay';
+        el.style.cssText = 'position:fixed;inset:0;z-index:120;display:flex;align-items:center;justify-content:center;padding:1.25rem;background:rgba(8,11,26,.45);-webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px);animation:eclBackIn .35s ease both;';
+        document.body.appendChild(el);
+    }
+    el.innerHTML = `
+      <div style="position:relative;display:flex;align-items:center;gap:22px;max-width:calc(100vw - 32px);padding:26px 38px 26px 28px;border-radius:22px;color:#fff;background:linear-gradient(165deg,#211d54,#111536 60%,#0b0f26);border:1px solid rgba(129,140,248,.28);box-shadow:0 40px 90px rgba(49,46,129,.55),inset 0 1px 0 rgba(255,255,255,.06);animation:eclCardIn .45s cubic-bezier(.2,.9,.25,1.1) both;">
+        <div style="position:relative;width:64px;height:64px;flex:none;">
+          <span style="position:absolute;inset:-7px;border-radius:24px;border:3px solid rgba(129,140,248,.18);border-top-color:#818cf8;border-right-color:rgba(129,140,248,.45);animation:eclSpin 1s linear infinite;"></span>
+          <img src="/static/assets/ecom-logo.png" alt="" style="position:relative;width:64px;height:64px;border-radius:18px;background:#fff;box-shadow:0 18px 45px rgba(99,102,241,.5);">
+        </div>
+        <div style="display:flex;flex-direction:column;min-width:0;">
+          <p style="margin:0;font-size:.66rem;letter-spacing:.3em;text-transform:uppercase;font-weight:700;color:#a5b4fc;">Please wait</p>
+          <div class="ecl-label" style="margin:.3rem 0 0;font-size:1.15rem;font-weight:800;letter-spacing:-.01em;background:linear-gradient(90deg,#e0e7ff,#a78bfa 40%,#818cf8 68%,#e0e7ff);background-size:220% auto;-webkit-background-clip:text;background-clip:text;color:transparent;animation:eclSheen 3s linear infinite;">${escapeHtml(String(label).replace(/…$/, ''))}</div>
+          <p style="margin:.35rem 0 0;font-size:.72rem;color:#8b93b8;">Pulling the latest data — this only takes a moment</p>
+        </div>
+      </div>`;
+    el.style.display = 'flex';
+}
+function ecLoadingHide() { const el = document.getElementById('ec-loading-overlay'); if (el) el.style.display = 'none'; }
 function brandLoaderSm(label = 'Loading…') {
     return `<div class="flex items-center gap-2 py-3"><span class="relative inline-flex items-center justify-center w-6 h-6 shrink-0"><span class="absolute w-6 h-6 rounded-full border-2 border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/ecom-logo.png" class="w-4 h-4 rounded"></span><span class="text-slate-400 text-xs">${escapeHtml(label)}</span></div>`;
 }
@@ -418,14 +474,53 @@ function _clearSession() {
     clearTimeout(_sessionTimer); _sessionTimer = null;
     document.getElementById('welcome-splash')?.remove();
     document.getElementById('welcome-splash-style')?.remove();
+    // The approval badge/popup machinery dies WITH the session — its delayed sign-in popup once
+    // fired onto the signed-out page (user-reported: popup over "Signed out successfully").
+    try { if (typeof poaBadgeStop === 'function') poaBadgeStop(); } catch (_) {}
     if(loginEmailEl) loginEmailEl.value = '';
     if(loginPasswordEl) loginPasswordEl.value = '';
     document.getElementById('login-pw-meter')?.classList.add('hidden');
     // Drop the #view hash so the NEXT sign-in lands on the home dashboard, not the page they left.
     try { history.replaceState(null, '', location.pathname + location.search); } catch (_) {}
 }
-// Silent logout (session expiry / 401 / auto-logout) — straight back to the login screen.
+// Silent logout — straight back to the login screen. Kept for flows where a page makes no sense.
 function logout() { _clearSession(); showLogin(); }
+// The signout page serves TWO stories on one canvas (user, 2026-08-27: expiry used to dump people
+// straight onto the login form with no explanation): the manual thank-you, and the session-expiry
+// notice — amber clock instead of the green check, and words that say WHY they are looking at it.
+const SO_MODES = {
+    bye: { badge: 'linear-gradient(140deg,#10b981,#059669)', shadow: '0 20px 50px rgba(16,185,129,.5)', eyeColor: '#6ee7b7',
+        icon: '<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>',
+        eye: 'Session ended', title: 'Signed out successfully',
+        sub: 'Thanks for using <b>Ecom Central</b>. See you again soon.',
+        foot: "You'll return to your home dashboard after signing in." },
+    expired: { badge: 'linear-gradient(140deg,#f59e0b,#d97706)', shadow: '0 20px 50px rgba(245,158,11,.45)', eyeColor: '#fcd34d',
+        icon: '<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z"/>',
+        eye: 'Session expired', title: 'You’ve been signed out',
+        sub: 'Your 6-hour session ended, so we signed you out to keep the account secure. Log in to pick up right where you left off.',
+        foot: "You'll return to the page you were on after signing in." },
+};
+function soSetContent(mode) {
+    const m = SO_MODES[mode] || SO_MODES.bye;
+    const b = document.getElementById('so-badge'); if (b) { b.style.background = m.badge; b.style.boxShadow = m.shadow; }
+    const ic = document.getElementById('so-badge-icon'); if (ic) ic.innerHTML = m.icon;
+    const eye = document.getElementById('so-eye'); if (eye) { eye.textContent = m.eye; eye.style.color = m.eyeColor; }
+    const t = document.getElementById('so-title'); if (t) t.textContent = m.title;
+    const s = document.getElementById('so-sub'); if (s) s.innerHTML = m.sub;
+    const f = document.getElementById('so-foot'); if (f) f.textContent = m.foot;
+}
+// Session expiry (401 / the 6-hour timer / a stale token at page load): the SAME page, in its
+// expiry voice, with the login button — never a bare login form with no explanation.
+// The page they were thrown off is REMEMBERED (user, 2026-08-27): the next successful login lands
+// back on it instead of Home. Deliberately not done for manual sign-out — leaving is a choice.
+function sessionExpired() {
+    try {
+        const v = (typeof currentView !== 'undefined' && currentView && currentView !== 'home')
+            ? currentView : (typeof viewFromHash === 'function' ? viewFromHash() : null);
+        if (v && v !== 'home') localStorage.setItem('ec-resume-view', v);
+    } catch (_) {}
+    _clearSession(); soSetContent('expired'); showSignoutConfirm();
+}
 // Manual "Sign Out" — a brief branded loader (logo), then a thank-you confirmation page (not straight to login).
 function signOut() {
     _clearSession();
@@ -433,7 +528,7 @@ function signOut() {
     if (appView) appView.style.display = 'none';
     const so = document.getElementById('signout-view'); if (so) so.style.display = 'none';
     showLoader();
-    setTimeout(() => { hideLoader(true); showSignoutConfirm(); }, 2500);   // ~2.5s loader before the thank-you page
+    setTimeout(() => { hideLoader(true); soSetContent('bye'); showSignoutConfirm(); }, 2500);   // ~2.5s loader before the thank-you page
 }
 function showSignoutConfirm() {
     const v = document.getElementById('signout-view');
@@ -450,6 +545,17 @@ function afterLogin(fresh) {
     showApp();                                  // sets currentUser (incl. name) via applyPermissions
     scheduleAutoLogout();
     if (fresh) { logActivity('login', null); showWelcomeSplash((currentUser && (currentUser.name || currentUser.email)) || ''); }
+    // Approvers' in-app PO-approval badge + sign-in popup (popup waits out the welcome splash).
+    if (typeof poaBadgeStart === 'function') poaBadgeStart(fresh ? 4200 : 800);
+    // Kicked out by an expired session? Land back on the page they were on — permission re-checked,
+    // because the account signing in may not be the one that was signed out.
+    try {
+        const resume = localStorage.getItem('ec-resume-view');
+        if (resume) {
+            localStorage.removeItem('ec-resume-view');
+            if (fresh && typeof navigate === 'function' && VALID_VIEWS.has(resume) && canView(resume)) navigate(resume);
+        }
+    } catch (_) {}
 }
 
 // 6-hour session: auto-logout the instant the token's own expiry passes (server also 401s any request then).
@@ -459,11 +565,9 @@ function scheduleAutoLogout() {
     const exp = (parseJwt(authToken) || {}).exp;               // seconds since epoch
     if (!exp) return;
     const ms = exp * 1000 - Date.now();
-    if (ms <= 0) { logout(); return; }
-    _sessionTimer = setTimeout(() => {
-        showNotification('Your 6-hour session has ended. Please sign in again.', true);
-        logout();
-    }, Math.min(ms, 2147483647));
+    if (ms <= 0) { sessionExpired(); return; }
+    // The expiry page itself says what happened — a toast on top of it would say it twice.
+    _sessionTimer = setTimeout(() => sessionExpired(), Math.min(ms, 2147483647));
 }
 
 // Time-aware greeting used by the welcome popup.
@@ -839,7 +943,7 @@ async function fetchApiData(endpoint, errorMessage, options = {}) {
 
     try {
         const response = await fetch(`/api${endpoint}`, { ...fetchOptions, headers });
-        if (response.status === 401) { showNotification("Session expired.", true); logout(); return Promise.reject("Unauthorized"); }
+        if (response.status === 401) { sessionExpired(); return Promise.reject("Unauthorized"); }
         if (!response.ok) { const e = await response.json(); throw new Error(e.error || `Server error: ${response.status}`); }
         const cType = response.headers.get('Content-Type');
         if (cType && (cType.includes('pdf') || cType.includes('sheet'))) return await response.blob();
@@ -1157,6 +1261,16 @@ function navigate(view) {
             activeLinkElement = document.getElementById('nav-purchase-orders');
             activeViewElement = document.getElementById('purchase-orders-view');
             if (typeof poInit === 'function') poInit();
+            break;
+        case 'grn':
+            activeLinkElement = document.getElementById('nav-grn');
+            activeViewElement = document.getElementById('grn-view');
+            if (typeof grnInit === 'function') grnInit();
+            break;
+        case 'po-approvals':
+            activeLinkElement = document.getElementById('nav-po-approvals');
+            activeViewElement = document.getElementById('po-approvals-view');
+            if (typeof poaInit === 'function') poaInit();
             break;
         case 'last-mile':
             activeLinkElement = document.getElementById('nav-last-mile');
@@ -6336,7 +6450,7 @@ const NAV_HREF = {
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon', 'nav-kwikship-recon': 'kwikship-recon',
-    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
+    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
@@ -7393,11 +7507,11 @@ const PERM_GROUPS = [
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
   ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
-  ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)'],['purchase-orders','Purchase Order (EasyEcom PO book)']]],
+  ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)'],['purchase-orders','Purchase Order (EasyEcom PO book)'],['grn','GRN (EasyEcom goods receiving)'],['po-approvals','PO Approvals (release drafted POs to EasyEcom)']]],
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
   // Capabilities (not dashboard views) — granted per-user by the admin. Server enforces each one too.
-  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)'],['delivery-perf-revenue','See ₹ revenue on Delivery Performance & Last-Mile Funnel (order values)'],['purchase-orders-write','Create purchase orders & change PO status (EasyEcom)']]]
+  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)'],['delivery-perf-revenue','See ₹ revenue on Delivery Performance & Last-Mile Funnel (order values)'],['purchase-orders-write','Create purchase orders & change PO status (EasyEcom)'],['grn-write','Receive stock — create GRNs in EasyEcom (Auto & against PO)']]]
 ];
 const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
 const PERM_TOTAL = PERM_CATALOG.length;
@@ -11508,7 +11622,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (savedToken) {
         authToken = savedToken;
         const exp = (parseJwt(authToken) || {}).exp;          // drop a token that's already past its 6-hour life
-        if (exp && exp * 1000 <= Date.now()) { logout(); }
+        if (exp && exp * 1000 <= Date.now()) { sessionExpired(); }   // stale token on open → say why
         else afterLogin(false);                               // restore session (no splash) + arm auto-logout
     } else {
         showLogin();
@@ -12502,7 +12616,7 @@ async function invReorder(){
     const noCase=need.filter(i=>!i.case_size&&i.net_qty>0).length;
     const TH='px-3 py-2 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
     const TD='px-3 py-2 border-b border-slate-100 text-sm';
-    const cols=[['SKU','l'],[`DRR/${d.thresholds?.drrWindow||7}d`,'r'],['DOI','r'],['Stock','r'],['Recommend Qty','r'],['Raised PO','r'],['Final Qty','r'],['Case Size','r'],['Case Qty','r'],['Order Units','r']];
+    const cols=[['SKU','l'],[`DRR/${d.thresholds?.drrWindow||7}d`,'r'],['DOI','r'],['Stock','r'],['Recommend Qty','r'],['Raised PO','r'],['DOI + PO','r'],['Final Qty','r'],['Case Size','r'],['Case Qty','r'],['Order Units','r']];
     const head=cols.map(([h,a])=>`<th class="${TH} ${a==='r'?'text-right':''}">${h}</th>`).join('');
     // NOTE: bg-emerald-50 (not an /opacity variant) — tailwind.css here is PREBUILT and does not carry
     // arbitrary opacity modifiers; they compile to nothing and the row silently loses its tint.
@@ -12513,6 +12627,8 @@ async function invReorder(){
         <td class="${TD} text-right tabular-nums ${i.stock<=0?'text-rose-600 font-semibold':'text-slate-600'}">${invNum(i.stock)}</td>
         <td class="${TD} text-right tabular-nums">${invNum(i.raw_qty)}</td>
         <td class="${TD} text-right tabular-nums ${i.open_po?'text-indigo-600 font-semibold':'text-slate-300'}" title="${poTitle(i)}">${i.open_po?`${i.open_po_stale?'<span class="text-amber-600" title="includes a stale PO">\u26a0</span> ':''}${invNum(i.open_po)}${(i.open_po_detail||[]).length>1?`<span class="text-slate-400 font-normal"> (${i.open_po_detail.length} POs)</span>`:''}`:'—'}</td>
+        <td class="${TD} text-right tabular-nums font-semibold ${i.doi_with_po==null?'text-slate-300':i.doi_with_po<=(d.thresholds?.placeOrder||20)?'text-rose-600':i.doi_with_po<=(d.thresholds?.warning||30)?'text-amber-600':'text-emerald-600'}"
+            title="Days of cover once the raised POs arrive: (stock ${invNum(i.stock)} + raised PO ${invNum(i.open_po||0)}) ÷ DRR ${Number(i.drr||0).toFixed(2)}">${i.doi_with_po==null?'—':Number(i.doi_with_po).toFixed(1)+'d'}</td>
         <td class="${TD} text-right tabular-nums font-semibold">${i.poCovered?'<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 whitespace-nowrap">on PO</span>':invNum(i.net_qty)}</td>
         <td class="${TD} text-right tabular-nums text-slate-500">${i.case_size?invNum(i.case_size):'—'}</td>
         <td class="${TD} text-right tabular-nums">${i.poCovered?'—':(i.case_size?invNum(i.cases):'—')}</td>
@@ -12538,7 +12654,7 @@ async function invReorder(){
         <p class="text-xs text-slate-400"><b class="text-slate-700">${toOrder.length}</b> SKU${toOrder.length===1?'':'s'} to order · <b class="text-slate-700">${invNum(cases)}</b> cases · <b class="text-slate-700">${invNum(units)}</b> units</p>
       </div>
       <div class="overflow-x-auto"><table class="w-full"><thead><tr>${head}</tr></thead><tbody>${tb}
-        <tr class="bg-slate-50"><td class="${TD} font-bold text-slate-700">TOTAL</td><td class="${TD}" colspan="7"></td>
+        <tr class="bg-slate-50"><td class="${TD} font-bold text-slate-700">TOTAL</td><td class="${TD}" colspan="8"></td>
           <td class="${TD} text-right tabular-nums font-bold">${invNum(cases)}</td>
           <td class="${TD} text-right tabular-nums font-bold text-slate-800">${invNum(units)}</td></tr>
       </tbody></table></div>
@@ -17794,12 +17910,14 @@ function poInit(){
     poLoad();
 }
 async function poLoad(fresh){
-    const k = document.getElementById('po-kpis'); if(k) k.innerHTML = brandLoader('Loading purchase orders…');
+    ecLoadingShow('Loading purchase orders…');
     try{
         const r = await fetch('/api/purchase-orders' + (fresh ? '?fresh=1' : ''), { headers: getAuthHeaders() });
         const d = await r.json(); if(!d.success) throw new Error(d.error || 'failed');
         _poData = d; poRender(d);
-    }catch(e){ if(k) k.innerHTML = '<div class="text-red-500 text-sm p-6">Error: ' + escapeHtml(e.message) + '</div>'; }
+    }catch(e){ const k = document.getElementById('po-kpis');
+        if(k) k.innerHTML = '<div class="text-red-500 text-sm p-6">Error: ' + escapeHtml(e.message) + '</div>'; }
+    finally{ ecLoadingHide(); }
 }
 // The rows currently in scope for the vendor / status dropdowns (the Open|Received toggle and the search
 // box are applied later, in poTable, so the KPIs stay stable while you scan the list).
@@ -18009,7 +18127,7 @@ function poTable(){
             const blob = await r.blob();
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url; a.download = `PO-${no}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+            a.href = url; a.download = `PO-${id}.pdf`; document.body.appendChild(a); a.click(); a.remove();   // filename = EasyEcom PO id (PO-2177002), same as the created-modal download — not the display sequence no.
             setTimeout(() => URL.revokeObjectURL(url), 2000);
             // Say WHICH document was served. EasyEcom builds its PO PDFs asynchronously, so a brand-new
             // PO can still be queued after the retries — in that case this is our own copy, which looks
@@ -18046,7 +18164,7 @@ function poDetailRow(p, ncols){
           <th class="${th} text-right">Ordered</th><th class="${th} text-right">Received</th><th class="${th} text-right">Pending</th>
           <th class="${th} text-right">Unit price</th><th class="${th} text-right">Line value</th>
         </tr></thead><tbody>${rows}</tbody></table></div>
-        <div class="text-xs text-slate-400 mt-2">Raised ${_poDate(p.createdAt)} · last updated ${_poDate(p.updatedAt)}${p.expectedAt ? ' · expected ' + _poDate(p.expectedAt) : ''}${p.expiresAt ? ' · expires ' + _poDate(p.expiresAt) : ''} · EasyEcom PO id ${p.poId}</div>
+        <div class="text-xs text-slate-400 mt-2">Raised ${_poDate(p.createdAt)} · last updated ${_poDate(p.updatedAt)}${p.expectedAt ? ' · expected ' + _poDate(p.expectedAt) : ''}${p.expiresAt ? ' · expires ' + _poDate(p.expiresAt) : ''} · PO id ${p.poId}</div>
         <div class="flex items-center gap-2 mt-3 flex-wrap" onclick="event.stopPropagation()">
             <button class="filter-btn po-dl" data-po="${p.poId}" data-no="${escapeHtml(String(p.poNumber))}">⬇ Download PO</button>
             <span class="text-xs text-slate-400">PDF with supplier, line items and totals</span>
@@ -18059,7 +18177,7 @@ function poDetailRow(p, ncols){
             <label class="inline-flex items-center gap-1.5 text-xs text-slate-500" title="Close the PO even though some ordered quantity was never received">
               <input type="checkbox" class="po-st-mc" data-po="${p.poId}"> mark complete</label>
             <button class="filter-btn-primary po-st-go" data-po="${p.poId}">Apply</button>
-            <span class="text-xs text-slate-400">updates the live PO in EasyEcom</span>
+            <span class="text-xs text-slate-400">updates the live PO</span>
           </div>` : ''}
       </td></tr>`;
 }
@@ -18213,7 +18331,7 @@ function poCostHint(l){
 // confirmed one — the HSN is named so it can be checked or overridden.
 function poTaxHint(l){
     const o = poSkuMeta(l.sku); if(!o) return '';
-    if(o.suggestedTax == null) return `<div class="poc-hint">no HSN on record — set GST manually</div>`;
+    if(o.suggestedTax == null) return `<div class="poc-hint">no GST on record — set it manually</div>`;
     const typed = Number(l.taxRate);
     if(isFinite(typed) && String(l.taxRate) !== '' && typed !== o.suggestedTax)
         return `<div class="poc-hint is-up">overridden · ${o.taxSource} suggests ${o.suggestedTax}%</div>`;
@@ -18236,7 +18354,7 @@ function poOpenCreate(){
         <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
           <div>
             <h2 class="text-lg font-bold text-slate-800">New purchase order</h2>
-            <p class="text-xs text-slate-400 mt-0.5">This creates a real PO in EasyEcom against the supplier you pick.</p>
+            <p class="text-xs text-slate-400 mt-0.5">Sent for approval first — the PO is raised only once an approver releases it.</p>
           </div>
           <button class="po-x text-slate-400 hover:text-slate-700 text-xl leading-none px-2">&times;</button>
         </div>
@@ -18250,7 +18368,7 @@ function poOpenCreate(){
             <label class="block"><span class="text-xs font-semibold text-slate-500">Expected delivery *</span>
               <input type="date" id="poc-exp" class="date-input w-full mt-1" value="${_ymd(tomorrow)}"></label>
             <label class="block"><span class="text-xs font-semibold text-slate-500">Reference code *</span>
-              <input type="text" id="poc-ref" class="filter-input w-full mt-1" value="${poDefaultRef()}" placeholder="required by EasyEcom"></label>
+              <input type="text" id="poc-ref" class="filter-input w-full mt-1" value="${poDefaultRef()}" placeholder="required"></label>
             <label class="block"><span class="text-xs font-semibold text-slate-500">Doc number</span>
               <input type="text" id="poc-doc" class="filter-input w-full mt-1" placeholder="optional"></label>
             <label class="block"><span class="text-xs font-semibold text-slate-500">Shipping cost</span>
@@ -18269,7 +18387,7 @@ function poOpenCreate(){
         </div>
         <div class="px-6 py-4 border-t border-slate-200 flex items-center justify-between gap-3 flex-wrap">
           <div class="text-sm text-slate-500">Goods total <b class="text-slate-800 tabular-nums" id="poc-total">₹0</b>
-            <span class="text-slate-400">· tax and shipping are applied by EasyEcom</span></div>
+            <span class="text-slate-400">· tax and shipping are applied at creation</span></div>
           <div class="flex items-center gap-2">
             <button class="po-x filter-btn">Cancel</button>
             <button id="poc-submit" class="filter-btn-primary">Create purchase order</button>
@@ -18368,8 +18486,8 @@ async function poSubmitCreate(){
         const pc = o.lastPrice > 0 ? Math.round(((t - o.lastPrice) / o.lastPrice) * 1000) / 10 : null;
         return `${l.sku} ₹${t} vs ₹${o.lastPrice} last${pc != null ? ` (${pc > 0 ? '+' : ''}${pc}%)` : ''}`; }).filter(Boolean);
     const okGo = await ecConfirm({
-        title: 'Create this purchase order?',
-        intro: 'It will be raised in EasyEcom against the supplier below.',
+        title: 'Send this purchase order for approval?',
+        intro: 'It is raised only after an approver releases it on the PO Approvals dashboard.',
         rows: [
             ['Supplier', vendorName],
             ['Reference', referenceCode],
@@ -18378,14 +18496,16 @@ async function poSubmitCreate(){
             ['Goods total', '₹' + Math.round(poCartTotal()).toLocaleString('en-IN'), true],
         ],
         note: moved.length ? `Priced differently from last time — ${moved.join(' · ')}` : null,
-        confirmText: 'Create purchase order',
+        confirmText: 'Send for approval',
     });
     if(!okGo) return;
-    const btn = document.getElementById('poc-submit'); btn.disabled = true; btn.textContent = 'Creating…';
+    const btn = document.getElementById('poc-submit'); btn.disabled = true; btn.textContent = 'Sending…';
     try{
-        const r = await fetch('/api/purchase-orders/create', { method:'POST',
+        // ⚠️ POs travel maker-checker now (2026-08-27): this SUBMITS the draft to the PO Approvals
+        // queue; the EasyEcom create fires only when an approver releases it there.
+        const r = await fetch('/api/po-approvals/submit', { method:'POST',
             headers:{ 'Content-Type':'application/json', ...getAuthHeaders() },
-            body: JSON.stringify({ vendorId, vendorCode, expDeliveryDate,
+            body: JSON.stringify({ vendorId, vendorCode, vendorName, expDeliveryDate,
                 referenceCode,
                 docNumber: document.getElementById('poc-doc').value,
                 address: document.getElementById('poc-addr').value,
@@ -18395,16 +18515,18 @@ async function poSubmitCreate(){
                     quantity: l.quantity, unitPrice: l.unitPrice,
                     taxRate: l.taxRate, batch_code: l.batch_code, expiry_date: l.expiry_date })) }) });
         const d = await r.json();
-        if(!r.ok || !d.success) throw new Error(d.error || 'Create failed');
+        if(!r.ok || !d.success) throw new Error(d.error || 'Submit failed');
         poCloseCreate();
-        // ⚠️ The PO is created APPROVED by EasyEcom and then moved to "Waiting for approval". If that
-        // second step failed the order still exists — and approved — so say so loudly instead of
-        // reporting a clean success the buyer would never think to re-check.
-        // A toast is the wrong shape for this. Creating a PO is a commitment, and the thing the buyer
-        // most needs afterwards — the status EasyEcom ACTUALLY gave it, read back rather than assumed —
-        // is exactly what a three-second banner conveys worst. Show a result panel instead.
-        poResultModal(d, { vendorName, referenceCode, lines, total: poCartTotal(), expDeliveryDate });
-        poLoad(true);
+        await ecResult({
+            title: 'Sent for approval',
+            intro: 'The PO is drafted and waiting on the PO Approvals dashboard — approvers can see it there now. The PO is not raised yet.',
+            rows: [
+                ['Request', '#' + d.id],
+                ['Supplier', vendorName],
+                ['Reference', referenceCode],
+                ['Goods total', '₹' + Math.round(poCartTotal()).toLocaleString('en-IN'), true],
+            ],
+        });
     }catch(e){ show(e.message); btn.disabled = false; btn.textContent = 'Create purchase order'; }
 }
 // Status change, offered inside an expanded PO row.
@@ -18528,7 +18650,7 @@ function poResultModal(d, ctx){
           <div class="ec-confirm-logo"><img src="/static/assets/ecom-logo.png" alt="Ecom Central"></div>
           <div>
             <h3>Purchase order created</h3>
-            <p>EasyEcom PO id <b>${escapeHtml(String(d.poId))}</b>${d.statusLabel ? ` · currently <b>${escapeHtml(d.statusLabel)}</b>` : ''}</p>
+            <p>PO id <b>${escapeHtml(String(d.poId))}</b>${d.statusLabel ? ` · currently <b>${escapeHtml(d.statusLabel)}</b>` : ''}</p>
           </div>
         </div>
         <div class="ec-confirm-rows">
@@ -18604,6 +18726,1028 @@ function ecResult(opts){
         document.body.appendChild(wrap);
         wrap.querySelector('.ec-result-ok').focus();
     });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// GRN — GOODS RECEIVING (Inventory) — the receiving half of the purchase cycle.
+// Source: GET /api/grn → wraps EasyEcom /Grn/V2/getGrnDetails + the PO book for "awaiting receipt".
+//
+// Deliberately built on the Purchase Order shell (same header, KPI grid, panels, expandable table)
+// so the two read as the two halves of one process. Status labels come from EasyEcom's own
+// `grn_status` string — its status IDS do not match their documentation, so no map is kept here.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+let _grnData = null, _grnWired = false, _grnKind = 'all', _grnVendor = 'all', _grnStatus = 'all',
+    _grnOpen = new Set(), _grnSort = { key: 'createdAt', dir: 'desc' },
+    _grnPreset = '30', _grnFrom = null, _grnTo = null;
+
+const GRN_STATUS_CLS = s => /complete/i.test(s) ? 'bg-emerald-100 text-emerald-700'
+    : /progress|created|pending|qc/i.test(s) ? 'bg-amber-100 text-amber-700'
+    : 'bg-slate-100 text-slate-600';
+
+function grnInit(){
+    if(!_grnFrom && !_grnTo && _grnPreset !== 'all' && _grnPreset !== 'custom'){
+        const r = poPresetRange(_grnPreset);
+        if(r){ _grnFrom = r.from; _grnTo = r.to;
+            const f = document.getElementById('grn-from'), t = document.getElementById('grn-to');
+            if(f) f.value = _grnFrom; if(t) t.value = _grnTo; }
+    }
+    if(!_grnWired){
+        _grnWired = true;
+        document.getElementById('grn-kind')?.addEventListener('click', e => { const b = e.target.closest('button'); if(!b) return;
+            [...b.parentElement.children].forEach(x => { x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
+            b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
+            _grnKind = b.dataset.kd; grnRender(_grnData); });
+        document.getElementById('grn-preset')?.addEventListener('change', e => {
+            const v = e.target.value, cust = document.getElementById('grn-custom');
+            cust.classList.toggle('hidden', v !== 'custom'); cust.classList.toggle('flex', v === 'custom');
+            _grnPreset = v;
+            if(v === 'custom') return;                          // wait for Apply
+            if(v === 'all'){ _grnFrom = _grnTo = null; }
+            else { const r = poPresetRange(v); if(r){ _grnFrom = r.from; _grnTo = r.to;
+                const f = document.getElementById('grn-from'), t = document.getElementById('grn-to');
+                if(f) f.value = _grnFrom; if(t) t.value = _grnTo; } }
+            grnRender(_grnData); });
+        document.getElementById('grn-apply')?.addEventListener('click', () => {
+            _grnFrom = document.getElementById('grn-from').value || null;
+            _grnTo = document.getElementById('grn-to').value || null;
+            grnRender(_grnData); });
+        document.getElementById('grn-vendor')?.addEventListener('change', e => { _grnVendor = e.target.value; grnRender(_grnData); });
+        document.getElementById('grn-status')?.addEventListener('change', e => { _grnStatus = e.target.value; grnRender(_grnData); });
+        document.getElementById('grn-search')?.addEventListener('input', debounce(() => grnTable(), 250));
+        document.getElementById('grn-refresh')?.addEventListener('click', () => grnLoad(true));
+        document.getElementById('grn-receive')?.addEventListener('click', () => grnOpenReceive(null));
+    }
+    grnLoad();
+}
+// Receiving goods is a warehouse decision with its own capability (`grn-write`), like
+// `purchase-orders-write` for buying. The server enforces it too; this only decides what to draw.
+function canWriteGrn(){ return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('grn-write'))); }
+// `silent` refreshes the data WITHOUT wiping the page into a loader — used after an in-page action
+// (Complete GRN) where the UI has already updated itself and a full "Loading…" would read as a
+// reload. A silent failure keeps the current render and says nothing: the optimistic state is
+// already correct, and the next ordinary load reconciles.
+async function grnLoad(fresh, silent){
+    if(!silent) ecLoadingShow('Loading goods receipts…');
+    try{
+        const r = await fetch('/api/grn' + (fresh ? '?fresh=1' : ''), { headers: getAuthHeaders() });
+        const d = await r.json(); if(!d.success) throw new Error(d.error || 'failed');
+        _grnData = d; grnRender(d);
+    }catch(e){ const k = document.getElementById('grn-kpis');
+        if(!silent && k) k.innerHTML = '<div class="text-red-500 text-sm p-6">Error: ' + escapeHtml(e.message) + '</div>'; }
+    finally{ if(!silent) ecLoadingHide(); }
+}
+// OUTER scope — kind + date only; the vendor/status dropdowns are built from THIS so their counts
+// describe what is on the page (same construction as poBase/poScope).
+function grnBase(d){
+    return (d.grns || []).filter(g => {
+        if(_grnKind === 'manual' && g.isAuto) return false;
+        if(_grnKind === 'auto' && !g.isAuto) return false;
+        if(_grnFrom || _grnTo){
+            const day = String(g.createdAt || '').slice(0, 10);
+            if(!day) return false;
+            if(_grnFrom && day < _grnFrom) return false;
+            if(_grnTo && day > _grnTo) return false;
+        }
+        return true;
+    });
+}
+function grnScope(d){
+    return grnBase(d).filter(g =>
+        (_grnVendor === 'all' || g.vendor === _grnVendor) &&
+        (_grnStatus === 'all' || g.status === _grnStatus));
+}
+function grnRender(d){
+    if(!d) return;
+    // The server's verdict outranks the token parse — canWrite rides the payload uncached per user.
+    const rb = document.getElementById('grn-receive');
+    if(rb) rb.classList.toggle('hidden', !(d.canWrite != null ? d.canWrite : canWriteGrn()));
+    const rows = grnScope(d);
+    const sum = (arr, f) => arr.reduce((a, x) => a + f(x), 0);
+
+    // Say what the filters hold back — a receiving page that quietly shows a slice of the book while
+    // presenting confident totals is just a wrong page (the PO page's rule, inherited).
+    const all = d.grns || [];
+    const hiddenKind = _grnKind === 'manual' ? all.filter(g => g.isAuto).length
+        : _grnKind === 'auto' ? all.filter(g => !g.isAuto).length : 0;
+    const outOfRange = (_grnFrom || _grnTo) ? all.length - all.filter(g => {
+        const day = String(g.createdAt || '').slice(0, 10);
+        return day && (!_grnFrom || day >= _grnFrom) && (!_grnTo || day <= _grnTo); }).length : 0;
+    const held = [];
+    if(hiddenKind) held.push(`${hiddenKind} ${_grnKind === 'manual' ? 'auto' : 'manual'} GRN${hiddenKind === 1 ? '' : 's'} hidden by the toggle`);
+    if(outOfRange) held.push(`${outOfRange} outside ${_grnFrom ? _dmy(_grnFrom) : '…'} → ${_grnTo ? _dmy(_grnTo) : '…'}`);
+    document.getElementById('grn-sub').textContent =
+        `${rows.length} receipt${rows.length === 1 ? '' : 's'} · ${sum(rows, g => g.received).toLocaleString('en-IN')} units in · ${_poINR(sum(rows, g => g.value))}`
+        + (held.length ? `  ·  ${held.join(' · ')}` : '')
+        + ` · fetched ${dpFmtTs(d.fetchedAt)}${d.cached ? ' (cached)' : ''}`;
+
+    const warn = document.getElementById('grn-warn');
+    if(warn){
+        const msgs = [];
+        if(d.truncated) msgs.push('EasyEcom returned more pages than the fetch cap — this list is INCOMPLETE.');
+        if(d.poBookAvailable === false) msgs.push('The PO book could not be read, so "Awaiting receipt" is unavailable right now — the GRN list itself is complete.');
+        warn.classList.toggle('hidden', !msgs.length);
+        warn.textContent = msgs.join(' ');
+    }
+
+    const fill = (id, opts, cur, allLabel) => { const el = document.getElementById(id); if(!el) return;
+        el.innerHTML = `<option value="all">${allLabel}</option>`
+            + (opts || []).map(o => `<option value="${escapeHtml(String(o.key))}">${escapeHtml(String(o.key))} (${o.count})</option>`).join('');
+        el.value = cur; if(el.value !== cur){ if(id === 'grn-vendor') _grnVendor = 'all'; else _grnStatus = 'all'; el.value = 'all'; } };
+    const base = grnBase(d);
+    const tally = f => { const c = {}; base.forEach(g => { const k = f(g); if(k) c[k] = (c[k] || 0) + 1; });
+        return Object.entries(c).map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count); };
+    fill('grn-vendor', tally(g => g.vendor), _grnVendor, 'All vendors');
+    fill('grn-status', tally(g => g.status), _grnStatus, 'All statuses');
+
+    const s = d.summary || {};
+    const shorts = rows.filter(g => g.isShort);
+    document.getElementById('grn-kpis').innerHTML = [
+        { label:'Goods receipts', accent:'#4f46e5', tint:'#eef2ff', icon:DP_ICONS.hash,
+          val:rows.length, foot:`${sum(rows, g => g.lineCount)} line items · ${new Set(rows.map(g => g.vendor).filter(Boolean)).size} vendor${new Set(rows.map(g => g.vendor).filter(Boolean)).size === 1 ? '' : 's'}` },
+        { label:'Units received', accent:'#059669', tint:'#ecfdf5', icon:DP_ICONS.bolt,
+          val:sum(rows, g => g.received).toLocaleString('en-IN'), foot:`${_poMoney(sum(rows, g => g.value))} of goods taken in` },
+        // LIVE numbers, not filtered ones: what is still owed does not depend on the date window —
+        // an open PO from four months ago is exactly the one this card must not hide.
+        // ⚠️ A failed PO read shows a DASH, never 0 — "0 units awaited" says nothing is owed to us,
+        // which is precisely the wrong reading of "we could not check" (seen live 2026-08-26).
+        { label:'Awaiting receipt', accent:'#b45309', tint:'#fffbeb', icon:DP_ICONS.refresh,
+          val:d.poBookAvailable === false ? '—' : (s.awaitingUnits || 0).toLocaleString('en-IN'),
+          foot:d.poBookAvailable === false ? 'PO book could not be read — hit Refresh'
+              : `units still owed · ${s.awaitingPos || 0} open PO${s.awaitingPos === 1 ? '' : 's'} · ${_poMoney(s.awaitingValue || 0)} (live, ignores filters)` },
+        { label:'Short receipts', accent:'#e11d48', tint:'#fff1f2', icon:DP_ICONS.uturn,
+          val:shorts.length, foot:`GRN${shorts.length === 1 ? '' : 's'} that received less than ordered${(sum(rows, g => g.qcFail) || sum(rows, g => g.damaged)) ? ` · ${sum(rows, g => g.qcFail)} QC-fail / ${sum(rows, g => g.damaged)} damaged units` : ''}` },
+    ].map(c => `<div class="dp-kpi card p-5" style="--accent:${c.accent}">
+        <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background:${c.tint};color:${c.accent}">${c.icon}</div>
+        <div class="text-[2rem] leading-none font-extrabold text-slate-800 tracking-tight tabular-nums mt-4">${c.val}</div>
+        <div class="text-sm font-semibold text-slate-600 mt-1.5">${c.label}</div>
+        <div class="text-xs text-slate-400 mt-0.5">${c.foot}</div></div>`).join('');
+
+    grnPipeline(d); grnAwaiting(d); grnShorts(rows); grnTable();
+}
+// The process flow as a strip. LIVE state of the whole book, on purpose — a pipeline filtered to a
+// date window would show a process with stages missing.
+function grnPipeline(d){
+    const el = document.getElementById('grn-pipeline'); if(!el) return;
+    const s = d.summary || {};
+    const stage = (title, big, foot, accent, tint) => `
+        <div class="flex-1 min-w-[150px] rounded-xl p-4" style="background:${tint}">
+          <div class="text-[11px] font-bold uppercase tracking-wider" style="color:${accent}">${title}</div>
+          <div class="text-2xl font-extrabold text-slate-800 tabular-nums mt-1">${big}</div>
+          <div class="text-xs text-slate-500 mt-0.5">${foot}</div>
+        </div>`;
+    const arrow = '<div class="text-slate-300 text-xl font-bold px-1" style="align-self:center">→</div>';
+    // Same dash-not-zero rule as the KPI card: a failed PO read must not render as "0 POs awaited".
+    el.innerHTML = `<div class="flex items-stretch gap-2 flex-wrap">`
+        + (d.poBookAvailable === false
+            ? stage('Awaiting receipt', '—', 'PO book could not be read — hit Refresh', '#b45309', '#fffbeb')
+            : stage('Awaiting receipt', (s.awaitingPos || 0) + ' PO' + (s.awaitingPos === 1 ? '' : 's'),
+                `${(s.awaitingUnits || 0).toLocaleString('en-IN')} units · ${_poMoney(s.awaitingValue || 0)} on its way`, '#b45309', '#fffbeb'))
+        + arrow
+        + stage('GRN in progress', s.inProgress || 0,
+                'receiving / QC not yet complete', '#4f46e5', '#eef2ff')
+        + arrow
+        + stage('Completed', s.completed || 0,
+                `${(s.unitsReceived || 0).toLocaleString('en-IN')} units into stock · ${_poMoney(s.valueReceived || 0)}`, '#059669', '#ecfdf5')
+        + arrow
+        + stage('Short received', s.shortGrns || 0,
+                'GRNs where a gap is still owed', '#e11d48', '#fff1f2')
+        + `</div>`;
+}
+function grnAwaiting(d){
+    const el = document.getElementById('grn-awaiting'); if(!el) return;
+    const list = d.awaiting || [];
+    if(d.poBookAvailable === false){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">PO book unavailable — try Refresh.</div>'; return; }
+    if(!list.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">Nothing awaited — every open PO has been fully received.</div>'; return; }
+    const top = list.slice(0, 10);
+    const writer = (d.canWrite != null ? d.canWrite : canWriteGrn());
+    el.innerHTML = top.map(p => {
+        const pct = p.ordered ? Math.round(p.received / p.ordered * 100) : 0;
+        const overdue = p.expectedAt && String(p.expectedAt).slice(0, 10) < new Date().toISOString().slice(0, 10);
+        const tip = (p.pendingItems || []).map(i => `${i.sku}: ${i.pending} of ${i.ordered} pending`).join(' · ');
+        return `<div class="py-2 border-b border-slate-100 last:border-0" title="${escapeHtml(tip)}">
+          <div class="flex items-center gap-2 text-sm">
+            <span class="font-semibold text-slate-800 whitespace-nowrap">PO ${escapeHtml(String(p.poNumber))}</span>
+            <span class="text-slate-500 truncate">${escapeHtml(p.vendor || '—')}</span>
+            <span class="ml-auto tabular-nums font-semibold text-amber-600 whitespace-nowrap">${p.pending.toLocaleString('en-IN')} units</span>
+            <span class="text-xs text-slate-400 whitespace-nowrap">${_poMoney(p.pendingValue)}</span>
+            ${writer ? `<button class="filter-btn text-xs grn-rx-po" data-po="${p.poId}">Receive</button>` : ''}
+          </div>
+          <div class="flex items-center gap-2 mt-1">
+            <div class="flex-1 h-1.5 rounded bg-slate-100 overflow-hidden"><div class="h-full rounded" style="width:${Math.max(2, pct)}%;background:${pct >= 100 ? '#059669' : '#4f46e5'}"></div></div>
+            <span class="text-[11px] text-slate-400 tabular-nums whitespace-nowrap">${pct}% received</span>
+            <span class="text-[11px] ${overdue ? 'text-rose-600 font-semibold' : 'text-slate-400'} whitespace-nowrap"
+                  title="${overdue ? 'Expected date has passed' : ''}">${p.ageDays != null ? p.ageDays + 'd old' : ''}${p.grnIds.length ? ` · ${p.grnIds.length} GRN${p.grnIds.length === 1 ? '' : 's'}` : ''}</span>
+          </div>
+        </div>`; }).join('')
+        + (list.length > top.length ? `<div class="text-xs text-slate-400 pt-2">+ ${list.length - top.length} more open PO${list.length - top.length === 1 ? '' : 's'}</div>` : '');
+    el.querySelectorAll('.grn-rx-po').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); grnOpenReceive(Number(b.dataset.po)); }));
+}
+function grnShorts(rows){
+    const el = document.getElementById('grn-shorts'); if(!el) return;
+    const shorts = rows.filter(g => g.isShort);
+    if(!shorts.length){ el.innerHTML = '<div class="text-slate-400 text-sm py-6 text-center">No short receipts in this view — everything arrived in full.</div>'; return; }
+    const top = shorts.slice(0, 10);
+    el.innerHTML = top.map(g => {
+        const gaps = g.items.filter(i => i.pending > 0);
+        return `<div class="py-2 border-b border-slate-100 last:border-0">
+          <div class="flex items-center gap-2 text-sm">
+            <span class="font-semibold text-slate-800 whitespace-nowrap">GRN ${g.isAuto ? g.grnId : escapeHtml(String(g.invoiceNo || g.grnId))}</span>
+            <span class="text-slate-400 text-xs whitespace-nowrap">PO ${escapeHtml(String(g.poNumber || '—'))}</span>
+            <span class="text-slate-500 truncate">${escapeHtml(g.vendor || '—')}</span>
+            <span class="ml-auto text-xs text-slate-400 tabular-nums whitespace-nowrap">${_poDate(g.createdAt)}</span>
+          </div>
+          <div class="text-xs text-slate-500 mt-1">${gaps.map(i =>
+              `<span class="inline-block mr-3">${escapeHtml(i.sku)}: <b class="text-rose-600">${i.received}</b> of ${i.ordered} — <b class="text-amber-600">${i.pending} owed</b></span>`).join('')}</div>
+        </div>`; }).join('')
+        + (shorts.length > top.length ? `<div class="text-xs text-slate-400 pt-2">+ ${shorts.length - top.length} more</div>` : '');
+}
+function grnSortVal(g, k){ switch(k){
+    case 'grnId': return Number(g.grnId) || 0;
+    case 'poNumber': return Number(g.poNumber) || 0;
+    case 'vendor': return String(g.vendor || '').toLowerCase();
+    case 'received': return g.received || 0;
+    case 'pending': return g.pending || 0;
+    case 'value': return g.value || 0;
+    default: return g.createdAt || ''; } }
+function grnTable(){
+    const c = document.getElementById('grn-table'); const d = _grnData; if(!c || !d) return;
+    const q = (document.getElementById('grn-search')?.value || '').trim().toLowerCase();
+    let list = grnScope(d);
+    if(q) list = list.filter(g =>
+        String(g.grnId).includes(q) || String(g.poNumber || '').includes(q) ||
+        (g.invoiceNo || '').toLowerCase().includes(q) ||
+        (g.vendor || '').toLowerCase().includes(q) || (g.warehouse || '').toLowerCase().includes(q) ||
+        g.items.some(i => (i.sku || '').toLowerCase().includes(q) || (i.name || '').toLowerCase().includes(q) || (i.batch || '').toLowerCase().includes(q)));
+    const dir = _grnSort.dir === 'asc' ? 1 : -1;
+    list = list.slice().sort((a, b) => { const va = grnSortVal(a, _grnSort.key), vb = grnSortVal(b, _grnSort.key); return va < vb ? -dir : va > vb ? dir : 0; });
+    const cnt = document.getElementById('grn-count');
+    if(cnt) cnt.textContent = `${list.length} shown · ${_poINR(list.reduce((a, g) => a + g.value, 0))}`;
+    if(!list.length){ c.innerHTML = '<div class="text-slate-400 text-sm p-6">No goods receipts match these filters</div>'; return; }
+    const th = 'px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
+    const td = 'px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
+    const cols = [['grnId','GRN',0],[null,'Status',0],['poNumber','PO',0],['vendor','Vendor',0],[null,'Warehouse',0],
+        ['createdAt','Received',0],['received','Units in',1],['pending','Still owed',1],['value','Value',1],[null,'Lines',1]];
+    const head = cols.map(([k, l, a]) => { const al = a ? ' text-right' : '';
+        if(!k) return `<th class="${th}${al}">${l}</th>`;
+        const act = _grnSort.key === k, ar = act ? `<span class="text-indigo-500">${_grnSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="text-slate-300">↕</span>';
+        return `<th class="${th}${al} grn-sort cursor-pointer select-none hover:text-slate-600 ${act ? 'text-slate-600' : ''}" data-k="${k}">${l} ${ar}</th>`; }).join('');
+    const body = list.map(g => {
+        const isOpen = _grnOpen.has(g.grnId);
+        let out = `<tr class="grn-row cursor-pointer transition-colors ${isOpen ? 'bg-indigo-50/70' : 'hover:bg-slate-50'}" data-grn="${g.grnId}">
+          <td class="${td}"><div class="flex items-center gap-1.5"><span class="text-slate-300 text-xs w-3">${isOpen ? '▾' : '▸'}</span>
+            <div><div class="font-semibold text-slate-800 leading-tight">${g.isAuto ? `GRN ${g.grnId}` : escapeHtml(String(g.invoiceNo || g.grnId))}${g.isAuto ? ' <span class="text-[10px] text-slate-400 font-normal" title="EasyEcom stamps every auto/API-created GRN’s invoice number as “AutoGrn” — the GRN id is the real identity">auto</span>' : ''}</div>
+            <div class="text-[11px] text-slate-400 leading-tight">${g.isAuto ? 'invoice: AutoGrn' : '#' + g.grnId}</div></div></div></td>
+          <td class="${td}"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${GRN_STATUS_CLS(g.status)}" title="EasyEcom grn_status_id ${g.statusId}">${escapeHtml(g.status)}</span></td>
+          <td class="${td} text-slate-600 tabular-nums">${g.poNumber != null ? 'PO ' + escapeHtml(String(g.poNumber)) : '—'}</td>
+          <td class="${td} text-slate-600"><div class="truncate" style="max-width:170px" title="${escapeHtml(g.vendor || '')}">${escapeHtml(g.vendor || '—')}</div></td>
+          <td class="${td} text-slate-500"><div class="truncate" style="max-width:170px" title="${escapeHtml(g.warehouse || '')}">${escapeHtml(g.warehouse || '—')}</div></td>
+          <td class="${td} text-slate-500 tabular-nums">${_poDate(g.createdAt)}</td>
+          <td class="${td} text-right tabular-nums text-slate-600">${g.received.toLocaleString('en-IN')}</td>
+          <td class="${td} text-right tabular-nums ${g.pending > 0 ? 'text-amber-600 font-semibold' : 'text-slate-300'}"
+              title="${g.pending > 0 ? 'This GRN left units of its PO lines still owed' : ''}">${g.pending ? g.pending.toLocaleString('en-IN') : '—'}</td>
+          <td class="${td} text-right tabular-nums font-semibold text-slate-800" title="${_poINR(g.value)}">${_poMoney(g.value)}</td>
+          <td class="${td} text-right tabular-nums text-slate-500">${g.lineCount}</td>
+        </tr>`;
+        if(isOpen) out += grnDetailRow(g, cols.length);
+        return out; }).join('');
+    c.innerHTML = `<table class="w-full border-collapse"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+    c.querySelectorAll('.grn-sort').forEach(h => h.addEventListener('click', e => { e.stopPropagation(); const k = h.dataset.k;
+        if(_grnSort.key === k) _grnSort.dir = _grnSort.dir === 'asc' ? 'desc' : 'asc';
+        else _grnSort = { key:k, dir:['value','received','pending','createdAt','grnId','poNumber'].includes(k) ? 'desc' : 'asc' };
+        grnTable(); }));
+    c.querySelectorAll('.grn-row').forEach(r => r.addEventListener('click', () => {
+        const id = Number(r.dataset.grn);
+        if(_grnOpen.has(id)) _grnOpen.delete(id); else _grnOpen.add(id);
+        grnTable(); }));
+    c.querySelectorAll('.grn-dl').forEach(b => b.addEventListener('click', e => { e.stopPropagation();
+        grnDownloadPdf(Number(b.dataset.grn), b); }));
+    c.querySelectorAll('.grn-cmpl').forEach(b => b.addEventListener('click', e => { e.stopPropagation();
+        grnCompleteAction(Number(b.dataset.grn), b); }));
+}
+// The portal's "Complete GRN" button, from here. Confirmed first — completing finalises the
+// receipt in EasyEcom — then the server calls their (undocumented, probe-found) completeGrn.
+async function grnCompleteAction(grnId, btn){
+    const go = typeof ecConfirm === 'function' ? await ecConfirm({
+        title: `Complete GRN #${grnId}?`,
+        intro: 'The receipt is finalised and the stock is confirmed in.',
+        confirmText: 'Complete GRN',
+    }) : true;
+    if(!go) return false;
+    const was = btn ? btn.textContent : '';
+    if(btn){ btn.disabled = true; btn.textContent = 'Completing…'; }
+    try{
+        const r = await fetch('/api/grn/complete', { method:'POST',
+            headers:{ 'Content-Type':'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({ grnId }) });
+        const out = await r.json();
+        if(!r.ok || !out.success) throw new Error(out.error || `Failed (${r.status})`);
+        // The row flips to Completed IMMEDIATELY (optimistic — EasyEcom just confirmed it), so the
+        // page never shows a loader for an action that already happened; the silent fresh fetch
+        // behind it reconciles the whole book.
+        const g = _grnData && (_grnData.grns || []).find(x => x.grnId === grnId);
+        if(g){ g.status = 'Completed'; g.statusId = 5; grnRender(_grnData); }
+        await ecResult({
+            title: 'GRN completed',
+            intro: 'The receipt is finalised.',
+            rows: [
+                ['GRN', '#' + grnId],
+                g && g.poNumber != null ? ['Against', 'PO ' + g.poNumber] : null,
+                g ? ['Units', (g.received || 0).toLocaleString('en-IN')] : null,
+                ['Status', 'Completed', true],
+            ],
+        });
+        grnLoad(true, true);
+        return true;
+    }catch(e){
+        showNotification(e.message, true);
+        if(btn){ btn.disabled = false; btn.textContent = was; }
+        return false;
+    }
+}
+function grnDetailRow(g, span){
+    const th = 'px-2 py-1.5 text-left text-[10px] font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap';
+    const td = 'px-2 py-1.5 text-xs text-slate-600 whitespace-nowrap';
+    // ⚠️ EasyEcom's qc_pending counter LIES for API-created GRNs: GRN 2355800 sits at qc_pending 588
+    // with line status "QC Complete" and all 588 units AVAILABLE — the API path skips the portal's
+    // manual QC step, so the counter never moves. When nothing was actually QC'd (no pass, no fail),
+    // the line status is the truth and the raw counter rides in the tooltip.
+    const qcCell = i => {
+        const bits = [];
+        if(i.qc.pass) bits.push(`<span class="text-emerald-600">${i.qc.pass} pass</span>`);
+        if(i.qc.fail) bits.push(`<span class="text-rose-600 font-semibold">${i.qc.fail} fail</span>`);
+        if(i.qc.pending && (i.qc.pass || i.qc.fail)) bits.push(`<span class="text-amber-600">${i.qc.pending} pending</span>`);
+        if(bits.length) return bits.join(' · ');
+        if(i.lineStatus) return `<span class="text-emerald-600" title="EasyEcom line status${i.qc.pending ? ` — raw qc_pending counter reads ${i.qc.pending}, which stays put on API-created GRNs` : ''}">${escapeHtml(i.lineStatus)}</span>`;
+        return i.qc.pending ? `<span class="text-amber-600">${i.qc.pending} pending</span>` : '<span class="text-slate-300">—</span>';
+    };
+    const items = g.items.map(i => `<tr class="border-t border-slate-100">
+        <td class="${td} font-semibold text-slate-800">${escapeHtml(i.sku || '—')}</td>
+        <td class="${td}"><div class="truncate" style="max-width:220px" title="${escapeHtml(i.name || '')}">${escapeHtml(i.name || '—')}</div></td>
+        <td class="${td} text-right tabular-nums">${i.ordered.toLocaleString('en-IN')}</td>
+        <td class="${td} text-right tabular-nums font-semibold ${i.received < i.ordered ? 'text-rose-600' : 'text-slate-800'}">${i.received.toLocaleString('en-IN')}</td>
+        <td class="${td} text-right tabular-nums ${i.pending > 0 ? 'text-amber-600 font-semibold' : 'text-slate-300'}">${i.pending ? i.pending.toLocaleString('en-IN') : '—'}</td>
+        <td class="${td} text-right tabular-nums">${i.rate ? _poINR(i.rate) : '—'}</td>
+        <td class="${td} text-right tabular-nums">${i.lineValue ? _poINR(i.lineValue) : '—'}</td>
+        <td class="${td}">${escapeHtml(i.batch || '—')}</td>
+        <td class="${td} tabular-nums">${i.expiry ? _poDate(i.expiry) : '—'}</td>
+        <td class="${td}">${qcCell(i)}</td>
+        <td class="${td} text-right tabular-nums ${i.damaged || i.lost ? 'text-rose-600 font-semibold' : 'text-slate-300'}">${(i.damaged || i.lost) ? `${i.damaged || 0}${i.lost ? ' / ' + i.lost + ' lost' : ''}` : '—'}</td>
+      </tr>`).join('');
+    return `<tr><td colspan="${span}" class="bg-slate-50 border-b border-slate-200 px-6 py-4">
+        <div class="flex items-center gap-4 text-xs text-slate-500 mb-3 flex-wrap">
+          <span><b class="text-slate-700">GRN #${g.grnId}</b>${g.invoiceNo ? ` · invoice ${escapeHtml(g.invoiceNo)}` : ''}</span>
+          <span>invoice date ${_poDate(g.invoiceDate)}</span>
+          ${g.poNumber != null ? `<span>against PO ${escapeHtml(String(g.poNumber))}${g.poRef ? ` (${escapeHtml(g.poRef)})` : ''} — see the Purchase Order page for the full PO</span>` : ''}
+          <span class="ml-auto flex items-center gap-1.5">
+            ${(!/complete/i.test(g.status) && (_grnData && (_grnData.canWrite != null ? _grnData.canWrite : canWriteGrn())))
+                ? `<button class="filter-btn-primary text-xs grn-cmpl" data-grn="${g.grnId}" title="Finalises this receipt">✓ Complete GRN</button>` : ''}
+            <button class="filter-btn text-xs grn-dl" data-grn="${g.grnId}">⬇ GRN document</button>
+          </span>
+        </div>
+        <div class="overflow-x-auto"><table class="w-full border-collapse bg-white rounded-lg overflow-hidden" style="min-width:900px">
+          <thead><tr class="bg-slate-100">
+            <th class="${th}">SKU</th><th class="${th}">Product</th>
+            <th class="${th} text-right">Ordered</th><th class="${th} text-right">Received</th><th class="${th} text-right">Still owed</th>
+            <th class="${th} text-right">Rate</th><th class="${th} text-right">Line value</th>
+            <th class="${th}">Batch</th><th class="${th}">Expiry</th><th class="${th}">QC</th><th class="${th} text-right">Damaged</th>
+          </tr></thead><tbody>${items}</tbody>
+        </table></div>
+      </td></tr>`;
+}
+
+// ── Receive stock (create a GRN in EasyEcom) ─────────────────────────────────────────────────────
+// One modal, two modes, mirroring EasyEcom's own single endpoint: pick an open PO and the pending
+// lines arrive prefilled (qty = what is still owed, cost = the PO's net unit price); pick
+// "No PO — Auto GRN" and lines are typed by hand against a chosen supplier. The server re-validates
+// everything — including that a PO line is never over-received — this form is the convenient path,
+// not the guard.
+let _grnRxLines = [];
+function grnRxLineFromPending(i){ return { sku:i.sku, max:i.pending, quantity:i.pending, cost:i.price != null ? i.price : '', batch:'', mrp:i.mrp != null ? i.mrp : '', mfg:'', expiry:'', shelf:'' }; }
+function grnRxNewLine(){ return { sku:'', max:null, quantity:'', cost:'', batch:'', mrp:'', mfg:'', expiry:'', shelf:'' }; }
+function grnDefaultRef(){
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    return `EC-GRN-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+function grnOpenReceive(poId){
+    const d = _grnData || {};
+    if(!(d.canWrite != null ? d.canWrite : canWriteGrn())){ showNotification('You do not have permission to create GRNs.', true); return; }
+    const awaiting = d.awaiting || [];
+    const po = poId ? awaiting.find(p => p.poId === poId) : null;
+    _grnRxLines = po ? (po.pendingItems || []).map(grnRxLineFromPending) : [grnRxNewLine()];
+    const wrap = document.createElement('div');
+    wrap.id = 'grn-rx-modal';
+    wrap.className = 'fixed inset-0 z-50 flex items-start justify-center p-6 overflow-y-auto';
+    wrap.style.background = 'rgba(15,23,42,.45)';
+    wrap.innerHTML = `
+      <div class="card w-full my-4" style="background:#fff;max-width:1080px" onclick="event.stopPropagation()">
+        <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-bold text-slate-800">Receive stock (GRN)</h2>
+            <p class="text-xs text-slate-400 mt-0.5">This inwards REAL inventory — sellable once QC passes.</p>
+          </div>
+          <button class="grn-rx-x text-slate-400 hover:text-slate-700 text-xl leading-none px-2">&times;</button>
+        </div>
+        <div class="px-6 py-5 space-y-4">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px">
+            <label class="block"><span class="text-xs font-semibold text-slate-500">Against purchase order</span>
+              <select id="grn-rx-po" class="filter-select w-full mt-1">
+                <option value="">No PO — Auto GRN (free-standing inward)</option>
+                ${awaiting.map(p => `<option value="${p.poId}" ${po && po.poId === p.poId ? 'selected' : ''}>PO ${escapeHtml(String(p.poNumber))} — ${escapeHtml(p.vendor || '—')} (${p.pending.toLocaleString('en-IN')} pending)</option>`).join('')}
+              </select></label>
+            <label class="block" id="grn-rx-vwrap"><span class="text-xs font-semibold text-slate-500">Supplier ${po ? '' : '*'}</span>
+              <select id="grn-rx-vendor" class="filter-select w-full mt-1" ${po ? 'disabled' : ''}>
+                <option value="">Select a supplier…</option>
+                ${(d.vendorOptions || []).map(v => `<option value="${v.id || ''}">${escapeHtml(v.name)}</option>`).join('')}
+              </select>
+              <span class="text-[11px] text-slate-400 ${po ? '' : 'hidden'}" id="grn-rx-vnote">taken from the PO</span></label>
+            <label class="block"><span class="text-xs font-semibold text-slate-500">GRN reference</span>
+              <input type="text" id="grn-rx-ref" class="filter-input w-full mt-1" value="${grnDefaultRef()}" maxlength="200"></label>
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs font-bold text-slate-500 uppercase tracking-wider">Lines to receive</span>
+              <button id="grn-rx-add" class="filter-btn text-xs">+ Add line</button>
+            </div>
+            <div class="overflow-x-auto"><table class="w-full border-collapse" id="grn-rx-lines"></table></div>
+            <p class="text-[11px] text-slate-400 mt-2">Cost is the per-unit rate (prefilled from the PO where known). Products configured with LOT/expiry in EasyEcom need <b>both</b> the mfg date and the expiry — EasyEcom refuses the line without them. A PO line can be part-received — the rest stays owed on the PO.</p>
+          </div>
+          <div id="grn-rx-err" class="hidden text-sm rounded-lg px-4 py-2.5" style="background:#fef2f2;color:#991b1b;border:1px solid #fecaca"></div>
+        </div>
+        <div class="px-6 py-4 border-t border-slate-200 flex items-center justify-between gap-3 flex-wrap">
+          <div class="text-sm text-slate-500">Receiving <b class="text-slate-800 tabular-nums" id="grn-rx-total">0 units</b></div>
+          <div class="flex items-center gap-2">
+            <button class="grn-rx-x filter-btn">Cancel</button>
+            <button id="grn-rx-save" class="filter-btn-primary">Create GRN</button>
+          </div>
+        </div>
+      </div>`;
+    const close = () => { document.removeEventListener('keydown', onKey, true); wrap.remove(); };
+    const onKey = e => { if(e.key === 'Escape'){ e.preventDefault(); close(); } };
+    document.addEventListener('keydown', onKey, true);
+    wrap.addEventListener('click', e => { if(e.target === wrap) close(); });
+    wrap.querySelectorAll('.grn-rx-x').forEach(b => b.addEventListener('click', close));
+
+    const err = m => { const el = wrap.querySelector('#grn-rx-err'); el.textContent = m; el.classList.toggle('hidden', !m); };
+    const totals = () => { const u = _grnRxLines.reduce((a, l) => a + (Number(l.quantity) || 0), 0);
+        wrap.querySelector('#grn-rx-total').textContent = `${u.toLocaleString('en-IN')} unit${u === 1 ? '' : 's'} across ${_grnRxLines.length} line${_grnRxLines.length === 1 ? '' : 's'}`; };
+    const selectedPo = () => { const v = wrap.querySelector('#grn-rx-po').value; return v ? awaiting.find(p => p.poId === Number(v)) : null; };
+
+    function renderLines(){
+        const t = wrap.querySelector('#grn-rx-lines');
+        const cp = selectedPo();
+        const th = 'px-2 py-1.5 text-left text-[10px] font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap';
+        t.innerHTML = `<thead><tr>
+            <th class="${th}">SKU</th><th class="${th}">Qty</th><th class="${th}">Cost / unit *</th>
+            <th class="${th}">Batch</th><th class="${th}">MRP</th><th class="${th}">Mfg (month)</th><th class="${th}">Expiry (month)</th><th class="${th}">Shelf</th><th class="${th}"></th>
+          </tr></thead><tbody>` + _grnRxLines.map((l, i) => `<tr class="border-t border-slate-100">
+            <td class="px-2 py-1.5" style="min-width:150px">${cp
+                ? `<span class="text-sm font-semibold text-slate-800">${escapeHtml(l.sku)}</span><div class="text-[11px] text-slate-400">${l.max != null ? l.max.toLocaleString('en-IN') + ' owed' : ''}</div>`
+                : `<input type="text" class="filter-input w-full grn-rx-f" data-i="${i}" data-f="sku" value="${escapeHtml(l.sku)}" placeholder="SKU">`}</td>
+            <td class="px-2 py-1.5"><input type="number" class="filter-input w-24 grn-rx-f" data-i="${i}" data-f="quantity" value="${escapeHtml(String(l.quantity))}" min="1" step="1" ${l.max != null ? `max="${l.max}"` : ''}></td>
+            <td class="px-2 py-1.5"><input type="number" class="filter-input w-28 grn-rx-f" data-i="${i}" data-f="cost" value="${escapeHtml(String(l.cost))}" min="0" step="0.01"></td>
+            <td class="px-2 py-1.5"><input type="text" class="filter-input w-28 grn-rx-f" data-i="${i}" data-f="batch" value="${escapeHtml(l.batch)}" placeholder="optional"></td>
+            <td class="px-2 py-1.5"><input type="number" class="filter-input w-24 grn-rx-f" data-i="${i}" data-f="mrp" value="${escapeHtml(String(l.mrp))}" min="0" step="0.01" placeholder="opt."></td>
+            <td class="px-2 py-1.5"><input type="month" class="date-input grn-rx-f" data-i="${i}" data-f="mfg" value="${escapeHtml(l.mfg)}"></td>
+            <td class="px-2 py-1.5"><input type="month" class="date-input grn-rx-f" data-i="${i}" data-f="expiry" value="${escapeHtml(l.expiry)}"></td>
+            <td class="px-2 py-1.5"><input type="text" class="filter-input w-20 grn-rx-f" data-i="${i}" data-f="shelf" value="${escapeHtml(l.shelf)}" placeholder="opt."></td>
+            <td class="px-2 py-1.5 text-right"><button class="grn-rx-del text-slate-300 hover:text-rose-500 px-1" data-i="${i}" title="Remove line">&times;</button></td>
+          </tr>`).join('') + '</tbody>';
+        t.querySelectorAll('.grn-rx-f').forEach(inp => inp.addEventListener('input', () => {
+            _grnRxLines[+inp.dataset.i][inp.dataset.f] = inp.value; totals(); }));
+        // Auto-GRN mode: a typed SKU that matches the product master pulls its MRP in (never
+        // overwriting something already typed). 'change' (blur), so it fires once the SKU is whole.
+        t.querySelectorAll('.grn-rx-f[data-f="sku"]').forEach(inp => inp.addEventListener('change', () => {
+            const info = ((_grnData || {}).skuInfo || {})[inp.value.trim()];
+            const l = _grnRxLines[+inp.dataset.i];
+            if(info && info.mrp != null && (l.mrp === '' || l.mrp == null)){ l.mrp = info.mrp; renderLines(); } }));
+        t.querySelectorAll('.grn-rx-del').forEach(b => b.addEventListener('click', () => {
+            _grnRxLines.splice(+b.dataset.i, 1);
+            // Auto mode always keeps one row to type into; PO mode may go empty (save refuses it).
+            if(!_grnRxLines.length && !selectedPo()) _grnRxLines = [grnRxNewLine()];
+            renderLines(); }));
+        totals();
+    }
+    // In PO mode the supplier box SHOWS the PO's own vendor (informational — the server takes the
+    // vendor from the PO regardless); the enhanced .csel face repaints via ecSyncSelect, or a
+    // programmatic value change keeps the stale label (the PG-recon lesson).
+    const syncVendorToPo = cp => {
+        const vs = wrap.querySelector('#grn-rx-vendor');
+        if(cp){ const m = (d.vendorOptions || []).find(v => v.name === cp.vendor); vs.value = m ? String(m.id) : ''; }
+        else vs.value = '';
+        vs.disabled = !!cp;
+        wrap.querySelector('#grn-rx-vnote')?.classList.toggle('hidden', !cp);
+        try{ if(typeof ecSyncSelect === 'function') ecSyncSelect(vs); }catch(_){}
+    };
+    wrap.querySelector('#grn-rx-po').addEventListener('change', () => {
+        const cp = selectedPo();
+        _grnRxLines = cp ? (cp.pendingItems || []).map(grnRxLineFromPending) : [grnRxNewLine()];
+        syncVendorToPo(cp);
+        wrap.querySelector('#grn-rx-add').classList.toggle('hidden', !!cp);   // PO lines come FROM the PO
+        err(''); renderLines(); });
+    wrap.querySelector('#grn-rx-add').addEventListener('click', () => { _grnRxLines.push(grnRxNewLine()); renderLines(); });
+    if(po) wrap.querySelector('#grn-rx-add').classList.add('hidden');
+
+    wrap.querySelector('#grn-rx-save').addEventListener('click', async () => {
+        const cp = selectedPo();
+        const vendorId = cp ? null : Number(wrap.querySelector('#grn-rx-vendor').value) || null;
+        const problems = [];
+        if(!cp && !vendorId) problems.push('pick a supplier for an Auto GRN');
+        if(!_grnRxLines.length) problems.push('add at least one line');
+        _grnRxLines.forEach((l, i) => {
+            if(!String(l.sku || '').trim()) problems.push(`line ${i + 1}: SKU is required`);
+            const q = Number(l.quantity);
+            if(!Number.isInteger(q) || q <= 0) problems.push(`line ${i + 1}: quantity must be a whole number above 0`);
+            else if(l.max != null && q > l.max) problems.push(`line ${i + 1} (${l.sku}): the PO is only owed ${l.max}`);
+            if(l.cost === '' || l.cost == null || !(Number(l.cost) >= 0)) problems.push(`line ${i + 1}: cost per unit is required`);
+        });
+        if(problems.length){ err(problems.join(' · ')); return; }
+        const btn = wrap.querySelector('#grn-rx-save');
+        btn.disabled = true; btn.textContent = 'Creating GRN…'; err('');
+        try{
+            const r = await fetch('/api/grn/create', { method:'POST',
+                headers:{ 'Content-Type':'application/json', ...getAuthHeaders() },
+                body: JSON.stringify({
+                    poId: cp ? cp.poId : null, vendorId,
+                    refNumber: wrap.querySelector('#grn-rx-ref').value.trim(),
+                    // Mfg/expiry are MONTH pickers (products carry month-level dates); the API wants a
+                    // full date, so YYYY-MM goes out as the FIRST of that month — EasyEcom's own
+                    // convention (GRN 2355800 stores a July-2029 expiry as 2029-07-01).
+                    items: _grnRxLines.map(l => ({ sku:String(l.sku).trim(), quantity:Number(l.quantity), cost:Number(l.cost),
+                        batch:l.batch, mrp:l.mrp,
+                        mfg:/^\d{4}-\d{2}$/.test(l.mfg) ? l.mfg + '-01' : l.mfg,
+                        expiry:/^\d{4}-\d{2}$/.test(l.expiry) ? l.expiry + '-01' : l.expiry,
+                        shelf:l.shelf })),
+                }) });
+            const out = await r.json();
+            if(!r.ok || !out.success) throw new Error(out.error || `Failed (${r.status})`);
+            close();
+            // The rich confirmation shows the GRN EasyEcom actually RECORDED (read back after the job
+            // finished) with its document one click away; the plain summary is the fallback for a
+            // queued-not-landed job or a read-back failure.
+            if(out.grn){ grnShowCreated(out); }
+            else {
+                const units = _grnRxLines.reduce((a, l) => a + (Number(l.quantity) || 0), 0);
+                await ecResult({
+                    title: out.finished ? 'GRN created' : 'GRN queued',
+                    intro: out.finished ? 'The stock has been taken in.' : 'The job is queued and still processing.',
+                    rows: [
+                        ['Mode', cp ? `Against PO ${cp.poNumber}` : 'Auto GRN'],
+                        ['Units', units.toLocaleString('en-IN')],
+                        ['Lines', String(_grnRxLines.length)],
+                        ['Job', String(out.queueId)],
+                        ['Job status', out.jobMessage || '—', true],
+                    ],
+                    note: out.jobFailed ? 'The job reported a problem — check the message above and the GRN book before retrying.'
+                        : out.finished ? 'Created, but the read-back failed — the GRN appears on the page after a refresh; download its document from there.'
+                        : 'Refresh the page in a minute; the new GRN appears once the job lands.',
+                    danger: !!out.jobFailed,
+                });
+            }
+            grnLoad(true);
+        }catch(e2){ err(e2.message); btn.disabled = false; btn.textContent = 'Create GRN'; }
+    });
+
+    document.body.appendChild(wrap);
+    renderLines();
+    try{ ecEnhanceSelect(wrap.querySelector('#grn-rx-po')); ecEnhanceSelect(wrap.querySelector('#grn-rx-vendor')); }catch(_){}
+    if(po) syncVendorToPo(po);   // after enhancement, so the painted face shows the PO's supplier
+}
+
+// Download the generated GRN document (server-side pdfkit — EasyEcom publishes none of its own).
+// Through fetch, never a plain link: the endpoint needs the Authorization header.
+async function grnDownloadPdf(grnId, btn){
+    const was = btn ? btn.textContent : '';
+    if(btn){ btn.disabled = true; btn.textContent = 'Preparing…'; }
+    try{
+        const r = await fetch(`/api/grn/${grnId}/pdf`, { headers: getAuthHeaders() });
+        if(!r.ok){ const d = await r.json().catch(() => ({})); throw new Error(d.error || `Download failed (${r.status})`); }
+        const url = URL.createObjectURL(await r.blob());
+        const a = document.createElement('a');
+        a.href = url; a.download = `GRN-${grnId}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }catch(e){ showNotification(e.message, true); }
+    finally{ if(btn){ btn.disabled = false; btn.textContent = was; } }
+}
+
+// The post-create confirmation: the COMPLETE GRN as EasyEcom recorded it — header, every line with
+// batch/expiry and money, totals — with its document one click away.
+function grnShowCreated(out){
+    const g = out.grn;
+    const wrap = document.createElement('div');
+    wrap.className = 'fixed inset-0 z-50 flex items-start justify-center p-6 overflow-y-auto';
+    wrap.style.background = 'rgba(15,23,42,.45)';
+    const th = 'px-2 py-1.5 text-left text-[10px] font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap';
+    const td = 'px-2 py-1.5 text-xs text-slate-600 whitespace-nowrap';
+    wrap.innerHTML = `
+      <div class="card w-full my-4" style="background:#fff;max-width:880px" onclick="event.stopPropagation()">
+        <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background:#ecfdf5;color:#059669">
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div>
+              <h2 class="text-lg font-bold text-slate-800">GRN created — #${g.grnId}</h2>
+              <p class="text-xs text-slate-400 mt-0.5">As actually recorded (read back after the job finished) · job ${escapeHtml(String(out.queueId))}</p>
+            </div>
+          </div>
+          <button class="grn-cr-x text-slate-400 hover:text-slate-700 text-xl leading-none px-2">&times;</button>
+        </div>
+        <div class="px-6 py-5 space-y-4">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+            ${[['Against', g.poNumber != null ? 'PO ' + g.poNumber : 'Auto GRN'],
+               ['Supplier', g.vendor || '—'],
+               ['Warehouse', g.warehouse || '—'],
+               ['Status', g.status],
+               ['Received on', _poDate(g.createdAt)],
+               ['GRN value', _poINR(g.value)]].map(([l, v]) => `
+              <div class="rounded-lg px-3 py-2" style="background:#f8fafc">
+                <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">${l}</div>
+                <div class="text-sm font-semibold text-slate-800 truncate" title="${escapeHtml(String(v))}">${escapeHtml(String(v))}</div>
+              </div>`).join('')}
+          </div>
+          <div class="overflow-x-auto"><table class="w-full border-collapse rounded-lg overflow-hidden" style="min-width:700px">
+            <thead><tr class="bg-slate-100">
+              <th class="${th}">SKU</th><th class="${th}">Product</th><th class="${th}">Batch</th><th class="${th}">Expiry</th>
+              <th class="${th} text-right">Received</th><th class="${th} text-right">Still owed</th>
+              <th class="${th} text-right">Rate</th><th class="${th} text-right">Amount</th>
+            </tr></thead>
+            <tbody>${g.items.map(i => `<tr class="border-t border-slate-100">
+              <td class="${td} font-semibold text-slate-800">${escapeHtml(i.sku || '—')}</td>
+              <td class="${td}"><div class="truncate" style="max-width:200px" title="${escapeHtml(i.name || '')}">${escapeHtml(i.name || '—')}</div></td>
+              <td class="${td}">${escapeHtml(i.batch || '—')}</td>
+              <td class="${td} tabular-nums">${i.expiry ? _poDate(i.expiry) : '—'}</td>
+              <td class="${td} text-right tabular-nums font-semibold text-slate-800">${i.received.toLocaleString('en-IN')}</td>
+              <td class="${td} text-right tabular-nums ${i.pending > 0 ? 'text-amber-600 font-semibold' : 'text-slate-300'}">${i.pending ? i.pending.toLocaleString('en-IN') : '—'}</td>
+              <td class="${td} text-right tabular-nums">${i.rate != null ? _poINR(i.rate) : '—'}</td>
+              <td class="${td} text-right tabular-nums font-semibold">${_poINR(i.lineValue)}</td>
+            </tr>`).join('')}</tbody>
+          </table></div>
+          ${g.pending > 0 ? `<div class="text-sm rounded-lg px-4 py-2.5" style="background:#fffbeb;color:#92400e;border:1px solid #fde68a">Part-received: ${g.pending.toLocaleString('en-IN')} unit${g.pending === 1 ? '' : 's'} of this PO remain${g.pending === 1 ? 's' : ''} owed — the PO stays open for the rest.</div>` : ''}
+        </div>
+        <div class="px-6 py-4 border-t border-slate-200 flex items-center justify-between gap-3 flex-wrap">
+          <div class="text-sm text-slate-500">${g.received.toLocaleString('en-IN')} units · <b class="text-slate-800">${_poINR(g.value)}</b></div>
+          <div class="flex items-center gap-2">
+            ${!/complete/i.test(g.status) ? '<button class="filter-btn-primary grn-cr-cmpl" title="Finalises this receipt">✓ Complete GRN</button>' : ''}
+            <button class="filter-btn grn-cr-dl">⬇ Download GRN document</button>
+            <button class="filter-btn-primary grn-cr-x">Done</button>
+          </div>
+        </div>
+      </div>`;
+    const close = () => { document.removeEventListener('keydown', onKey, true); wrap.remove(); };
+    const onKey = e => { if(e.key === 'Escape' || e.key === 'Enter'){ e.preventDefault(); close(); } };
+    document.addEventListener('keydown', onKey, true);
+    wrap.addEventListener('click', e => { if(e.target === wrap) close(); });
+    wrap.querySelectorAll('.grn-cr-x').forEach(b => b.addEventListener('click', close));
+    wrap.querySelector('.grn-cr-dl').addEventListener('click', e => grnDownloadPdf(g.grnId, e.currentTarget));
+    wrap.querySelector('.grn-cr-cmpl')?.addEventListener('click', async e => {
+        if(await grnCompleteAction(g.grnId, e.currentTarget)) close();   // list refreshes with Completed
+    });
+    document.body.appendChild(wrap);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// PO APPROVALS (Inventory) — maker-checker for purchase orders.
+// A PO drafted on the Purchase Order page waits here; Approve fires the REAL EasyEcom create
+// (server-side, through the same performPoCreate as the direct route). Rich single-purpose page:
+// gradient hero with the queue's weight, one card per pending request with its full cart, and a
+// decision history. Gradients are INLINE STYLES — the prebuilt tailwind.css has no gradient classes.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+let _poaData = null, _poaWired = false;
+
+// ── In-app approver notification — the ONLY channel (user: "i want they received notification on
+// ecom not anywhere else"; the email version leaked to the report CC list and was removed the day
+// it shipped). Approvers' sessions poll the pending count each minute: a red badge rides the PO
+// Approvals nav item, and a toast fires when the count RISES while they're signed in.
+let _poaBadgeLast = null, _poaBadgeTimer = null, _poaPopupShown = false, _poaPopupDelay = 800, _poaPopupTO = null;
+// Everything the badge machinery owns, stopped and cleared — called from _clearSession so no timer,
+// poll or already-visible popup can outlive the session that armed it.
+function poaBadgeStop(){
+    clearInterval(_poaBadgeTimer); _poaBadgeTimer = null;
+    clearTimeout(_poaPopupTO); _poaPopupTO = null;
+    _poaBadgeLast = null; _poaPopupShown = false;
+    document.getElementById('poa-login-popup')?.remove();
+    poaBadgeSet(0);
+}
+async function poaBadgeTick(){
+    if(!currentUser || !canView('po-approvals')) return;
+    try{
+        const r = await fetch('/api/po-approvals/pending-count', { headers: getAuthHeaders() });
+        if(!r.ok) return;
+        const d = await r.json(); if(!d.success) return;
+        poaBadgeSet(d.count);
+        // Sign-in with a waiting queue → the login POPUP (once per session, delayed past the welcome
+        // splash); a RISE while already signed in → a toast. Two notification shapes, one channel.
+        if(_poaBadgeLast == null && d.count > 0){ clearTimeout(_poaPopupTO); _poaPopupTO = setTimeout(() => poaLoginPopup(d.count, d.value), _poaPopupDelay); }
+        if(_poaBadgeLast != null && d.count > _poaBadgeLast){
+            const n = d.count - _poaBadgeLast;
+            showNotification(`${n} new purchase order${n === 1 ? '' : 's'} awaiting your approval`);
+        }
+        _poaBadgeLast = d.count;
+    }catch(_){}
+}
+function poaBadgeSet(count){
+    const b = document.getElementById('nav-po-approvals-badge');
+    if(b){ b.textContent = count; b.classList.toggle('hidden', !count); }
+}
+function poaBadgeStart(popupDelayMs){
+    clearInterval(_poaBadgeTimer); _poaBadgeLast = null; _poaPopupShown = false;
+    _poaPopupDelay = popupDelayMs || 800;
+    if(!currentUser || !canView('po-approvals')) { poaBadgeSet(0); return; }
+    poaBadgeTick();
+    _poaBadgeTimer = setInterval(poaBadgeTick, 60000);
+}
+// The sign-in popup: a floating card in the app's dark-premium identity. Clicking it goes straight
+// to the PO Approvals dashboard; ✕ dismisses. Shown once per session, and never while already there.
+function poaLoginPopup(count, value){
+    // authToken is the live-session test — currentUser survives _clearSession, the token does not.
+    if(_poaPopupShown || !count || currentView === 'po-approvals' || !currentUser || !authToken) return;
+    _poaPopupShown = true;
+    document.getElementById('poa-login-popup')?.remove();
+    if(!document.getElementById('poa-popup-style')){
+        const st = document.createElement('style');
+        st.id = 'poa-popup-style';
+        st.textContent = '@keyframes poaPopIn { 0% { opacity:0; transform:translateY(24px) scale(.95) } 100% { opacity:1; transform:translateY(0) scale(1) } }';
+        document.head.appendChild(st);
+    }
+    const el = document.createElement('div');
+    el.id = 'poa-login-popup';
+    el.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:190;display:flex;align-items:center;gap:16px;max-width:400px;padding:18px 20px;border-radius:18px;color:#fff;cursor:pointer;background:linear-gradient(165deg,#211d54,#111536 60%,#0b0f26);border:1px solid rgba(129,140,248,.35);box-shadow:0 30px 70px rgba(49,46,129,.6),inset 0 1px 0 rgba(255,255,255,.06);animation:poaPopIn .5s cubic-bezier(.2,.9,.25,1.1) both;';
+    el.innerHTML = `
+      <div style="width:46px;height:46px;flex:none;border-radius:14px;display:grid;place-items:center;background:linear-gradient(140deg,#f59e0b,#d97706);box-shadow:0 14px 35px rgba(245,158,11,.45)">
+        <svg style="width:24px;height:24px;color:#fff" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+      </div>
+      <div style="min-width:0">
+        <div style="font-size:.95rem;font-weight:800">${count} purchase order${count === 1 ? '' : 's'} awaiting your approval</div>
+        <div style="font-size:.75rem;color:#a5b4fc;margin-top:2px">${value ? _poMoney(value) + ' on hold — ' : ''}click to review &amp; release</div>
+      </div>
+      <button class="poa-pop-x" style="flex:none;background:none;border:0;color:#8b93b8;font-size:1.1rem;line-height:1;cursor:pointer;padding:4px" title="Dismiss">&times;</button>`;
+    el.addEventListener('click', () => { el.remove(); if(typeof navigate === 'function') navigate('po-approvals'); });
+    el.querySelector('.poa-pop-x').addEventListener('click', e => { e.stopPropagation(); el.remove(); });
+    document.body.appendChild(el);
+}
+
+function poaInit(){
+    if(!_poaWired){
+        _poaWired = true;
+        document.getElementById('poa-refresh')?.addEventListener('click', () => poaLoad());
+    }
+    poaLoad();
+}
+async function poaLoad(silent){
+    if(!silent) ecLoadingShow('Loading approval queue…');
+    try{
+        const r = await fetch('/api/po-approvals', { headers: getAuthHeaders() });
+        const d = await r.json(); if(!d.success) throw new Error(d.error || 'failed');
+        _poaData = d; poaRender(d);
+    }catch(e){ const q = document.getElementById('poa-queue');
+        if(!silent && q) q.innerHTML = '<div class="text-red-500 text-sm p-6">Error: ' + escapeHtml(e.message) + '</div>'; }
+    finally{ if(!silent) ecLoadingHide(); }
+}
+function poaRender(d){
+    if(!d) return;
+    const pending = d.pending || [], recent = d.recent || [];
+    const pendingValue = pending.reduce((a, r) => a + (Number(r.total_value) || 0), 0);
+    const monthKey = new Date().toISOString().slice(0, 7);
+    const releasedMonth = recent.filter(r => r.status === 'created' && String(r.decided_at || '').slice(0, 7) === monthKey).length;
+    document.getElementById('poa-sub').textContent = pending.length
+        ? `${pending.length} purchase order${pending.length === 1 ? '' : 's'} waiting · ${_poINR(pendingValue)} on hold until released`
+        : 'Nothing waiting — every drafted PO has been decided';
+
+    // Hero — the queue's weight at a glance, deliberately the one saturated element on the page.
+    // ⚠️ The stat gap is INLINE — `gap-10` is not in the prebuilt tailwind.css (only gap-6 and
+    // below), so the class silently did nothing and the sub-texts of adjacent stats ran together
+    // ("waiting POsapproved & created", user-reported). Sub-texts also get a max-width to wrap.
+    const stat = (big, label, sub) => `<div style="min-width:150px;max-width:190px">
+        <div class="text-[2rem] leading-none font-extrabold tabular-nums" style="color:#fff">${big}</div>
+        <div class="text-sm font-semibold mt-1.5" style="color:rgba(255,255,255,.92)">${label}</div>
+        <div class="text-xs mt-0.5" style="color:rgba(255,255,255,.65)">${sub}</div></div>`;
+    document.getElementById('poa-hero').innerHTML = `
+      <div class="rounded-2xl p-6 flex items-center flex-wrap" style="gap:44px;background:linear-gradient(135deg,#312e81,#4f46e5 55%,#7c3aed);box-shadow:0 10px 30px -12px rgba(79,70,229,.55)">
+        ${stat(pending.length, 'Awaiting approval', pending.length ? 'oldest first, below' : 'the queue is clear')}
+        ${stat(_poMoney(pendingValue), 'Value on hold', 'goods total of the waiting POs')}
+        ${stat(releasedMonth, 'Released this month', 'approved & created')}
+        <div class="ml-auto text-xs" style="color:rgba(255,255,255,.75);max-width:260px">A drafted PO is created only when someone on this page releases it. Approvers see it here the moment a draft arrives.</div>
+      </div>`;
+
+    const cnt = document.getElementById('poa-count');
+    if(cnt) cnt.textContent = pending.length ? `${pending.length} waiting · ${_poINR(pendingValue)}` : '';
+
+    const q = document.getElementById('poa-queue');
+    if(!pending.length){
+        q.innerHTML = `<div class="card p-10 text-center">
+            <div class="text-3xl mb-2">✓</div>
+            <div class="text-sm font-semibold text-slate-700">All clear</div>
+            <div class="text-xs text-slate-400 mt-1">New drafts appear here the moment a buyer submits them — the nav badge counts what's waiting.</div></div>`;
+    } else {
+        q.innerHTML = pending.map(r => poaCard(r, d)).join('');
+        q.querySelectorAll('.poa-approve').forEach(b => b.addEventListener('click', () => poaApprove(Number(b.dataset.id), b)));
+        q.querySelectorAll('.poa-reject').forEach(b => b.addEventListener('click', () => poaReject(Number(b.dataset.id))));
+        q.querySelectorAll('.poa-pdf').forEach(b => b.addEventListener('click', () => poaDraftPdf(Number(b.dataset.id), b)));
+    }
+    poaHistory(recent);
+    poaPrefetchPdfs(pending);
+    poaBadgeSet(pending.length); _poaBadgeLast = pending.length;   // decisions update the badge instantly
+}
+// Draft PDFs are PREFETCHED the moment the queue renders, so 📄 Draft PO opens INSTANTLY (user:
+// a cold click took 6–8 s). Blob URLs are cached per request id; entries for requests that left
+// the queue are revoked so memory never grows past the pending list.
+let _poaPdfCache = {};
+function poaPrefetchPdfs(pending){
+    const keep = new Set(pending.map(r => r.id));
+    Object.keys(_poaPdfCache).forEach(id => {
+        if(!keep.has(Number(id))){
+            const u = _poaPdfCache[id];
+            if(typeof u === 'string' && u.startsWith('blob:')) try{ URL.revokeObjectURL(u); }catch(_){}
+            delete _poaPdfCache[id];
+        }
+    });
+    pending.forEach(r => {
+        if(_poaPdfCache[r.id] !== undefined) return;
+        _poaPdfCache[r.id] = 'loading';
+        fetch(`/api/po-approvals/${r.id}/pdf`, { headers: getAuthHeaders() })
+            .then(res => res.ok ? res.blob() : null)
+            .then(b => { _poaPdfCache[r.id] = b ? URL.createObjectURL(b) : null; })
+            .catch(() => { _poaPdfCache[r.id] = null; });
+    });
+}
+function poaCard(r, d){
+    const p = r.payload || {};
+    const items = p.items || [];
+    const mine = r.requested_by === d.me && !d.isAdmin;   // maker-checker: no self-approval
+    const th = 'px-3 py-2 text-left text-[10px] font-semibold text-slate-400 uppercase tracking-wider';
+    const td = 'px-3 py-2 text-sm text-slate-700 border-t border-slate-100';
+    return `<div class="card p-0 overflow-hidden" style="border-left:4px solid ${r.status === 'failed' ? '#e11d48' : '#4f46e5'}">
+      <div class="px-6 py-4 flex items-start gap-4 flex-wrap">
+        <div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-base font-bold text-slate-800">${escapeHtml(r.vendor_name || 'Supplier')}</span>
+            <span class="px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-50 text-indigo-700">${escapeHtml(r.ref_code || '')}</span>
+            <span class="px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-500">#${r.id}</span>
+          </div>
+          <div class="text-xs text-slate-400 mt-1">Drafted by <b class="text-slate-600">${escapeHtml(r.requested_by_name || r.requested_by)}</b> · ${dpFmtTs(r.requested_at)} · expected delivery ${p.expDeliveryDate ? _dmy(p.expDeliveryDate) : '—'}</div>
+        </div>
+        <div class="ml-auto text-right">
+          <div class="text-2xl font-extrabold text-slate-800 tabular-nums">${_poINR(r.total_value)}</div>
+          <div class="text-xs text-slate-400">${(r.total_qty || 0).toLocaleString('en-IN')} units · ${r.line_count} line${r.line_count === 1 ? '' : 's'} · ex-tax</div>
+        </div>
+      </div>
+      ${r.status === 'failed' ? `<div class="mx-6 mb-3 text-sm rounded-lg px-4 py-2.5" style="background:#fff1f2;color:#9f1239;border:1px solid #fecdd3"><b>The PO could not be created</b> — ${escapeHtml(r.create_error || 'unknown error')}. Approve again retries it.</div>` : ''}
+      <div class="overflow-x-auto border-t border-slate-100"><table class="w-full border-collapse">
+        <thead><tr class="bg-slate-50/60"><th class="${th}">SKU</th><th class="${th} text-right">Qty</th><th class="${th} text-right">Unit price</th><th class="${th} text-right">GST</th><th class="${th} text-right">Line total</th></tr></thead>
+        <tbody>${items.map(i => `<tr>
+            <td class="${td} font-semibold">${escapeHtml(i.sku || '')}</td>
+            <td class="${td} text-right tabular-nums">${Number(i.quantity || 0).toLocaleString('en-IN')}</td>
+            <td class="${td} text-right tabular-nums">₹${escapeHtml(String(i.unitPrice))}</td>
+            <td class="${td} text-right tabular-nums">${i.taxRate ? escapeHtml(String(i.taxRate)) + '%' : '—'}</td>
+            <td class="${td} text-right tabular-nums font-semibold">${_poINR(Number(i.quantity || 0) * Number(i.unitPrice || 0))}</td>
+          </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="px-6 py-4 border-t border-slate-100 flex items-center gap-2 flex-wrap" style="background:#f8fafc">
+        <button class="filter-btn text-xs poa-pdf" data-id="${r.id}">📄 Draft PO</button>
+        <span class="ml-auto flex items-center gap-2">
+          <button class="filter-btn poa-reject" data-id="${r.id}" style="color:#be123c;border-color:#fecdd3">Reject</button>
+          <button class="filter-btn-primary poa-approve" data-id="${r.id}" ${mine ? 'disabled title="You drafted this PO — a different approver has to release it" style="opacity:.5;cursor:not-allowed"' : ''}
+              >${r.status === 'failed' ? 'Approve again (retry)' : 'Approve'}</button>
+        </span>
+      </div>
+    </div>`;
+}
+async function poaApprove(id, btn){
+    const r = (_poaData?.pending || []).find(x => x.id === id); if(!r) return;
+    const go = await ecConfirm({
+        title: 'Release this purchase order?',
+        intro: 'Approving creates the REAL purchase order against the supplier — the commitment is made now.',
+        rows: [
+            ['Supplier', r.vendor_name || '—'],
+            ['Reference', r.ref_code || '—'],
+            ['Drafted by', r.requested_by_name || r.requested_by],
+            ['Goods total', _poINR(r.total_value), true],
+        ],
+        confirmText: 'Approve',
+    });
+    if(!go) return;
+    const was = btn.textContent; btn.disabled = true; btn.textContent = 'Creating PO…';
+    try{
+        const rr = await fetch(`/api/po-approvals/${id}/approve`, { method:'POST',
+            headers:{ 'Content-Type':'application/json', ...getAuthHeaders() }, body: '{}' });
+        const out = await rr.json();
+        if(!rr.ok || !out.success) throw new Error(out.error || `Failed (${rr.status})`);
+        await ecResult({
+            title: 'Purchase order created',
+            intro: 'The approval released it — this is what was actually recorded.',
+            rows: [
+                ['PO id', String(out.poId || '—')],
+                ['Landed status', out.statusLabel || '—'],
+                ['Supplier', r.vendor_name || '—'],
+                ['Goods total', _poINR(r.total_value), true],
+            ],
+            note: out.warning || undefined, danger: !!out.warning,
+        });
+        poaLoad(true);
+    }catch(e){
+        showNotification(e.message, true);
+        btn.disabled = false; btn.textContent = was;
+        poaLoad(true);   // a failed create moved the row to 'failed' — show that state
+    }
+}
+function poaReject(id){
+    const r = (_poaData?.pending || []).find(x => x.id === id); if(!r) return;
+    // Rejection wants a reason the buyer will actually read — a small purpose-built modal.
+    const wrap = document.createElement('div');
+    wrap.className = 'fixed inset-0 z-50 flex items-start justify-center p-6 overflow-y-auto';
+    wrap.style.background = 'rgba(15,23,42,.45)';
+    wrap.innerHTML = `<div class="card w-full my-8 p-6" style="background:#fff;max-width:460px" onclick="event.stopPropagation()">
+        <h2 class="text-lg font-bold text-slate-800">Reject this PO draft?</h2>
+        <p class="text-xs text-slate-400 mt-1 mb-3">${escapeHtml(r.vendor_name || '')} · ${escapeHtml(r.ref_code || '')} · ${_poINR(r.total_value)} — nothing is created in EasyEcom.</p>
+        <textarea id="poa-rej-note" class="filter-input w-full" rows="3" placeholder="Why? (the buyer sees this)"></textarea>
+        <div class="flex items-center justify-end gap-2 mt-4">
+          <button class="filter-btn poa-rej-x">Cancel</button>
+          <button class="filter-btn-primary poa-rej-go" style="background:#e11d48;border-color:#e11d48">Reject draft</button>
+        </div></div>`;
+    const close = () => wrap.remove();
+    wrap.addEventListener('click', e => { if(e.target === wrap) close(); });
+    wrap.querySelector('.poa-rej-x').addEventListener('click', close);
+    wrap.querySelector('.poa-rej-go').addEventListener('click', async () => {
+        const btn = wrap.querySelector('.poa-rej-go'); btn.disabled = true; btn.textContent = 'Rejecting…';
+        try{
+            const rr = await fetch(`/api/po-approvals/${id}/reject`, { method:'POST',
+                headers:{ 'Content-Type':'application/json', ...getAuthHeaders() },
+                body: JSON.stringify({ note: wrap.querySelector('#poa-rej-note').value.trim() }) });
+            const out = await rr.json();
+            if(!rr.ok || !out.success) throw new Error(out.error || `Failed (${rr.status})`);
+            close(); showNotification(`Draft #${id} rejected`); poaLoad(true);
+        }catch(e){ showNotification(e.message, true); btn.disabled = false; btn.textContent = 'Reject draft'; }
+    });
+    document.body.appendChild(wrap);
+    wrap.querySelector('#poa-rej-note').focus();
+}
+// The draft opens as a VIEWER popup (user, 2026-08-27) — read it in place, download from inside.
+// The prefetch cache makes this instant; a cache miss (or a still-running prefetch) fetches live.
+async function poaDraftPdf(id, btn){
+    const was = btn ? btn.textContent : '';
+    if(btn){ btn.disabled = true; btn.textContent = 'Preparing…'; }
+    try{
+        const row = (_poaData?.pending || []).concat(_poaData?.recent || []).find(x => x.id === id);
+        let url = (typeof _poaPdfCache[id] === 'string' && _poaPdfCache[id].startsWith('blob:')) ? _poaPdfCache[id] : null;
+        if(!url){
+            const r = await fetch(`/api/po-approvals/${id}/pdf`, { headers: getAuthHeaders() });
+            if(!r.ok){ const d = await r.json().catch(() => ({})); throw new Error(d.error || `Failed (${r.status})`); }
+            url = URL.createObjectURL(await r.blob());
+            _poaPdfCache[id] = url;   // next open is instant too
+        }
+        const wrap = document.createElement('div');
+        wrap.className = 'fixed inset-0 z-50 flex items-start justify-center p-6';
+        wrap.style.background = 'rgba(15,23,42,.55)';
+        wrap.innerHTML = `
+          <div class="card w-full my-2 flex flex-col" style="background:#fff;max-width:940px;height:calc(100vh - 48px)" onclick="event.stopPropagation()">
+            <div class="px-5 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
+              <div>
+                <h2 class="text-base font-bold text-slate-800">Draft PO — ${escapeHtml((row && row.ref_code) || String(id))}</h2>
+                <p class="text-[11px] text-slate-400">${escapeHtml((row && row.vendor_name) || '')}${row && row.status === 'pending' ? ' · pending approval' : ''}</p>
+              </div>
+              <div class="flex items-center gap-2">
+                <button class="filter-btn poa-pv-dl">⬇ Download</button>
+                <button class="poa-pv-x text-slate-400 hover:text-slate-700 text-xl leading-none px-2">&times;</button>
+              </div>
+            </div>
+            <iframe src="${url}" title="Draft PO" style="flex:1;width:100%;border:0;background:#525659"></iframe>
+          </div>`;
+        // The blob URL is NOT revoked on close — the cache owns it (reopen stays instant); pruning
+        // happens in poaPrefetchPdfs when the request leaves the queue.
+        const close = () => { document.removeEventListener('keydown', onKey, true); wrap.remove(); };
+        const onKey = e => { if(e.key === 'Escape'){ e.preventDefault(); close(); } };
+        document.addEventListener('keydown', onKey, true);
+        wrap.addEventListener('click', e => { if(e.target === wrap) close(); });
+        wrap.querySelector('.poa-pv-x').addEventListener('click', close);
+        wrap.querySelector('.poa-pv-dl').addEventListener('click', () => {
+            const a = document.createElement('a');
+            a.href = url; a.download = `PO-${(row && row.ref_code) || id}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+        });
+        document.body.appendChild(wrap);
+    }catch(e){ showNotification(e.message, true); }
+    finally{ if(btn){ btn.disabled = false; btn.textContent = was; } }
+}
+function poaHistory(recent){
+    const c = document.getElementById('poa-history'); if(!c) return;
+    if(!recent.length){ c.innerHTML = '<div class="text-slate-400 text-sm p-6">No decisions yet</div>'; return; }
+    const th = 'px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 whitespace-nowrap bg-slate-50/60';
+    const td = 'px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle whitespace-nowrap';
+    c.innerHTML = `<table class="w-full border-collapse"><thead><tr>
+        <th class="${th}">Request</th><th class="${th}">Supplier</th><th class="${th}">Reference</th>
+        <th class="${th} text-right">Value</th><th class="${th}">Drafted by</th><th class="${th}">Decided by</th>
+        <th class="${th}">When</th><th class="${th}">Outcome</th></tr></thead>
+      <tbody>${recent.map(r => `<tr class="hover:bg-slate-50">
+        <td class="${td} tabular-nums">#${r.id}</td>
+        <td class="${td}"><div class="truncate" style="max-width:180px">${escapeHtml(r.vendor_name || '—')}</div></td>
+        <td class="${td} text-slate-500">${escapeHtml(r.ref_code || '—')}</td>
+        <td class="${td} text-right tabular-nums font-semibold">${_poMoney(r.total_value)}</td>
+        <td class="${td} text-slate-500">${escapeHtml((r.requested_by_name || r.requested_by || '').split('@')[0])}</td>
+        <td class="${td} text-slate-500" title="${escapeHtml(r.decided_by || '')}">${escapeHtml(r.decided_by_name ? r.decided_by_name.trim().split(/\s+/)[0] : (r.decided_by || '—').split('@')[0])}</td>
+        <td class="${td} text-slate-500 tabular-nums">${dpFmtTs(r.decided_at)}</td>
+        <td class="${td}">${r.status === 'created'
+            ? `<span class="px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-100 text-emerald-700">Created — PO ${escapeHtml(String(r.easyecom_po_id || ''))}</span>`
+            : `<span class="px-2 py-0.5 rounded-full text-[11px] font-medium bg-rose-100 text-rose-700" title="${escapeHtml(r.decision_note || '')}">Rejected${r.decision_note ? ' — ' + escapeHtml(String(r.decision_note).slice(0, 40)) : ''}</span>`}</td>
+      </tr>`).join('')}</tbody></table>`;
 }
 
 // ═══════════════ GoKwik PG Reconciliation ═══════════════

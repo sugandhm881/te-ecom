@@ -727,6 +727,313 @@ function check(name, got, want) {
         [/decU\.startsWith\('CONFIRM'\)/.test(waUi), /decU==='CANCEL'\|\|decU==='REJECT'/.test(waUi)],
         [true, true]);
 
+    // -- GRN (Inventory → GRN): the receiving half of the purchase cycle --------------------------
+    // getGrnDetails has the SAME silent-slice trap as the PO endpoint (verified live 2026-08-26:
+    // bare call = 6 GRNs / one week; created_after=2024-01-01 = 67 back to Feb over 14 pages), its
+    // status ids do not match EasyEcom's own doc (live: 2=In Progress, 5=Completed vs documented
+    // 1=CREATED, 3=QC Complete), and it 429s under bursts — hence date param, cursor walk, the
+    // API's own status STRING, and a one-retry ladder.
+    {
+        const gr = fs.readFileSync(path.join(ROOT, 'app/api/grn.js'), 'utf8');
+        const srvG = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+        const htmlG = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+        check('grn: created_after always sent, nextUrl walked, one retry on a burst 429',
+            [/getGrnDetails\?created_after=/.test(gr), /body\.nextUrl/.test(gr),
+             /retrying in 3s/.test(gr)], [true, true, true]);
+        // The frequent-429 fix (user, 2026-08-26 night): a 429 mid-walk retries THAT PAGE with
+        // backoff (the whole-walk retry re-fetched every earlier page, doubling the burst), pages
+        // are paced 150ms apart, and the GRN page reads the PO book through the SHARED poBookCached
+        // instead of walking the same 14 pages the PO page just walked.
+        check('grn: 429s handled per page with pacing, PO book shared between the two dashboards',
+            [/r\.status === 429 && a < 3/.test(gr), /pace the limiter/.test(gr),
+             (poSrc => /r\.status === 429 && a < 3/.test(poSrc) && /function poBookCached/.test(poSrc) && /module\.exports\.poBookCached/.test(poSrc))(fs.readFileSync(path.join(ROOT, 'app/api/purchase_orders.js'), 'utf8')),
+             /poBookCached\(since, !!req\.query\.fresh\)/.test(gr)],
+            [true, true, true, true]);
+        check('grn: status label comes from the API string, never a hardcoded id map',
+            [/g\.grn_status \|\|/.test(gr), /GRN STATUS IDS DO NOT MATCH/.test(gr)], [true, true]);
+        // grn_detail_price is the LINE TOTAL (62/62 non-zero live GRNs), though EasyEcom's doc sample
+        // reads as a unit rate — multiplying by quantity would inflate a 391-unit line 391×.
+        check('grn: grn_detail_price treated as line total, unit rate derived by division',
+            [/IS THE LINE TOTAL, NOT THE UNIT RATE/.test(gr),
+             /lineValue: num\(i\.grn_detail_price\)/.test(gr),
+             /grn_detail_price\) \* num\(i\.received_quantity\)/.test(gr)], [true, true, false]);
+        // "Awaiting receipt" reuses the PO page's own open/dead semantics — one definition, no drift.
+        check('grn: awaiting-receipt reuses the PO book (fetchAllPurchaseOrders + shapePo)',
+            [/require\('\.\/purchase_orders'\)/.test(gr), /p\.isOpen/.test(gr),
+             /module\.exports\.fetchAllPurchaseOrders/.test(fs.readFileSync(path.join(ROOT, 'app/api/purchase_orders.js'), 'utf8'))],
+            [true, true, true]);
+        // A dead PO book degrades the panel, never the GRN list — and it now RETRIES first (it walks
+        // as many pages as the GRN fetch into the same limiter; without the retry it was consistently
+        // the half that died). When it still fails, the KPI card and the pipeline stage show a DASH,
+        // never 0 — "0 units awaited" reads as nothing owed, the wrong reading of "could not check".
+        check('grn: PO-book failure retries, then degrades to a dash — never a fake zero',
+            [/poBookAvailable/.test(gr), /awaiting-receipt panel degraded/.test(gr),
+             /PO book fetch failed, retrying in 3s/.test(gr),
+             /d\.poBookAvailable === false \? '—'/.test(waUi),
+             (waUi.match(/PO book could not be read — hit Refresh/g) || []).length >= 2],
+            [true, true, true, true, true]);
+        check('grn: route mounted and gated by its own view permission',
+            [/app\.use\('\/api', require\('\.\/app\/api\/grn'\)\)/.test(srvG),
+             /\[\/\^\\\/grn\/i, 'grn'\]/.test(srvG)], [true, true]);
+        check('grn: nav below Purchase Order, view shell, deep link, perm catalog entry',
+            [/nav-grn/.test(htmlG), /grn-view/.test(htmlG),
+             /'nav-grn': 'grn'/.test(waUi), /function grnInit/.test(waUi),
+             /\['grn','GRN \(EasyEcom goods receiving\)'\]/.test(waUi)],
+            [true, true, true, true, true]);
+        // The pipeline strip and the Awaiting card show LIVE state — what is still owed does not
+        // depend on the page's date window; an old open PO is exactly the one not to hide.
+        check('grn: pipeline and awaiting figures are live, not filtered by the date window',
+            [/ignores filters/.test(waUi), /LIVE state of the whole book/.test(waUi)], [true, true]);
+        // -- GRN writes (Receive stock): POST /wms/QueueGrnApi, async queue + CheckGrnStatus --------
+        // One endpoint serves both flows (with purchase_order_id = against PO; without = Auto GRN).
+        // The PO-based param table says `vendorId` (code) but BOTH of EasyEcom's own body samples
+        // send numeric snake_case `vendor_id` — the CreatePurchaseOrder trap again; samples win.
+        check('grn write: gated on grn-write, vendor_id snake_case, PO vendor taken from the PO',
+            [/perms\.includes\('grn-write'\)/.test(gr), /vendor_id: vendorId/.test(gr),
+             /vendorId = po\.vendorId \|\| vendorId/.test(gr),
+             /purchase_order_id: poId/.test(gr)], [true, true, true, true]);
+        // A typo'd 6000 against a 600-unit line would create phantom sellable stock — every PO-based
+        // line is held against the PO's PENDING quantity, and a dead PO refuses receipts outright.
+        check('grn write: over-receive and dead-PO receipts are refused before EasyEcom is called',
+            [/is only owed/.test(gr), /is not on PO/.test(gr), /a dead PO cannot receive goods/.test(gr)],
+            [true, true, true]);
+        // The job is ASYNC ({code:200, queueId}); success is judged on code/status AND a queueId, and
+        // CheckGrnStatus is polled so the caller hears what EasyEcom actually said.
+        check('grn write: async queue — never trusts HTTP 200 alone, polls CheckGrnStatus',
+            [/CheckGrnStatus/.test(gr), /body\.code != null \? body\.code : body\.status/.test(gr),
+             /!queueId/.test(gr), /waitForGrnJob/.test(gr)], [true, true, true, true]);
+        // Optional fields are OMITTED when blank (the PO-create lesson: '' becomes a blank batch),
+        // and cost is per-unit — PROVEN on the first live GRN (2355800: 588 × 33.70 → 19,815.60
+        // stored), the opposite reading of getGrnDetails' line-total price, deliberately.
+        check('grn write: blank optionals omitted, per-unit cost reading proven live',
+            [/line\.batch_code = String\(it\.batch\)\.trim\(\)/.test(gr), /PROVEN LIVE 2026-08-26/.test(gr),
+             /588 × 33\.70/.test(gr)], [true, true, true]);
+        // QueueGrnApi reports validation failures as an ARRAY of {SKU, Error} objects (seen live:
+        // "Manufacturing Date is mandatory as the product category is configured with LOT") — fed
+        // raw into the error string it renders "[object Object]". Flattened per SKU; and since these
+        // products are LOT-configured, the Receive form carries a Mfg-date column beside Expiry.
+        check('grn write: EasyEcom array errors flattened readable, mfg date on the form',
+            [/function eeMsgText/.test(gr), /eeMsgText\(body\.message\)/.test(gr),
+             /x\.Error \|\| x\.error/.test(gr),
+             /data-f="mfg"/.test(waUi), /mfg:\/\^/.test(waUi)], [true, true, true, true, true]);
+        check('grn write: Receive UI exists, gated, PO lines prefilled and capped at pending',
+            [/function grnOpenReceive/.test(waUi), /canWriteGrn/.test(waUi),
+             /grnRxLineFromPending/.test(waUi), /the PO is only owed/.test(waUi),
+             /grn-receive/.test(htmlG),
+             /\['grn-write','Receive stock/.test(waUi)], [true, true, true, true, true, true]);
+        // -- GRN document + rich confirmation + MRP auto-fill (user, 2026-08-26 evening) ------------
+        // EasyEcom has NO GRN-document endpoint (probed live: 5 candidates all 404, unlike POs), so
+        // the document is ALWAYS ours — pdfkit, filename GRN-<id>.pdf, and the footer says who made
+        // it. Columns come from ONE edge table (the first render overprinted RATE on AMOUNT) and the
+        // row advances by the WRAPPED height of the product name, not a fixed 15px.
+        check('grn doc: generated PDF route — no EasyEcom original exists, layout self-consistent',
+            [/router\.get\('\/grn\/:grnId\/pdf'/.test(gr), /EASYECOM HAS NO GRN-DOCUMENT ENDPOINT/.test(gr),
+             /filename="GRN-\$\{g\.grnId\}\.pdf"/.test(gr), /heightOfString/.test(gr)],
+            [true, true, true, true]);
+        // After the queue job finishes, the NEW GRN is read back (matched inside an IST-naive string
+        // window — new Date() on EasyEcom's zoneless stamp shifts by the server's timezone) so the
+        // confirmation shows what EasyEcom RECORDED, with the document one click away; the plain
+        // summary stays as the fallback. Every GRN row's expansion also carries the download.
+        check('grn doc: post-create confirmation shows the recorded GRN + download, row button too',
+            [/grn: createdGrn/.test(gr), /IST-NAIVE/.test(gr),
+             /function grnShowCreated/.test(waUi), /function grnDownloadPdf/.test(waUi),
+             /Download GRN document/.test(waUi), /grn-dl/.test(waUi)],
+            [true, true, true, true, true, true]);
+        // The document reproduces EASYECOM'S OWN GRN LAYOUT (user supplied a real portal print of
+        // GRN 2355558): bordered company header, "GRN" band, vendor/PO info block with the ":-"
+        // labels (vendor address + TIN from the RAW vendor master — fetchVendors strips both), the
+        // 14-column grid and the Grand Total band. The "EasyEcom print" portal link was REMOVED on
+        // request — the generated document is now the one download (printGRN stays refused to API
+        // auth: "Not authorised", portal-session-only).
+        check('grn doc: EasyEcom-format document, portal link removed',
+            [/EASYECOM'S OWN GRN LAYOUT/.test(gr), /Vendor TinNo :-/.test(gr),
+             /tax_identification_number/.test(gr), /function rawVendors/.test(gr),
+             /Grand Total:/.test(gr), /Total Quantity:/.test(gr),
+             /app\.easyecom\.io\/wms\/printGRN/.test(waUi)],
+            [true, true, true, true, true, true, false]);
+        // MRP auto-fills from the live product master (probe: master carries mrp) — on PO lines via
+        // pendingItems, in Auto mode when a typed SKU matches skuInfo; never overwrites a typed value.
+        check('grn: MRP auto-fetched from the product master, typed values never overwritten',
+            [/function skuInfoMap/.test(gr), /mrp: \(skuInfo\[/.test(gr),
+             /mrp:i\.mrp != null \? i\.mrp : ''/.test(waUi),
+             /l\.mrp === '' \|\| l\.mrp == null/.test(waUi)], [true, true, true, true]);
+        // Mfg/expiry are MONTH pickers (product dating is month-level, per the user) — YYYY-MM is
+        // expanded to the first of the month on BOTH sides (EasyEcom's own convention: a July-2029
+        // expiry is stored 2029-07-01), so the API stays usable with either form.
+        // Complete GRN (user: "still complete GRN button i need to click on Easyecom — do directly
+        // from our GRN module"): POST /wms/completeGrn is UNDOCUMENTED, found by probing — the one
+        // candidate of 12 answering 405-on-GET. Payload { grn_id, c_id } where c_id is the GRN's own
+        // inwarded_warehouse_c_id ('company_id'/'companyId' answer "Company Id is missing"; the c_id
+        // shape was proven by "Cannot complete GRN as it is already in completed status"). Failures
+        // arrive as HTTP 200 + status:400 (the updatePoStatus trap); gated on grn-write; the button
+        // renders only on not-yet-completed GRNs, with a confirm.
+        check('grn complete: probe-found endpoint, c_id from the GRN itself, gated + confirmed',
+            [/router\.post\('\/grn\/complete'/.test(gr), /grn_id: grnId, c_id: g\.warehouseCid/.test(gr),
+             /warehouseCid: g\.inwarded_warehouse_c_id/.test(gr), /is already \$\{g\.status\}/.test(gr),
+             /function grnCompleteAction/.test(waUi), /grn-cmpl/.test(waUi),
+             /!\/complete\/i\.test\(g\.status\)/.test(waUi)],
+            [true, true, true, true, true, true, true]);
+        // After a complete: a REAL result panel (ecResult, not a vanishing toast), the row flips to
+        // Completed immediately, and the fresh fetch runs SILENTLY — a full-page loader after an
+        // action that already happened reads as a reload (user, 2026-08-26 night).
+        check('grn complete: result panel + optimistic row flip + silent background refresh',
+            [/g\.status = 'Completed'; g\.statusId = 5; grnRender\(_grnData\)/.test(waUi),
+             /grnLoad\(true, true\)/.test(waUi),
+             /async function grnLoad\(fresh, silent\)/.test(waUi),
+             /if\(!silent\) ecLoadingShow/.test(waUi)],
+            [true, true, true, true]);
+        check('grn: mfg/expiry are month pickers, YYYY-MM expanded to first-of-month both sides',
+            [/type="month"[^\n]*data-f="mfg"/.test(waUi), /type="month"[^\n]*data-f="expiry"/.test(waUi),
+             /\^\\d\{4\}-\\d\{2\}\$/.test(waUi), /it\[k\] = String\(it\[k\]\)\.trim\(\) \+ '-01'/.test(gr)],
+            [true, true, true, true]);
+    }
+
+    // -- PO Approvals (maker-checker before EasyEcom) + PO-line enrichment ------------------------
+    // A PO is drafted (po_approvals_ecom), approvers are emailed, and only Approve fires the real
+    // EasyEcom create — through performPoCreate, the SAME implementation as the direct route (which
+    // shrank to an admin escape hatch). Full flow proven without touching EasyEcom: submit → list →
+    // self-approve refused → EE-format draft PDF (with product image) → reject → double-decide
+    // refused (7/7). Separately: EasyEcom sends NO product name on PO lines (and no EAN/HSN on new
+    // SKUs — TE-ABD1 showed all dashes), so lines are enriched from the product master.
+    {
+        const poa = fs.readFileSync(path.join(ROOT, 'app/api/po_approvals.js'), 'utf8');
+        const poSrc = fs.readFileSync(path.join(ROOT, 'app/api/purchase_orders.js'), 'utf8');
+        const htmlA = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+        check('po approvals: one create implementation, direct route is an admin escape hatch',
+            [/async function performPoCreate/.test(poSrc), /module\.exports\.performPoCreate/.test(poSrc),
+             /Purchase orders now go through approval/.test(poSrc),
+             /performPoCreate\(row\.payload, u\.sub\)/.test(poa)], [true, true, true, true]);
+        check('po approvals: maker-checker — requester cannot approve their own PO (admins may)',
+            [/row\.requested_by === u\.sub/.test(poa), /different approver has to release it/.test(poa)],
+            [true, true]);
+        // A failed EE create parks the request on 'failed' with the error recorded — Approve retries;
+        // a half-done approval must never vanish back into pending or disappear.
+        check('po approvals: failed EE create stays actionable',
+            [/status: 'failed'/.test(poa), /create_error/.test(poa)], [true, true]);
+        // ⚠️ NOTIFICATION IS IN-APP ONLY. The email version was removed the day it shipped: the user
+        // wants notifications inside Ecom Central, and the shared sendMail helper AUTO-FILLS THE
+        // REPORT CC LIST when no `cc` is passed, so the "approvers-only" mail leaked to the whole
+        // report audience. po_approvals must never import sendMail again; the channel is the
+        // pending-count poll → nav badge + toast, gated to approvers.
+        check('po approvals: in-app notification only — no mail import, badge + toast + login popup',
+            [/require\('\.\/email_settings'\)/.test(poa) === false, /pending-count/.test(poa),
+             /function poaBadgeTick/.test(waUi), /nav-po-approvals-badge/.test(waUi),
+             /awaiting your approval/.test(waUi),
+             /function poaLoginPopup/.test(waUi), /navigate\('po-approvals'\)/.test(waUi),
+             /nav-po-approvals-badge/.test(htmlA),
+             /approvers have been emailed|notified by email|emailed the moment/.test(waUi) === false],
+            [true, true, true, true, true, true, true, true, true]);
+        // The badge/popup machinery dies WITH the session: _clearSession stops the poll, cancels the
+        // delayed popup timer and removes a visible popup — one fired onto the signed-out page
+        // (user-reported); the popup also re-checks authToken, which _clearSession nulls.
+        check('po approvals: notification cannot outlive the session',
+            [/function poaBadgeStop/.test(waUi), /poaBadgeStop === 'function'\) poaBadgeStop\(\)/.test(waUi),
+             /clearTimeout\(_poaPopupTO\)/.test(waUi), /\|\| !authToken\) return;/.test(waUi)],
+            [true, true, true, true]);
+        // Draft PDF = EasyEcom's OWN PO sheet (from a real EE document): product image, vendor
+        // TIN/address from the raw vendor master, IGST/CGST split by vendor state, EE's quirky
+        // value-in-words ("twenty thousands … point three eight Paise" reproduced exactly), and a
+        // rupee-capable font (Helvetica has no ₹ — the first render printed "¹101.1").
+        check('po approvals: draft PDF is the EE sheet — image, TIN, words, ₹ font fallback',
+            [/product_image_url/.test(poa), /tax_identification_number/.test(poa),
+             /interstate \? `IGST-/.test(poa), /function inrWords/.test(poa),
+             /RUPEE_FONT/.test(poa), /DRAFT — pending approval/.test(poa)],
+            [true, true, true, true, true, true]);
+        // Session EXPIRY lands on the signout page in an expiry voice (amber clock, "Session
+        // expired", why + login button) — never a bare login form with no explanation (user,
+        // 2026-08-27). All three expiry paths route through it: the 6-hour timer, a 401 mid-work,
+        // and a stale token at page open. Manual sign-out resets the page to its thank-you voice.
+        check('session expiry: explained on the signout page, all three paths, no bare login',
+            [/function sessionExpired\(\)/.test(waUi), /SO_MODES/.test(waUi),
+             /Session expired/.test(waUi), /soSetContent\('expired'\)/.test(waUi),
+             /soSetContent\('bye'\)/.test(waUi),
+             (waUi.match(/sessionExpired\(\)/g) || []).length >= 4,
+             /401\) \{ showNotification\("Session expired\."/.test(waUi)],
+            [true, true, true, true, true, true, false]);
+        // Loading is a CENTRED POPUP overlay (user, 2026-08-27: the KPI-cell loader sat off to the
+        // left and read as a broken page); previous content stays dimly visible behind it, and the
+        // overlay always hides again — even on an error (finally).
+        check('loading: centred overlay for PO / GRN / PO Approvals, always hidden again',
+            [/function ecLoadingShow/.test(waUi), /ec-loading-overlay/.test(waUi),
+             /ecLoadingShow\('Loading purchase orders…'\)/.test(waUi),
+             /ecLoadingShow\('Loading goods receipts…'\)/.test(waUi),
+             /ecLoadingShow\('Loading approval queue…'\)/.test(waUi),
+             (waUi.match(/finally\{ (if\(!silent\) )?ecLoadingHide\(\); \}/g) || []).length >= 3],
+            [true, true, true, true, true, true]);
+        // The loader wears the app's dark-premium identity (the welcome-splash card language, not a
+        // bare white box — user: "this is not our standard"), and an expired session RESUMES the
+        // page it interrupted on the next login (permission re-checked; manual sign-out still goes
+        // Home — leaving is a choice).
+        // brandLoader IS the popup now: hooked once, all ~35 dashboards inherit the design with
+        // their own labels; a marker shim + visibility watcher hides the overlay exactly when the
+        // old inline loader used to disappear (content replaced / view left / modal closed).
+        // The LEGACY #global-loader (fetchApiData's overlay) wears the SAME dark card — its old
+        // white design flashed for sub-second API calls before the new overlay took over (user:
+        // "loader design is different… after that new design loader work").
+        // DOI + PO (user, 2026-08-27): (stock + raised-PO pending units) ÷ DRR — the runway once the
+        // open POs land, beside today's DOI. Computed ONCE in buildReorder, shipped to the dashboard
+        // table, the Teams image payload and the fallback card, so all three state the same number.
+        {
+            const inv = fs.readFileSync(path.join(ROOT, 'app/api/inventory.js'), 'utf8');
+            check('inventory: DOI-with-raised-PO computed once, on the page + report image + card',
+                [/\(stock \+ poQty\) \/ drr/.test(inv), /doi_with_po: doiWithPo/.test(inv),
+                 /doi_with_po: r\.doi_with_po/.test(inv),
+                 /r\.doi_with_po\.toFixed\(1\)/.test(inv),
+                 /'DOI \+ PO'/.test(waUi), /doi_with_po==null/.test(waUi)],
+                [true, true, true, true, true, true]);
+        }
+        check('loading: legacy global loader restyled to the same dark card — one design everywhere',
+            [/gl-card/.test(htmlA), /SAME dark-premium card as ecLoadingShow/.test(htmlA),
+             /rgba\(8, 11, 26, 0\.45\)/.test(htmlA), /loader-dot-bounce/.test(htmlA) === false],
+            [true, true, true, true]);
+        check('loading: brandLoader hooked app-wide — marker shim + visibility watcher',
+            [/data-ec-loading/.test(waUi), /_eclWatchStart/.test(waUi),
+             /offsetParent !== null/.test(waUi),
+             /ecLoadingShow\(label\); _eclWatchStart\(\);/.test(waUi)],
+            [true, true, true, true]);
+        check('loading: dark-premium card; expiry resumes the interrupted page on next login',
+            [/eclSpin 1s linear infinite/.test(waUi), /linear-gradient\(165deg,#211d54,#111536 60%,#0b0f26\)[\s\S]{0,400}eclCardIn/.test(waUi),
+             /ec-resume-view/.test(waUi), /VALID_VIEWS\.has\(resume\) && canView\(resume\)/.test(waUi),
+             /page you were on after signing in/.test(waUi)],
+            [true, true, true, true, true]);
+        // The draft opens in a VIEWER popup (iframe on a blob URL, Download inside) — not a direct
+        // download; the approve button says just "Approve"; and the hero's stat gap is INLINE
+        // because gap-10 is not in the prebuilt tailwind.css (stats ran together, user-reported).
+        check('po approvals: draft viewer popup, plain Approve, inline hero gap',
+            [/poa-pv-dl/.test(waUi), /<iframe src="\$\{url\}"/.test(waUi),
+             /'Approve again \(retry\)' : 'Approve'/.test(waUi),
+             /style="gap:44px/.test(waUi)],
+            [true, true, true, true]);
+        // The viewer was blocked by CSP (no frame-src → default-src 'self' refuses blob: iframes)
+        // and a cold open took 6–8 s (sequential vendor/master/image fetches). Fixed: frame-src
+        // allows blob:, the server builds in parallel, and the CLIENT PREFETCHES each pending
+        // draft's PDF at render — the click is instant; cache pruned as requests leave the queue.
+        check('po approvals: blob iframes allowed by CSP, PDFs prefetched for instant open',
+            [/frame-src 'self' blob:/.test(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8')),
+             /function poaPrefetchPdfs/.test(waUi), /_poaPdfCache/.test(waUi),
+             /URL\.revokeObjectURL\(u\)/.test(waUi),
+             /await Promise\.all\(items\.map\(async it =>/.test(poa)],
+            [true, true, true, true, true]);
+        check('po approvals: UI wired — submit path, dashboard, nav, permission',
+            [/\/api\/po-approvals\/submit/.test(waUi), /function poaInit/.test(waUi),
+             /'nav-po-approvals': 'po-approvals'/.test(waUi),
+             /\['po-approvals','PO Approvals/.test(waUi),
+             /nav-po-approvals/.test(htmlA), /po-approvals-view/.test(htmlA),
+             /po-approvals\\\/submit/.test(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8'))],
+            [true, true, true, true, true, true, true]);
+        check('po lines: name/EAN/HSN enriched from the product master (EasyEcom sends none)',
+            [/master enrichment failed/.test(poSrc), /i\.description = m\.product_name/.test(poSrc),
+             /i\.ean = m\.EANUPC/.test(poSrc), /i\.hsn = m\.hsn_code/.test(poSrc)], [true, true, true, true]);
+        // GST for previously-ordered SKUs reads the MASTER's per-product tax_rate first (user, TE-AAD1
+        // showed "no HSN on record" though EasyEcom held everything — and the HSN-chapter guess says
+        // 12% where the configured rate is 5%; a genus is not the product). HSN chapter = fallback only.
+        check('po picker: history rows take GST from the product master, HSN chapter is fallback',
+            [/GST FOR HISTORY ROWS COMES FROM THE PRODUCT MASTER FIRST/.test(poSrc),
+             /const masterTax = m \? pctFromFraction\(m\.tax_rate\) : null;/.test(poSrc),
+             /masterTax != null \? masterTax : gstFromHsn\(hsn\)/.test(poSrc)],
+            [true, true, true]);
+    }
+
     // -- Rejected COD: the customer's written "no" gets its own queue tab -------------------------
     // A tapped REJECT on the MSG91 WhatsApp template writes a CANCEL confirmation; by explicit
     // instruction the tab takes NO automatic action -- no hold, no Shopify cancel -- it exists so the

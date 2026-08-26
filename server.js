@@ -43,6 +43,7 @@ app.enable('trust proxy');
 const CSP = [
     "default-src 'self'",
     "media-src 'self' blob:",          // AI-call recordings play in the order popup (fetch → blob)
+    "frame-src 'self' blob:",          // PDF viewer popups (draft PO) render a fetched blob in an iframe
     "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com data:",
@@ -162,6 +163,12 @@ const _VIEW_PERMS = [
     [/^\/ops-control/i, 'ops-control'],
     [/^\/last-mile/i, 'last-mile'],               // Last-Mile Funnel dashboard (OFD → delivered / RTO), incl. /last-mile/shipment/:awb
     [/^\/purchase-orders/i, 'purchase-orders'],   // Inventory - Purchase Order (EasyEcom PO book)
+    [/^\/grn/i, 'grn'],                           // Inventory - GRN (EasyEcom goods receiving)
+    // PO approvals: drafting rides purchase-orders-write; deciding/viewing rides po-approvals; the
+    // draft PDF serves both (requester previews what the approver sees). Specific rules first.
+    [/^\/po-approvals\/submit/i, 'purchase-orders-write'],
+    [/^\/po-approvals\/\d+\/pdf/i, ['po-approvals', 'purchase-orders-write']],
+    [/^\/po-approvals/i, 'po-approvals'],
     [/^\/ndr-action/i, ['ops-control', 'delivery-perf']],   // NDR reattempt/return — both ops surfaces use it
     // Shared shipment-detail lookup — read-only courier tracking used by the Delivery Performance table, the
     // Silent-RTO & SLA rows, AND the Customer Support "click AWB → live tracking" modal, so allow those views'
@@ -315,6 +322,8 @@ app.use('/api', deliveryReportsRoutes);
 app.use('/api', opsControlRoutes);
 app.use('/api', lastMileRoutes);
 app.use('/api', purchaseOrderRoutes);
+app.use('/api', require('./app/api/grn'));            // Inventory → GRN (EasyEcom goods receiving)
+app.use('/api', require('./app/api/po_approvals'));   // Inventory → PO Approvals (maker-checker before EasyEcom)
 app.use('/api', amazonFbaRoutes);
 app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll

@@ -90,6 +90,12 @@ function buildReorder(rows, caseSizes, openPo = {}, poDetail = {}, poStale = {})
         // Units already on a live PO, and what is STILL needed once those are counted.
         const poQty = Math.max(0, Number(openPo[r.sku]) || 0);
         const netQty = Math.max(0, rawQty - poQty);
+        // DOI BASED ON RAISED PO (2026-08-27, user request): the runway once everything already on a
+        // live PO arrives — (stock + raised-PO pending units) ÷ the same DRR. Today's DOI answers
+        // "how long does what's on the shelf last"; this answers "how long once the open POs land",
+        // which is the number that says whether MORE ordering is needed beyond what's in flight.
+        // Same conventions as `doi`: null when DRR is 0 (no sales → no meaningful days).
+        const doiWithPo = drr > 0 ? Math.round(((stock + poQty) / drr) * 10) / 10 : null;
         const caseSize = caseSizes[r.sku] || null;
         // Round UP to whole cases — off the NET need, since you only buy what the open POs don't cover.
         // Without a known case size we still surface the raw need rather than hiding the SKU — the UI
@@ -98,7 +104,7 @@ function buildReorder(rows, caseSizes, openPo = {}, poDetail = {}, poStale = {})
         return {
             sku: r.sku, product_name: r.product_name, category: r.category,
             warehouse: r.warehouse, location_id: r.location_id,
-            stock, units_sold: sold, drr, doi, status,
+            stock, units_sold: sold, drr, doi, doi_with_po: doiWithPo, status,
             case_size: caseSize, raw_qty: rawQty, order_qty: orderQty,
             open_po: poQty, net_qty: netQty,
             // Which POs make up `open_po`, so a surprising figure can be read rather than queried.
@@ -332,7 +338,7 @@ async function sendInventoryTeamsReport() {
     let img;
     try {
         const reorder = need.map(r => ({
-            sku: r.sku, stock: r.stock, drr: r.drr, doi: r.doi,
+            sku: r.sku, stock: r.stock, drr: r.drr, doi: r.doi, doi_with_po: r.doi_with_po,
             raw_qty: r.raw_qty, open_po: r.open_po || 0, net_qty: r.net_qty,
             case_size: r.case_size || null, cases: r.cases, order_qty: r.order_qty, poCovered: !!r.poCovered,
         }));
@@ -378,7 +384,8 @@ async function sendInventoryTeamsReport() {
                 ],
                 rows: need.map(r => [
                     r.sku,
-                    `${n(r.stock)} · ${r.doi == null ? '—' : r.doi.toFixed(1) + 'd'}`,
+                    // "stock · today's DOI ▸ DOI once raised POs land" — the arrow half only when a PO exists.
+                    `${n(r.stock)} · ${r.doi == null ? '—' : r.doi.toFixed(1) + 'd'}${r.open_po && r.doi_with_po != null ? ' ▸ ' + r.doi_with_po.toFixed(1) + 'd' : ''}`,
                     // Fully covered by an open PO — say so rather than showing a bare 0.
                     r.poCovered ? '✓ on PO' : n(r.net_qty),
                     r.poCovered ? '—' : (r.case_size ? `${n(r.cases)} × ${n(r.case_size)}` : '—'),

@@ -89,7 +89,14 @@ async function fetchAllPurchaseOrders(sinceISO) {
     let pages = 0, truncated = false;
     while (url) {
         if (pages >= PAGE_CAP) { truncated = true; break; }
-        const r = await axios.get(url, { headers, timeout: 30000, validateStatus: () => true });
+        let r = await axios.get(url, { headers, timeout: 30000, validateStatus: () => true });
+        // ⚠️ A 429 MID-WALK RETRIES THIS PAGE, NEVER THE WHOLE WALK (2026-08-26). The old recovery
+        // re-fetched every earlier page too, DOUBLING the burst that tripped the limiter — which is
+        // why "EasyEcom HTTP 429" kept coming back. Backoff grows per attempt; the cursor stays valid.
+        for (let a = 0; r.status === 429 && a < 3; a++) {
+            await new Promise(s => setTimeout(s, 2500 * (a + 1)));
+            r = await axios.get(url, { headers, timeout: 30000, validateStatus: () => true });
+        }
         if (r.status !== 200) throw new Error(`EasyEcom HTTP ${r.status}${typeof r.data === 'string' ? ' — ' + r.data.slice(0, 120) : ''}`);
         const body = r.data || {};
         if (body.code !== 200) throw new Error(body.message || `EasyEcom code ${body.code}`);
@@ -99,8 +106,22 @@ async function fetchAllPurchaseOrders(sinceISO) {
         if (!page.length || !body.nextUrl) break;
         // nextUrl comes back as a PATH ('/wms/V2/...?cursor=…'), so it needs the base prefixed.
         url = String(body.nextUrl).startsWith('http') ? body.nextUrl : base + body.nextUrl;
+        await new Promise(s => setTimeout(s, 150));   // pace the limiter — 14 back-to-back pages is what trips it
     }
     return { rows, pages, truncated };
+}
+
+// The SHAPED PO book behind one short cache, shared with the GRN dashboard — without it the two
+// pages walked the same 14 EasyEcom pages independently within seconds of each other, which is
+// exactly the burst their limiter punishes. `fresh` (the Refresh button) always re-walks.
+let _poBookCache = null;
+const PO_BOOK_TTL = 3 * 60 * 1000;
+async function poBookCached(sinceISO, fresh) {
+    if (!fresh && _poBookCache && _poBookCache.key === sinceISO && Date.now() - _poBookCache.t < PO_BOOK_TTL) return _poBookCache.rows;
+    const { rows } = await fetchAllPurchaseOrders(sinceISO);
+    const shaped = rows.map(shapePo);
+    _poBookCache = { t: Date.now(), key: sinceISO, rows: shaped };
+    return shaped;
 }
 
 // The vendor master. Derived from PO history at first, which only ever knew suppliers we had already
@@ -240,7 +261,7 @@ async function skuCatalogue(pos) {
                 orderCount: 0, prevPrice: null, prevPriceAt: null, priceChanged: false,
                 masterCost: (isFinite(p.cost) && p.cost > 0) ? Number(p.cost) : null,
                 hsn, suggestedTax,
-                taxSource: masterTax != null ? 'EasyEcom product master' : (suggestedTax != null ? `HSN ${hsn}` : null),
+                taxSource: masterTax != null ? 'product master' : (suggestedTax != null ? `HSN ${hsn}` : null),
             };
         })
         .sort((a, b) => a.sku.localeCompare(b.sku));
@@ -250,7 +271,16 @@ async function skuCatalogue(pos) {
         const h = (history[sku] || []).slice().sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
         const prices = [...new Set(h.map(x => x.price))];
         const prev = h.find(x => x.price !== latest[sku].price);   // the last DIFFERENT price, if any
-        const hsn = latest[sku].hsn || null;
+        // ⚠️ GST FOR HISTORY ROWS COMES FROM THE PRODUCT MASTER FIRST (fixed 2026-08-27, user-reported
+        // on TE-AAD1: "no HSN on record" though EasyEcom held everything). Two failures stacked up:
+        // PO lines carry no HSN for newer SKUs, so the HSN-chapter guess had nothing to read — and
+        // even WITH an HSN the chapter guess is a genus, not the product: 30049011 suggests 12% while
+        // TE-AAD1's configured rate is 5% (EasyEcom's own PO prints IGST-5%). The master's per-product
+        // `tax_rate` (a FRACTION) is the configured truth; the HSN chapter stays as the fallback.
+        const m = masterBySku[sku];
+        const hsn = latest[sku].hsn || (m && m.hsn_code) || null;
+        const masterTax = m ? pctFromFraction(m.tax_rate) : null;
+        const suggestedTax = masterTax != null ? masterTax : gstFromHsn(hsn);
         return {
             sku, name: names[sku] || (masterBySku[sku] && masterBySku[sku].product_name) || null,
             // ⚠️ lastPrice is the NET (tax-exclusive) figure — the one CreatePurchaseOrder expects. The
@@ -268,10 +298,10 @@ async function skuCatalogue(pos) {
             prevPriceAt: prev && prev.at ? String(prev.at).slice(0, 10) : null,
             priceChanged: prices.length > 1,
             hsn,
-            // Suggested GST from the HSN chapter. `taxSource` tells the UI (and the buyer) where the
-            // number came from, so an inherited rate is never mistaken for a confirmed one.
-            suggestedTax: gstFromHsn(hsn),
-            taxSource: gstFromHsn(hsn) != null ? `HSN ${hsn}` : null,
+            // `taxSource` tells the UI (and the buyer) where the number came from, so an inherited
+            // rate is never mistaken for a confirmed one.
+            suggestedTax,
+            taxSource: masterTax != null ? 'product master' : (suggestedTax != null ? `HSN ${hsn}` : null),
         };
     }).concat(fresh);
 }
@@ -348,6 +378,23 @@ router.get('/purchase-orders', async (req, res) => {
             fetchVendors().catch(e => { console.warn('[PO] vendor master failed:', e.message); return []; }),
         ]);
         const pos = rows.map(shapePo).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+
+        // ⚠️ PO LINES ARRIVE WITH NO PRODUCT NAME, AND FOR NEWER SKUS NO EAN/HSN EITHER (user-reported
+        // 2026-08-27: TE-ABD1 showed — / — / — on the page while the product master holds all three;
+        // TE-BFW1 had HSN only). EasyEcom simply doesn't copy master fields onto PO lines. Enriched
+        // from the master here — EasyEcom's own value wins whenever it IS present, and a master
+        // failure just leaves the dashes (never blocks the book).
+        try {
+            const bySku = {};
+            (await fetchProductMaster()).forEach(p => { const k = String(p.sku || '').trim(); if (k) bySku[k] = p; });
+            pos.forEach(p => p.items.forEach(i => {
+                const m = bySku[String(i.sku || '').trim()];
+                if (!m) return;
+                if (!i.description) i.description = m.product_name || null;
+                if (!i.ean) i.ean = m.EANUPC || null;
+                if (!i.hsn) i.hsn = m.hsn_code || null;
+            }));
+        } catch (e) { console.warn('[PO] master enrichment failed — line names/EAN/HSN may show dashes:', e.message); }
 
         const open = pos.filter(p => p.isOpen);
         const uniq = (f) => { const c = {}; pos.forEach(p => { const k = f(p); if (k) c[k] = (c[k] || 0) + 1; });
@@ -473,14 +520,11 @@ async function setPoStatus(poId, status, markComplete) {
     } catch (e) { return { ok: false, error: e.message }; }
 }
 
-// POST /api/purchase-orders/create
-// Body mirrors EasyEcom's CreatePurchaseOrder, but validated here so a malformed cart is rejected
-// BEFORE it reaches them — their endpoint returns 200 with a message on some failures, which is exactly
-// the shape that lets a bad write look successful.
-router.post('/purchase-orders/create', async (req, res) => {
-    if (!canWritePo(req)) return denyWrite(res);
+// The ACTUAL EasyEcom write, shared by the direct route below and the PO-APPROVAL flow
+// (po_approvals.js) — one implementation so the two can never drift on validation, the vendor_id
+// trap, the status read-back, or how success is judged. Returns { http, body } for res.status().json().
+async function performPoCreate(b, actorSub) {
     try {
-        const b = req.body || {};
         const vendorId = parseInt(b.vendorId, 10);
         const items = Array.isArray(b.items) ? b.items : [];
         const errs = [];
@@ -500,7 +544,7 @@ router.post('/purchase-orders/create', async (req, res) => {
             const p = Number(it.unitPrice);
             if (!isFinite(p) || p < 0) errs.push(`${n}: unitPrice must be 0 or more`);
         });
-        if (errs.length) return res.status(400).json({ success: false, error: errs.join(' · '), errors: errs });
+        if (errs.length) return { http: 400, body: { success: false, error: errs.join(' · '), errors: errs } };
 
         // ⚠️⚠️ **THE FIELD IS `vendor_id` (snake_case), NOT `vendorId` AS DOCUMENTED.**
         // EasyEcom's own CreatePurchaseOrder sample shows `"vendorId": 100176`, but sending our numeric
@@ -564,11 +608,11 @@ router.post('/purchase-orders/create', async (req, res) => {
         const okCode = body.code === 200 || body.code === 201;
         if (r.status < 200 || r.status >= 300 || !okCode) {
             console.error('[PO create] failed', r.status, JSON.stringify(body).slice(0, 300));
-            return res.status(502).json({ success: false, error: body.message || `EasyEcom HTTP ${r.status}`, easyecom: body });
+            return { http: 502, body: { success: false, error: body.message || `EasyEcom HTTP ${r.status}`, easyecom: body } };
         }
         _poCache = null;                         // the book changed — never serve a stale list after a write
         const poId = body.data && body.data.poId;
-        console.log(`[PO create] poId ${poId} · vendor ${vendorId} · ${payload.items.length} line(s) · by ${(req.user || {}).sub || 'unknown'}`);
+        console.log(`[PO create] poId ${poId} · vendor ${vendorId} · ${payload.items.length} line(s) · by ${actorSub || 'unknown'}`);
 
         // ⚠️ **CreatePurchaseOrder LANDS THE PO ON "Approved" (status 3), NOT "Waiting for approval".**
         // Verified on PO 70 (id 2144985): created straight into status 3, so it would skip the approval
@@ -590,13 +634,28 @@ router.post('/purchase-orders/create', async (req, res) => {
                 console.warn(`[PO create] poId ${poId} landed on Approved (3) — EasyEcom did not honour the requested status`);
             }
         }
-        res.json({ success: true, poId,
+        return { http: 200, body: { success: true, poId,
             status: landedStatus, statusLabel: landedStatus ? statusLabel(landedStatus) : null,
-            warning: statusWarning, message: body.message || 'Purchase order created', easyecom: body });
+            warning: statusWarning, message: body.message || 'Purchase order created', easyecom: body } };
     } catch (e) {
         console.error('[PO create]', e.message);
-        res.status(500).json({ success: false, error: e.message });
+        return { http: 500, body: { success: false, error: e.message } };
     }
+}
+
+// POST /api/purchase-orders/create — the DIRECT write. ⚠️ Since the PO-APPROVAL flow went in
+// (2026-08-27), every PO is meant to travel submit → approve → create; this route stays only as an
+// ADMIN escape hatch (a broken approval flow must never mean nobody can buy stock). Non-admins are
+// pointed at the approval flow — holding purchase-orders-write now means "may SUBMIT for approval".
+router.post('/purchase-orders/create', async (req, res) => {
+    if (!canWritePo(req)) return denyWrite(res);
+    const u = req.user || {};
+    const isAdmin = (u.role === undefined && u.permissions === undefined) || u.role === 'admin'
+        || (Array.isArray(u.permissions) && u.permissions.includes('*'));
+    if (!isAdmin) return res.status(400).json({ success: false,
+        error: 'Purchase orders now go through approval — submit it from the New PO form and an approver will release it to EasyEcom.' });
+    const out = await performPoCreate(req.body || {}, u.sub);
+    res.status(out.http).json(out.body);
 });
 
 // POST /api/purchase-orders/status   { poId, status, markComplete }
@@ -887,3 +946,12 @@ async function openPoQtyBySku({ days = DEFAULT_LOOKBACK_DAYS, fresh = false } = 
 
 module.exports = router;
 module.exports.openPoQtyBySku = openPoQtyBySku;
+// Reused by the GRN dashboard so "awaiting receipt" can never disagree with this page's own
+// open/dead/received semantics.
+module.exports.fetchAllPurchaseOrders = fetchAllPurchaseOrders;
+module.exports.shapePo = shapePo;
+module.exports.poBookCached = poBookCached;   // shared with the GRN page — one walk serves both
+module.exports.performPoCreate = performPoCreate;   // the PO-approval flow fires this on Approve
+module.exports.canWritePo = canWritePo;
+module.exports.fetchVendors = fetchVendors;   // the GRN Receive form's supplier picker (Auto-GRN mode)
+module.exports.fetchProductMaster = fetchProductMaster;   // GRN form's MRP/name auto-fill (10-min in-process cache)
