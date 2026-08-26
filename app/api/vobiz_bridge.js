@@ -82,6 +82,7 @@ Order: ${s.ctx.product || 'their order'} for Rs.${s.ctx.amount || ''}. Customer 
 ${purpose.objectives}
 If the customer indicates IN ANY WAY that they prefer or only understand another language (a direct ask, or statements like they only know Bengali), switch to that language IMMEDIATELY and continue the whole call in it.
 TONE: courteous, professional and calm from the greeting to the goodbye — a trained customer-care executive, never a friend. No slang, no jokes, no cheeky or over-familiar phrases (never things like \u0905\u0930\u0947 \u0935\u093e\u0939, \u0915\u094d\u092f\u093e \u092c\u093e\u0924 \u0939\u0948, \u091a\u093f\u0932, boss, dear). Warmth comes from politeness, not casualness.
+CALL SCREENING: some phones answer with an automated screening assistant that asks for your name and the reason for the call (usually in English: "your name and reason for calling", "please stay on the line"). When you hear that: reply in the SAME language the assistant used, with ONE short sentence only — "This is ${sp.name} from The Element, calling ${s.ctx.firstName} about their order confirmation." Then stop speaking and wait silently for the real person; never speak stage directions. Do NOT ask the order-confirmation question to the assistant, and do NOT repeat yourself to it. When the real customer then speaks (a hello or greeting), start fresh with your normal greeting and run the call normally.
 CONFIRMATION DISCIPLINE: sounds like hmm / haan-haan WHILE you are still explaining are listening signals, NOT confirmation. A confirmation counts ONLY as a clear affirmative (जी हाँ / हाँ / yes) given AFTER you finish asking the confirm question. If the reply is unclear or just a hum, politely ask once more for a clear हाँ या ना — never assume agreement.
 SPOKEN DELIVERY RULES (your words go DIRECTLY to a voice synthesizer):
 - Respond ONLY in ${langName}. Max 2 short sentences per turn. Only speakable words: no emoji, symbols, dashes, brackets, quotes or lists.
@@ -102,6 +103,7 @@ function sanitizeReply(t) {
 }
 function toSpokenText(t) {
     return String(t || '')
+        .replace(/\([^)]{0,80}\)/g, ' ')          // stage directions like (wait patiently) are never speech
         .replace(/[—–]/g, ', ')
         .replace(/["“”‘’'`]/g, '')
         .replace(/[()\[\]{}<>#*_~^|\\\/]/g, ' ')
