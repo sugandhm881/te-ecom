@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// EcomBot — a real Microsoft Teams bot (Azure Bot Service, Single Tenant).
+// Pravidhi Bot (Teams display name "Pravidhi"; formerly EcomBot) — a real Microsoft Teams bot (Azure Bot Service, Single Tenant).
 //
 // WHY THIS EXISTS. Teams gave us three half-solutions and each hit a wall:
 //   • Graph polling      → Microsoft gates the Teams MESSAGE APIs behind a protected-API approval;
@@ -152,7 +152,7 @@ async function sendToChannel(target, activity) {
         const { data: any } = await supabase.from('teams_bot_channels_ecom')
             .select('service_url').order('updated_at', { ascending: false }).limit(1);
         row = (any && any[0]) || null;
-        if (!row) throw new Error(`no serviceUrl known yet — install EcomBot in a team and @mention it once so it learns the tenant endpoint`);
+        if (!row) throw new Error(`no serviceUrl known yet — install the Pravidhi bot in a team and @mention it once so it learns the tenant endpoint`);
     }
     const token = await botToken();
     const auth = { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 20000, validateStatus: () => true };
@@ -185,7 +185,7 @@ async function replyToActivity(activity, text) {
     });
 }
 
-// Strip the "<at>EcomBot</at>" mention (and any HTML) so the command is the whole message — the
+// Strip the "<at>Pravidhi</at>" mention (and any HTML) so the command is the whole message — the
 // approval parser requires that, so leaving the bot name in makes every command unrecognised.
 function plainCommand(activity) {
     let t = String(activity.text || '');

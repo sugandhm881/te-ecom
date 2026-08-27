@@ -254,7 +254,7 @@ router.get('/docpharma-inventory/report.pdf', async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename=inventory-report${per ? `_${fromStr}_to_${toStr}` : ''}.pdf`);
         doc.pipe(res);
         const drawHeader = () => {
-            const logo = ['../static/assets/te-logo.png', '../static/assets/ecom-logo.png'].map(p => path.join(__dirname, p)).find(fs.existsSync);
+            const logo = ['../static/assets/te-logo.png', '../static/assets/pravidhi-icon.png'].map(p => path.join(__dirname, p)).find(fs.existsSync);
             if (logo) doc.image(logo, M, 22, { width: 54 });
             doc.font('Helvetica-Bold').fontSize(15).fillColor([34, 44, 67]).text('Inventory Report — DocPharma', logo ? 90 : M, 26);
             doc.font('Helvetica').fontSize(9).fillColor([120, 120, 120]).text('The Element  ·  Shifupro Technologies Pvt Ltd', logo ? 90 : M, 45);

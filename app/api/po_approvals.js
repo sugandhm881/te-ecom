@@ -50,7 +50,7 @@ const isoDate = s => /^\d{4}-\d{2}-\d{2}$/.test(String(s || '').trim());
 // mail went to the whole report audience. Lesson for every future sendMail call: pass `cc: []`
 // explicitly unless the report CC list is genuinely intended.
 // The in-app channel: approvers' dashboards poll GET /po-approvals/pending-count (below) — a badge
-// on the PO Approvals nav item + a toast when the count rises. Nothing leaves Ecom Central.
+// on the PO Approvals nav item + a toast when the count rises. Nothing leaves Pravidhi.
 router.get('/po-approvals/pending-count', async (req, res) => {
     try {
         const { data, error } = await supabase.from('po_approvals_ecom')

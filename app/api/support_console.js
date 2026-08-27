@@ -1,4 +1,4 @@
-// Customer Support Console — port of the standalone Support Console app into Ecom Central.
+// Customer Support Console — port of the standalone Support Console app into Pravidhi.
 // Reads the SAME Supabase tables/views that app used: order_buckets (view — the per-order bucket
 // engine), order_notes, call_logs, escalation_contacts, undelivered_tracking, msg91_messages,
 // tracking_run_lock, profiles. Auth/roles come from OUR portal (JWT + permissions), not Supabase auth:

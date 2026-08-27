@@ -1,4 +1,4 @@
-// Builds the EcomBot Teams app package: manifest.json + the two icons Teams requires.
+// Builds the Pravidhi Teams bot app package: manifest.json + the two icons Teams requires.
 //
 // The icons are generated rather than checked in as binaries so the brand colour and the App ID live
 // in ONE place (here and .env) — a mismatch between the manifest's botId and the real Azure app is
@@ -139,15 +139,17 @@ function resize(src, sw, sh, dw, dh) {
     return out;
 }
 
-const INDIGO = [79, 70, 229, 255];      // #4F46E5 — the dashboard's accent
+const INDIGO = [15, 23, 42, 255];       // #0F172A — the sidebar ground the gradient प sits on
 const WHITE = [255, 255, 255, 255];
 
 // Colour icon: 192x192. Uses the real brand logo when one is available, falling back to a drawn "E"
 // so the build never breaks just because artwork is missing.
-//   teams-app/logo-source.png   ← drop a square PNG here to override
-//   app/static/assets/ecom-logo.png ← otherwise the dashboard logo is used
+//   teams-app/logo-source.png        ← the sidebar mark: gradient प (#6366f1→#a78bfa) on the #0f172a
+//                                      ground, full-bleed (see pravidhi-lockup-dark.svg for the same
+//                                      mark) — Teams rounds colour icons itself
+//   app/static/assets/pravidhi-icon.png ← otherwise the dashboard icon is used
 let colour = null;
-const SOURCES = [path.join(__dirname, 'logo-source.png'), path.join(__dirname, '..', 'app', 'static', 'assets', 'ecom-logo.png')];
+const SOURCES = [path.join(__dirname, 'logo-source.png'), path.join(__dirname, '..', 'app', 'static', 'assets', 'pravidhi-icon.png')];
 for (const src of SOURCES) {
     if (!fs.existsSync(src)) continue;
     try {
@@ -176,11 +178,26 @@ if (!colour) {
 
 // Outline icon: 32x32, TRANSPARENT with a flat white glyph. Teams tints this one; a coloured or
 // opaque-background outline icon renders as a grey box in the channel rail.
-const outline = canvas(32, 32, null);
-rect(outline, 32, 9, 7, 5, 18, WHITE);
-rect(outline, 32, 9, 7, 15, 4, WHITE);
-rect(outline, 32, 9, 14, 12, 4, WHITE);
-rect(outline, 32, 9, 21, 15, 4, WHITE);
+//   teams-app/outline-source.png ← the white प glyph on transparent (512x512), downscaled here
+let outline = null;
+const OUTLINE_SRC = path.join(__dirname, 'outline-source.png');
+if (fs.existsSync(OUTLINE_SRC)) {
+    try {
+        const img = decodePng(fs.readFileSync(OUTLINE_SRC));
+        outline = resize(img.rgba, img.width, img.height, 32, 32);
+        // Force pure white so Teams' tint has a clean mask; only the alpha carries the shape.
+        for (let i = 0; i < 32 * 32; i++) { outline[i * 4] = outline[i * 4 + 1] = outline[i * 4 + 2] = 255; }
+        console.log('outline icon: from teams-app/outline-source.png');
+    } catch (e) { console.warn('could not use outline-source.png: ' + e.message); }
+}
+if (!outline) {
+    outline = canvas(32, 32, null);
+    rect(outline, 32, 9, 7, 5, 18, WHITE);
+    rect(outline, 32, 9, 7, 15, 4, WHITE);
+    rect(outline, 32, 9, 14, 12, 4, WHITE);
+    rect(outline, 32, 9, 21, 15, 4, WHITE);
+    console.log('outline icon: drawn fallback');
+}
 
 // ── manifest ─────────────────────────────────────────────────────────────────────────────────────
 // botId MUST equal the Azure Bot's Microsoft App ID. Read from .env so the two cannot drift.
@@ -195,7 +212,7 @@ if (!/^[0-9a-f-]{36}$/i.test(appId)) {
 const manifest = {
     $schema: 'https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json',
     manifestVersion: '1.16',
-    version: '1.0.1',
+    version: '1.1.0',           // bumped for the Pravidhi rename — Teams only picks up a manifest with a higher version
     id: appId,
     packageName: 'skin.theelement.ecomcentral',
     developer: {
@@ -205,12 +222,12 @@ const manifest = {
         termsOfUseUrl: 'https://dashboard.theelement.skin',
     },
     icons: { color: 'color.png', outline: 'outline.png' },
-    name: { short: 'EcomBot', full: 'Ecom Central Bot' },
+    name: { short: 'Pravidhi', full: 'Pravidhi Bot' },
     description: {
-        short: 'Ops reports and approvals for Ecom Central.',
-        full: 'Posts DocPharma, inventory and finance reports into Teams, and takes approvals back — reply yes, no or rejected to act on whatever is pending.',
+        short: 'Ops reports and approvals from Pravidhi.',
+        full: 'Posts operations, inventory and finance reports into Teams, and takes approvals back — reply yes, no or rejected to act on whatever is pending.',
     },
-    accentColor: '#4F46E5',
+    accentColor: '#0F172A',
     bots: [{
         botId: appId,
         scopes: ['team'],
@@ -219,7 +236,7 @@ const manifest = {
         commandLists: [{
             scopes: ['team'],
             commands: [
-                { title: 'rejected', description: 'Run the DocPharma → warehouse check now' },
+                { title: 'rejected', description: 'Run the courier → warehouse rejected-shipment check now' },
                 { title: 'yes', description: 'Approve whatever is pending (Amazon reviews / Tally push)' },
                 { title: 'no', description: 'Reject whatever is pending' },
             ],
@@ -236,4 +253,4 @@ fs.writeFileSync(path.join(__dirname, 'manifest.json'), JSON.stringify(manifest,
 console.log('Built teams-app/: manifest.json, color.png (192x192), outline.png (32x32)');
 console.log(`botId matches .env TEAMS_BOT_APP_ID (${appId.slice(0, 8)}…)`);
 console.log('\nZip it (the three files must be at the ROOT of the zip, not inside a folder):');
-console.log('  Compress-Archive -Path "teams-app\\manifest.json","teams-app\\color.png","teams-app\\outline.png" -DestinationPath "teams-app\\EcomBot.zip" -Force');
+console.log('  Compress-Archive -Path "teams-app\\manifest.json","teams-app\\color.png","teams-app\\outline.png" -DestinationPath "teams-app\\Pravidhi.zip" -Force');

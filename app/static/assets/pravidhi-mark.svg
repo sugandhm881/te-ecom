@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="12 10 88 100" width="88" height="100">
+  <!-- Pravidhi mark, direction B: a geometric Devanagari "प" — first letter of प्रविधि — hanging
+       from its shirorekha. Stroke 14 throughout. -->
+  <defs><linearGradient id="pvg" gradientUnits="userSpaceOnUse" x1="0" y1="104" x2="0" y2="17"><stop offset="0" stop-color="#312e81"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs>
+  <path d="M18 24 H94 M80 24 V104 M54 24 A22 22 0 0 0 54 68 H80" fill="none" stroke="url(#pvg)" stroke-width="14"/>
+</svg>

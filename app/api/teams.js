@@ -89,7 +89,7 @@ function tableToCard(b) {
 // Native Adaptive Card 1.5 `Table` — real cells with real grid lines.
 //
 // The ColumnSet version above exists only because the Workflows connector pins the card schema to
-// 1.4, where `Table` does not exist. EcomBot is not bound by that: a bot sends the card itself, so it
+// 1.4, where `Table` does not exist. The Pravidhi bot is not bound by that: a bot sends the card itself, so it
 // can declare 1.5 and get borders, proper cell padding and header styling for free. The ColumnSet
 // path is still used for the WEBHOOK fallback, which is still 1.4 — hence two renderers rather than
 // replacing one with the other.
@@ -180,7 +180,7 @@ function slackToCardBody(payload, rich = false) {
 // The Slack-blocks → OpenUrl converter was removed with them, so Slack-derived URL buttons do not
 // come back either. (If buttons are ever wanted again, re-enable in this one function.)
 function buildAdaptiveCard(payload, opts = {}) {
-    // `rich` = sent by EcomBot, which can declare schema 1.5 and therefore use the native Table
+    // `rich` = sent by the Pravidhi bot, which can declare schema 1.5 and therefore use the native Table
     // element with real grid lines. The webhook path must stay on 1.4 (the Workflows connector pins
     // it) and falls back to the ColumnSet imitation.
     const rich = !!opts.rich;
@@ -249,7 +249,7 @@ async function postTeams(webhookUrl, payload, opts = {}) {
     const card = buildAdaptiveCard(payload, opts);
     if (!card) return false;
 
-    // Prefer EcomBot when we can: the card then comes from the bot's own identity instead of the
+    // Prefer the Pravidhi bot when we can: the card then comes from the bot's own identity instead of the
     // generic "Workflows" sender, and the bot works in PRIVATE channels where an incoming webhook
     // cannot be created at all. Falls back to the webhook whenever the bot is not configured, has
     // never seen that channel (no serviceUrl learned yet), or errors — so this can only ever add a
@@ -310,7 +310,7 @@ const TARGETS = {
 
 // GET /api/teams/routing — which delivery path each report will actually take, WITHOUT posting anything.
 // A report silently falling back to the Workflows webhook is invisible in Teams apart from the sender
-// name, so this answers "is it really coming from EcomBot?" in one call instead of waiting for a cron.
+// name, so this answers "is it really coming from the Pravidhi bot?" in one call instead of waiting for a cron.
 router.get('/teams/routing', (req, res) => {
     let botOn = false;
     try { botOn = require('./teams_bot').botEnabled(); } catch (_) { /* bot module absent → webhook only */ }
@@ -340,7 +340,7 @@ router.post('/teams/test', async (req, res) => {
     const via = (botOn && channelId) ? 'bot' : 'webhook';
     const ok = await postTeams(url, { blocks: [
         { type: 'header', text: { type: 'plain_text', text: '✅ Teams webhook test' } },
-        { type: 'section', text: { type: 'mrkdwn', text: `This is a *test* card from Ecom Central for the *${target}* channel, sent via *${via === 'bot' ? 'EcomBot' : 'the Workflows webhook'}*. If you can see this, reports will arrive here.` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `This is a *test* card from Pravidhi for the *${target}* channel, sent via *${via === 'bot' ? 'the Pravidhi bot' : 'the Workflows webhook'}*. If you can see this, reports will arrive here.` } },
         { type: 'context', elements: [{ type: 'mrkdwn', text: new Date().toLocaleString('en-IN') }] }
     ] });
     res.json({ success: ok, target, via, channel_id: channelId });

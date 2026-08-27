@@ -139,7 +139,7 @@ const { tokenRequired: _apiAuth, requirePermission } = require('./app/auth');
 // /tally/bridge/* is the Tally bridge agent — a headless script on the finance PC, so it holds no JWT.
 // It authenticates with a constant-time X-Bridge-Key compare inside app/api/tally.js (which refuses
 // every request outright when TALLY_BRIDGE_KEY is unset).
-// `/bot/*` is the EcomBot (Azure Bot Service) messaging endpoint. It carries a MICROSOFT-issued JWT,
+// `/bot/*` is the Pravidhi Teams bot (Azure Bot Service) messaging endpoint. It carries a MICROSOFT-issued JWT,
 // not one of ours, so our gate must let it through — teams_bot.js then verifies that token against
 // Microsoft's published signing keys and requires audience == our App ID before acting on anything.
 // ONLY the messaging endpoint is public — `/bot/health` reports configuration and stays behind our
@@ -340,9 +340,12 @@ app.use('/api', require('./app/api/tally_bank').router);      // Finance → ban
 // Admin → Zone Mapping: upload Kwikship's pincode→zone sheet and re-derive `zone` on Kwikship
 // shipments from it. The router gates itself with tokenRequired + requireAdmin.
 app.use('/api', require('./app/api/zone_mapping'));
-// EcomBot — the Teams bot messaging endpoint (POST /api/bot/messages) + /api/bot/health.
+// Pravidhi Teams bot — the messaging endpoint (POST /api/bot/messages) + /api/bot/health.
 // Public in PUBLIC_API above because it authenticates with Microsoft's own JWT, verified inside.
 app.use('/api', require('./app/api/teams_bot'));
+// Teams app updater — Settings card that publishes teams-app/Pravidhi.zip to the org catalog and
+// upgrades the installed bot in every team via Graph (admin-only, device-code sign-in inside).
+app.use('/api', require('./app/api/teams_app').router);
 app.use('/api', docpharmaReconRoutes);
 app.use('/api', rapidshypReconRoutes);
 app.use('/api', kwikshipReconRoutes);

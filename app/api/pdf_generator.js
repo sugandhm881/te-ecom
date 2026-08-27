@@ -28,7 +28,7 @@ class PDFReport {
     }
 
     drawHeader() {
-        const logoPath = path.join(__dirname, '../static/assets/ecom-logo.png');
+        const logoPath = path.join(__dirname, '../static/assets/pravidhi-icon.png');
         
         // Image or Fallback Text
         if (fs.existsSync(logoPath)) {
@@ -36,7 +36,7 @@ class PDFReport {
             this.doc.image(logoPath, 28, 22, { width: 28 });
         } else {
             this.doc.font('Helvetica-Bold').fontSize(16).fillColor('black')
-                .text('Ecom Central', 28, 22, { align: 'left' });
+                .text('Pravidhi', 28, 22, { align: 'left' });
         }
 
         // Title

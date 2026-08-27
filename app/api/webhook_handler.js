@@ -434,8 +434,8 @@ router.post('/teams', async (req, res) => {
         || (b.message && b.message.from?.user?.displayName) || 'Teams').trim();
     const id = String(b.id || b.messageId || (b.message && b.message.id) || '').trim() || null;
 
-    // ⚠️ TRAP: an Outgoing Webhook message arrives as "<at>EcomBot</at> rejected". Plain tag-stripping
-    // leaves "EcomBot rejected", and parseApproval requires the command to be the WHOLE message — so
+    // ⚠️ TRAP: an Outgoing Webhook message arrives as "<at>Pravidhi</at> rejected". Plain tag-stripping
+    // leaves "Pravidhi rejected", and parseApproval requires the command to be the WHOLE message — so
     // every single command would be ignored. Drop the mention ELEMENT (tag AND its text) first, then
     // strip whatever HTML is left, exactly as the Graph path does.
     const text = String(rawText)

@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ecom Central</title>
-<link rel="icon" type="image/png" href="/static/assets/ecom-logo.png">
+<title>Pravidhi</title>
+<link rel="icon" type="image/png" href="/static/assets/pravidhi-icon.png">
 <link rel="stylesheet" href="/static/tailwind.css"><!-- pre-built Tailwind — replaces the runtime cdn.tailwindcss.com JIT compiler (huge per-render cost) -->
 <link rel="stylesheet" href="/static/smooth.css?v=2026-08-19b"><!-- motion/polish layer — smoother popups/loaders/transitions on the SAME original colours -->
 <link rel="stylesheet" href="/static/accent.css?v=2026-07-29a"><!-- accent recolour: indigo → login/welcome violet gradient (everything else unchanged) -->
@@ -122,7 +122,7 @@
         linear-gradient(120deg, #131c33 0%, #0f172a 46%, #131a2e 100%);
         padding: 30px 0 30px; border-bottom: 1px solid #1e293b; }
     .home-band-in { max-width: 1100px; margin: 0 auto; padding: 0 32px; display: flex; align-items: center; gap: 18px; }
-    .home-logo { width: 52px; height: 52px; flex: none; border-radius: 14px; background: #fff; padding: 5px;
+    .home-logo { width: 52px; height: 52px; flex: none; border-radius: 14px; padding: 0;
         box-shadow: 0 10px 26px -10px rgba(0,0,0,.75), 0 0 0 1px rgba(255,255,255,.10); }
     .home-band-txt { min-width: 0; }
     #home-greet { margin: 0; font-size: 29px; font-weight: 700; letter-spacing: -.035em; color: #fff;
@@ -591,7 +591,7 @@
     .ec-confirm-icon.is-danger { background: #fff1f2; color: #e11d48; }
     /* Branded mark for confirmations of something that SUCCEEDED — a glyph in a coloured circle reads as
        a status badge, and a red one reads as an error even when the action worked. */
-    .ec-confirm-logo { flex: none; width: 42px; height: 42px; border-radius: .7rem; overflow: hidden; background: #fff; box-shadow: 0 2px 10px -2px rgba(79,70,229,.35); display: flex; align-items: center; justify-content: center; }
+    .ec-confirm-logo { flex: none; width: 42px; height: 42px; border-radius: .7rem; overflow: hidden; box-shadow: 0 2px 10px -2px rgba(79,70,229,.35); display: flex; align-items: center; justify-content: center; }
     .ec-confirm-logo img { width: 100%; height: 100%; object-fit: contain; }
     .ec-confirm-rows { margin: 0 1.35rem; border: 1px solid #e2e8f0; border-radius: .6rem; overflow: hidden; }
     .ec-confirm-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; padding: .5rem .75rem; font-size: .82rem; color: #64748b; }
@@ -744,8 +744,8 @@
   <div class="gl-card">
     <div style="position:relative;width:64px;height:64px;flex:none;">
       <div class="loader-ring"></div>
-      <img id="loader-logo" src="/static/assets/ecom-logo.png" alt="Loading"
-           style="position:relative;width:64px;height:64px;border-radius:18px;background:#fff;box-shadow:0 18px 45px rgba(99,102,241,.5);">
+      <img id="loader-logo" src="/static/assets/pravidhi-icon.png" alt="Loading"
+           style="position:relative;width:64px;height:64px;border-radius:18px;box-shadow:0 18px 45px rgba(99,102,241,.5);">
     </div>
     <div style="display:flex;flex-direction:column;min-width:0;">
       <p class="gl-eye">Please wait</p>
@@ -762,8 +762,8 @@
   #login-view{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:1.5rem;overflow:hidden;color:#fff;background:radial-gradient(1200px 620px at 50% -12%,#241d5c 0%,#14173a 48%,#060819 100%)}
   #login-view .lv-orb{position:absolute;border-radius:50%;filter:blur(64px);opacity:.5;animation:lv-float 6s ease-in-out infinite}
   #login-view .lv-card{position:relative;width:100%;max-width:420px;padding:40px 40px 30px;border-radius:26px;background:linear-gradient(165deg,#211d54,#111536 60%,#0b0f26);border:1px solid rgba(129,140,248,.28);box-shadow:0 40px 90px rgba(49,46,129,.55),inset 0 1px 0 rgba(255,255,255,.06);animation:lv-cardin .55s cubic-bezier(.2,.9,.25,1.1) both}
-  #login-view .lv-logo{width:64px;height:64px;margin:0 auto 18px;border-radius:18px;background:#fff;display:grid;place-items:center;box-shadow:0 18px 44px rgba(99,102,241,.5);animation:lv-logoin .8s cubic-bezier(.2,.85,.25,1) both}
-  #login-view .lv-logo img{width:40px;height:40px;object-fit:contain}
+  #login-view .lv-logo{width:64px;height:64px;margin:0 auto 18px;border-radius:18px;display:grid;place-items:center;box-shadow:0 18px 44px rgba(99,102,241,.5);animation:lv-logoin .8s cubic-bezier(.2,.85,.25,1) both}
+  #login-view .lv-logo img{width:64px;height:64px;border-radius:18px;object-fit:cover}
   #login-view h1{margin:0;text-align:center;font-size:1.6rem;font-weight:800;letter-spacing:-.02em;background:linear-gradient(90deg,#e0e7ff,#a78bfa 45%,#818cf8 70%,#e0e7ff);-webkit-background-clip:text;background-clip:text;color:transparent;animation:lv-rise .5s ease .2s both}
   #login-view .lv-tag{margin:.55rem 0 0;text-align:center;font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;color:#a5b4fc;font-weight:600;animation:lv-rise .5s ease .3s both}
   #login-view form:not(.hidden){display:flex;flex-direction:column;gap:14px;margin-top:1.7rem;animation:lv-rise .45s ease .4s both}
@@ -800,8 +800,8 @@
     <div class="lv-orb" style="width:360px;height:360px;top:-90px;left:-70px;background:#6366f1"></div>
     <div class="lv-orb" style="width:320px;height:320px;bottom:-110px;right:-60px;background:#a855f7;opacity:.4;animation-delay:-3s"></div>
     <div class="lv-card">
-        <div class="lv-logo"><img src="/static/assets/ecom-logo.png" alt="Ecom Central"></div>
-        <h1>Sign in to Ecom Central</h1>
+        <div class="lv-logo"><img src="/static/assets/pravidhi-icon.png" alt="Pravidhi"></div>
+        <h1>Sign in to Pravidhi</h1>
         <p class="lv-tag">One Stop Solution</p>
 
         <form id="login-form" onsubmit="return false;">
@@ -897,7 +897,7 @@
         </div>
         <p class="so-eye" id="so-eye">Session ended</p>
         <h1 class="so-title" id="so-title">Signed out successfully</h1>
-        <p class="so-sub" id="so-sub">Thanks for using <b>Ecom Central</b>. See you again soon.</p>
+        <p class="so-sub" id="so-sub">Thanks for using <b>Pravidhi</b>. See you again soon.</p>
         <button id="signout-login-btn" class="so-btn">Click here to log in</button>
         <p class="so-foot" id="so-foot">You'll return to your home dashboard after signing in.</p>
     </div>
@@ -910,8 +910,7 @@
 
     <aside id="app-sidebar" class="w-64 bg-[#0f172a] text-slate-300 flex flex-col border-r border-slate-800 z-50 shrink-0">
         <div class="h-16 flex items-center px-6 border-b border-slate-800 bg-[#0f172a]">
-            <img src="/static/assets/ecom-logo.png" class="w-8 h-8 rounded-lg">
-            <span class="ml-3 text-white font-bold text-lg tracking-tight">Ecom Central</span>
+            <img src="/static/assets/pravidhi-lockup-dark.svg" alt="Pravidhi" style="height:34px;width:auto;display:block">
         </div>
 
         <!-- Nav search — filters the sidebar to matching dashboards. Only ever matches links the user is
@@ -1214,8 +1213,7 @@
             <button id="sidebar-toggle" type="button" aria-label="Menu" class="p-2 -ml-2 rounded-lg hover:bg-white/10 active:bg-white/20">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
             </button>
-            <img src="/static/assets/ecom-logo.png" class="w-7 h-7 rounded-md">
-            <span class="font-bold tracking-tight">Ecom Central</span>
+            <img src="/static/assets/pravidhi-lockup-dark.svg" alt="Pravidhi" style="height:28px;width:auto;display:block">
         </div>
 
         <!-- Home — the landing page. Contents are rendered by homeRender() from the sidebar itself, so it
@@ -1226,7 +1224,7 @@
                  the same anchor, carries the mark, and the mosaic below overlaps it so the two lock together. -->
             <div class="home-band">
                 <div class="home-band-in">
-                    <img src="/static/assets/ecom-logo.png" alt="" class="home-logo">
+                    <img src="/static/assets/pravidhi-icon.png" alt="" class="home-logo">
                     <div class="home-band-txt">
                         <h1 id="home-greet">Welcome back</h1>
                         <p id="home-sub" class="home-sub"></p>
@@ -2148,6 +2146,26 @@
                 <div class="card p-8">
                     <h2 class="text-lg font-bold text-slate-800 mb-6">Connected Accounts</h2>
                     <div id="seller-connections" class="space-y-4"></div>
+                </div>
+
+                <!-- Teams bot app — admin only. One click publishes the package in teams-app/ to the org
+                     catalog and upgrades the installed bot in every team, so a rename/icon change never
+                     needs remove → re-add → re-map. Needs a one-time Microsoft sign-in (device code). -->
+                <style>#ta-update:disabled{opacity:.5;cursor:not-allowed}</style>
+                <div id="teams-app-card" class="card p-8" style="display:none">
+                    <div class="flex items-center justify-between mb-1">
+                        <h2 class="text-lg font-bold text-slate-800">Teams bot app</h2>
+                        <span class="text-[11px] px-2 py-0.5 rounded-full ring-1 bg-indigo-50 text-indigo-700 ring-indigo-200">admin only</span>
+                    </div>
+                    <p class="text-sm text-slate-500 mb-5">Keeps the bot's name and icon current in every team. <b>Update</b> publishes the latest package to your organisation's app catalog and upgrades the installed copy in each team in place &mdash; nothing to uninstall or re-map.</p>
+                    <div id="ta-body" class="text-sm text-slate-600">Loading&hellip;</div>
+                    <div class="flex flex-wrap items-center gap-3 mt-6">
+                        <button id="ta-update" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors" style="" disabled>Update Teams app</button>
+                        <button id="ta-signin" class="px-4 py-2 rounded-lg text-sm font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors">Sign in to Microsoft</button>
+                        <button id="ta-refresh" class="px-3 py-2 rounded-lg text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors">Refresh</button>
+                        <span id="ta-status" class="text-sm"></span>
+                    </div>
+                    <div id="ta-signin-box" class="mt-5 rounded-xl border border-indigo-200 bg-indigo-50 p-5" style="display:none"></div>
                 </div>
 
                 <!-- Email & Reports — admin only (SMTP + recipients for the report mails) -->
@@ -3764,7 +3782,7 @@
      ONLY thing that makes a browser re-fetch. Forgetting it means the change ships and nobody sees it:
      on 2026-08-13 a whole session of Last-Mile + Purchase Order work was invisible for exactly this
      reason, and it looks identical to "the fix didn't work". -->
-<script src="/static/app.js?v=2026-08-27-doi-with-po"></script>
+<script src="/static/app.js?v=2026-08-27-teams-app"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

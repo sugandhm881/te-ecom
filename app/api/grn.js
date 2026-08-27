@@ -673,7 +673,7 @@ router.get('/grn/:grnId/pdf', async (req, res) => {
         vline(L, segStart, rowY); vline(R, segStart, rowY);  // outer frame includes the total band
 
         doc.font('Helvetica').fontSize(6.5).fillColor('#9a9a9a')
-           .text(`Generated from EasyEcom GRN data by Ecom Central · ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
+           .text(`Generated from EasyEcom GRN data by Pravidhi · ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
                  L, rowY + 8, { width: W });
         doc.end();
     } catch (e) {

@@ -424,7 +424,7 @@ async function sendInventoryTeamsReport() {
         ...(whLine ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: whLine }] }] : []),
         { type: 'image', image_url, alt_text: `Inventory & Reorder — Shifupro — ${label}` },
         ...orderBlocks,
-        { type: 'context', elements: [{ type: 'mrkdwn', text: `Ecom Central · Inventory Analytics · ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}` }] },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: `Pravidhi · Inventory Analytics · ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}` }] },
     ] };
     // text:true sends the HTML twin alongside the card, so this works whether the Inventory webhook is a
     // channel-post Workflow (reads `card`) OR a reply-into-thread Workflow (reads `text`/`attachments`).

@@ -192,7 +192,7 @@ function createFallbackImage(itemName) {
         `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#f1f5f9"/><text x="50" y="50" font-family="Arial,sans-serif" font-size="34" fill="#94a3b8" text-anchor="middle" dominant-baseline="central">${initials}</text></svg>`);
 }
 
-// Branded loaders — EVERY loading state shows the Ecom Central logo (spinning ring + logo).
+// Branded loaders — EVERY loading state shows the Pravidhi logo (spinning ring + logo).
 // brandLoader = large centered (tables, KPI strips, modals) · brandLoaderSm = compact inline (small panels).
 // ⚠️ brandLoader IS the app-wide loading popup now (user, 2026-08-27: "apply this same for entire
 // software … loader design should same"). Every dashboard already calls it with its own label, so
@@ -242,7 +242,7 @@ function ecLoadingShow(label = 'Loading…') {
       <div style="position:relative;display:flex;align-items:center;gap:22px;max-width:calc(100vw - 32px);padding:26px 38px 26px 28px;border-radius:22px;color:#fff;background:linear-gradient(165deg,#211d54,#111536 60%,#0b0f26);border:1px solid rgba(129,140,248,.28);box-shadow:0 40px 90px rgba(49,46,129,.55),inset 0 1px 0 rgba(255,255,255,.06);animation:eclCardIn .45s cubic-bezier(.2,.9,.25,1.1) both;">
         <div style="position:relative;width:64px;height:64px;flex:none;">
           <span style="position:absolute;inset:-7px;border-radius:24px;border:3px solid rgba(129,140,248,.18);border-top-color:#818cf8;border-right-color:rgba(129,140,248,.45);animation:eclSpin 1s linear infinite;"></span>
-          <img src="/static/assets/ecom-logo.png" alt="" style="position:relative;width:64px;height:64px;border-radius:18px;background:#fff;box-shadow:0 18px 45px rgba(99,102,241,.5);">
+          <img src="/static/assets/pravidhi-icon.png" alt="" style="position:relative;width:64px;height:64px;border-radius:18px;box-shadow:0 18px 45px rgba(99,102,241,.5);">
         </div>
         <div style="display:flex;flex-direction:column;min-width:0;">
           <p style="margin:0;font-size:.66rem;letter-spacing:.3em;text-transform:uppercase;font-weight:700;color:#a5b4fc;">Please wait</p>
@@ -254,7 +254,7 @@ function ecLoadingShow(label = 'Loading…') {
 }
 function ecLoadingHide() { const el = document.getElementById('ec-loading-overlay'); if (el) el.style.display = 'none'; }
 function brandLoaderSm(label = 'Loading…') {
-    return `<div class="flex items-center gap-2 py-3"><span class="relative inline-flex items-center justify-center w-6 h-6 shrink-0"><span class="absolute w-6 h-6 rounded-full border-2 border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/ecom-logo.png" class="w-4 h-4 rounded"></span><span class="text-slate-400 text-xs">${escapeHtml(label)}</span></div>`;
+    return `<div class="flex items-center gap-2 py-3"><span class="relative inline-flex items-center justify-center w-6 h-6 shrink-0"><span class="absolute w-6 h-6 rounded-full border-2 border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/pravidhi-icon.png" class="w-4 h-4 rounded"></span><span class="text-slate-400 text-xs">${escapeHtml(label)}</span></div>`;
 }
 
 // Debounce: run fn only after `ms` of quiet — keeps typing smooth on heavy table re-renders.
@@ -378,7 +378,7 @@ function _otpBack() {
     document.getElementById('otp-form')?.classList.add('hidden');
     document.getElementById('login-form')?.classList.remove('hidden');
     document.getElementById('auth-toggle')?.classList.remove('hidden');
-    const h = document.querySelector('#login-view h1'); if (h) h.textContent = 'Sign in to Ecom Central';
+    const h = document.querySelector('#login-view h1'); if (h) h.textContent = 'Sign in to Pravidhi';
 }
 let _otpBusy = false;
 async function _otpVerify() {
@@ -429,7 +429,7 @@ function _forgotBack() {
     document.getElementById('forgot-form')?.classList.add('hidden');
     document.getElementById('login-form')?.classList.remove('hidden');
     document.getElementById('auth-toggle')?.classList.remove('hidden');
-    const h = document.querySelector('#login-view h1'); if (h) h.textContent = 'Sign in to Ecom Central';
+    const h = document.querySelector('#login-view h1'); if (h) h.textContent = 'Sign in to Pravidhi';
 }
 async function handleForgotSend() {
     if (_forgotBusy) return;
@@ -492,7 +492,7 @@ const SO_MODES = {
     bye: { badge: 'linear-gradient(140deg,#10b981,#059669)', shadow: '0 20px 50px rgba(16,185,129,.5)', eyeColor: '#6ee7b7',
         icon: '<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>',
         eye: 'Session ended', title: 'Signed out successfully',
-        sub: 'Thanks for using <b>Ecom Central</b>. See you again soon.',
+        sub: 'Thanks for using <b>Pravidhi</b>. See you again soon.',
         foot: "You'll return to your home dashboard after signing in." },
     expired: { badge: 'linear-gradient(140deg,#f59e0b,#d97706)', shadow: '0 20px 50px rgba(245,158,11,.45)', eyeColor: '#fcd34d',
         icon: '<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z"/>',
@@ -597,7 +597,7 @@ function showWelcomeSplash(name) {
     // (no name set yet) → keep the hero clean ("Welcome back") and show the email as the subtext.
     const hasName = name && !String(name).includes('@');
     const heroText = hasName ? String(name).trim().split(/\s+/)[0] : 'Welcome back';   // first name only
-    const subText = hasName ? 'Welcome back to Ecom Central' : (name || 'Welcome to Ecom Central');
+    const subText = hasName ? 'Welcome back to Pravidhi' : (name || 'Welcome to Pravidhi');
 
     const el = document.createElement('div');
     el.id = 'welcome-splash';
@@ -608,7 +608,7 @@ function showWelcomeSplash(name) {
         <div style="position:relative;width:72px;height:72px;flex:none;">
           <span style="position:absolute;inset:0;border-radius:20px;box-shadow:0 0 0 2px rgba(129,140,248,.55);animation:wsRing 2.2s ease-out infinite;"></span>
           <span style="position:absolute;inset:0;border-radius:20px;box-shadow:0 0 0 2px rgba(129,140,248,.4);animation:wsRing 2.2s ease-out .9s infinite;"></span>
-          <img src="/static/assets/ecom-logo.png" alt="Ecom Central" style="position:relative;width:72px;height:72px;border-radius:20px;background:#fff;box-shadow:0 22px 55px rgba(99,102,241,.55);animation:wsLogoIn .85s cubic-bezier(.2,.85,.25,1) both;">
+          <img src="/static/assets/pravidhi-icon.png" alt="Pravidhi" style="position:relative;width:72px;height:72px;border-radius:20px;box-shadow:0 22px 55px rgba(99,102,241,.55);animation:wsLogoIn .85s cubic-bezier(.2,.85,.25,1) both;">
           <span class="ws-spark" style="top:-6px;left:50%;animation-delay:.6s;"></span>
           <span class="ws-spark" style="top:22%;right:-9px;animation-delay:1.1s;background:#93c5fd;"></span>
           <span class="ws-spark" style="bottom:2px;left:-8px;animation-delay:1.6s;background:#f0abfc;"></span>
@@ -931,7 +931,7 @@ function _authToggle(toSignup) {
     document.getElementById('forgot-form')?.classList.add('hidden');
     lf.classList.toggle('hidden', toSignup); sf.classList.toggle('hidden', !toSignup);
     if (tg) tg.textContent = toSignup ? 'Already have an account? Sign in' : 'Create an account';
-    if (h) h.textContent = toSignup ? 'Create your account' : 'Sign in to Ecom Central';
+    if (h) h.textContent = toSignup ? 'Create your account' : 'Sign in to Pravidhi';
     if (msg) msg.classList.add('hidden');
 }
 
@@ -1087,12 +1087,12 @@ function navLabelOf(a) {
     return [...span.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim();
 }
 
-// Browser tab title follows the open dashboard: "Delivery Performance · Ecom Central". With eight or
+// Browser tab title follows the open dashboard: "Delivery Performance · Pravidhi". With eight or
 // nine tabs of this app open — which is how it actually gets used — every tab otherwise reads the same
 // and you have to click through them to find the one you want.
 // The label is taken from the SIDEBAR LINK, the same single source the nav search and Home read, so a
 // renamed nav item retitles its tab with no second list to update.
-const APP_TITLE = 'Ecom Central';
+const APP_TITLE = 'Pravidhi';
 function setTabTitle(view) {
     let label = '';
     for (const [id, v] of Object.entries(typeof NAV_HREF !== 'undefined' ? NAV_HREF : {})) {
@@ -1188,6 +1188,7 @@ function navigate(view) {
             activeViewElement = document.getElementById('settings-view'); 
             if(typeof renderSettings === 'function') renderSettings();
             if(typeof renderEmailSettings === 'function') renderEmailSettings();
+            if(typeof renderTeamsApp === 'function') renderTeamsApp();
             break;
         case 'reports-view':
             activeLinkElement = document.getElementById('nav-reports');
@@ -4199,6 +4200,98 @@ function umbAddPrompt(){
     const v=wrap.querySelector('#umb-pick').value; wrap.remove(); umbModal(v); });
 }
 
+// ─────────── Teams bot app updater (admin only) ───────────
+// Settings card: shows package / catalog / per-team versions and drives POST /api/teams/app/update.
+// A missing or under-scoped Microsoft sign-in is a normal state here, not an error — the card
+// turns into a device-code sign-in (code + link) and polls until the admin has approved it.
+let _taWired = false, _taPoll = null;
+function _taEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+async function renderTeamsApp(){
+  const card = document.getElementById('teams-app-card');
+  if(!card) return;
+  if(!(currentUser && currentUser.isAdmin)){ card.style.display='none'; return; }
+  card.style.display='';
+  if(!_taWired){
+    _taWired = true;
+    document.getElementById('ta-update')?.addEventListener('click', taUpdate);
+    document.getElementById('ta-signin')?.addEventListener('click', taSignin);
+    document.getElementById('ta-refresh')?.addEventListener('click', ()=>renderTeamsApp());
+  }
+  const body = document.getElementById('ta-body'), btn = document.getElementById('ta-update'), st = document.getElementById('ta-status');
+  body.textContent = 'Checking versions…'; btn.disabled = true; st.textContent = '';
+  try{
+    const r = await fetch('/api/teams/app/status',{headers:getAuthHeaders()});
+    const d = await r.json();
+    if(!d.success) throw new Error(d.error||'Status failed');
+    const pkg = d.package||{};
+    if(!d.configured){ body.innerHTML = '<span class="text-amber-700">'+_taEsc(d.error)+'</span>'; return; }
+    if(!d.signed_in){
+      body.innerHTML = '<div class="rounded-lg bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3">'+_taEsc(d.error)+
+        (d.detail?'<div class="text-xs text-amber-700 mt-1">'+_taEsc(d.detail)+'</div>':'')+
+        '<div class="text-xs mt-2">Use <b>Sign in to Microsoft</b> below. Package on this server: <b>'+_taEsc(pkg.name||'')+' v'+_taEsc(pkg.version||'?')+'</b>.</div></div>';
+      return;
+    }
+    const cat = d.catalog;
+    const rows = (d.teams||[]).map(t=>{
+      const state = !t.installed ? '<span class="text-slate-400">not installed</span>'
+        : (cat && t.installed_version && t.installed_version===cat.version) ? '<span class="text-emerald-700 font-semibold">v'+_taEsc(t.installed_version)+' · current</span>'
+        : '<span class="text-amber-700 font-semibold">v'+_taEsc(t.installed_version||'?')+' · needs update</span>';
+      return '<tr><td class="py-1.5 pr-4">'+_taEsc(t.name)+'</td><td class="py-1.5">'+state+(t.error?' <span class="text-rose-600 text-xs">'+_taEsc(t.error)+'</span>':'')+'</td></tr>';
+    }).join('');
+    body.innerHTML =
+      '<div class="mb-4" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px">'+
+        '<div class="rounded-lg bg-slate-50 px-4 py-3"><div class="uppercase tracking-wide text-slate-400" style="font-size:11px">Package on server</div><div class="font-bold text-slate-800">v'+_taEsc(pkg.version||'?')+'</div><div class="text-xs text-slate-500">'+_taEsc(pkg.name||'')+(pkg.zip?'':' · zip missing')+'</div></div>'+
+        '<div class="rounded-lg bg-slate-50 px-4 py-3"><div class="uppercase tracking-wide text-slate-400" style="font-size:11px">Org app catalog</div><div class="font-bold '+(d.catalog_behind?'text-amber-700':'text-slate-800')+'">'+(cat?'v'+_taEsc(cat.version):'not published')+'</div><div class="text-xs text-slate-500">'+(cat?_taEsc(cat.displayName)+(d.catalog_behind?' · behind the package':' · current'):'upload once in Teams admin center')+'</div></div>'+
+        '<div class="rounded-lg bg-slate-50 px-4 py-3"><div class="uppercase tracking-wide text-slate-400" style="font-size:11px">Teams needing update</div><div class="font-bold '+(d.stale_teams?'text-amber-700':'text-emerald-700')+'">'+d.stale_teams+'</div><div class="text-xs text-slate-500">of '+(d.teams||[]).filter(t=>t.installed).length+' installed</div></div>'+
+      '</div>'+
+      '<table class="text-sm"><thead><tr class="uppercase tracking-wide text-slate-400" style="font-size:11px"><th class="text-left pr-4 pb-1 font-semibold">Team</th><th class="text-left pb-1 font-semibold">Installed</th></tr></thead><tbody>'+(rows||'<tr><td class="text-slate-400" colspan="2">You are not a member of any team.</td></tr>')+'</tbody></table>';
+    btn.disabled = !(d.catalog_behind || d.stale_teams>0);
+    if(btn.disabled) st.innerHTML = '<span class="text-emerald-700">Everything is up to date.</span>';
+  }catch(e){ body.innerHTML = '<span class="text-rose-600">'+_taEsc(e.message)+'</span>'; }
+}
+async function taUpdate(){
+  const btn = document.getElementById('ta-update'), st = document.getElementById('ta-status');
+  btn.disabled = true; st.innerHTML = '<span class="text-slate-500">Updating… this can take up to a minute.</span>';
+  try{
+    const r = await fetch('/api/teams/app/update',{method:'POST',headers:getAuthHeaders()});
+    const d = await r.json();
+    if(d.needs_signin){ st.innerHTML = '<span class="text-amber-700">'+_taEsc(d.error)+'</span>'; renderTeamsApp(); return; }
+    const lines = (d.steps||[]).map(s=>{
+      if(s.step==='publish') return s.skipped ? 'Catalog already v'+_taEsc(s.version) : 'Published v'+_taEsc(s.to)+' to the catalog (was v'+_taEsc(s.from)+')';
+      if(s.skipped) return _taEsc(s.team)+': '+_taEsc(s.reason);
+      return _taEsc(s.team)+': '+(s.ok ? 'updated v'+_taEsc(s.from||'?')+' → v'+_taEsc(s.to) : '<span class="text-rose-600">failed — '+_taEsc(s.error)+'</span>');
+    });
+    st.innerHTML = '<span class="'+(d.success?'text-emerald-700':'text-rose-600')+'">'+(d.success?'Done.':'Finished with errors.')+(d.error?' '+_taEsc(d.error):'')+'</span>'+
+      (lines.length?'<ul class="text-xs text-slate-600 mt-1" style="list-style:disc;margin-left:16px">'+lines.map(l=>'<li>'+l+'</li>').join('')+'</ul>':'');
+    // Re-read after a moment; the upgrade is immediate server-side, the Teams client may need a restart to redraw.
+    setTimeout(()=>{ const keep = st.innerHTML; renderTeamsApp().then(()=>{ if(keep) st.innerHTML = keep + '<div class="text-xs text-slate-400 mt-1">Quit and reopen Teams to see the new name and icon.</div>'; }); }, 2500);
+  }catch(e){ st.innerHTML = '<span class="text-rose-600">'+_taEsc(e.message)+'</span>'; btn.disabled=false; }
+}
+async function taSignin(){
+  const box = document.getElementById('ta-signin-box');
+  box.style.display=''; box.innerHTML = '<span class="text-sm text-slate-600">Requesting a sign-in code…</span>';
+  if(_taPoll){ clearInterval(_taPoll); _taPoll=null; }
+  try{
+    const r = await fetch('/api/teams/app/signin',{method:'POST',headers:getAuthHeaders()});
+    const d = await r.json();
+    if(!d.success) throw new Error(d.error||'Sign-in could not start');
+    box.innerHTML =
+      '<div class="text-sm text-slate-700 mb-2">Open <a class="font-semibold text-indigo-700 underline" href="'+_taEsc(d.verification_uri)+'" target="_blank" rel="noopener">'+_taEsc(d.verification_uri)+'</a> and enter this code, then sign in as the Teams admin:</div>'+
+      '<div class="font-mono text-2xl font-bold tracking-widest text-indigo-800 bg-white inline-block px-4 py-2 rounded-lg border border-indigo-200">'+_taEsc(d.user_code)+'</div>'+
+      '<div id="ta-signin-msg" class="text-xs text-slate-500 mt-3">Waiting for you to finish in the browser… (code valid for '+Math.round((d.expires_in||900)/60)+' min)</div>';
+    _taPoll = setInterval(async ()=>{
+      try{
+        const p = await (await fetch('/api/teams/app/signin/'+encodeURIComponent(d.handle),{headers:getAuthHeaders()})).json();
+        const msg = document.getElementById('ta-signin-msg');
+        if(p.status==='pending') return;
+        clearInterval(_taPoll); _taPoll=null;
+        if(p.status==='done'){ box.innerHTML = '<span class="text-sm text-emerald-700 font-semibold">Signed in. Permissions granted: '+_taEsc(p.scopes||'')+'</span>'; renderTeamsApp(); }
+        else if(msg) msg.innerHTML = '<span class="text-rose-600">'+_taEsc(p.error||p.status)+'</span>';
+      }catch(_){}
+    }, 3000);
+  }catch(e){ box.innerHTML = '<span class="text-sm text-rose-600">'+_taEsc(e.message)+'</span>'; }
+}
+
 // ─────────── Email & Reports settings (admin only) ───────────
 let _emailSettingsWired = false;
 async function renderEmailSettings(){
@@ -6385,7 +6478,7 @@ function cpRenderTab(){
         <td class="${TD}">${dirChip(t.type)}</td>
         <td class="${TD} text-right tabular-nums font-semibold">${_cpMoney(t.amount)}</td>
         <td class="${TD} text-right tabular-nums text-slate-500">${t.balance_after==null?'—':_cpMoney(t.balance_after)}</td>
-        <td class="${TD} text-slate-400 italic">used at checkout / issued outside Ecom Central</td>
+        <td class="${TD} text-slate-400 italic">used at checkout / issued outside Pravidhi</td>
         <td class="${TD} text-slate-400">Shopify</td></tr>`).join('')}
       ${!(cr.log||[]).length && !(cr.transactions||[]).length ? `<tr><td colspan="6" class="px-4 py-8 text-center text-sm text-slate-400">No store-credit activity yet.</td></tr>`:''}
     </tbody></table>`;
@@ -6553,7 +6646,7 @@ async function loadInitialData() {
     navigate(viewFromHash() || 'home');   // honor a deep-linked #view on first load; else land on Home
     const ordersList = document.getElementById('orders-list');
     // Branded ecom-central logo + spinner shown right in the table area while orders load (non-blocking).
-    if (ordersList) ordersList.innerHTML = `<tr><td colspan="10" class="py-16"><div class="flex flex-col items-center justify-center gap-3"><span class="relative inline-flex items-center justify-center w-14 h-14"><span class="absolute w-14 h-14 rounded-full border-[3px] border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/ecom-logo.png" class="w-9 h-9 rounded-lg"></span><span class="text-slate-400 text-sm font-medium">Loading latest orders…</span></div></td></tr>`;
+    if (ordersList) ordersList.innerHTML = `<tr><td colspan="10" class="py-16"><div class="flex flex-col items-center justify-center gap-3"><span class="relative inline-flex items-center justify-center w-14 h-14"><span class="absolute w-14 h-14 rounded-full border-[3px] border-indigo-100 border-t-indigo-600 animate-spin"></span><img src="/static/assets/pravidhi-icon.png" class="w-9 h-9 rounded-lg"></span><span class="text-slate-400 text-sm font-medium">Loading latest orders…</span></div></td></tr>`;
 
     // Background load — orders FIRST (render as soon as they arrive); COD & EDD fill their columns in after,
     // so a slow /cod-confirmations or /edd-batch can never delay the orders table.
@@ -11806,7 +11899,7 @@ async function fopsFetch() {
   btn.disabled = true;
   btn.innerHTML = `<span class="inline-flex items-center gap-2"><svg class="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>Fetching…</span>`;
   fopsOrders = [];
-  if (tbody) tbody.innerHTML = `<tr><td colspan="9"><div class="flex flex-col items-center justify-center py-16 gap-4"><div style="position:relative;width:56px;height:56px;"><img src="/static/assets/ecom-logo.png" style="width:56px;height:56px;border-radius:14px;object-fit:contain;box-shadow:0 4px 16px rgba(79,70,229,0.18);animation:loader-logo-pulse 1.6s ease-in-out infinite;"><div class="loader-ring"></div></div><div class="text-xs text-slate-400 font-medium">Loading orders…</div></div></td></tr>`;
+  if (tbody) tbody.innerHTML = `<tr><td colspan="9"><div class="flex flex-col items-center justify-center py-16 gap-4"><div style="position:relative;width:56px;height:56px;"><img src="/static/assets/pravidhi-icon.png" style="width:56px;height:56px;border-radius:14px;object-fit:contain;box-shadow:0 4px 16px rgba(79,70,229,0.18);animation:loader-logo-pulse 1.6s ease-in-out infinite;"><div class="loader-ring"></div></div><div class="text-xs text-slate-400 font-medium">Loading orders…</div></div></td></tr>`;
   const { start, end } = fopsMode === 'ops' ? fopsMTD() : fopsDateRange();
   fopsLog(`Fetching ${start} → ${end}…`);
   try {
@@ -12098,7 +12191,7 @@ async function fopsTrack(awb, carrier, numericId) {
   body.innerHTML = `
     <div class="flex flex-col items-center justify-center py-14 gap-4">
       <div style="position:relative;width:56px;height:56px;">
-        <img src="/static/assets/ecom-logo.png" style="width:56px;height:56px;border-radius:14px;object-fit:contain;box-shadow:0 4px 16px rgba(79,70,229,0.18);animation:loader-logo-pulse 1.6s ease-in-out infinite;">
+        <img src="/static/assets/pravidhi-icon.png" style="width:56px;height:56px;border-radius:14px;object-fit:contain;box-shadow:0 4px 16px rgba(79,70,229,0.18);animation:loader-logo-pulse 1.6s ease-in-out infinite;">
         <div class="loader-ring"></div>
       </div>
       <div class="text-xs text-slate-400 font-medium">Fetching live status…</div>
@@ -18605,7 +18698,7 @@ function ecConfirm(opts){
               <!-- The app's mark rather than a glyph in a coloured circle: a bare "!" reads as an error
                    even when nothing has gone wrong. Severity is carried by the confirm button and the
                    note, which is where a reader actually looks for it. -->
-              <div class="ec-confirm-logo"><img src="/static/assets/ecom-logo.png" alt="Ecom Central"></div>
+              <div class="ec-confirm-logo"><img src="/static/assets/pravidhi-icon.png" alt="Pravidhi"></div>
               <div>
                 <h3>${escapeHtml(o.title || 'Are you sure?')}</h3>
                 ${o.intro ? `<p>${escapeHtml(o.intro)}</p>` : ''}
@@ -18647,7 +18740,7 @@ function poResultModal(d, ctx){
           <!-- The app's own mark, not a bare glyph. This panel confirms something the user just did
                successfully; a red "!" read as an error at a glance. The approval caveat is carried by
                the note below, which is where a warning belongs. -->
-          <div class="ec-confirm-logo"><img src="/static/assets/ecom-logo.png" alt="Ecom Central"></div>
+          <div class="ec-confirm-logo"><img src="/static/assets/pravidhi-icon.png" alt="Pravidhi"></div>
           <div>
             <h3>Purchase order created</h3>
             <p>PO id <b>${escapeHtml(String(d.poId))}</b>${d.statusLabel ? ` · currently <b>${escapeHtml(d.statusLabel)}</b>` : ''}</p>
@@ -18706,7 +18799,7 @@ function ecResult(opts){
         wrap.innerHTML = `
           <div class="ec-confirm" role="dialog" aria-modal="true">
             <div class="ec-confirm-head">
-              <div class="ec-confirm-logo"><img src="/static/assets/ecom-logo.png" alt="Ecom Central"></div>
+              <div class="ec-confirm-logo"><img src="/static/assets/pravidhi-icon.png" alt="Pravidhi"></div>
               <div>
                 <h3>${escapeHtml(o.title || 'Done')}</h3>
                 ${o.intro ? `<p>${escapeHtml(o.intro)}</p>` : ''}

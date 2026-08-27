@@ -135,9 +135,9 @@ router.post('/email-settings/test', async (req, res) => {
     try {
         const r = await sendMail({
             to,
-            subject: 'Ecom Central — test email ✓',
-            html: '<p>This is a test email from <b>Ecom Central</b> Settings. If you received it, your SMTP configuration works.</p>',
-            text: 'This is a test email from Ecom Central Settings. If you received it, your SMTP configuration works.',
+            subject: 'Pravidhi — test email ✓',
+            html: '<p>This is a test email from <b>Pravidhi</b> Settings. If you received it, your SMTP configuration works.</p>',
+            text: 'This is a test email from Pravidhi Settings. If you received it, your SMTP configuration works.',
         });
         res.json({ success: true, message: `Sent to ${r.to.join(', ')}` });
     } catch (e) {
@@ -283,7 +283,7 @@ router.post('/user-mailboxes/test', async (req, res) => {
     try {
         const r = await sendMailAs(key, {
             to,
-            subject: 'Ecom Central — sending mailbox test ✓',
+            subject: 'Pravidhi — sending mailbox test ✓',
             text: `This test was sent from ${key}'s mapped mailbox. If you received it, outreach email will send from this address.`,
             html: `<p>This test was sent from <b>${key}</b>'s mapped mailbox. If you received it, outreach email will send from this address.</p>`,
         });

@@ -37,7 +37,7 @@ async function sendOtpWhatsApp(mobile10, otp) {
 const TTL_MS = 5 * 60 * 1000;      // OTP validity
 const MAX_ATTEMPTS = 5;            // wrong tries before the OTP is voided
 const RESEND_GAP_MS = 25 * 1000;   // server-side resend throttle (UI cooldown is 30s)
-const OTP_SUBJECT_TAG = 'is your Ecom Central login OTP';   // constant part of the subject — used to find OTP mails in Sent
+const OTP_SUBJECT_TAG = 'is your Pravidhi login OTP';   // constant part of the subject — used to find OTP mails in Sent
 
 const _store = new Map();          // email -> { hash, exp, attempts, lastSentAt }
 
@@ -84,14 +84,14 @@ async function sendOtp(email, opts = {}) {
             subject: `${otp} ${OTP_SUBJECT_TAG}`,
             html: `<div style="font-family:Arial,Helvetica,sans-serif;max-width:440px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:12px">
                 <div style="margin:0 0 4px">
-                    <img src="${config.DASHBOARD_URL}/static/assets/ecom-logo.png" width="34" height="34" alt="" style="border-radius:8px;vertical-align:middle;margin-right:10px">
-                    <span style="font-size:20px;font-weight:bold;color:#4338ca;vertical-align:middle">Ecom Central</span>
+                    <img src="${config.DASHBOARD_URL}/static/assets/pravidhi-icon.png" width="34" height="34" alt="" style="border-radius:8px;vertical-align:middle;margin-right:10px">
+                    <span style="font-size:20px;font-weight:bold;color:#4338ca;vertical-align:middle">Pravidhi</span>
                 </div>
                 <p style="color:#475569;font-size:14px;margin:8px 0">Use this one-time password to finish signing in:</p>
                 <div style="font-size:32px;letter-spacing:8px;font-weight:bold;color:#1e293b;text-align:center;padding:16px 0">${otp}</div>
-                <p style="color:#64748b;font-size:12px;margin:8px 0 0">Valid for 5 minutes and usable once. If you didn't try to sign in to Ecom Central, ignore this email and consider changing your password.</p>
+                <p style="color:#64748b;font-size:12px;margin:8px 0 0">Valid for 5 minutes and usable once. If you didn't try to sign in to Pravidhi, ignore this email and consider changing your password.</p>
             </div>`,
-            text: `Your Ecom Central login OTP is ${otp}. It is valid for 5 minutes and usable once. If you didn't try to sign in, ignore this email.`,
+            text: `Your Pravidhi login OTP is ${otp}. It is valid for 5 minutes and usable once. If you didn't try to sign in, ignore this email.`,
             // Logo is a HOSTED image (served by the dashboard VPS), NOT an attachment — so Gmail shows
             // no "ecom-logo.png" chip in the inbox list and there is nothing to click/preview. Trade-off:
             // if the dashboard server is unreachable the logo simply doesn't render (text stays intact).

@@ -599,7 +599,7 @@ router.get('/reports/rto-no-attempt', async (req, res) => {
         }
 
         const wb = new ExcelJS.Workbook();
-        wb.creator = 'Ecom Central';
+        wb.creator = 'Pravidhi';
         const HEAD = { bold: true, color: { argb: 'FFFFFFFF' } };
         const HFILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } };
 
@@ -1172,7 +1172,7 @@ function mailShell(title, subtitle, rangeLabel, headers, rightCols, bodyRows, fo
       <p style="margin:0 0 16px;color:#94a3b8;font-size:12px;">${esc(windowLabel || 'Order window')}: ${esc(rangeLabel)}</p>
       <table style="border-collapse:collapse;width:100%;font-size:12px;"><thead><tr>${th}</tr></thead><tbody>${bodyRows}</tbody></table>
       ${footNote ? `<p style="margin:14px 0 0;color:#94a3b8;font-size:11px;">${esc(footNote)}</p>` : ''}
-      <p style="margin:18px 0 0;color:#94a3b8;font-size:11px;">— Ecom Central</p></div>`;
+      <p style="margin:18px 0 0;color:#94a3b8;font-size:11px;">— Pravidhi</p></div>`;
 }
 
 // ── Lost shipments ──────────────────────────────────────────────────────────
@@ -1933,7 +1933,7 @@ router.get('/claims/export.xlsx', async (req, res) => {
 
         const ExcelJS = require('exceljs');
         const wb = new ExcelJS.Workbook();
-        wb.creator = 'Ecom Central';
+        wb.creator = 'Pravidhi';
         const ws = wb.addWorksheet(cfg.title.slice(0, 31));
 
         // A title band, because a spreadsheet that lands in someone's inbox has to say what window it

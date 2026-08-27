@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 130" width="560" height="130">
+  <!-- Pravidhi lockup for DARK surfaces (sidebar / top bar): same geometry as pravidhi-lockup.svg,
+       but the mark's gradient is lifted (#6366f1 → #a78bfa) so it reads against #0f172a. -->
+  <defs><linearGradient id="pvgd" gradientUnits="userSpaceOnUse" x1="0" y1="104" x2="0" y2="17"><stop offset="0" stop-color="#6366f1"/><stop offset="1" stop-color="#a78bfa"/></linearGradient></defs>
+  <g transform="translate(6 8)"><path d="M18 24 H94 M80 24 V104 M54 24 A22 22 0 0 0 54 68 H80" fill="none" stroke="url(#pvgd)" stroke-width="14"/></g>
+  <text x="122" y="112" font-family="Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="120" font-weight="600" letter-spacing="-2.4" fill="#ffffff">Pravidhi</text>
+</svg>

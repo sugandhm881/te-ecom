@@ -178,7 +178,7 @@ router.post('/docpharma-ledger-pdf', express.json({ limit: '4mb' }), (req, res) 
         doc.pipe(res);
 
         const drawHeader = () => {
-            const logo = ['../static/assets/te-logo.png', '../static/assets/ecom-logo.png'].map(p => path.join(__dirname, p)).find(fs.existsSync);
+            const logo = ['../static/assets/te-logo.png', '../static/assets/pravidhi-icon.png'].map(p => path.join(__dirname, p)).find(fs.existsSync);
             const titleX = logo ? 90 : M;
             if (logo) doc.image(logo, M, 22, { width: 54 });          // te-logo is ~2:1, so 54w ≈ 27h
             doc.font('Helvetica-Bold').fontSize(16).fillColor([34, 44, 67]).text('DocPharma Ledger', titleX, 26);

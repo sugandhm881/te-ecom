@@ -1,7 +1,7 @@
 {
   "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
   "manifestVersion": "1.16",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "id": "54c61a94-70ec-4261-9d02-86de7f0d7558",
   "packageName": "skin.theelement.ecomcentral",
   "developer": {
@@ -15,14 +15,14 @@
     "outline": "outline.png"
   },
   "name": {
-    "short": "EcomBot",
-    "full": "Ecom Central Bot"
+    "short": "Pravidhi",
+    "full": "Pravidhi Bot"
   },
   "description": {
-    "short": "Ops reports and approvals for Ecom Central.",
-    "full": "Posts DocPharma, inventory and finance reports into Teams, and takes approvals back — reply yes, no or rejected to act on whatever is pending."
+    "short": "Ops reports and approvals from Pravidhi.",
+    "full": "Posts operations, inventory and finance reports into Teams, and takes approvals back — reply yes, no or rejected to act on whatever is pending."
   },
-  "accentColor": "#4F46E5",
+  "accentColor": "#0F172A",
   "bots": [
     {
       "botId": "54c61a94-70ec-4261-9d02-86de7f0d7558",
@@ -39,7 +39,7 @@
           "commands": [
             {
               "title": "rejected",
-              "description": "Run the DocPharma → warehouse check now"
+              "description": "Run the courier → warehouse rejected-shipment check now"
             },
             {
               "title": "yes",

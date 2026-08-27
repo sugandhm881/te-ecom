@@ -406,5 +406,5 @@ async function initTeamsListener() {
     console.log(`[TeamsListener] started${DRYRUN() ? ' (DRY-RUN)' : ''} — watching ${[CH_DP() && 'DP', CH_AMZ() && 'Amazon', CH_FIN() && 'Finance'].filter(Boolean).join(' + ')} channel(s) every ${interval / 1000}s`);
 }
 
-module.exports = { initTeamsListener, pollOnce, fetchNewMessages, getAccessToken, parseApproval,
+module.exports = { initTeamsListener, pollOnce, fetchNewMessages, getAccessToken, parseApproval, persistRefreshToken,
     handleInboundMessage, channelRoles, _lastSeen: lastSeen };
