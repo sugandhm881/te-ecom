@@ -83,11 +83,14 @@ const commands = {
     _edit(mutate, what) {
         const p = S.plainPath(dir);
         const dev = fs.existsSync(p);
+        const hasVault = fs.existsSync(S.vaultPath(dir));
         const text = dev ? fs.readFileSync(p, 'utf8') : S.openVault(dir, secret).text;
         const next = mutate(text);
         if (dev) fs.writeFileSync(p, next);
-        S.sealVault(dir, next, secret);
-        ok(`${what} in ${dev ? S.PLAIN_NAME + ' and ' : ''}${S.VAULT_NAME}`);
+        // A folder that has never been sealed (plaintext .env only, no master key yet) is still editable —
+        // the VPS hit "no master key" on a plain `unset` (2026-08-27). Re-seal only when a vault exists.
+        if (hasVault || !dev) S.sealVault(dir, next, secret);
+        ok(`${what} in ${dev ? S.PLAIN_NAME : ''}${dev && hasVault ? ' and ' : ''}${hasVault || !dev ? S.VAULT_NAME : ''}${!hasVault && dev ? ' (no vault yet — run init + encrypt when ready)' : ''}`);
     },
     set() {
         const [key, ...rest] = args; const value = rest.join(' ');
