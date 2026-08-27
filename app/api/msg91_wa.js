@@ -18,7 +18,12 @@
 //   * language must match the template's registration EXACTLY — en/en_US sends were accepted with
 //     status:success and never delivered (cod_confirmation_v1 is en_GB);
 //   * MSG91_COD_ALLOWLIST in .env restricts every send to the named phones/orders — 41 real customers
-//     were messaged during testing before this existed. Remove it ONLY at cut-over;
+//     were messaged during testing before this existed. CUT OVER 2026-08-27 (user: "make it happen for
+//     everyone"): the var is REMOVED from .env, so every customer is messaged. Setting it again re-enters
+//     test mode instantly, no deploy. Vobiz CALLS keep their own list, VOBIZ_CALL_ALLOWLIST.
+//   * n8n's own cod_confirmation_v1 flow must be OFF once this is live — sentToPhoneRecently() skips our
+//     send when the same template already reached the phone, but the msg91_messages mirror syncs only
+//     HOURLY (IST timestamps), so it cannot catch a duplicate inside the 3-minute window;
 //   * log-then-send with a unique key: a crash can lose one message, never send it twice.
 // ─────────────────────────────────────────────────────────────────────────────
 const express = require('express');
@@ -31,14 +36,38 @@ const WA_NUMBER = () => String(process.env.MSG91_WA_NUMBER || '').replace(/\D/g,
 const configured = () => !!AUTH() && !!WA_NUMBER();
 const last10 = p => String(p || '').replace(/\D/g, '').slice(-10);
 
-// The operator's explicit test rule: while the allowlist is set, nobody off it can be messaged.
-function allowlistBlocks(orderName, phone) {
-    const raw = String(process.env.MSG91_COD_ALLOWLIST || '').trim();
-    if (!raw) return null;
-    const entries = raw.split(',').map(s => s.trim()).filter(Boolean);
-    const p10 = last10(phone), name = String(orderName || '').replace(/^#/, '');
-    const ok = entries.some(e => e.replace(/^#/, '') === name || last10(e) === p10);
-    return ok ? null : 'not on MSG91_COD_ALLOWLIST (test mode)';
+// The operator's explicit test rule: while an allowlist var is set, nobody off it can be reached.
+// EMPTY / unset = open to everyone (the production state since 2026-08-27). WhatsApp reads
+// MSG91_COD_ALLOWLIST; Vobiz calls read VOBIZ_CALL_ALLOWLIST — separate on purpose, so opening the
+// messages did not silently open AI phone calls to every customer.
+function allowlistBlocksFor(envVar) {
+    return function (orderName, phone) {
+        const raw = String(process.env[envVar] || '').trim();
+        if (!raw) return null;
+        const entries = raw.split(',').map(s => s.trim()).filter(Boolean);
+        const p10 = last10(phone), name = String(orderName || '').replace(/^#/, '');
+        const ok = entries.some(e => e.replace(/^#/, '') === name || last10(e) === p10);
+        return ok ? null : `not on ${envVar} (test mode)`;
+    };
+}
+const allowlistBlocks = allowlistBlocksFor('MSG91_COD_ALLOWLIST');
+
+// Did this phone ALREADY receive this template recently, from anyone? Checks our own send log and
+// the msg91_messages mirror (every MSG91 send incl. n8n's). ⚠ The mirror's sent_at is IST wall-clock
+// stored as UTC (+5:30) and it syncs only hourly, so this is a backstop for late/second sends, not a
+// real-time dedupe. Window: 6 h.
+async function sentToPhoneRecently(phone, templateName, hours = 6) {
+    const p10 = last10(phone);
+    if (p10.length !== 10 || !templateName) return null;
+    const sinceUtc = new Date(Date.now() - hours * 3600e3);
+    const { data: ours } = await supabase.from('wa_sends_msg91').select('id, order_name, created_at')
+        .eq('phone', p10).eq('template_name', templateName).eq('status', 'sent').gte('created_at', sinceUtc.toISOString()).limit(1);
+    if (ours && ours.length) return `already sent to this phone for ${ours[0].order_name} at ${ours[0].created_at}`;
+    const sinceIst = new Date(sinceUtc.getTime() + 5.5 * 3600e3).toISOString();      // mirror stores IST as UTC
+    const { data: mirror } = await supabase.from('msg91_messages').select('id, sent_at')
+        .eq('template_name', templateName).ilike('phone', `%${p10}`).gte('sent_at', sinceIst).limit(1);
+    if (mirror && mirror.length) return `already sent to this phone by another channel (msg91_messages, ${mirror[0].sent_at} IST)`;
+    return null;
 }
 
 // ── The field vocabulary — everything a template's `variables` array may name ────────────────────
@@ -125,7 +154,7 @@ async function nextAvailable(orderId, orderName, sequenceKey) {
         supabase.from('call_logs').select('outcome, called_at').eq('order_id', String(orderId)).in('outcome', NO_CONTACT_OUTCOMES),
     ]);
     if (te) throw new Error(te.message);
-    const okSends = (sends || []).filter(s => s.status !== 'failed');
+    const okSends = (sends || []).filter(s => !['failed', 'skipped'].includes(s.status));   // a skipped row is not a send
     const done = new Map(okSends.map(s => [s.version, s]));
     const tpl = (tpls || []).find(t => !done.has(t.version));
     if (!tpl) return { tpl: null, locked: null, tpls: tpls || [], done };
@@ -168,7 +197,7 @@ router.get('/support/wa/state', async (req, res) => {
         ]);
         if (te) throw new Error(te.message);
         if (se) throw new Error(se.message);
-        const sent = new Map((sends || []).filter(s => s.status !== 'failed')
+        const sent = new Map((sends || []).filter(s => !['failed', 'skipped'].includes(s.status))
             .map(s => [`${s.sequence_key}|${s.version}`, s]));
         const seqs = {};
         (tpls || []).forEach(t => {
@@ -282,6 +311,17 @@ async function performAutoSend(orderName, sequenceKey, version, extraFields) {
     const { data: tpl } = await supabase.from('wa_template_sequences_msg91').select('*')
         .eq('sequence_key', sequenceKey).eq('version', version).eq('active', true).maybeSingle();
     if (!tpl) return { skip: `no active template for ${sequenceKey} v${version}` };
+    // Same template already delivered to this phone (our log or the MSG91 mirror, e.g. n8n) → record
+    // a 'skipped' row so the turnstile stops every later path from retrying, and send nothing.
+    const dup = await sentToPhoneRecently(order.phone, tpl.template_name);
+    if (dup) {
+        await supabase.from('wa_sends_msg91').insert({
+            order_name: orderName, sequence_key: sequenceKey, version, template_name: tpl.template_name,
+            phone: last10(order.phone), status: 'skipped', payload: { fields, auto: true, skipped: dup }, sent_by: 'auto',
+            response: { skipped: dup },
+        }).then(() => {}).catch(() => {});
+        return { skip: dup };
+    }
     const ins = await supabase.from('wa_sends_msg91').insert({
         order_name: orderName, sequence_key: sequenceKey, version,
         template_name: tpl.template_name, phone: last10(order.phone),
@@ -563,4 +603,4 @@ router.get('/support/wa/chat', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-module.exports = { router, resolveOrderFields, allowlistBlocks, autoCodOnCreate, codInitialTick, codReminderTick, ndrTick, COD_V1_DELAY_MS };
+module.exports = { router, resolveOrderFields, allowlistBlocks, allowlistBlocksFor, sentToPhoneRecently, autoCodOnCreate, codInitialTick, codReminderTick, ndrTick, COD_V1_DELAY_MS };

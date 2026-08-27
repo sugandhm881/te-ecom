@@ -19,8 +19,8 @@
 // Vobiz gets {"type":"clearAudio"} (drops its buffered speech instantly) and the in-flight
 // chat/TTS turn is aborted.
 //
-// ⚠ TEST SAFETY: outbound calls are refused for any phone not on MSG91_COD_ALLOWLIST while that
-// var is set — same turnstile as WhatsApp, same standing instruction ("test only what I said").
+// ⚠ TEST SAFETY: outbound calls are refused for any phone not on VOBIZ_CALL_ALLOWLIST while that
+// var is set — its OWN list since 2026-08-27, when WhatsApp opened to every customer (unset = open).
 // ⚠ PROMPTS are a compact server-side copy of the rules living in voice-agent.html (spoken style,
 // persona, brand closing). If the page's prompts evolve, this file must follow — drift risk noted.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,7 +31,8 @@ const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const { supabase } = require('../supabase');
 const config = require('../../config');
-const { resolveOrderFields, allowlistBlocks } = require('./msg91_wa');
+const { resolveOrderFields, allowlistBlocksFor } = require('./msg91_wa');
+const allowlistBlocks = allowlistBlocksFor('VOBIZ_CALL_ALLOWLIST');   // calls keep a test list even though messages are open
 
 const SARVAM_KEY = () => String(process.env.SARVAM_API_KEY || '').trim().split(/\s+/)[0];
 const V_AUTH_ID = () => String(process.env.VOBIZ_AUTH_ID || '').trim();

@@ -1873,6 +1873,34 @@ function check(name, got, want) {
     void RR;
 }
 
+// ── 4g4. WhatsApp cut-over: open to every customer, calls stay listed, duplicates skipped ────────
+// 2026-08-27, user: "make it happen for everyone not just allowed list". The allowlist is DATA (an
+// env var), so cut-over is its removal; the code must (1) read "unset = open", (2) keep Vobiz CALLS on
+// their own list so opening messages does not open phone calls, and (3) skip a template the phone
+// already received from anyone — our log or the MSG91 mirror (n8n) — recording a 'skipped' row that
+// no path ever mistakes for a send.
+{
+    const wa = fs.readFileSync(path.join(ROOT, 'app/api/msg91_wa.js'), 'utf8');
+    const vb = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+    const { allowlistBlocksFor } = require(path.join(ROOT, 'app/api/msg91_wa'));
+    const saved = process.env.ZZ_TEST_LIST;
+    delete process.env.ZZ_TEST_LIST;
+    check('wa cutover: an unset allowlist blocks nobody', allowlistBlocksFor('ZZ_TEST_LIST')('TE1', '9876543210'), null);
+    process.env.ZZ_TEST_LIST = '+91 98765 43210, TE25-1';
+    check('wa cutover: a set allowlist still blocks everyone not named (phone or order)',
+        [allowlistBlocksFor('ZZ_TEST_LIST')('TE9', '9876543210'), allowlistBlocksFor('ZZ_TEST_LIST')('TE25-1', '1111111111'), allowlistBlocksFor('ZZ_TEST_LIST')('TE9', '2222222222')],
+        [null, null, 'not on ZZ_TEST_LIST (test mode)']);
+    if (saved === undefined) delete process.env.ZZ_TEST_LIST; else process.env.ZZ_TEST_LIST = saved;
+    check('wa cutover: WhatsApp reads MSG91_COD_ALLOWLIST, Vobiz calls read VOBIZ_CALL_ALLOWLIST',
+        [/const allowlistBlocks = allowlistBlocksFor\('MSG91_COD_ALLOWLIST'\)/.test(wa), /allowlistBlocksFor\('VOBIZ_CALL_ALLOWLIST'\)/.test(vb), /allowlistBlocks\b/.test(vb)],
+        [true, true, true]);
+    check('wa cutover: a template already delivered to the phone is skipped and recorded, never re-sent',
+        [/async function sentToPhoneRecently/.test(wa), /const dup = await sentToPhoneRecently\(order\.phone, tpl\.template_name\)/.test(wa),
+         /status: 'skipped'/.test(wa), (wa.match(/!\['failed', 'skipped'\]\.includes\(s\.status\)/g) || []).length],
+        [true, true, true, 2]);
+    check('wa cutover: the mirror lookup shifts for its IST-as-UTC timestamps', /5\.5 \* 3600e3/.test(wa), true);
+}
+
 // ── 4h. Secrets vault: every credential is AES-256-GCM at rest, and nothing reads around it ─────
 // Added 2026-08-27. `.env` is sealed into `.env.vault` by app/secrets.js; config.js and every
 // standalone script go through that one loader, and the rotated Teams refresh token is written back
