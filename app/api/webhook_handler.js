@@ -336,7 +336,8 @@ router.post('/shopify-order', async (req, res) => {
             const sa = o.shipping_address || {};
             const address = [sa.address1, sa.address2, sa.city, sa.province, sa.zip].filter(Boolean).join(', ');
             const shopifyHold = require('./shopify_hold');
-            const reasons = await shopifyHold.holdReasons({ phone, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price, address });
+            const email = o.email || (o.customer && o.customer.email) || null;
+            const reasons = await shopifyHold.holdReasons({ phone, email, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price, address });
             if (!reasons.length) { console.log(`[ShopifyHold] ${orderName}: not a repeat-COD candidate → no hold`); return; }
             const r = await shopifyHold.holdOrderSmart(orderName, o.id, shopifyHold.reasonNoteFrom(reasons), o.created_at);
             console.log(`[ShopifyHold] ${orderName}: ${r.held ? 'HELD on Shopify ✓' : r.skipped ? 'skipped (' + r.skipped + ')' : 'hold FAILED (' + r.failed + ')'}`);

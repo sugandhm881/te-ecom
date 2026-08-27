@@ -16,8 +16,8 @@ const UNDELIVERED_BUCKETS = ['undelivered'];   // per the console spec: single m
 // What "Status changed" means: an order that WAS undelivered and has since SETTLED. Delivered or RTO —
 // the two outcomes the customer-support team acts on. Not merely "any bucket other than undelivered".
 const SETTLED_BUCKETS = ['delivered', 'rto'];
-const HIGH_VALUE_MIN = 1500;   // ₹ — high-value hold threshold, and the bar a PAST DELIVERED order must
-                               // clear to earn the trust exception. Keep in sync with shopify_hold.js.
+const RR = require('./repeat_rules');   // the repeat-COD rules + phone∪email identity — ONE copy, shared with shopify_hold.js
+const HIGH_VALUE_MIN = RR.HIGH_VALUE_MIN;
 const CALL_OUTCOMES = ['no_answer', 'customer_will_accept', 'refused', 'reschedule', 'wrong_number', 'delivered_confirmed', 'other'];
 const PREPAID_STATUSES = ['paid', 'partially_paid', 'refunded', 'partially_refunded'];
 
@@ -461,81 +461,46 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
         const shipPhoneBy = {}; shipRows.forEach(s => { if (s.phone && !shipPhoneBy[String(s.order_id)]) shipPhoneBy[String(s.order_id)] = s.phone; });
         cand.forEach(c => { if (!c.phone && shipPhoneBy[String(c.order_id)]) c.phone = shipPhoneBy[String(c.order_id)]; });
     }
-    // (4) ≥1 of the customer's last 3 PRIOR orders not delivered.
-    // Phones are stored in mixed formats ('+919876543210' / '919876543210' / bare 10-digit — and the
-    // shipping-address backfill above can add spaced ones), so EXACT matching missed history entirely.
-    // Normalize to the last 10 digits: query the common stored variants, then group/look up by last-10.
-    const _p10 = p => String(p || '').replace(/\D/g, '').slice(-10);
-    const phones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
-    const phoneVariants = [...new Set(phones.flatMap(p => { const t = _p10(p); return t.length === 10 ? [p, t, '91' + t, '+91' + t] : [p]; }))];
-    const hist = phones.length ? await chunkedIn('order_buckets', 'order_id, order_name, phone, bucket, created_at, total_price', 'phone', phoneVariants) : [];
-    // COMPLETE-history high-value deliveries, asked separately (delivered + ≥₹1500 only, so the result
-    // set is tiny). Not filtered out of `hist`: that batch is shared with the last-3 logic and each
-    // chunk's response is capped at 1000 rows, which could silently hide an older proving delivery.
-    const hvRows = phones.length ? await chunkedIn('order_buckets', 'phone, created_at', 'phone', phoneVariants,
-        q => q.eq('bucket', 'delivered').gte('total_price', HIGH_VALUE_MIN)) : [];
-    const hvByPhone = {};   // last-10 phone → EARLIEST delivered ≥₹1500 order date
-    hvRows.forEach(h => { const k = _p10(h.phone) || h.phone; if (!hvByPhone[k] || new Date(h.created_at) < new Date(hvByPhone[k])) hvByPhone[k] = h.created_at; });
+    // (4)/(5) The reasons. IDENTITY = phone ∪ email with transitive closure (repeat_rules.js) — a
+    // customer who changed phone number but kept the email (TE25-45095) is still the same customer.
+    // One batch of history fetches for every candidate's phones AND emails, expanding through the
+    // contacts found on the way; then each candidate's identity is closed over that pool.
+    const seedPhones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
+    const seedEmails = [...new Set(cand.map(c => c.email).filter(Boolean))];
+    const hist = (seedPhones.length || seedEmails.length) ? await RR.fetchHistory(supabase, { phones: seedPhones, emails: seedEmails }) : [];
     // EasyEcom-cancelled prior orders read as active in order_buckets (Shopify lag) — treat them as cancelled
     // so a customer whose only "non-delivered" prior order was actually cancelled isn't flagged repeat-risk.
     const histCancelled = await eeCancelledSet(hist.map(h => h.order_name));
-    const nkn = n => String(n || '').replace('#', '').trim();
-    const byPhone = {}; hist.forEach(h => { const k = _p10(h.phone) || h.phone; (byPhone[k] = byPhone[k] || []).push(h); });
-    const TERMINAL = new Set(['delivered', 'rto', 'cancelled']);                 // final states → not "in-flight"
-    const isCancelled = h => h.bucket === 'cancelled' || histCancelled.has(nkn(h.order_name));   // Shopify OR EasyEcom cancel
-    // Addresses for the `short_address` reason — the current candidates + each customer's PAST DELIVERED orders
-    // (the trust exception: a short address is NOT held if a past DELIVERED order used the same address).
-    const _normA = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
-    const _fullA = a => [a.address1, a.address2, a.city, a.province, a.zip].filter(Boolean).join(', ');
+    const isCancelled = h => h.bucket === 'cancelled' || histCancelled.has(RR.orderKey(h.order_name));
+    // COMPLETE-history high-value deliveries for the pool (delivered + ≥₹1500 only, so the set is tiny).
+    const hvRows = hist.length ? await RR.chunkedIn(supabase, 'order_buckets', 'order_id, phone, email, created_at', 'phone',
+        [...new Set(hist.map(h => RR.phoneKey(h.phone)).filter(Boolean))].flatMap(RR.phoneVariants),
+        q => q.eq('bucket', 'delivered').gte('total_price', HIGH_VALUE_MIN)) : [];
+    const hvByEmail = hist.length ? await RR.chunkedIn(supabase, 'order_buckets', 'order_id, phone, email, created_at', 'email',
+        [...new Set(hist.map(h => RR.emailKey(h.email)).filter(Boolean))].flatMap(RR.emailVariants),
+        q => q.eq('bucket', 'delivered').gte('total_price', HIGH_VALUE_MIN)) : [];
+    const hvAll = [...hvRows, ...hvByEmail];
+    // Addresses: the candidates' own + every DELIVERED order in the pool (for the short-address trust exception).
     const candAddrRows = cand.length ? await chunkedIn('order_shipping_addresses', 'order_id, address1, address2, city, province, zip', 'order_id', cand.map(c => c.order_id)) : [];
     const deliveredHistIds = hist.filter(h => h.bucket === 'delivered').map(h => h.order_id);
     const histAddrRows = deliveredHistIds.length ? await chunkedIn('order_shipping_addresses', 'order_id, address1, address2, city, province, zip', 'order_id', deliveredHistIds) : [];
-    const candAddrById = {}; candAddrRows.forEach(a => { candAddrById[String(a.order_id)] = _fullA(a); });
-    const histAddrNormById = {}; histAddrRows.forEach(a => { histAddrNormById[String(a.order_id)] = _normA(_fullA(a)); });
+    const candAddrById = {}; candAddrRows.forEach(a => { candAddrById[String(a.order_id)] = RR.fullAddr(a); });
+    const histAddrNormById = {}; histAddrRows.forEach(a => { histAddrNormById[String(a.order_id)] = RR.normAddr(RR.fullAddr(a)); });
     return cand.filter(c => {
-        const all = byPhone[_p10(c.phone) || c.phone] || [];
+        const ident = RR.closeIdentity({ phone: c.phone, email: c.email }, hist);
+        const all = ident.orders;
         c.orders_count = all.length;
-        // Reason `recent_undelivered` — ≥1 of the customer's last 3 PRIOR orders not delivered.
-        const last3Prior = all
-            .filter(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at))
-            .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-            .slice(0, 3);
-        // RULE: if ANY ONE of the last 3 prior orders was DELIVERED, the customer is trusted → don't flag/hold on
-        // the history reasons (recent non-delivery / in-flight). Only when NONE of the last 3 delivered. RTO/
-        // undelivered/in-transit all count as "not delivered". (high_value below is independent of this.)
-        const dCount    = last3Prior.filter(h => h.bucket === 'delivered').length;
-        const reliable  = dCount >= 1;
-        // Reason `recent_undelivered` — ≥1 of the last 3 not delivered (RTO included), unless reliable.
-        const rRecent   = !reliable && last3Prior.some(h => h.bucket !== 'delivered' && !isCancelled(h));
-        // Reason `in_flight` (spec reason #1) — the customer has ANOTHER non-terminal (live/pending) order. Independent
-        // of the delivery-reliability skip (that carve-out is for recent-non-delivery only), so a concurrent live order
-        // holds the latest even for a customer who has a past delivery.
-        const rInflight = all.some(h => h.order_id !== c.order_id && new Date(h.created_at) < new Date(c.created_at) && !TERMINAL.has(h.bucket) && !isCancelled(h));
-        // Reason `high_value` — this order is ₹1500 and above.
-        // TRUST EXCEPTION (2026-08-01): skip when the customer has EVER TAKEN DELIVERY of a ≥₹1500 order.
-        // NO last-3 window and no time limit — their COMPLETE history counts (a proven high-value
-        // acceptor makes the value alone a non-signal). Mirrors holdReasons() in shopify_hold.js.
-        const hvAt = hvByPhone[_p10(c.phone) || c.phone];
-        const deliveredHighValue = !!(hvAt && new Date(hvAt) < new Date(c.created_at));
-        const rValue    = Number(c.total_price || 0) >= HIGH_VALUE_MIN && !deliveredHighValue;
-        // Reason `short_address` — terse/incomplete address (<100 chars), unless a PAST DELIVERED order for this
-        // customer used the same address (proven deliverable).
-        const cAddr = candAddrById[String(c.order_id)] || '';
-        let rShort = false;
-        if (cAddr && cAddr.length < 60) {
-            const cNorm = _normA(cAddr);
-            rShort = !all.some(h => h.bucket === 'delivered' && histAddrNormById[String(h.order_id)] === cNorm);
-        }
-        // PARTIALLY-PAID orders are held on high value ONLY; the history/short-address reasons stay COD-specific.
-        const isPartialPaid = finById[String(c.order_id)] === 'partially_paid';
-        const reasons = [];
-        if (!isPartialPaid && rInflight) reasons.push('in_flight');
-        if (!isPartialPaid && rRecent)   reasons.push('recent_undelivered');
-        if (rValue)                      reasons.push('high_value');
-        if (!isPartialPaid && rShort)    reasons.push('short_address');
+        c.identity = { phones: [...ident.phones], emails: [...ident.emails], overflow: ident.overflow };
+        const inIdent = r => (RR.phoneKey(r.phone) && ident.phones.has(RR.phoneKey(r.phone))) || (RR.emailKey(r.email) && ident.emails.has(RR.emailKey(r.email)));
+        const deliveredHighValue = hvAll.some(h => inIdent(h) && new Date(h.created_at) < new Date(c.created_at));
+        const deliveredAddrNorms = new Set(all.filter(h => h.bucket === 'delivered').map(h => histAddrNormById[String(h.order_id)]).filter(Boolean));
+        const reasons = RR.evaluateReasons({
+            cand: { order_id: c.order_id, created_at: c.created_at, total_price: c.total_price, financial_status: finById[String(c.order_id)] || '', address: candAddrById[String(c.order_id)] || '' },
+            history: all, deliveredHighValue, deliveredAddrNorms, isCancelled,
+        });
         c.reasons = reasons;
         // Dashboard (anyReason): return the whole tagged base — /support/queue filters it. Auto-hold cron:
-        // qualify by ANY of the 3 reasons (so high-value / in-flight orders auto-hold too, matching the panel).
+        // qualify by ANY of the 4 reasons (so high-value / in-flight orders auto-hold too, matching the panel).
         return anyReason ? true : reasons.length > 0;
     });
 }

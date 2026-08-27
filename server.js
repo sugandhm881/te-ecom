@@ -530,8 +530,11 @@ cronJob('WH Report (every 2h)', process.env.WH_REPORT_CRON || '30 8-20/2 * * *',
 // so the evening report is built on the freshest courier status.
 // WhatsApp automation (MSG91): the 30-min COD reminder sweep and the NDR/RTO event sweep.
 // Both engines are allowlist-gated until cut-over and every send logs to wa_sends_msg91.
+// The same 5-minute tick also runs the COD V1 BACKSTOP: the 3-minute confirm is armed in-process by
+// the orders/create webhook, so an order whose timer died with a restart is picked up here.
 cronJob('WA CodReminder (*/5 * * * *)', '*/5 * * * *', async () => {
-    const { codReminderTick } = require('./app/api/msg91_wa');
+    const { codInitialTick, codReminderTick } = require('./app/api/msg91_wa');
+    await codInitialTick().catch(e => console.error('[WA auto] COD V1 backstop error:', e.message));
     await codReminderTick().catch(e => console.error('[WA auto] reminder cron error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 cronJob('WA NDR (*/15 * * * *)', '*/15 * * * *', async () => {

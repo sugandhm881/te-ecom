@@ -699,10 +699,32 @@ function check(name, got, want) {
          /only for orders currently held on Shopify/.test(wa),
          /s\.mode==='auto'/.test(waUi), /s\.hidden/.test(waUi)],
         [true, true, true, true, true]);
-    // The webhook hook is back, deliberately (plan change): instant COD confirm on orders/create.
-    check('wa auto: orders/create webhook fires the instant COD confirmation',
+    // The webhook hook is back, deliberately (plan change): COD confirm armed on orders/create —
+    // and since 2026-08-27 it fires THREE MINUTES later (user spec), on cod_confirmation_v1, with a
+    // cron backstop so a restart inside the window cannot lose the send. The send re-reads the order
+    // first: a cancellation inside those three minutes wins.
+    check('wa auto: orders/create webhook arms the COD confirmation',
         [/autoCodOnCreate\(o\)/.test(fs.readFileSync(path.join(ROOT, 'app/api/webhook_handler.js'), 'utf8'))],
         [true]);
+    check('wa auto: COD V1 is delayed 3 minutes, not instant, and has a restart-safe backstop',
+        [/COD_V1_DELAY_MS = 3 \* 60e3/.test(wa), /setTimeout\(\(\) => sendCodV1\(orderName, 'timer'\), delayMs\)/.test(wa),
+         /async function codInitialTick/.test(wa), /codInitialTick\(\)/.test(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8')),
+         /cancelled before the 3-minute mark/.test(wa), /cod_confirmation_v1\s+— 3 MINUTES/.test(wa)],
+        [true, true, true, true, true, true]);
+    {
+        // Behavioural: the eligibility rule and the timer arming, with the real functions.
+        const src = wa;
+        const elig = new Function('return ' + src.slice(src.indexOf('function codV1Eligible'), src.indexOf('async function sendCodV1')))();
+        check('wa auto: V1 eligibility — COD only, no test, no cancelled',
+            [elig({ financial_status: 'pending' }, 'TE1'), elig({ financial_status: 'paid' }, 'TE1'), elig({ financial_status: 'pending', test: true }, 'TE1'),
+             elig({ financial_status: 'pending', cancelled_at: 'x' }, 'TE1'), elig({ financial_status: 'pending' }, '')],
+            [null, 'not COD (financial_status=paid)', 'test order', 'already cancelled', 'no order name']);
+    }
+    // The registry row is DATA (the reason the template swap needs no deploy) — the migration that
+    // records the swap must name the right template, and must not be the instant one any more.
+    const mig = fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260827_wa_cod_v1_template.sql'), 'utf8');
+    check('wa auto: cod_auto V1 registry row is cod_confirmation_v1 (migration on record)',
+        [/set template_name = 'cod_confirmation_v1'/.test(mig), /sequence_key = 'cod_auto' and s\.version = 1/.test(mig)], [true, true]);
 
     // "I want real template" — the registered bodies are synced from MSG91's get-template-client
     // (control.msg91.com, path param; recovered from the docs page source after every api.msg91.com
@@ -1759,6 +1781,59 @@ function check(name, got, want) {
         /holdOrderSmart\([\s\S]{0,700}?\} catch \(e\) \{[\s\S]{0,120}failed\+\+/.test(srv), true);
     check('shopify hold: the candidate lookup retries a transient failure once',
         /if \(!shTransient\(e1\)\) throw e1;/.test(srv), true);
+}
+
+// ── 4g2. Repeat-COD identity: phone ∪ email, closed — the rules in ONE place ────────────────────
+// TE25-45095 (2026-08-27): RTO in April + cancellation in May under phone A, new COD order under phone B
+// with the SAME email — both copies of the rule keyed history on phone only and saw a first-time
+// buyer. Now repeat_rules.js owns the identity closure AND the rule evaluation for the webhook, the
+// */2 cron and the Call Queue. These tests replay that order's shape, the placeholder guard, the
+// runaway-closure fallback, and every payment-type branch, on the pure functions.
+{
+    const RR = require(path.join(ROOT, 'app/api/repeat_rules'));
+    const rows = [
+        { order_id: '1', order_name: '#TE25-21864', phone: '+919607878181', email: 'more.vinaya123@gmail.com', bucket: 'rto', created_at: '2026-04-13T16:56:19Z', total_price: 748 },
+        { order_id: '2', order_name: '#TE25-25202', phone: '+919607878181', email: 'more.vinaya123@gmail.com', bucket: 'cancelled', created_at: '2026-05-08T07:49:17Z', total_price: 748 },
+        { order_id: '3', order_name: '#TE25-45095', phone: '+917030520199', email: 'more.vinaya123@gmail.com', bucket: 'order_to_dispatch', created_at: '2026-08-27T10:45:45Z', total_price: 798 },
+        { order_id: '9', order_name: '#OTHER', phone: '9999999999', email: 'stranger@x.com', bucket: 'rto', created_at: '2026-06-01T00:00:00Z', total_price: 500 },
+    ];
+    const cand = { order_id: '3', created_at: '2026-08-27T10:45:45Z', total_price: 798, financial_status: 'pending', address: 'Flat 4, Some Long Street Name, Some Locality, Pune, Maharashtra, 411001' };
+    // Webhook moment: the new order is NOT in order_buckets yet, so the pool is history only.
+    const pool = rows.filter(r => r.order_id !== '3');
+    const idPhoneOnly = RR.closeIdentity({ phone: '7030520199' }, pool);
+    const idBoth = RR.closeIdentity({ phone: '7030520199', email: 'More.Vinaya123@gmail.com' }, pool);
+    check('repeat: phone-only seed finds nothing for TE25-45095 (the old behaviour)', idPhoneOnly.orders.map(o => o.order_id), []);
+    check('repeat: phone ∪ email closes over the old phone and finds the RTO history',
+        [idBoth.orders.map(o => o.order_id).sort(), [...idBoth.phones].sort(), [...idBoth.emails]],
+        [['1', '2'], ['7030520199', '9607878181'], ['more.vinaya123@gmail.com']]);
+    // Cron moment: the order IS in the pool — a phone seed reaches the email through its own row.
+    check('repeat: once the order is in the pool even a phone seed closes over the email',
+        RR.closeIdentity({ phone: '7030520199' }, rows).orders.map(o => o.order_id).sort(), ['1', '2', '3']);
+    check('repeat: TE25-45095 now holds on recent_undelivered (RTO counts, cancelled does not)',
+        RR.evaluateReasons({ cand, history: idBoth.orders, deliveredHighValue: false, deliveredAddrNorms: new Set() }), ['recent_undelivered']);
+    check('repeat: a placeholder phone is never an identity key', [RR.phoneKey('9999999999'), RR.phoneKey('+91 70305 20199'), RR.emailKey('dummy@x.com'), RR.emailKey(' A@B.COM ')], [null, '7030520199', null, 'a@b.com']);
+    // Runaway closure: 401 orders share one email → fall back to the seed keys, never merge strangers.
+    const big = Array.from({ length: 401 }, (_, i) => ({ order_id: 'b' + i, phone: '8' + String(100000000 + i), email: 'shared@x.com', bucket: 'rto', created_at: '2026-01-01T00:00:00Z' }));
+    const ov = RR.closeIdentity({ phone: '8100000000', email: 'shared@x.com' }, big);
+    check('repeat: a closure past MAX_MERGE falls back to the seed keys and flags overflow', [ov.overflow, ov.phones.size, ov.emails.size], [true, 1, 1]);
+    // Payment-type branches and the trust exceptions.
+    const hist = [{ order_id: 'h1', bucket: 'in_transit', created_at: '2026-08-01T00:00:00Z' }, { order_id: 'h2', bucket: 'rto', created_at: '2026-07-01T00:00:00Z' }];
+    const base = { order_id: 'c', created_at: '2026-08-27T00:00:00Z', total_price: 1600, address: 'short addr' };
+    check('repeat: fully prepaid never holds', RR.evaluateReasons({ cand: { ...base, financial_status: 'paid' }, history: hist, deliveredHighValue: false, deliveredAddrNorms: new Set() }), []);
+    check('repeat: partially paid holds on high_value only', RR.evaluateReasons({ cand: { ...base, financial_status: 'partially_paid' }, history: hist, deliveredHighValue: false, deliveredAddrNorms: new Set() }), ['high_value']);
+    check('repeat: COD gets every reason that applies', RR.evaluateReasons({ cand: { ...base, financial_status: 'pending' }, history: hist, deliveredHighValue: false, deliveredAddrNorms: new Set() }).sort(), ['high_value', 'in_flight', 'recent_undelivered', 'short_address']);
+    check('repeat: a past ≥₹1500 delivery and a delivered same-address drop those two reasons',
+        RR.evaluateReasons({ cand: { ...base, financial_status: 'pending' }, history: hist, deliveredHighValue: true, deliveredAddrNorms: new Set([RR.normAddr('Short Addr')]) }).sort(), ['in_flight', 'recent_undelivered']);
+    check('repeat: any delivered order in the last 3 makes the customer trusted for the history rule',
+        RR.evaluateReasons({ cand: { ...base, total_price: 500, address: 'a long enough address to pass the sixty character minimum easily', financial_status: 'pending' }, history: [...hist, { order_id: 'h3', bucket: 'delivered', created_at: '2026-08-10T00:00:00Z' }], deliveredHighValue: false, deliveredAddrNorms: new Set() }), ['in_flight']);
+    // Structural: both callers go through the one module; the webhook now passes the email.
+    const sh = fs.readFileSync(path.join(ROOT, 'app/api/shopify_hold.js'), 'utf8');
+    const sc = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+    const wh = fs.readFileSync(path.join(ROOT, 'app/api/webhook_handler.js'), 'utf8');
+    check('repeat: webhook and cron/queue both evaluate through repeat_rules (no second copy of the rule)',
+        [/RR\.evaluateReasons\(/.test(sh), /RR\.evaluateReasons\(/.test(sc), /RR\.fetchHistory\(/.test(sh), /RR\.fetchHistory\(/.test(sc),
+         /const HIGH_VALUE_MIN = 1500/.test(sh), /const HIGH_VALUE_MIN = 1500/.test(sc), /holdReasons\(\{ phone, email,/.test(wh)],
+        [true, true, true, true, false, false, true]);
 }
 
 // ── 4h. Secrets vault: every credential is AES-256-GCM at rest, and nothing reads around it ─────

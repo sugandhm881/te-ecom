@@ -262,8 +262,11 @@ router.post('/support/wa/send', express.json(), async (req, res) => {
 // ── AUTOMATIC SENDS (2026-08-26 plan) — every send logs to wa_sends_msg91, the UNIQUE
 // (order, sequence, version) row is the double-send turnstile, and MSG91_COD_ALLOWLIST gates
 // EVERYTHING until cut-over ("use the same till test is done").
-//   cod_auto  V1 cod_confirmation_v2      — instant on Shopify orders/create (COD only)
-//   cod_auto  V2 cod_confirm_reminder_v1  — 30 min later if NO reply (CONFIRM or REJECT both count)
+//   cod_auto  V1 cod_confirmation_v1      — 3 MINUTES after Shopify orders/create (COD only; user spec
+//                                           2026-08-27, replacing the instant cod_confirmation_v2). The
+//                                           delay is an in-process timer armed by the webhook, with
+//                                           codInitialTick (*/5 cron) as the restart-safe backstop.
+//   cod_auto  V2 cod_confirm_reminder_v1  — 30 min after V1 if NO reply (CONFIRM or REJECT both count)
 //   ndr_auto  V1 ndr_msg                  — 1st failed delivery attempt (shipment_journey_ecom)
 //   ndr_auto  V2 ndr_final_attempt_v1     — 2nd failed attempt
 //   ndr_auto  V3 order_rto_v1             — RTO initiated
@@ -299,17 +302,66 @@ async function performAutoSend(orderName, sequenceKey, version, extraFields) {
     }
 }
 
-// Shopify orders/create → instant COD confirmation. Payload comes straight from the webhook.
-async function autoCodOnCreate(o) {
+// Shopify orders/create → COD confirmation V1, THREE MINUTES later (user spec 2026-08-27; it was
+// instant before). The wait is deliberate: an order cancelled or edited seconds after checkout must
+// not be confirmed, and the `orders` mirror has settled by then. The timer is in-process, so a pm2
+// restart inside those three minutes would lose it — codInitialTick() below is the backstop that
+// picks such orders up from the `orders` table. Both land on the same UNIQUE turnstile row, so the
+// two paths can never double-send.
+const COD_V1_DELAY_MS = 3 * 60e3;
+const _codTimers = new Map();                                       // orderName → timeout (diagnostic only)
+function codV1Eligible(o, orderName) {
+    if (!orderName) return 'no order name';
+    if (String(o.financial_status) !== 'pending') return `not COD (financial_status=${o.financial_status || 'none'})`;
+    if (o.test) return 'test order';
+    if (o.cancelled_at) return 'already cancelled';
+    return null;
+}
+async function sendCodV1(orderName, via) {
+    _codTimers.delete(orderName);
     try {
-        const orderName = String(o.name || '').replace(/^#/, '').trim();
-        if (!orderName) return;
-        if (String(o.financial_status) !== 'pending') return console.log(`[WA auto] ${orderName}: not COD (financial_status=${o.financial_status || 'none'}) — no confirm message`);
-        if (o.test) return console.log(`[WA auto] ${orderName}: test order — skipped`);
-        if (o.cancelled_at) return console.log(`[WA auto] ${orderName}: already cancelled — skipped`);
+        // Re-read the order at send time: a cancellation in the last three minutes wins.
+        const { data: live } = await supabase.from('orders').select('cancelled_at, financial_status')
+            .or(`name.eq.${orderName},name.eq.#${orderName}`).order('created_at', { ascending: false }).limit(1).maybeSingle();
+        if (live && live.cancelled_at) return console.log(`[WA auto] ${orderName}: cancelled before the 3-minute mark — no confirm message`);
+        if (live && live.financial_status && live.financial_status !== 'pending') return console.log(`[WA auto] ${orderName}: paid before the 3-minute mark — no confirm message`);
         const r = await performAutoSend(orderName, 'cod_auto', 1);
-        if (r.skip) console.log(`[WA auto] ${orderName}: cod_auto V1 skipped — ${r.skip}`);
-    } catch (e) { console.error('[WA auto] order-create send failed:', e.message); }
+        if (r.skip) console.log(`[WA auto] ${orderName}: cod_auto V1 skipped (${via}) — ${r.skip}`);
+        else console.log(`[WA auto] ${orderName}: cod_auto V1 sent (${via})`);
+    } catch (e) { console.error(`[WA auto] ${orderName}: cod_auto V1 failed (${via}):`, e.message); }
+}
+async function autoCodOnCreate(o, { delayMs = COD_V1_DELAY_MS } = {}) {
+    const orderName = String((o && o.name) || '').replace(/^#/, '').trim();
+    const why = codV1Eligible(o || {}, orderName);
+    if (why) return console.log(`[WA auto] ${orderName || '?'}: ${why} — no confirm message`);
+    if (_codTimers.has(orderName)) return;                          // webhook retry — one timer per order
+    const t = setTimeout(() => sendCodV1(orderName, 'timer'), delayMs);
+    if (t.unref) t.unref();
+    _codTimers.set(orderName, t);
+    console.log(`[WA auto] ${orderName}: COD confirm V1 scheduled in ${Math.round(delayMs / 60e3)} min`);
+}
+
+// Every 5 min (same cron as the reminder): COD orders created 3–60 min ago with NO cod_auto V1 row —
+// the ones whose in-process timer died with a restart, or whose webhook never arrived. The 60-min
+// ceiling is the age seal (history is never messaged); the allowlist and the turnstile still gate
+// every send exactly as for the timer path.
+async function codInitialTick() {
+    const from = new Date(Date.now() - 60 * 60e3).toISOString();
+    const to = new Date(Date.now() - COD_V1_DELAY_MS).toISOString();
+    const { data: orders } = await supabase.from('orders').select('name, created_at')
+        .eq('financial_status', 'pending').is('cancelled_at', null).neq('test', true)
+        .gte('created_at', from).lte('created_at', to).order('created_at').limit(100);
+    let sent = 0;
+    for (const o of (orders || [])) {
+        const orderName = String(o.name || '').replace(/^#/, '').trim();
+        if (!orderName || _codTimers.has(orderName)) continue;      // timer still pending → leave it
+        const { data: v1 } = await supabase.from('wa_sends_msg91').select('id')
+            .eq('order_name', orderName).eq('sequence_key', 'cod_auto').eq('version', 1).limit(1);
+        if (v1 && v1.length) continue;
+        await sendCodV1(orderName, 'backstop');
+        sent++; await new Promise(rs => setTimeout(rs, 1200));
+    }
+    if (sent) console.log(`[WA auto] COD V1 backstop tick: ${sent} processed`);
 }
 
 // Every 5 min: V1 sent 30min–6h ago, no reply of ANY kind, no V2 yet → reminder. The 6h ceiling is
@@ -511,4 +563,4 @@ router.get('/support/wa/chat', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-module.exports = { router, resolveOrderFields, allowlistBlocks, autoCodOnCreate, codReminderTick, ndrTick };
+module.exports = { router, resolveOrderFields, allowlistBlocks, autoCodOnCreate, codInitialTick, codReminderTick, ndrTick, COD_V1_DELAY_MS };
