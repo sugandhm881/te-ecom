@@ -256,7 +256,10 @@ async function autoHoldOrder(orderName, shopifyOrderId, reasonNote, createdAt, o
     //     lag). Once an order is hours old it's already imported/shipping, so holding does nothing — and
     //     a BULK re-scan of old orders would retroactively hold long-settled ones (happened 2026-07-28:
     //     53 already-"Shipped" orders held by a one-off <100-char sweep). Skip anything not freshly placed.
-    if (createdAt) {
+    //     `allowImported` (the EasyEcom-mirror call) skips this too: by then the parcel is VERIFIABLY held
+    //     in EasyEcom and isDispatchedOrder() has already said it has not left — the mirror only makes
+    //     Shopify agree, and refusing it as "stale" left the two systems disagreeing on late holds.
+    if (createdAt && !(opts && opts.allowImported)) {
         const ageMs = Date.now() - new Date(createdAt).getTime();
         if (Number.isFinite(ageMs) && ageMs > 6 * 60 * 60 * 1000) return { skipped: 'stale' };
     }
@@ -329,7 +332,11 @@ async function holdOrderSmart(orderName, shopifyOrderId, reasonNote, createdAt, 
     // 1) Preferred path — still upstream of EasyEcom.
     const first = await autoHoldOrder(name, shopifyOrderId, reasonNote, createdAt);
     if (first.held) return { held: true, where: 'shopify' };
-    if (first.skipped !== 'in-easyecom') return first;   // stale / already held / released / shipped — leave it
+    // 'in-easyecom' AND 'stale' both mean "the Shopify window has closed" — and both fall through to
+    // the EasyEcom path below, which has its own dispatched guard. 'stale' used to end here (2026-08-27,
+    // "no order should be skipped"): an order the webhook AND the cron missed for six hours was dropped
+    // for good, even though it was still sitting un-manifested in EasyEcom and perfectly holdable.
+    if (first.skipped !== 'in-easyecom' && first.skipped !== 'stale') return first;   // already held / released / shipped — leave it
 
     // ⚠️ RE-HOLD GUARD — SECOND LAYER. The human-release test now runs first inside autoHoldOrder(), so by
     // here we already know no tombstone exists. This layer is deliberately kept anyway: it is the reason the
@@ -436,9 +443,11 @@ const RR = require('./repeat_rules');
 const HIGH_VALUE_MIN = RR.HIGH_VALUE_MIN;
 const REASON_LABEL = { high_value: 'high value (≥₹1500)', recent_undelivered: 'no delivery in last 3', in_flight: 'another live order', short_address: 'short address (<60 chars)' };
 function reasonNoteFrom(reasons) { return (reasons || []).map(r => REASON_LABEL[r] || r).join(', ') || HOLD_NOTE; }
-async function holdReasons({ phone, email, financialStatus, createdAt, shopifyOrderId, totalPrice, address }) {
+async function holdReasons(opts) { return (await holdReasonsDetailed(opts)).reasons; }
+// Same, plus the resolved identity and history size — what the evaluation ledger records.
+async function holdReasonsDetailed({ phone, email, financialStatus, createdAt, shopifyOrderId, totalPrice, address }) {
     const fin = String(financialStatus || '').toLowerCase();
-    if (['paid', 'refunded', 'partially_refunded'].includes(fin)) return [];        // fully prepaid → never held
+    if (['paid', 'refunded', 'partially_refunded'].includes(fin)) return { reasons: [], identity: null, historyCount: 0 };   // fully prepaid → never held
     // IDENTITY = phone ∪ email, closed transitively (TE25-45095: new phone, same email, RTO history under
     // the old phone — a phone-only lookup saw a first-time buyer). Placeholders are never keys.
     const history = await RR.fetchHistory(supabase, { phones: [phone], emails: [email] });
@@ -456,14 +465,47 @@ async function holdReasons({ phone, email, financialStatus, createdAt, shopifyOr
             deliveredAddrNorms = new Set(rows.map(a => RR.normAddr(RR.fullAddr(a))));
         }
     }
-    return RR.evaluateReasons({
+    const reasons = RR.evaluateReasons({
         cand: { order_id: shopifyOrderId, created_at: createdAt, total_price: totalPrice, financial_status: financialStatus, address: addrStr },
         history: ident.orders, deliveredHighValue, deliveredAddrNorms,
     });
+    return { reasons, identity: ident, historyCount: ident.orders.filter(h => String(h.order_id) !== String(shopifyOrderId)).length };
+}
+
+// ── The coverage guarantee: every COD order gets evaluated, whatever the webhook and cron did ────
+// Runs every 10 minutes. Work list = COD orders 5 min–48 h old with NO row in hold_evaluations_ecom
+// (repeat_rules.unevaluatedCodOrders). Each is evaluated exactly like the webhook would have, held if a
+// reason fires (holdOrderSmart has the dispatched guard, so a parcel that already left is left alone),
+// and recorded with path='reconcile'. A non-empty work list is itself the signal that the primary paths
+// missed something, so it is logged at WARN with the names.
+async function reconcileHoldCoverage({ limit = 100 } = {}) {
+    const todo = await RR.unevaluatedCodOrders(supabase);
+    if (!todo.length) return { checked: 0, held: 0 };
+    console.warn(`[HoldCoverage] ${todo.length} COD order(s) had NO hold evaluation — webhook + cron both missed them: ${todo.slice(0, 10).map(o => norm(o.name)).join(', ')}${todo.length > 10 ? ' …' : ''}`);
+    let held = 0, checked = 0;
+    for (const o of todo.slice(0, limit)) {
+        const name = norm(o.name);
+        try {
+            const { data: addr } = await supabase.from('order_shipping_addresses').select('address1, address2, city, province, zip, phone').eq('order_id', String(o.id)).limit(1).maybeSingle();
+            const phone = (addr && addr.phone) || o.phone;
+            const address = addr ? RR.fullAddr(addr) : '';
+            const d = await holdReasonsDetailed({ phone, email: o.email, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price, address });
+            let action = null;
+            if (d.reasons.length) {
+                action = await holdOrderSmart(name, o.id, reasonNoteFrom(d.reasons), o.created_at);
+                if (action.held) held++;
+            }
+            await RR.recordEvaluation(supabase, { orderName: name, path: 'reconcile', reasons: d.reasons, identity: d.identity, historyCount: d.historyCount, shopifyRepeatTag: /\bRepeat\b/i.test(String(o.tags || '')), action, financialStatus: o.financial_status });
+            checked++;
+        } catch (e) { console.error(`[HoldCoverage] ${name}: ${e.message}`); }
+        await new Promise(r => setTimeout(r, 400));
+    }
+    console.log(`[HoldCoverage] reconciled ${checked} order(s), held ${held}`);
+    return { checked, held, missed: todo.length };
 }
 async function qualifiesForHold(opts) { return (await holdReasons(opts)).length > 0; }   // back-compat boolean wrapper
 
 module.exports = {
     listFulfillmentOrders, holdShopifyOrder, releaseShopifyOrder,
-    getHoldStates, releasedByHuman, holdOrderManual, releaseOrder, cancelOrder, autoHoldOrder, holdOrderSmart, holdSiblingOrders, isDispatchedOrder, qualifiesForHold, holdReasons, reasonNoteFrom, HOLD_NOTE,
+    getHoldStates, releasedByHuman, holdOrderManual, releaseOrder, cancelOrder, autoHoldOrder, holdOrderSmart, holdSiblingOrders, isDispatchedOrder, qualifiesForHold, holdReasons, holdReasonsDetailed, reconcileHoldCoverage, reasonNoteFrom, HOLD_NOTE,
 };

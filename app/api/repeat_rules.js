@@ -154,7 +154,44 @@ function evaluateReasons({ cand, history, deliveredHighValue, deliveredAddrNorms
     return reasons;
 }
 
+// ── the evaluation ledger — every decision leaves a row ───────────────────────────────────────────
+// Fire-and-forget: a ledger write must never break a hold. verdict: hold | no_reason | prepaid | not_holdable.
+async function recordEvaluation(supabase, { orderName, path, reasons, identity, historyCount, shopifyRepeatTag, action, financialStatus }) {
+    try {
+        const fin = String(financialStatus || '').toLowerCase();
+        const verdict = ['paid', 'refunded', 'partially_refunded'].includes(fin) ? 'prepaid' : (reasons && reasons.length ? 'hold' : 'no_reason');
+        await supabase.from('hold_evaluations_ecom').insert({
+            order_name: orderKey(orderName), path, verdict, reasons: reasons || [],
+            identity: identity ? { phones: [...(identity.phones || [])], emails: [...(identity.emails || [])], overflow: !!identity.overflow } : null,
+            history_count: historyCount == null ? null : Number(historyCount),
+            shopify_repeat_tag: shopifyRepeatTag == null ? null : !!shopifyRepeatTag,
+            action: action || null,
+        });
+    } catch (e) { console.warn('[HoldLedger] write failed:', e.message); }
+}
+
+// COD orders in the window with NO evaluation row at all — the reconciler's work list. Window starts
+// `minAgeMin` ago (give the webhook + its 3-minute neighbour a chance) and ends `maxAgeH` ago (older
+// than that a hold is moot AND the age seal protects settled history).
+async function unevaluatedCodOrders(supabase, { minAgeMin = 5, maxAgeH = 48 } = {}) {
+    const from = new Date(Date.now() - maxAgeH * 3600e3).toISOString();
+    const to = new Date(Date.now() - minAgeMin * 60e3).toISOString();
+    const { data: orders, error } = await supabase.from('orders')
+        .select('id, name, email, phone, created_at, financial_status, total_price, tags, cancelled_at, fulfillment_status')
+        .in('financial_status', ['pending', 'partially_paid']).is('cancelled_at', null).neq('test', true)
+        .gte('created_at', from).lte('created_at', to).order('created_at').limit(1000);
+    if (error) throw new Error('orders lookup failed: ' + error.message);
+    const names = (orders || []).map(o => orderKey(o.name)).filter(Boolean);
+    const seen = new Set();
+    for (let i = 0; i < names.length; i += 300) {
+        const { data } = await supabase.from('hold_evaluations_ecom').select('order_name').in('order_name', names.slice(i, i + 300));
+        (data || []).forEach(r => seen.add(r.order_name));
+    }
+    return (orders || []).filter(o => !seen.has(orderKey(o.name)));
+}
+
 module.exports = {
+    recordEvaluation, unevaluatedCodOrders,
     HIGH_VALUE_MIN, SHORT_ADDR_MAX, MAX_MERGE, PLACEHOLDER_PHONES, TERMINAL_BUCKETS,
     p10, phoneKey, emailKey, phoneVariants, emailVariants, normAddr, fullAddr, orderKey,
     closeIdentity, fetchHistory, deliveredHighValueBefore, evaluateReasons, chunkedIn,

@@ -665,6 +665,17 @@ cronJob('ShopifyHold (*/2 * * * *)', '*/2 * * * *', async () => {
     }
 }, { timezone: 'Asia/Kolkata' });
 
+// THE COVERAGE GUARANTEE (2026-08-27, "no order should be skipped from rule"): every 10 minutes, any COD
+// order 5 min–48 h old with NO row in hold_evaluations_ecom is evaluated and held if a reason fires,
+// whatever the webhook (not delivered, HMAC, restart) or the */2 cron (window, cap, outage) did. Same
+// gate as the cron: it holds nothing while auto-hold is disabled, but it still evaluates and records, so
+// the ledger shows what WOULD have been held.
+cronJob('HoldCoverage (*/10 * * * *)', '*/10 * * * *', async () => {
+    if (String(process.env.SHOPIFY_AUTOHOLD_ENABLED || '').toLowerCase() !== 'true') return;
+    const { reconcileHoldCoverage } = require('./app/api/shopify_hold');
+    await reconcileHoldCoverage();
+}, { timezone: 'Asia/Kolkata' });
+
 // The run itself, lifted out so the tick above can stop waiting on it without killing it.
 async function shRunOnce() {
     {
@@ -683,10 +694,19 @@ async function shRunOnce() {
         }
         let held = 0, skipped = 0, failed = 0;
         const reasons = new Map();   // message → count, for ONE summary line instead of a line per order
-        for (const c of cand.slice(0, 50)) {
+        // ⚠️ Already-held / human-released orders are dropped BEFORE the per-tick cap. They used to sit at
+        // the front of the list (oldest first) and consume the 50 slots every tick, so on a busy day a NEW
+        // qualifying order could wait behind fifty settled ones indefinitely (2026-08-27, "no order should
+        // be skipped"). The cap now bounds real hold attempts only.
+        const states = await shopifyHold.getHoldStates(cand.map(c => c.order_name));
+        const RR = require('./app/api/repeat_rules');
+        const open = cand.filter(c => { const st = states[RR.orderKey(c.order_name)]; return !(st && (st.status === 'held' || st.status === 'released')); });
+        skipped += cand.length - open.length;
+        for (const c of open.slice(0, 100)) {
             try {
                 const r = await shopifyHold.holdOrderSmart(c.order_name, c.order_id, shopifyHold.reasonNoteFrom(c.reasons), c.created_at);
                 if (r.held) held++; else if (r.skipped) skipped++; else failed++;
+                RR.recordEvaluation(supabase, { orderName: c.order_name, path: 'cron', reasons: c.reasons, identity: c.identity, historyCount: c.orders_count, action: r, financialStatus: 'pending' }).catch(() => {});
                 // Backstop for the sibling hold too — if the webhook missed the burst, catch the batch here.
                 // Anything already imported into EasyEcom is reported as skipped (a Shopify hold is a no-op
                 // there); those stay a manual EasyEcom-hold decision for the team.

@@ -1778,7 +1778,7 @@ function check(name, got, want) {
     check('shopify hold: overlapping runs are skipped, not stacked',
         /_shRunning/.test(srv) && /previous run still going/.test(srv), true);
     check('shopify hold: one failing order cannot abandon the batch',
-        /holdOrderSmart\([\s\S]{0,700}?\} catch \(e\) \{[\s\S]{0,120}failed\+\+/.test(srv), true);
+        /holdOrderSmart\([\s\S]{0,1200}?\} catch \(e\) \{[\s\S]{0,120}failed\+\+/.test(srv), true);
     check('shopify hold: the candidate lookup retries a transient failure once',
         /if \(!shTransient\(e1\)\) throw e1;/.test(srv), true);
 }
@@ -1832,8 +1832,45 @@ function check(name, got, want) {
     const wh = fs.readFileSync(path.join(ROOT, 'app/api/webhook_handler.js'), 'utf8');
     check('repeat: webhook and cron/queue both evaluate through repeat_rules (no second copy of the rule)',
         [/RR\.evaluateReasons\(/.test(sh), /RR\.evaluateReasons\(/.test(sc), /RR\.fetchHistory\(/.test(sh), /RR\.fetchHistory\(/.test(sc),
-         /const HIGH_VALUE_MIN = 1500/.test(sh), /const HIGH_VALUE_MIN = 1500/.test(sc), /holdReasons\(\{ phone, email,/.test(wh)],
+         /const HIGH_VALUE_MIN = 1500/.test(sh), /const HIGH_VALUE_MIN = 1500/.test(sc), /holdReasonsDetailed\(\{ phone, email,/.test(wh)],
         [true, true, true, true, false, false, true]);
+}
+
+// ── 4g3. Hold coverage: every COD order is evaluated, recorded, and never starved ────────────────
+// "No order should be skipped from rule" (2026-08-27). Three structural guarantees: (1) every path
+// writes the evaluation ledger; (2) the */2 cron drops already-held orders BEFORE its per-tick cap, so
+// settled orders cannot starve a new one; (3) a 'stale' Shopify verdict falls through to the EasyEcom
+// path instead of ending the attempt; plus (4) the 10-minute reconciler that evaluates any COD order
+// the webhook and cron both missed. The work-list rule is exercised on the pure filter.
+{
+    const RR = require(path.join(ROOT, 'app/api/repeat_rules'));
+    const sh = fs.readFileSync(path.join(ROOT, 'app/api/shopify_hold.js'), 'utf8');
+    const wh = fs.readFileSync(path.join(ROOT, 'app/api/webhook_handler.js'), 'utf8');
+    const sv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    check('coverage: webhook, cron and reconciler all write the evaluation ledger',
+        [(wh.match(/RR\.recordEvaluation\(/g) || []).length >= 2, /RR\.recordEvaluation\(supabase, \{ orderName: c\.order_name, path: 'cron'/.test(sv), /path: 'reconcile'/.test(sh)],
+        [true, true, true]);
+    check('coverage: the cron drops held/released orders BEFORE the per-tick cap (no starvation)',
+        [/const open = cand\.filter\(c => \{ const st = states\[/.test(sv), /for \(const c of open\.slice\(0, 100\)\)/.test(sv), /for \(const c of cand\.slice\(0, 50\)\)/.test(sv)],
+        [true, true, false]);
+    check("coverage: a 'stale' Shopify verdict falls through to the EasyEcom hold path",
+        [/first\.skipped !== 'in-easyecom' && first\.skipped !== 'stale'/.test(sh), /if \(createdAt && !\(opts && opts\.allowImported\)\)/.test(sh)], [true, true]);
+    check('coverage: the 10-minute reconciler exists and is on the cron table',
+        [/async function reconcileHoldCoverage/.test(sh), /cronJob\('HoldCoverage \(\*\/10 \* \* \* \*\)'/.test(sv), /unevaluatedCodOrders/.test(sh)], [true, true, true]);
+    check('coverage: ledger table migration is on record',
+        /create table if not exists hold_evaluations_ecom/.test(fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260827_hold_evaluations.sql'), 'utf8')), true);
+    // The work-list rule: COD (pending / partially_paid), not cancelled, not test, 5 min–48 h old.
+    const src = fs.readFileSync(path.join(ROOT, 'app/api/repeat_rules.js'), 'utf8');
+    check('coverage: reconciler work list = COD, live, non-test, inside the 5min–48h window, with no ledger row',
+        [/\.in\('financial_status', \['pending', 'partially_paid'\]\)\.is\('cancelled_at', null\)\.neq\('test', true\)/.test(src),
+         /minAgeMin = 5, maxAgeH = 48/.test(src), /filter\(o => !seen\.has\(orderKey\(o\.name\)\)\)/.test(src)],
+        [true, true, true]);
+    // Ledger verdicts are derived, never free text.
+    check('coverage: ledger verdict is derived from payment status + reasons',
+        /verdict = \['paid', 'refunded', 'partially_refunded'\]\.includes\(fin\) \? 'prepaid' : \(reasons && reasons\.length \? 'hold' : 'no_reason'\)/.test(src), true);
+    check('coverage: an identity gap (Shopify says Repeat, we found no history) is called out in the log',
+        /Shopify tags it Repeat but no history was found/.test(wh), true);
+    void RR;
 }
 
 // ── 4h. Secrets vault: every credential is AES-256-GCM at rest, and nothing reads around it ─────

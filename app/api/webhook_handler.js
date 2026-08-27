@@ -337,10 +337,18 @@ router.post('/shopify-order', async (req, res) => {
             const address = [sa.address1, sa.address2, sa.city, sa.province, sa.zip].filter(Boolean).join(', ');
             const shopifyHold = require('./shopify_hold');
             const email = o.email || (o.customer && o.customer.email) || null;
-            const reasons = await shopifyHold.holdReasons({ phone, email, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price, address });
-            if (!reasons.length) { console.log(`[ShopifyHold] ${orderName}: not a repeat-COD candidate → no hold`); return; }
+            const RR = require('./repeat_rules');
+            const d = await shopifyHold.holdReasonsDetailed({ phone, email, financialStatus: o.financial_status, createdAt: o.created_at, shopifyOrderId: o.id, totalPrice: o.total_price, address });
+            const reasons = d.reasons;
+            const repeatTag = /\bRepeat\b/i.test(String(o.tags || ''));
+            if (!reasons.length) {
+                console.log(`[ShopifyHold] ${orderName}: not a repeat-COD candidate → no hold${repeatTag && !d.historyCount ? ' ⚠ Shopify tags it Repeat but no history was found — identity gap?' : ''}`);
+                await RR.recordEvaluation(supabase, { orderName, path: 'webhook', reasons, identity: d.identity, historyCount: d.historyCount, shopifyRepeatTag: repeatTag, action: null, financialStatus: o.financial_status });
+                return;
+            }
             const r = await shopifyHold.holdOrderSmart(orderName, o.id, shopifyHold.reasonNoteFrom(reasons), o.created_at);
             console.log(`[ShopifyHold] ${orderName}: ${r.held ? 'HELD on Shopify ✓' : r.skipped ? 'skipped (' + r.skipped + ')' : 'hold FAILED (' + r.failed + ')'}`);
+            await RR.recordEvaluation(supabase, { orderName, path: 'webhook', reasons, identity: d.identity, historyCount: d.historyCount, shopifyRepeatTag: repeatTag, action: r, financialStatus: o.financial_status });
             // Hold the customer's OTHER open orders too. The per-order rules only trip on the order that
             // matches them, so on a 2–3 order burst the earlier ones would otherwise ship. This runs on the
             // WEBHOOK — i.e. the instant the new order lands — which is the only moment the earlier orders
