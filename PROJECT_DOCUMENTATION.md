@@ -850,7 +850,7 @@ Only the sender name on a posted card reveals which path was taken, so **`GET /a
 
 ## 12. Environment Variables
 
-Defined in `.env` (git-ignored — **never commit**), read exclusively through `config.js`.
+Defined in `.env` (git-ignored — **never commit**) and, since 2026-08-27, **sealed into `.env.vault` (AES-256-GCM) — see §17**; read exclusively through `config.js`, which loads them via `app/secrets.js`.
 
 | Group | Variables |
 |---|---|
@@ -1004,13 +1004,34 @@ Hardening completed in the 2026-07 security audit:
 - **Secrets at rest:** portal SMTP password AES-256-GCM encrypted (`crypto_util.js`, versioned format `v1$iv$tag$ct`, tamper-detected); `app_email_settings` and `order_marks_ecom` are RLS-locked with no client policies (service-role only).
 - **Fail-safe messaging:** Slack hard-disabled (`SLACK_ENABLED` opt-in); report dedup aborts on ledger read failure instead of re-spamming.
 
+- **Secrets at rest (2026-08-27):** the whole `.env` is AES-256-GCM encrypted into `.env.vault` (§17); the cached EasyEcom JWT in `easyecom_token_cache` is encrypted with the same `crypto_util` scheme as the SMTP passwords and the panel cookie; the rotated Teams refresh token is written back into the vault, never to a plaintext file.
+
 **Known open items**
-1. **HTTPS** — still plain HTTP; deploy the Caddy reverse proxy (`Caddyfile.example`).
-2. `.env` contains live credentials on developer machines — rotate any credential suspected of exposure.
+1. **HTTPS** — served via Traefik/nginx on the VPS (§14); `Caddyfile.example` is a leftover.
+2. Rotate any credential suspected of exposure (`npm run secrets -- set KEY VALUE`); the master key must be backed up off-machine.
+3. Webhook edge functions still accept hard-coded fallback tokens (`rapidshyp-webhook`, `kwikship-webhook`, `msg91-cod-webhook`) — remove the literals and rely on the secrets; the Node `POST /api/webhook/rapidshyp` route is unauthenticated.
 
 ---
 
 *Document generated 2026-07-16. Keep this file updated when adding dashboards, tables, crons, or environment variables.*
+
+## 17. Secrets vault — every credential AES-256-GCM at rest (added 2026-08-27)
+
+**The rule:** nothing sensitive sits on disk in the clear. The whole `.env` is sealed into **`.env.vault`** and the app reads it through ONE door, `app/secrets.js`; `config.js` calls `secrets.load()` where it used to call `dotenv.config()`, and every standalone script (`cron_job.js`, `data_fetcher.js` via config, `docpharma_*`, `cod_confirmation.js`, `tests/vobiz_*`) does the same. The **key names are hidden too** — the ciphertext is the entire dotenv text, not a per-value map.
+
+- **Format:** one JSON object `{v:1, alg:'aes-256-gcm', kdf:'raw'|'scrypt', salt?, iv, tag, ct, updated_at}`. GCM's auth tag means a flipped byte or a wrong key is *refused*, never decrypted into garbage (selftest-pinned).
+- **Master key** — the one secret that cannot itself be encrypted — is looked up in order: `PRAVIDHI_MASTER_KEY` (64-hex raw key, or any passphrase → scrypt with the vault's own salt) → `PRAVIDHI_MASTER_KEY_FILE` → **`~/.pravidhi/master.key`** (default; `node tools/secrets.js init` creates it, mode 600). ⚠️ It lives deliberately **outside the repo folder** so a zipped/copied/leaked project directory carries only ciphertext. ⚠️⚠️ **Lose the key and the vault is unrecoverable — back it up in the password manager, not on the same machine.**
+- **Two modes, decided by what is on disk (user, 2026-08-27: "`.env` should show for me because I am working locally"):** **DEV** — a plaintext `.env` sits beside the vault and is the **source of truth**; you edit it directly, and at every boot the vault is re-sealed from it (only when the content changed, so an idle boot leaves the timestamp alone), so `.env.vault` is always a current encrypted copy. **SERVER** (VPS, Tally PC) — only `.env.vault` exists (`encrypt --delete`), decrypted at boot. A vault that cannot be opened (no key / wrong key) is a **loud boot failure**, never a silent fall-through. `.env` with no vault at all still works but warns `secrets are UNENCRYPTED on disk`, so a server can never quietly run unsealed. `check` reports which mode a folder is in and whether the dev copy is in sync.
+- **CLI:** `node tools/secrets.js init | encrypt [--delete] | decrypt [--to-file] | get KEY | set KEY VALUE | unset KEY | list | rotate | check`, `--dir tally-bridge` for the agent's own vault, `--key` to supply the secret inline. `encrypt` keeps `.env` (dev) unless `--delete` (server), and proves the round trip **before** deleting anything; `check` exits non-zero only when the vault is missing or unopenable. npm aliases: `npm run secrets -- …`, `secrets:encrypt`, `secrets:check`.
+- **Runtime writes go through the loader:** `persistRefreshToken()` (Microsoft rotates `TEAMS_REFRESH_TOKEN` on every use; shared by `teams_listener.js` and `teams_app.js`) now calls `secrets.persist()` — dev: edits `.env` and re-seals the vault; server: decrypts → edits one line → re-seals → atomic rename, creating no plaintext file. No other code path touches `.env` (selftest walks the tree for `readFileSync/writeFileSync('.env')` and for stray `dotenv.config()` calls — the bridge agent's fallback is the only permitted one).
+- **DB-cached credentials:** `easyecom_token_cache.jwt_token` is now stored via `crypto_util.encrypt()` (`v1$…`, AES-256-GCM keyed by `EMAIL_ENC_KEY` → `JWT_SECRET`), joining `app_email_settings.smtp_password_enc`, `app_user_smtp_ecom.smtp_password_enc` and `easyecom_panel_session.cookie_enc`. A pre-existing plaintext row is read transparently and re-encrypted on the next refresh. ⚠️ Same standing caveat as before: **changing `JWT_SECRET` without a dedicated `EMAIL_ENC_KEY` orphans every one of those columns.**
+- **Tally bridge:** `tally-bridge/agent.js` loads `tally-bridge/.env.vault` through the parent project's loader (falls back to dotenv only when `app/secrets.js` is absent, i.e. the folder was copied on its own). Seal it with `node tools/secrets.js encrypt --dir tally-bridge`; the finance PC needs its own `~/.pravidhi/master.key`.
+- **Deploy (VPS):** the pm2 user needs the key — either `~/.pravidhi/master.key` for that user, or `PRAVIDHI_MASTER_KEY_FILE=/etc/pravidhi/master.key` in the pm2 ecosystem env. Migration on the server: `git pull && node tools/secrets.js init && node tools/secrets.js encrypt --delete && pm2 restart <app>` — boot then logs `[secrets]` only if something is wrong. ⚠️ Both repos on a developer machine (staging + live) share the one `~/.pravidhi/master.key`, so `encrypt` in the second folder needs no second `init`.
+- **Editing a value:** dev — just edit `.env` (the vault follows at the next boot, or run `encrypt`). Server — `npm run secrets -- set KEY VALUE` (one line, re-sealed) or `decrypt --to-file` → edit → `encrypt --delete`. `list` prints key NAMES only; `get` prints one value — treat the terminal as a sink.
+- **Rotation:** `rotate` writes a new master key (old one kept as `.bak` until every vault on the machine is re-sealed) and re-seals the vault in place. Rotating a *credential* is `set`.
+- **Removed:** `debug_easyecom.js` no longer prints the first characters of the API key / JWT.
+- **Database:** Supabase encrypts the whole Postgres volume at rest (AES-256, AWS-managed) — every table, always. On top of that the app encrypts every *credential* column it owns with AES-256-GCM (`crypto_util`): `app_email_settings.smtp_password_enc`, `app_user_smtp_ecom.smtp_password_enc`, `easyecom_panel_session.cookie_enc`, `easyecom_token_cache.jwt_token`. Customer PII columns (phones, addresses) rely on the volume encryption only — column-level encryption there would break every query, filter and report, so it is deliberately not done.
+- **What this does NOT cover, by design:** the developer's local plaintext `.env` (kept on purpose for editing — protection is at rest on the servers and in any copy of the folder that travels without the master key), and the master key itself, which is the irreducible plaintext. Selftests: the "vault:" cases in `tests/selftest.js`.
 
 ## Product name: Pravidhi (renamed 2026-08-27)
 

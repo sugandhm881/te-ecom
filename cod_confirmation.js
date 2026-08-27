@@ -1,5 +1,5 @@
 // File: cod_confirmation.js
-require('dotenv').config();
+require('./app/secrets').load();   // .env.vault (AES-256-GCM) or plaintext .env
 const { google } = require('googleapis');
 const path = require('path');
 const { supabase } = require('./app/supabase');

@@ -1,5 +1,11 @@
-﻿node_modules/
+node_modules/
 .env
+# Encrypted secrets vault + master key. The vault is ciphertext, but it is per-environment and
+# never belongs in git; the key must never be near the repo at all.
+.env.vault
+.env.vault.tmp-*
+.master.key
+*.master.key
 master_order_data.json
 master_api_log.json
 .DS_Store
@@ -19,6 +25,7 @@ amazon_cache_date.txt
 
 # Tally bridge agent secrets + its rotating log (runtime, never commit)
 tally-bridge/.env
+tally-bridge/.env.vault
 tally-bridge/agent.log*
 
 # Bank statements — real financial data, never commit

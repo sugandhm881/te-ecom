@@ -5,7 +5,7 @@
  * Usage:  node debug_easyecom.js           (last 30 days)
  *         node debug_easyecom.js 7         (last 7 days)
  */
-require('dotenv').config();
+require('./app/secrets').load();   // .env.vault (AES-256-GCM) or plaintext .env
 const axios  = require('axios');
 const moment = require('moment-timezone');
 
@@ -23,8 +23,6 @@ const headers = {
 (async () => {
     console.log(`>>> GET ${url}`);
     console.log(`>>> start=${startDate}  end=${endDate}`);
-    console.log(`>>> api-key: ${(process.env.EASYECOM_API_KEY || '').slice(0, 8)}...`);
-    console.log(`>>> jwt:     ${(process.env.EASYECOM_JWT || '').slice(0, 20)}...`);
 
     try {
         const res = await axios.get(url, {

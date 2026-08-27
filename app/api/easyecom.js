@@ -52,8 +52,11 @@ async function getEasyecomToken(forceRefresh = false) {
     if (!forceRefresh) {
         try {
             const { data } = await supabase.from('easyecom_token_cache').select('jwt_token, expires_at').eq('id', 1).maybeSingle();
-            if (data && data.jwt_token && new Date(data.expires_at).getTime() > now + 5 * 60 * 1000) {
-                _tokenCache = { token: data.jwt_token, expiresAt: new Date(data.expires_at).getTime() };
+            // The column is AES-256-GCM encrypted (crypto_util "v1$…"); a row written before that is
+            // plaintext and still honoured — it gets re-encrypted the next time a token is cached.
+            const jwt = data && data.jwt_token ? (String(data.jwt_token).startsWith('v1$') ? decrypt(data.jwt_token) : data.jwt_token) : null;
+            if (jwt && new Date(data.expires_at).getTime() > now + 5 * 60 * 1000) {
+                _tokenCache = { token: jwt, expiresAt: new Date(data.expires_at).getTime() };
                 return _tokenCache.token;
             }
         } catch (_) { /* fall through to login */ }
@@ -95,7 +98,7 @@ async function getEasyecomToken(forceRefresh = false) {
     _tokenCache     = { token, expiresAt: payload.exp * 1000 };
     // Persist for every other process — the next login should be ~90 days away, not next restart.
     await supabase.from('easyecom_token_cache')
-        .upsert({ id: 1, jwt_token: token, expires_at: new Date(payload.exp * 1000).toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'id' })
+        .upsert({ id: 1, jwt_token: encrypt(token), expires_at: new Date(payload.exp * 1000).toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'id' })
         .then(() => {}).catch(() => {});
     console.log('[EasyEcom] New JWT cached (memory + DB), expires:', new Date(payload.exp * 1000).toISOString());
     return token;

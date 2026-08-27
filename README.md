@@ -8,9 +8,14 @@ Unifies Shopify orders, RapidShyp/DocPharma shipment tracking, delivery-performa
 
 ```bash
 npm install
-cp .env.example .env        # fill in credentials (see docs §12) — .env is git-ignored
+cp .env.example .env        # fill in credentials (see docs §12)
+node tools/secrets.js init  # once per machine → ~/.pravidhi/master.key (back it up!)
+npm run secrets:encrypt     # .env → .env.vault (AES-256-GCM). Locally .env stays and is the file you edit;
+                            # on a server add --delete so only the encrypted copy remains
 npm start                    # → http://localhost:5002
 ```
+
+`.env.vault` is the encrypted copy (re-sealed from `.env` at every boot in dev); `npm run secrets -- get|set|list|decrypt|rotate|check` manages it (docs §17).
 
 Rebuild CSS after any UI change:
 

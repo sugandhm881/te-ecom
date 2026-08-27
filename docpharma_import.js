@@ -2,7 +2,7 @@
 // Usage:  node docpharma_import.js [path-to-file]      (default: ./docpharma_export.csv)
 // Accepts CSV (comma, quoted fields) OR TSV (tab). Expected columns (any order, header row required):
 //   PartnerOrderId, Customer Name, OrderDate, OrderValue, Payment Type, Order Status, Delivered Date
-require('dotenv').config();
+require('./app/secrets').load();   // .env.vault (AES-256-GCM) or plaintext .env
 const fs = require('fs');
 const path = require('path');
 const { supabase } = require('./app/supabase');

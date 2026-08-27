@@ -10,7 +10,7 @@ const path = require('path');
 const config = require('../../config');
 const { postTeams } = require('./teams');
 
-const ENV_PATH = path.join(__dirname, '..', '..', '.env');
+const secrets = require('../secrets');
 const DRYRUN = () => process.env.TEAMS_LISTENER_DRYRUN === '1';
 
 const cfg = k => process.env[k] || config[k];
@@ -26,13 +26,12 @@ const CH_FIN = () => cfg('TEAMS_CHANNEL_FINANCE');
 // ── token management (refresh-token flow; persists the rotated refresh token) ──
 let accessToken = null, tokenExpiry = 0;
 
+// Microsoft rotates the refresh token on every use, so the new one must be written back or the next
+// restart authenticates with a dead token. Goes through the secrets vault (re-sealed AES-256-GCM);
+// only a pre-vault install still has a plaintext .env for it to land in.
 function persistRefreshToken(rt) {
     try {
-        let env = fs.readFileSync(ENV_PATH, 'utf8');
-        const re = /^TEAMS_REFRESH_TOKEN=.*$/m;
-        env = re.test(env) ? env.replace(re, `TEAMS_REFRESH_TOKEN=${rt}`) : env.replace(/\n?$/, '\n') + `TEAMS_REFRESH_TOKEN=${rt}\n`;
-        fs.writeFileSync(ENV_PATH, env);
-        process.env.TEAMS_REFRESH_TOKEN = rt;
+        secrets.persist('TEAMS_REFRESH_TOKEN', rt);
     } catch (e) { console.error('[TeamsListener] persist refresh token failed:', e.message); }
 }
 

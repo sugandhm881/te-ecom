@@ -5,7 +5,7 @@
 // Run:  set VOBIZ_PUBLIC_BASE=<tunnel-url> then  node tests/vobiz_inbound_host.js
 // The caller must be on MSG91_COD_ALLOWLIST; order context pins to VOBIZ_INBOUND_TEST_ORDER.
 // ─────────────────────────────────────────────────────────────────────────────
-require('dotenv').config();
+require('../app/secrets').load();   // .env.vault (AES-256-GCM) or plaintext .env
 const express = require('express');
 const http = require('http');
 const bridge = require('../app/api/vobiz_bridge');

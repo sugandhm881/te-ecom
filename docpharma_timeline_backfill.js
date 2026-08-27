@@ -2,7 +2,7 @@
 // Fills scans[] + dispatched_at + rto_at (+ precise delivered_date). Throttled & resumable
 // (rows with timeline_synced_at set are skipped). Needs a fresh DP_PORTAL_TOKEN in .env.
 // Usage: node docpharma_timeline_backfill.js
-require('dotenv').config();
+require('./app/secrets').load();   // .env.vault (AES-256-GCM) or plaintext .env
 const { supabase } = require('./app/supabase');
 const { syncDocpharmaTimeline } = require('./app/api/docpharma_portal');
 

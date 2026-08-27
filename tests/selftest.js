@@ -1761,6 +1761,90 @@ function check(name, got, want) {
         /if \(!shTransient\(e1\)\) throw e1;/.test(srv), true);
 }
 
+// ── 4h. Secrets vault: every credential is AES-256-GCM at rest, and nothing reads around it ─────
+// Added 2026-08-27. `.env` is sealed into `.env.vault` by app/secrets.js; config.js and every
+// standalone script go through that one loader, and the rotated Teams refresh token is written back
+// INTO the vault. These tests pin the crypto round trip, the precedence (vault beats a leftover
+// plaintext file), the "no key = loud failure" rule, and that no code path re-grew a plaintext door.
+{
+    const os = require('os');
+    const S = require(path.join(ROOT, 'app/secrets'));
+    const dotenv = require('dotenv');
+    const T = fs.mkdtempSync(path.join(os.tmpdir(), 'pravidhi-vault-'));
+    const KEY = S.generateMasterKey();
+    const text = 'PORT=5002\nJWT_SECRET=abcdefghijklmnopqrstuvwxyz0123456789\n# a comment survives\nTEAMS_REFRESH_TOKEN=old\nQUOTED="a b#c"\n';
+    const savedEnv = { key: process.env.PRAVIDHI_MASTER_KEY, file: process.env.PRAVIDHI_MASTER_KEY_FILE, port: process.env.PORT, rt: process.env.TEAMS_REFRESH_TOKEN };
+    process.env.PRAVIDHI_MASTER_KEY = KEY; delete process.env.PRAVIDHI_MASTER_KEY_FILE;
+    delete process.env.PORT; delete process.env.TEAMS_REFRESH_TOKEN;
+    const refused = fn => { try { fn(); return 'accepted'; } catch (_) { return 'refused'; } };
+    try {
+        const v = S.encryptText(text, KEY);
+        check('vault: sealed with AES-256-GCM', [v.v, v.alg, v.kdf], [1, 'aes-256-gcm', 'raw']);
+        check('vault: ciphertext carries no key NAME in the clear', /JWT_SECRET|TEAMS_REFRESH/.test(JSON.stringify(v)), false);
+        check('vault: round trip is byte-exact (comments and quoting included)', S.decryptVault(v, KEY), text);
+        check('vault: wrong key is refused, never garbage', refused(() => S.decryptVault(v, 'ff'.repeat(32))), 'refused');
+        const tampered = Object.assign({}, v, { ct: v.ct.slice(0, -2) + (v.ct.endsWith('00') ? '11' : '00') });
+        check('vault: a flipped ciphertext byte fails the GCM tag', refused(() => S.decryptVault(tampered, KEY)), 'refused');
+        const pv = S.encryptText(text, 'a passphrase, not hex');
+        check('vault: a passphrase is stretched with scrypt and salted', [pv.kdf, typeof pv.salt, S.decryptVault(pv, 'a passphrase, not hex') === text], ['scrypt', 'string', true]);
+
+        fs.writeFileSync(path.join(T, '.env'), text);
+        S._reset();
+        const plain = S.load({ dir: T, quiet: true });
+        check('vault: plaintext-only boot loads but WARNS', [plain.mode, plain.warnings.length > 0], ['plain', true]);
+        // DEV mode: .env beside a (stale) vault → .env wins and the vault is re-sealed from it
+        S.sealVault(T, text.replace('PORT=5002', 'PORT=6001'));
+        S._reset(); delete process.env.PORT;
+        const l = S.load({ dir: T, quiet: true });
+        check('vault: dev mode — the local .env is the source and the stale vault is re-sealed from it', [l.mode, l.parsed.PORT, l.resealed, S.openVault(T).text === text], ['dev', '5002', true, true]);
+        S._reset(); delete process.env.PORT;
+        check('vault: dev mode — an unchanged .env does not rewrite the vault', S.load({ dir: T, quiet: true }).resealed, false);
+        check('vault: dotenv quoting is honoured through the vault', l.parsed.QUOTED, 'a b#c');
+        check('vault: dev persist() writes .env AND re-seals the vault', [S.persist('TEAMS_REFRESH_TOKEN', 'rotated', { dir: T }), /rotated/.test(fs.readFileSync(path.join(T, '.env'), 'utf8')), /rotated/.test(S.openVault(T).text)], ['dev', true, true]);
+        check('vault: persist refuses a non-env key name', refused(() => S.persist('rm -rf', 'x', { dir: T })), 'refused');
+        check('vault: upsertLine quotes values with spaces/#, keeps other lines', dotenv.parse(S.upsertLine('A=1\nB=2\n', 'B', 'x y#z')), { A: '1', B: 'x y#z' });
+        // SERVER mode: vault only
+        fs.unlinkSync(path.join(T, '.env'));
+        S._reset(); delete process.env.TEAMS_REFRESH_TOKEN; delete process.env.PORT;
+        const sv = S.load({ dir: T, quiet: true });
+        check('vault: server mode — vault only, decrypted at boot, rotated value present', [sv.mode, sv.parsed.TEAMS_REFRESH_TOKEN, sv.parsed.PORT], ['vault', 'rotated', '5002']);
+        check('vault: server persist() re-seals the vault and creates NO plaintext file', [S.persist('TEAMS_REFRESH_TOKEN', 'rotated2', { dir: T }), fs.existsSync(path.join(T, '.env')), /rotated2/.test(S.openVault(T).text)], ['vault', false, true]);
+        delete process.env.PRAVIDHI_MASTER_KEY; process.env.PRAVIDHI_MASTER_KEY_FILE = path.join(T, 'no-such-key');
+        S._reset();
+        check('vault: a vault with no key is a LOUD boot failure, not a silent fall-through',
+            (() => { try { S.load({ dir: T, quiet: true }); return 'silent'; } catch (e) { return e.code; } })(), 'NO_KEY');
+    } finally {
+        S._reset();
+        if (savedEnv.key !== undefined) process.env.PRAVIDHI_MASTER_KEY = savedEnv.key; else delete process.env.PRAVIDHI_MASTER_KEY;
+        if (savedEnv.file !== undefined) process.env.PRAVIDHI_MASTER_KEY_FILE = savedEnv.file; else delete process.env.PRAVIDHI_MASTER_KEY_FILE;
+        if (savedEnv.port !== undefined) process.env.PORT = savedEnv.port;
+        if (savedEnv.rt !== undefined) process.env.TEAMS_REFRESH_TOKEN = savedEnv.rt;
+        try { fs.rmSync(T, { recursive: true, force: true }); } catch (_) {}
+    }
+
+    // No code path may read .env around the loader. dotenv.config() is allowed in exactly one place:
+    // the bridge agent's fallback for a copy deployed without app/secrets.js.
+    const walk = d => fs.readdirSync(d, { withFileTypes: true }).flatMap(e => {
+        if (e.name === 'node_modules' || e.name === '.git' || e.name === 'static') return [];
+        const p = path.join(d, e.name); return e.isDirectory() ? walk(p) : (p.endsWith('.js') ? [p] : []);
+    });
+    const files = walk(ROOT).map(f => [path.relative(ROOT, f).replace(/\\/g, '/'), fs.readFileSync(f, 'utf8')]);
+    const dotenvUsers = files.filter(([, src]) => /require\(['"]dotenv['"]\)\.config\(/.test(src)).map(([f]) => f).sort();
+    check('vault: dotenv.config() is called only by the bridge agent fallback', dotenvUsers, ['tally-bridge/agent.js']);
+    const envReaders = files.filter(([f, src]) => !/^(app\/secrets\.js|tools\/secrets\.js|tests\/selftest\.js)$/.test(f)
+        && /(readFileSync|writeFileSync)\([^)]*['"]\.env['"]/.test(src)).map(([f]) => f);
+    check('vault: nothing reads or writes a plaintext .env by hand any more', envReaders, []);
+    const tl = fs.readFileSync(path.join(ROOT, 'app/api/teams_listener.js'), 'utf8');
+    check('vault: the rotated Teams refresh token is persisted through the vault', /secrets\.persist\('TEAMS_REFRESH_TOKEN'/.test(tl), true);
+    const ee = fs.readFileSync(path.join(ROOT, 'app/api/easyecom.js'), 'utf8');
+    check('vault: the cached EasyEcom JWT is written encrypted (never a bare jwt_token: token)', [/jwt_token: encrypt\(token\)/.test(ee), /jwt_token: token\b/.test(ee)], [true, false]);
+    check('vault: ...and a legacy plaintext row is still readable', /startsWith\('v1\$'\) \? decrypt\(data\.jwt_token\)/.test(ee), true);
+    const dbg = fs.readFileSync(path.join(ROOT, 'debug_easyecom.js'), 'utf8');
+    check('vault: the debug script no longer prints credential prefixes', /(API_KEY|JWT)[^\n]*\.slice\(0, ?\d+\)/.test(dbg), false);
+    const gi = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
+    check('vault: .env.vault and the master key are git-ignored', [/^\.env\.vault$/m.test(gi), /master\.key/.test(gi), /^tally-bridge\/\.env\.vault$/m.test(gi)], [true, true, true]);
+}
+
 // ── 5. RapidShyp sync: transient failures must not raise a cron-failure card ─────────────────────
 // Bug 2026-08-17: an 8s timeout on 3 AWBs turned a 13-minute run into "❌ Cron failed". The job only
 // fetches AWBs with no row yet, so a failure self-heals on the next run two hours later — while a

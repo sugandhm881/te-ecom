@@ -10,7 +10,7 @@
 //
 // Run: node tests/vobiz_call_sim.js       (needs SARVAM_API_KEY in .env; ~60-90s)
 // ─────────────────────────────────────────────────────────────────────────────
-require('dotenv').config();
+require('../app/secrets').load();   // .env.vault (AES-256-GCM) or plaintext .env
 const fs = require('fs');
 const path = require('path');
 const http = require('http');

@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('./app/secrets').load();   // .env.vault (AES-256-GCM) or plaintext .env
 const nodemailer = require('nodemailer');
 const moment = require('moment-timezone');
 const { getAdsetPerformanceData } = require('./app/api/adset_performance');

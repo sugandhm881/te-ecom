@@ -25,7 +25,9 @@
 const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
-require('dotenv').config({ path: path.join(__dirname, '.env') });
+// Secrets: tally-bridge/.env.vault (AES-256-GCM, via the parent project's loader) or plaintext tally-bridge/.env.
+try { require(path.join(__dirname, '..', 'app', 'secrets')).load({ dir: __dirname }); }
+catch (e) { if (e && e.code && e.code !== 'MODULE_NOT_FOUND') throw e; require('dotenv').config({ path: path.join(__dirname, '.env') }); }
 
 // axios comes from the parent project's node_modules so this folder needs no install of its own.
 let axios;

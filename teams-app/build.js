@@ -200,12 +200,11 @@ if (!outline) {
 }
 
 // ── manifest ─────────────────────────────────────────────────────────────────────────────────────
-// botId MUST equal the Azure Bot's Microsoft App ID. Read from .env so the two cannot drift.
-const envPath = path.join(__dirname, '..', '.env');
-const env = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
-const appId = ((env.match(/^TEAMS_BOT_APP_ID=(.*)$/m) || [])[1] || '').trim();
+// botId MUST equal the Azure Bot's Microsoft App ID. Read through the secrets vault (.env.vault, or
+// the plaintext .env on a pre-vault install) so the two cannot drift.
+const appId = String(require('../app/secrets').read('TEAMS_BOT_APP_ID', { dir: path.join(__dirname, '..') }) || '').trim();
 if (!/^[0-9a-f-]{36}$/i.test(appId)) {
-    console.error('TEAMS_BOT_APP_ID missing or not a GUID in .env — cannot build a valid manifest.');
+    console.error('TEAMS_BOT_APP_ID missing or not a GUID in the secrets vault — cannot build a valid manifest.');
     process.exit(1);
 }
 
