@@ -1253,6 +1253,11 @@ function navigate(view) {
             activeLinkElement = document.getElementById('nav-support-voice');
             activeViewElement = document.getElementById('support-voice-view');
             break;   // self-contained iframe (/static/voice-agent.html) — no init needed
+        case 'support-agent-learning':
+            activeLinkElement = document.getElementById('nav-support-agent-learning');
+            activeViewElement = document.getElementById('support-agent-learning-view');
+            if (typeof salInit === 'function') salInit();
+            break;
         case 'ops-control':
             activeLinkElement = document.getElementById('nav-ops-control');
             activeViewElement = document.getElementById('ops-control-view');
@@ -6545,7 +6550,7 @@ const NAV_HREF = {
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon', 'nav-kwikship-recon': 'kwikship-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
-    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice',
+    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
     'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions',
     'nav-finance-entry': 'finance-entry', 'nav-finance-register': 'finance-register', 'nav-finance-books': 'finance-books'
@@ -7591,6 +7596,165 @@ function zmInit() {
     document.getElementById('zm-remap')?.addEventListener('click', zmRemap);
 }
 
+
+// ═══════════════ AGENT LEARNING — the self-learning voice agent (2026-08-28) ═══════════════
+// Reads /api/support/agent-learning/summary: every saved call reviewed by the AI (scores, outcome,
+// issues), the LESSONS distilled from them (active / proposed / retired, with before-vs-after numbers),
+// and the learning runs. Lessons can be activated, retired, edited, or taught by hand — every change
+// reaches the next call within five minutes (the prompt block is cached that long on the server).
+let _sal = { data: null, charts: {}, wired: false, filter: '' };
+const SAL_CAT_LABEL = { opening: 'Opening', screening: 'Call screening', confirmation: 'Confirmation', language: 'Language', tone: 'Tone', objection: 'Objections', closing: 'Closing', other: 'Other' };
+const SAL_OUT_LABEL = { confirmed: 'Confirmed', cancelled: 'Cancelled', reattempt: 'Re-attempt', no_answer: 'No answer', unclear: 'Unclear', other: 'Other' };
+const SAL_OUT_COLOR = { confirmed: '#10b981', cancelled: '#f43f5e', reattempt: '#f59e0b', no_answer: '#94a3b8', unclear: '#a78bfa', other: '#cbd5e1' };
+function salInit(){
+  if(!_sal.wired){
+    _sal.wired=true;
+    supRenderRange('sal-range', salLoad);
+    document.getElementById('sal-run')?.addEventListener('click', salRun);
+    document.getElementById('sal-lesson-filter')?.addEventListener('change', e=>{ _sal.filter=e.target.value; salRenderLessons(); });
+    document.getElementById('sal-add-lesson')?.addEventListener('click', salTeach);
+  }
+  salLoad();
+}
+async function salLoad(){
+  const k=document.getElementById('sal-kpis'); if(k) k.innerHTML=brandLoader('Loading learning data…');
+  try{
+    _sal.data=await supFetch('/api/support/agent-learning/summary?'+supRangeQS());
+    salRender();
+  }catch(e){ if(k) k.innerHTML=`<div class="text-rose-500 text-sm col-span-6">${escapeHtml(e.message)}</div>`; }
+}
+function salDelta(cur, prev, good='up', unit=''){
+  if(cur==null||prev==null) return '';
+  const d=Math.round((cur-prev)*10)/10; if(!d) return '<span class="text-[11px] text-slate-400">no change</span>';
+  const up=d>0, goodMove=(good==='up')===up;
+  return `<span class="text-[11px] font-semibold ${goodMove?'text-emerald-600':'text-rose-600'}">${up?'▲':'▼'} ${Math.abs(d)}${unit} vs prev</span>`;
+}
+function salRender(){
+  const d=_sal.data, K=d.kpis;
+  document.getElementById('sal-banner').innerHTML = !K.ai_configured
+    ? `<div class="rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm px-4 py-3">AI is not configured on this server (AI_API_KEY / AI_API_URL / AI_MODEL) — calls cannot be reviewed until it is.</div>`
+    : (K.reviewed_total < K.calls_total ? `<div class="rounded-lg bg-sky-50 border border-sky-200 text-sky-800 text-sm px-4 py-3">${K.calls_total - K.reviewed_total} saved call(s) not reviewed yet — the nightly run (02:15 IST) picks them up, or press <b>Run learning now</b>.</div>` : '');
+  const tile=(label,val,sub)=>`<div class="card p-4"><div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">${label}</div><div class="text-2xl font-bold text-slate-800 mt-1">${val}</div><div class="mt-1">${sub||''}</div></div>`;
+  document.getElementById('sal-kpis').innerHTML=[
+    tile('Calls reviewed', `${K.reviewed_in_range}`, `<span class="text-[11px] text-slate-400">${K.reviewed_total} of ${K.calls_total} ever</span>`),
+    tile('Avg quality score', K.avg_score==null?'—':`${K.avg_score}<span class="text-sm text-slate-400">/10</span>`, salDelta(K.avg_score,K.avg_score_prev,'up')),
+    tile('Confirmation rate', K.confirm_rate==null?'—':`${K.confirm_rate}%`, salDelta(K.confirm_rate,K.confirm_rate_prev,'up','%')),
+    tile('Lessons active', `${K.lessons_active}`, `<span class="text-[11px] text-slate-400">injected into every call</span>`),
+    tile('Lessons proposed', `${K.lessons_proposed}`, `<span class="text-[11px] text-slate-400">waiting for a 2nd call or your click</span>`),
+    tile('Learnt this period', `${K.lessons_learnt_in_range}`, `<span class="text-[11px] text-slate-400">${K.lessons_retired} retired overall</span>`),
+  ].join('');
+  salCharts(); salIssues(); salRenderLessons(); salReviews(); salRuns();
+}
+function salChart(id, cfg){ const c=document.getElementById(id); if(!c) return; if(_sal.charts[id]) _sal.charts[id].destroy(); _sal.charts[id]=new Chart(c, cfg); }
+function salCharts(){
+  const d=_sal.data, days=d.daily.map(x=>_dm?_dm(x.day):x.day.slice(5));
+  salChart('sal-trend',{ type:'line', data:{ labels:days, datasets:[
+      { label:'Avg score', data:d.daily.map(x=>x.avg_score), borderColor:'#6366f1', backgroundColor:'rgba(99,102,241,.12)', tension:.3, fill:true, yAxisID:'y', spanGaps:true },
+      { label:'Confirmation %', data:d.daily.map(x=>x.confirm_rate), borderColor:'#10b981', tension:.3, yAxisID:'y1', spanGaps:true, borderDash:[4,3] },
+      { label:'Calls', data:d.daily.map(x=>x.calls), type:'bar', backgroundColor:'rgba(148,163,184,.25)', yAxisID:'y2' } ]},
+    options:{ responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false}, plugins:{legend:{position:'bottom'}},
+      scales:{ y:{min:0,max:10,title:{display:true,text:'score'}}, y1:{position:'right',min:0,max:100,grid:{drawOnChartArea:false},title:{display:true,text:'%'}}, y2:{display:false,min:0} } } });
+  const dims=['clarity','empathy','brevity','correctness','language_fit','overall'];
+  salChart('sal-dims',{ type:'bar', data:{ labels:dims.map(x=>x.replace('_',' ')), datasets:[{ label:'avg', data:dims.map(x=>d.dims[x]), backgroundColor:dims.map(x=>x==='overall'?'#6366f1':'#a5b4fc') }]},
+    options:{ responsive:true, maintainAspectRatio:false, indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{min:0,max:10}} } });
+  const oc=Object.keys(SAL_OUT_LABEL).filter(k=>d.outcomes[k]);
+  salChart('sal-outcomes',{ type:'doughnut', data:{ labels:oc.map(k=>SAL_OUT_LABEL[k]), datasets:[{ data:oc.map(k=>d.outcomes[k]), backgroundColor:oc.map(k=>SAL_OUT_COLOR[k]) }]},
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right'}} } });
+  const cats=Object.keys(d.categories).sort((a,b)=>d.categories[b]-d.categories[a]);
+  salChart('sal-cats',{ type:'bar', data:{ labels:cats.map(c=>SAL_CAT_LABEL[c]||c), datasets:[{ label:'lesson candidates', data:cats.map(c=>d.categories[c]), backgroundColor:'#f59e0b' }]},
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true,ticks:{precision:0}}} } });
+}
+function salIssues(){
+  const el=document.getElementById('sal-issues'); const top=_sal.data.top_issues;
+  el.innerHTML = top.length ? top.map(t=>`<div class="flex items-center justify-between gap-2"><span class="text-slate-700 truncate" title="${escapeHtml(t.issue)}">${escapeHtml(t.issue)}</span><span class="text-xs font-semibold text-slate-500 tabular-nums">${t.n}×</span></div>`).join('') : '<div class="text-slate-400 text-sm">No issues recorded in this range.</div>';
+}
+function salStatusChip(st){ const m={active:'bg-emerald-50 text-emerald-700 border-emerald-200',proposed:'bg-amber-50 text-amber-700 border-amber-200',retired:'bg-slate-100 text-slate-500 border-slate-200'}; return `<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold border ${m[st]||m.retired}">${st}</span>`; }
+function salRenderLessons(){
+  const el=document.getElementById('sal-lessons'); let list=_sal.data.lessons;
+  if(_sal.filter) list=list.filter(l=>l.status===_sal.filter);
+  const order={active:0,proposed:1,retired:2}; list=list.slice().sort((a,b)=>(order[a.status]-order[b.status])||(b.times_reinforced-a.times_reinforced));
+  if(!list.length){ el.innerHTML='<div class="text-slate-400 text-sm">Nothing learnt yet — run learning once there are reviewed calls.</div>'; return; }
+  el.innerHTML=list.map(l=>{
+    const ev=(l.evidence||[]).filter(e=>e.quote).slice(-3);
+    const ba=l.before&&l.after?`<div class="mt-2 grid grid-cols-2 gap-2 text-xs"><div class="rounded bg-slate-50 px-2 py-1.5"><div class="text-slate-400">Before (${l.before.calls} calls)</div><div class="font-semibold text-slate-700">score ${l.before.avg_score??'—'} · confirm ${l.before.confirm_rate??'—'}%</div></div><div class="rounded ${l.delta_score>0?'bg-emerald-50':l.delta_score<0?'bg-rose-50':'bg-slate-50'} px-2 py-1.5"><div class="text-slate-400">After (${l.after.calls} calls)</div><div class="font-semibold text-slate-700">score ${l.after.avg_score??'—'} · confirm ${l.after.confirm_rate??'—'}% ${l.delta_score!=null?`<span class="${l.delta_score>0?'text-emerald-600':l.delta_score<0?'text-rose-600':'text-slate-400'}">(${l.delta_score>0?'+':''}${l.delta_score})</span>`:''}</div></div></div>`
+      : (l.status==='active'?'<div class="mt-2 text-[11px] text-slate-400">Before/after appears once there are ≥3 reviewed calls on each side of activation.</div>':'');
+    const when=d=>d?new Date(d).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'—';
+    return `<div class="rounded-xl border ${l.status==='active'?'border-emerald-200':l.status==='proposed'?'border-amber-200':'border-slate-200'} p-4" data-id="${l.id}">
+      <div class="flex items-start justify-between gap-3 flex-wrap">
+        <div class="min-w-0 flex-1"><div class="flex items-center gap-2 flex-wrap">${salStatusChip(l.status)}<span class="px-2 py-0.5 rounded-full text-[11px] bg-indigo-50 text-indigo-700">${SAL_CAT_LABEL[l.category]||l.category}</span><span class="text-[11px] text-slate-400">${escapeHtml(l.call_type)} · ${escapeHtml(l.language)} · ${l.source==='human'?'taught by you':'learnt by the agent'}</span></div>
+          <div class="font-semibold text-slate-800 mt-1.5">${escapeHtml(l.title)}</div>
+          <div class="text-sm text-slate-700 mt-1 sal-rule">${escapeHtml(l.rule)}</div>
+          ${ev.length?`<div class="mt-2 space-y-1">${ev.map(e=>`<div class="text-xs text-slate-500 border-l-2 border-slate-200 pl-2">“${escapeHtml(e.quote)}” <span class="text-slate-400">· ${when(e.called_at)}</span></div>`).join('')}</div>`:''}
+          ${ba}
+          <div class="text-[11px] text-slate-400 mt-2">seen on <b>${l.times_reinforced}</b> call(s) · confidence ${Math.round(Number(l.confidence)*100)}% · first ${when(l.first_seen_at)} · last ${when(l.last_seen_at)}${l.activated_at?' · active since '+when(l.activated_at):''}${l.retired_at?' · retired '+when(l.retired_at)+(l.note?' — '+escapeHtml(l.note):''):''}</div></div>
+        <div class="flex items-center gap-1.5 shrink-0">
+          ${l.status!=='active'?`<button class="filter-btn sal-act" data-id="${l.id}" data-a="activate">Activate</button>`:''}
+          ${l.status==='active'?`<button class="filter-btn sal-act" data-id="${l.id}" data-a="retire">Retire</button>`:''}
+          <button class="filter-btn sal-act" data-id="${l.id}" data-a="edit">Edit</button></div></div></div>`; }).join('');
+  el.querySelectorAll('.sal-act').forEach(b=>b.addEventListener('click',()=>salAction(b.dataset.id,b.dataset.a)));
+}
+async function salAction(id, action){
+  const l=_sal.data.lessons.find(x=>String(x.id)===String(id)); if(!l) return;
+  let body={};
+  if(action==='edit'){ const rule=prompt('Edit the rule the agent follows (English, one instruction):', l.rule); if(!rule||rule.trim().length<15) return; body={rule:rule.trim(), title:l.title}; }
+  if(action==='retire'){ const note=prompt('Why retire this lesson? (optional)',''); if(note===null) return; body={note}; }
+  try{ await supFetch(`/api/support/agent-learning/lessons/${id}/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); showNotification(`Lesson ${action==='edit'?'updated':action+'d'} — reaches the next call within 5 min`); salLoad(); }
+  catch(e){ showNotification(e.message,'error'); }
+}
+async function salTeach(){
+  const rule=prompt('Teach the agent a rule it must follow on every call (English, one instruction, ≥15 chars):',''); if(!rule||rule.trim().length<15) return;
+  const category=prompt('Category: opening / screening / confirmation / language / tone / objection / closing / other','tone')||'other';
+  try{ await supFetch('/api/support/agent-learning/lessons',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rule:rule.trim(),category:category.trim()})}); showNotification('Rule taught — active on the next call'); salLoad(); }
+  catch(e){ showNotification(e.message,'error'); }
+}
+async function salRun(){
+  const b=document.getElementById('sal-run'); b.disabled=true; b.textContent='Reviewing calls…';
+  try{ const r=await supFetch('/api/support/agent-learning/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    showNotification(r.skipped?`Skipped — ${r.skipped}`:`Reviewed ${r.calls_reviewed} call(s): ${r.lessons_new} new lesson(s), ${r.lessons_reinforced} reinforced, ${r.lessons_activated} activated${r.pending?` · ${r.pending} still pending`:''}`); salLoad(); }
+  catch(e){ showNotification(e.message,'error'); }
+  finally{ b.disabled=false; b.textContent='Run learning now'; }
+}
+function salScoreChip(v){ const n=Number(v)||0; const c=n>=8?'bg-emerald-50 text-emerald-700':n>=6?'bg-amber-50 text-amber-700':'bg-rose-50 text-rose-700'; return `<span class="px-1.5 py-0.5 rounded text-xs font-semibold ${c}">${n}</span>`; }
+function salReviews(){
+  const el=document.getElementById('sal-reviews'); const R=_sal.data.reviews;
+  document.getElementById('sal-reviews-count').textContent=`${R.length} shown · click a row for the transcript, scores and what was learnt`;
+  const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+  const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
+  el.innerHTML = R.length ? `<table class="w-full"><thead><tr>${['When','Type','Language','Outcome','Overall','Clarity','Empathy','Brevity','Correct','Lang fit','Issues','Lessons'].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${R.map(r=>`<tr class="sal-row cursor-pointer hover:bg-slate-50" data-cid="${r.call_id}">
+    <td class="${TD} text-xs tabular-nums whitespace-nowrap">${new Date(r.called_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</td>
+    <td class="${TD} text-xs">${escapeHtml(r.call_type||'')}</td><td class="${TD} text-xs">${escapeHtml(r.language||'')}</td>
+    <td class="${TD}"><span class="px-1.5 py-0.5 rounded text-xs font-semibold" style="background:${SAL_OUT_COLOR[r.outcome]||'#cbd5e1'}22;color:${SAL_OUT_COLOR[r.outcome]||'#64748b'}">${SAL_OUT_LABEL[r.outcome]||r.outcome}</span></td>
+    ${['overall','clarity','empathy','brevity','correctness','language_fit'].map(k=>`<td class="${TD}">${salScoreChip(r.scores&&r.scores[k])}</td>`).join('')}
+    <td class="${TD} text-xs text-slate-500 max-w-[260px] truncate" title="${escapeHtml((r.issues||[]).join(' · '))}">${escapeHtml((r.issues||[]).join(' · '))||'—'}</td>
+    <td class="${TD} text-xs">${(r.lesson_ids||[]).length||'—'}</td></tr>`).join('')}</tbody></table>` : '<div class="text-slate-400 text-sm p-6">No reviewed calls in this range.</div>';
+  el.querySelectorAll('.sal-row').forEach(tr=>tr.addEventListener('click',()=>salCallModal(tr.dataset.cid)));
+}
+async function salCallModal(callId){
+  document.getElementById('sal-modal')?.remove();
+  const wrap=document.createElement('div'); wrap.id='sal-modal'; wrap.className='fixed inset-0 flex items-center justify-center bg-slate-900/60 p-4'; wrap.style.zIndex='95';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6">${brandLoaderSm('Loading call…')}</div>`;
+  document.body.appendChild(wrap); wrap.addEventListener('click',e=>{ if(e.target===wrap) wrap.remove(); });
+  try{
+    const d=await supFetch('/api/support/agent-learning/call/'+encodeURIComponent(callId)); const c=d.call, r=d.review||{};
+    const lines=String(c.transcript||'').split('\n').filter(Boolean).map(l=>{ const ag=/^agent:/i.test(l); return `<div class="max-w-[85%] ${ag?'ml-auto text-right':''}"><div class="inline-block px-3 py-1.5 rounded-xl text-sm ${ag?'bg-indigo-50 text-indigo-900':'bg-slate-100 text-slate-800'}">${escapeHtml(l.replace(/^(agent|customer):\s*/i,''))}</div></div>`; }).join('');
+    wrap.firstElementChild.innerHTML=`<div class="flex items-start justify-between gap-3"><div><h3 class="text-lg font-bold text-slate-800">${escapeHtml(c.call_type||'call')} · ${escapeHtml(c.customer_name||'')}</h3><div class="text-xs text-slate-400">${new Date(c.called_at).toLocaleString('en-IN')} · ${escapeHtml(c.language||'')} · ${c.exchanges||0} exchanges${c.order_id?' · order '+escapeHtml(c.order_id):''}</div></div><button class="filter-btn" onclick="document.getElementById('sal-modal').remove()">Close</button></div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+        <div><div class="text-[11px] font-semibold text-slate-400 uppercase mb-2">Transcript</div><div class="space-y-1.5">${lines||'<span class="text-slate-400 text-sm">no transcript</span>'}</div>${c.summary?`<div class="mt-3 text-xs text-slate-500 border-t pt-2">${escapeHtml(c.summary)}</div>`:''}</div>
+        <div><div class="text-[11px] font-semibold text-slate-400 uppercase mb-2">AI review</div>
+          ${r.scores?`<div class="flex flex-wrap gap-1.5 mb-3">${Object.entries(r.scores).map(([k,v])=>`<span class="text-xs text-slate-500">${k.replace('_',' ')} ${salScoreChip(v)}</span>`).join('')}</div>`:'<div class="text-sm text-slate-400">Not reviewed yet.</div>'}
+          ${r.outcome?`<div class="text-sm mb-2">Outcome: <b>${SAL_OUT_LABEL[r.outcome]||r.outcome}</b></div>`:''}
+          ${(r.strengths||[]).length?`<div class="text-xs font-semibold text-emerald-700 mt-2">Did well</div><ul class="text-sm text-slate-700 list-disc pl-5">${r.strengths.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul>`:''}
+          ${(r.issues||[]).length?`<div class="text-xs font-semibold text-rose-700 mt-2">Issues</div><ul class="text-sm text-slate-700 list-disc pl-5">${r.issues.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul>`:''}
+          ${(r.customer_signals||[]).length?`<div class="text-xs font-semibold text-slate-500 mt-2">Customer signals</div><ul class="text-sm text-slate-700 list-disc pl-5">${r.customer_signals.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul>`:''}
+          ${d.lessons.length?`<div class="text-xs font-semibold text-indigo-700 mt-3">What the agent learnt from this call</div>${d.lessons.map(l=>`<div class="mt-1.5 rounded-lg border border-indigo-100 bg-indigo-50/40 px-3 py-2 text-sm"><div class="flex items-center gap-2">${salStatusChip(l.status)}<b>${escapeHtml(l.title)}</b></div><div class="text-slate-700 mt-1">${escapeHtml(l.rule)}</div></div>`).join('')}`:'<div class="text-xs text-slate-400 mt-3">No new lesson from this call — it was routine.</div>'}
+        </div></div>`;
+  }catch(e){ wrap.firstElementChild.innerHTML=`<div class="text-rose-500 text-sm">${escapeHtml(e.message)}</div>`; }
+}
+function salRuns(){
+  const el=document.getElementById('sal-runs'); const R=_sal.data.runs;
+  el.innerHTML = R.length ? R.map(r=>`<div>${new Date(r.started_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})} · ${r.trigger} · reviewed ${r.calls_reviewed}${r.calls_failed?` (failed ${r.calls_failed})`:''} · lessons +${r.lessons_new} / ${r.lessons_reinforced} reinforced / ${r.lessons_activated} activated${r.error?` · <span class="text-rose-600">${escapeHtml(r.error)}</span>`:''}${!r.finished_at?' · <i>running</i>':''}</div>`).join('') : '<div class="text-slate-400">No runs yet.</div>';
+}
+
 // ═══════════════ USERS & PERMISSIONS (admin) ═══════════════
 const PERM_GROUPS = [
   ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['last-mile','Last-Mile Funnel'],['amazon-fba','Amazon FBA']]],
@@ -7598,7 +7762,7 @@ const PERM_GROUPS = [
   ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon'],['gokwik-pg-recon','GoKwik PG Recon'],['kwikship-recon','KwikShip Freight Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
-  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)']]],
+  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)'],['support-agent-learning','Agent Learning (self-learning voice agent)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
   ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)'],['purchase-orders','Purchase Order (EasyEcom PO book)'],['grn','GRN (EasyEcom goods receiving)'],['po-approvals','PO Approvals (release drafted POs to EasyEcom)']]],
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],

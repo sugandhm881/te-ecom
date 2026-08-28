@@ -98,7 +98,7 @@ SPOKEN DELIVERY RULES (your words go DIRECTLY to a voice synthesizer):
 - Your OWN first-person ${langName === 'Hindi' ? 'Hindi verb forms are your gender’s: ' + forms : 'voice is ' + sp.gender}.
 - Address the customer as FIRST NAME + ${langName === 'Hindi' ? 'जी' : '"ji"'}; for the customer always respectful plural forms (रहेंगे/करेंगे/होंगे) — NEVER feminine forms for the customer: रहेंगी, होंगी, चाहती, करेंगी are all FORBIDDEN — always चाहेंगे/रहेंगे.
 - Asking for their time is a QUESTION: "क्या आपके पास दो मिनट हैं?" — never "बस दो मिनट का time है".
-- CLOSING: ${langName === 'Hindi' ? `"${HI_CLOSE}"` : '"Thank you for choosing The Element. Have a great day!"'} — never a bare goodbye. Never repeat a sentence twice in the call.`;
+- CLOSING: ${langName === 'Hindi' ? `"${HI_CLOSE}"` : '"Thank you for choosing The Element. Have a great day!"'} — never a bare goodbye. Never repeat a sentence twice in the call.${s.lessonsBlock || ''}`;
 }
 
 function sanitizeReply(t) {
@@ -470,6 +470,10 @@ class VoiceCall {
 function createSession({ phone, ctx, lang, voice, callType }) {
     const sid = crypto.randomBytes(8).toString('hex');
     sessions.set(sid, { sid, phone, ctx, lang: lang || 'hi-IN', voice: voice || 'kavya', callType: PURPOSES[callType] ? callType : 'cod_confirm', transcript: [], createdAt: Date.now() });
+    // Self-learning: the lessons the agent has learnt from earlier calls ride on the session and are
+    // appended to every prompt of this call (agent_learning.js; cached 5 min, never blocks the call).
+    require('./agent_learning').lessonsPromptBlock(PURPOSES[callType] ? callType : 'cod_confirm', lang || 'hi-IN')
+        .then(b => { const s = sessions.get(sid); if (s) s.lessonsBlock = b; }).catch(() => {});
     return sid;
 }
 

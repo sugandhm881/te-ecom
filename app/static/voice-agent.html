@@ -1891,6 +1891,14 @@ async function startCallWithTraining() {
   const ct = selectedCallType;
   const lang = document.getElementById('lang-select') ? LANG_LABELS[document.getElementById('lang-select').value] : 'Hindi';
   window._trainingContext = await fetchTrainingExamples(ct, lang);
+  // Self-learning: lessons distilled from earlier calls (backend /api/voice-lessons) — same block the
+  // phone bridge injects, so both agents improve together. A failure just means no lessons this call.
+  try {
+    const tok = localStorage.getItem('authToken');
+    const r = await fetch('/api/voice-lessons?call_type=' + encodeURIComponent(ct) + '&lang=' + encodeURIComponent(lang), tok ? { headers: { 'Authorization': 'Bearer ' + tok } } : {});
+    const d = r.ok ? await r.json() : null;
+    if (d && d.block) window._trainingContext = (window._trainingContext || '') + '\n' + d.block;
+  } catch (_) {}
   await _originalStartCall();
 }
 

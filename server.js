@@ -190,6 +190,8 @@ const _VIEW_PERMS = [
     [/^\/claims\//i, 'claims-sla'],
     [/^\/kwikship\//i, 'delivery-perf'],   // manual Kwikship tracking re-sync (cron runs nightly 2 AM)
     // Customer Support console — any support view permission unlocks its API group.
+    [/^\/support\/agent-learning/i, ['support-agent-learning', 'support-voice']],   // self-learning dashboard (router re-checks)
+    [/^\/voice-lessons/i, ['support-voice', 'support-agent-learning']],             // lessons block for the browser agent
     [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist', 'customer-profile']],
     // Customer Profile page (replaces Blacklist Numbers) — same audience. Issuing store credit is gated
     // a SECOND time inside the router by requirePermission('support-store-credit'), so being able to
@@ -329,6 +331,7 @@ app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll
 app.use('/api', require('./app/api/support_console'));        // Customer Support console (queue/calls/notes/contacts)
 app.use('/api', require('./app/api/msg91_wa').router);   // manual WhatsApp sends (template sequences) — /support/wa/*
+app.use('/api', require('./app/api/agent_learning').router);   // voice-agent self-learning — /support/agent-learning/*, /voice-lessons
 const vobizBridge = require('./app/api/vobiz_bridge');    // real phone calls: Vobiz telephony ⇄ Sarvam voice agent
 app.use('/api', vobizBridge.router);
 app.use('/api', require('./app/api/user_activity').router);   // activity logging (POST /activity — any signed-in user)
@@ -536,6 +539,13 @@ cronJob('WA CodReminder (*/5 * * * *)', '*/5 * * * *', async () => {
     const { codInitialTick, codReminderTick } = require('./app/api/msg91_wa');
     await codInitialTick().catch(e => console.error('[WA auto] COD V1 backstop error:', e.message));
     await codReminderTick().catch(e => console.error('[WA auto] reminder cron error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+// Voice-agent self-learning: review yesterday's calls, merge lessons, activate the well-evidenced ones.
+// 02:15 IST — after the day's calls, before anyone dials. Also runnable from the dashboard button.
+cronJob('AgentLearn (15 2 * * *)', '15 2 * * *', async () => {
+    const { runLearning } = require('./app/api/agent_learning');
+    const r = await runLearning({ trigger: 'cron', limit: 60 });
+    if (r && r.skipped) console.log('[AgentLearn] skipped —', r.skipped);
 }, { timezone: 'Asia/Kolkata' });
 cronJob('WA NDR (*/15 * * * *)', '*/15 * * * *', async () => {
     const { ndrTick } = require('./app/api/msg91_wa');

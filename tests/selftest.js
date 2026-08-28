@@ -1901,6 +1901,32 @@ function check(name, got, want) {
     check('wa cutover: the mirror lookup shifts for its IST-as-UTC timestamps', /5\.5 \* 3600e3/.test(wa), true);
 }
 
+// ── 4i. Voice-agent self-learning: reviewed once, lessons merged not duplicated, injected in both agents ──
+{
+    const AL = require(path.join(ROOT, 'app/api/agent_learning'));
+    check('learn: similar rules merge, different rules do not',
+        [AL.similarity('Ask the confirm question only after the customer greets you back', 'Ask the confirmation question only once the customer has greeted you back') >= 0.45,
+         AL.similarity('Ask the confirm question only after the customer greets you back', 'Close with the brand thank-you line in the customer language') >= 0.45], [true, false]);
+    const n = AL.normaliseReview({ outcome: 'confirmed', scores: { clarity: 9, empathy: 7, brevity: 8, correctness: 9, language_fit: 6 }, strengths: ['x'], issues: [], lessons: [
+        { title: 'Wait for the human', rule: 'When a screening assistant answers, state name and reason once, then stay silent until a person speaks.', category: 'screening', confidence: 0.9, evidence_quote: 'please stay on the line' },
+        { title: 'bad', rule: 'too short', category: 'nope', confidence: 2 }] });
+    check('learn: a review is normalised — overall derived, bad lessons dropped, categories constrained',
+        [n.outcome, n.scores.overall, n.lessons.length, n.lessons[0].category, n.lessons[0].confidence], ['confirmed', 7.8, 1, 'screening', 0.9]);
+    check('learn: JSON is recovered from a fenced or chatty AI reply', AL.parseJson('Sure!\n```json\n{"outcome":"other"}\n```')?.outcome, 'other');
+    check('learn: the two channels share one purpose', [AL.baseType('cod_confirm_vobiz'), AL.baseType('cod_confirm'), AL.langName('hi-IN'), AL.langName('Hindi')], ['cod_confirm', 'cod_confirm', 'Hindi', 'Hindi']);
+    const src = fs.readFileSync(path.join(ROOT, 'app/api/agent_learning.js'), 'utf8');
+    check('learn: a call is reviewed once (unique call_id) and the prompt block is capped',
+        [/call_id\s+uuid not null unique/.test(fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260828_agent_learning.sql'), 'utf8')), /slice\(0, MAX_ACTIVE_INJECT\)/.test(src), AL.MAX_ACTIVE_INJECT <= 15], [true, true, true]);
+    check('learn: activation needs a second call, or near-certainty from one', [AL.ACTIVATE_REINFORCED, AL.ACTIVATE_CONFIDENCE], [2, 0.95]);
+    check('learn: a rate limit backs off, then stops the run instead of writing wrong reviews', [/RETRY_WAITS_MS = \[20e3, 45e3\]/.test(src), /if \(transientAi\(e\.message\)\) break;/.test(src), typeof AL.dedupeLessons], [true, true, 'function']);
+    const vb = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+    const va = fs.readFileSync(path.join(ROOT, 'app/static/voice-agent.html'), 'utf8');
+    const sv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    check('learn: both agents inject the lessons block',
+        [/lessonsPromptBlock\(/.test(vb), /\$\{s\.lessonsBlock \|\| ''\}/.test(vb), /\/api\/voice-lessons\?call_type=/.test(va)], [true, true, true]);
+    check('learn: nightly cron + gated routes + nav', [/cronJob\('AgentLearn \(15 2 \* \* \*\)'/.test(sv), /\/support\\\/agent-learning/.test(sv), /nav-support-agent-learning/.test(fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8')), /'support-agent-learning'/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8'))], [true, true, true, true]);
+}
+
 // ── 4h. Secrets vault: every credential is AES-256-GCM at rest, and nothing reads around it ─────
 // Added 2026-08-27. `.env` is sealed into `.env.vault` by app/secrets.js; config.js and every
 // standalone script go through that one loader, and the rotated Teams refresh token is written back
