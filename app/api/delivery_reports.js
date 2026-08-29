@@ -500,6 +500,7 @@ router.get('/delivery-performance', async (req, res) => {
                 mail_sent: mailSet.has(r.order_name),     // an escalation email was sent for this order
                 sheet_pushed: sheetSet.has(r.order_name), // pushed to the courier-shared escalation sheet
                 otdHrs: diff(r.order_date, r.dispatched_at, 'hrs'),   // Order→Dispatch hours (null if not yet dispatched)
+                dtdDays: r.outcome === 'delivered' ? diff(r.dispatched_at, r.delivered_at, 'days') : null,   // Dispatch→Delivery days (delivered only — the TAT card's own cohort)
                 order_date: dayKey(r.order_date),        // IST calendar day (see dayKey)
                 delivered_at: dayKey(r.delivered_at),
                 rto_at: dayKey(r.rto_at),

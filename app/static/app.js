@@ -10458,7 +10458,7 @@ async function dprePayDelete(id){ if(!confirm('Delete this payment?'))return;
 }
 
 // ─── Delivery Performance (RTO / NDR / FASR) ─────────────────────────────────
-let _dpFrom = null, _dpTo = null, _dpData = null, _dpWired = false, _dpSource = 'all', _dpPayment = 'all', _dpZone = [], _dpState = [], _dpCourier = 'all', _dpOrderType = 'all', _dpCompare = false, _dpTatFilter = null;
+let _dpFrom = null, _dpTo = null, _dpData = null, _dpWired = false, _dpSource = 'all', _dpPayment = 'all', _dpZone = [], _dpState = [], _dpCourier = 'all', _dpOrderType = 'all', _dpCompare = false, _dpTatFilter = null, _dpDtdFilter = null;
 // ── Revenue lens ────────────────────────────────────────────────────────────────────────────────
 // 'count' = every metric weighted 1 per shipment (the original behaviour, and the default).
 // 'value' = every metric weighted by the order's ₹ value. The server sends BOTH for every figure, so
@@ -10500,6 +10500,14 @@ const DP_TAT_BUCKETS = [
   { label: '48+',   max: Infinity, color: '#ef4444', tint: '#fef2f2' },
 ];
 function dpOtdBucket(h){ if(h==null||isNaN(h)) return -1; for(let i=0;i<DP_TAT_BUCKETS.length;i++) if(h<=DP_TAT_BUCKETS[i].max) return i; return DP_TAT_BUCKETS.length-1; }
+// Dispatch→Delivery buckets in DAYS — must mirror BUCKETS_DAYS in delivery_reports.js (the server counts the card, the client filters the rows).
+const DP_DTD_BUCKETS = [
+  { label: '0-1', max: 1,        color: '#22c55e', tint: '#f0fdf4' },
+  { label: '1-3', max: 3,        color: '#0ea5e9', tint: '#f0f9ff' },
+  { label: '3-5', max: 5,        color: '#f59e0b', tint: '#fffbeb' },
+  { label: '5+',  max: Infinity, color: '#f97316', tint: '#fff7ed' },
+];
+function dpDtdBucket(d){ if(d==null||isNaN(d)) return -1; for(let i=0;i<DP_DTD_BUCKETS.length;i++) if(d<=DP_DTD_BUCKETS[i].max) return i; return DP_DTD_BUCKETS.length-1; }
 // Shipment table sort + click-to-expand detail state.
 let _dpSort={key:'order_date',dir:'desc'}, _dpOpenAwb=null; const _dpScanCache={};
 // Format an ISO timestamp as "27 Jun, 2:04 PM" (local). '—' if missing.
@@ -10761,22 +10769,24 @@ function dpCouriers(couriers){ const sel=document.getElementById('dp-courier-fil
     if(sel.value!==cur){ _dpCourier='all'; sel.value='all'; if(cur!=='all') dpLoad(); }
 }
 // TAT Dashboard — two cards: Order→Dispatch and Dispatch→Delivery, avg + bucket bars (0-1/1-3/3-5/5+).
-function dpTatCard(title,sub,t,prevAvg,filterable){ if(!t){ return ''; }
+function dpTatCard(title,sub,t,prevAvg,filterable,kind){ if(!t){ return ''; }
+    kind = kind || 'otd';
+    const BK = kind==='dtd' ? DP_DTD_BUCKETS : DP_TAT_BUCKETS, cur = kind==='dtd' ? _dpDtdFilter : _dpTatFilter;
     const colors=['bg-green-500','bg-sky-500','bg-amber-500','bg-orange-500','bg-red-500'];
     const tot=t.count||0, suffix=t.unit==='hrs'?'h':'d', unitLbl=t.unit==='hrs'?'hrs':'days';
     const bars=(t.buckets||[]).map((b,i)=>{ const n=b.count||0, pctv=tot?Math.round(n/tot*100):0;
-        const active=filterable && _dpTatFilter===i;
+        const active=filterable && cur===i;
         // When filterable, each row is a clickable button that filters the shipment table to that bucket.
         const cls=filterable?`dp-tatbar w-full flex items-center gap-2 text-xs rounded-md px-1 py-0.5 -mx-1 cursor-pointer transition-colors ${active?'':'hover:bg-slate-50'}`:'flex items-center gap-2 text-xs';
-        const style=active?`style="background:${DP_TAT_BUCKETS[i].tint};box-shadow:inset 0 0 0 2px ${DP_TAT_BUCKETS[i].color}"`:'';
+        const style=active?`style="background:${BK[i].tint};box-shadow:inset 0 0 0 2px ${BK[i].color}"`:'';
         const tag=filterable?'button':'div';
-        const attrs=filterable?`data-bucket="${i}" title="Click to show these ${n} shipments in the table"`:'';
+        const attrs=filterable?`data-bucket="${i}" data-kind="${kind}" title="Click to show these ${n} shipments in the table"`:'';
         return `<${tag} type="button" class="${cls}" ${attrs} ${style}>
           <span class="w-14 text-slate-500 tabular-nums text-left">${b.label}${suffix}</span>
           <div class="flex-1 h-4 bg-slate-100 rounded overflow-hidden"><div class="${colors[i%colors.length]} h-4 rounded" style="width:${pctv}%"></div></div>
           <span class="w-16 text-right text-slate-600 tabular-nums">${n} · ${pctv}%</span>
         </${tag}>`; }).join('');
-    const hint=filterable?`<span class="text-[10px] text-indigo-400 ml-1">${_dpTatFilter!=null?'· filtering — click again to clear':'· click a bucket to filter'}</span>`:'';
+    const hint=filterable?`<span class="text-[10px] text-indigo-400 ml-1">${cur!=null?'· filtering — click again to clear':'· click a bucket to filter'}</span>`:'';
     return `<div class="card p-5">
         <div class="flex items-start justify-between"><h2 class="text-sm font-bold text-slate-700">${title}</h2>
           <div class="text-right"><div><span class="text-2xl font-bold text-slate-800 tabular-nums">${t.avg}</span><span class="text-xs text-slate-400 ml-1">avg ${unitLbl}</span></div>${dpNumDelta(t.avg,prevAvg,suffix)}</div></div>
@@ -10820,13 +10830,16 @@ function dpZoneMix(zones){
 }
 function dpTat(t,c){ const el=document.getElementById('dp-tat'); if(!el) return; if(!t){ el.innerHTML=''; return; }
     el.innerHTML =
-        dpTatCard('Order → Dispatch TAT','Time from order to courier pickup', t.orderToDispatch, c?c.otdAvg:null, true)+
-        dpTatCard('Dispatch → Delivery TAT','Courier transit time to delivery', t.dispatchToDelivery, c?c.dtdAvg:null);
-    // Wire the Order→Dispatch buckets: toggle the TAT filter and refresh the table (colored by bucket).
+        dpTatCard('Order → Dispatch TAT','Time from order to courier pickup', t.orderToDispatch, c?c.otdAvg:null, true, 'otd')+
+        dpTatCard('Dispatch → Delivery TAT','Courier transit time to delivery', t.dispatchToDelivery, c?c.dtdAvg:null, true, 'dtd');
+    // Both cards' buckets toggle their own filter on the shipment table (Order→Dispatch in hours,
+    // Dispatch→Delivery in days — the latter only ever matches DELIVERED rows, the card's own cohort).
+    // The two filters AND together, so "dispatched within 12h but took 5+ days to deliver" is one click each.
     el.querySelectorAll('.dp-tatbar').forEach(b=>b.addEventListener('click',()=>{
-        const i=+b.dataset.bucket; _dpTatFilter = (_dpTatFilter===i)?null:i;
+        const i=+b.dataset.bucket;
+        if(b.dataset.kind==='dtd') _dpDtdFilter = (_dpDtdFilter===i)?null:i; else _dpTatFilter = (_dpTatFilter===i)?null:i;
         dpTat(t,c); dpTableRender();
-        if(_dpTatFilter!=null) document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'});
+        if(_dpTatFilter!=null||_dpDtdFilter!=null) document.getElementById('dp-table')?.scrollIntoView({behavior:'smooth',block:'start'});
     }));
 }
 // Clickable partition chip — filters the shipment explorer to that state. COUNTS always sum to `total`.
@@ -11291,10 +11304,11 @@ function dpTableRender(){ const c=document.getElementById('dp-table'); const d=_
     // excluded other couriers from `d.shipments`, so filtering again would be a second, independent copy
     // of the same rule that could silently disagree with the KPIs above it.
     if(_dpTatFilter!=null) list=list.filter(r=>dpOtdBucket(r.otdHrs)===_dpTatFilter);   // Order→Dispatch TAT bucket
+    if(_dpDtdFilter!=null) list=list.filter(r=>dpDtdBucket(r.dtdDays)===_dpDtdFilter);   // Dispatch→Delivery TAT bucket (delivered rows only)
     if(q) list=list.filter(r=>(r.order||'').toLowerCase().includes(q)||(r.awb||'').toLowerCase().includes(q));
     const cnt=document.getElementById('dp-count');
     const shownVal=list.reduce((a,r)=>a+(Number(r.value)||0),0);
-    if(cnt) cnt.textContent=`${list.length} shown${dpIsVal()?` · ${dpMoneyFull(shownVal)}`:''}${_dpCourier!=='all'?` · ${_dpCourier}`:''}${_dpTatFilter!=null?` · O→Dispatch ${DP_TAT_BUCKETS[_dpTatFilter].label}h`:''}${d.shipmentsTruncated?` · list capped at ${all.length} of ${d.shipmentsTotal}`:''}`;
+    if(cnt) cnt.textContent=`${list.length} shown${dpIsVal()?` · ${dpMoneyFull(shownVal)}`:''}${_dpCourier!=='all'?` · ${_dpCourier}`:''}${_dpTatFilter!=null?` · O→Dispatch ${DP_TAT_BUCKETS[_dpTatFilter].label}h`:''}${_dpDtdFilter!=null?` · Dispatch→Delivery ${DP_DTD_BUCKETS[_dpDtdFilter].label}d`:''}${d.shipmentsTruncated?` · list capped at ${all.length} of ${d.shipmentsTotal}`:''}`;
     if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-6">No shipments match this filter</div>'; return; }
     // ── sort (click a header to change) ──
     const dir=_dpSort.dir==='asc'?1:-1;

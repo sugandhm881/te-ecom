@@ -1927,6 +1927,33 @@ function check(name, got, want) {
     check('learn: nightly cron + gated routes + nav', [/cronJob\('AgentLearn \(15 2 \* \* \*\)'/.test(sv), /\/support\\\/agent-learning/.test(sv), /nav-support-agent-learning/.test(fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8')), /'support-agent-learning'/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8'))], [true, true, true, true]);
 }
 
+// ── 4j. DocPharma journey dates come from the portal timeline, by the DATABASE ──────────────────
+// 2026-08-29: Dispatch→Delivery TAT read "0 shipments" for DocPharma — the partner API has no dispatch /
+// OFD / RTO timestamps, so 0 of 1,215 journeys had dispatched_at. The portal sync already stores them
+// on docpharma_orders; a SQL function + trigger + hourly pg_cron now copy them across (NULLs only).
+{
+    const mig = fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260829_docpharma_journey_dates.sql'), 'utf8');
+    check('dp dates: function fills only NULLs, trigger on docpharma_orders, hourly pg_cron, one-time backfill',
+        [/coalesce\(j\.dispatched_at, s\.dispatched_at\)/.test(mig), /create trigger trg_docpharma_orders_journey/.test(mig),
+         /cron\.schedule\('docpharma-journey-dates-hourly', '50 \* \* \* \*'/.test(mig), /select public\.sync_docpharma_journey_dates\(interval '400 days'\);/.test(mig),
+         /where s->>'label' = 'out_for_delivery'/.test(mig)], [true, true, true, true, true]);
+}
+
+// ── 4k. Dispatch→Delivery TAT card filters the explorer, like Order→Dispatch already did ────────
+{
+    const app = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    const dr = fs.readFileSync(path.join(ROOT, 'app/api/delivery_reports.js'), 'utf8');
+    check('dtd filter: server ships dtdDays per row, client mirrors the day buckets and filters on them',
+        [/dtdDays: r\.outcome === 'delivered' \? diff\(r\.dispatched_at, r\.delivered_at, 'days'\)/.test(dr),
+         /const DP_DTD_BUCKETS = \[/.test(app), /dpDtdBucket\(r\.dtdDays\)===_dpDtdFilter/.test(app),
+         /t\.dispatchToDelivery, c\?c\.dtdAvg:null, true, 'dtd'\)/.test(app), /data-kind="\$\{kind\}"/.test(app)], [true, true, true, true, true]);
+    // The client's day buckets must equal the server's — the card counts and the filtered rows must agree.
+    const srv = (dr.match(/const BUCKETS_DAYS = \[(.*)\];/) || [])[1] || '';
+    const cli = (app.match(/const DP_DTD_BUCKETS = \[([\s\S]*?)\];/) || [])[1] || '';
+    const labels = s => (s.match(/label: '([^']+)'/g) || []).map(x => x.replace(/label: '|'/g, ''));
+    check('dtd filter: client buckets equal server buckets', labels(cli), labels(srv));
+}
+
 // ── 4h. Secrets vault: every credential is AES-256-GCM at rest, and nothing reads around it ─────
 // Added 2026-08-27. `.env` is sealed into `.env.vault` by app/secrets.js; config.js and every
 // standalone script go through that one loader, and the rotated Teams refresh token is written back
