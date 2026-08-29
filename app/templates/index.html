@@ -3754,7 +3754,45 @@
               <button id="zm-remap" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors">Re-apply to shipments</button>
             </div>
           </header>
-          <div class="p-8 space-y-6">
+          <div class="px-8 pt-4 flex items-center gap-2 border-b border-slate-200 bg-white">
+            <button class="zm-tab px-3 py-2 text-sm font-semibold border-b-2 border-indigo-600 text-indigo-700" data-tab="mapping">Mapping</button>
+            <button class="zm-tab px-3 py-2 text-sm font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-700" data-tab="state">Zone &amp; State</button>
+          </div>
+          <div id="zm-pane-state" class="p-8 space-y-6 hidden">
+            <div id="zs-kpis" class="grid grid-cols-2 md:grid-cols-4 gap-4"></div>
+            <div class="card p-5">
+              <div class="flex items-start justify-between flex-wrap gap-3">
+                <div>
+                  <h2 class="text-sm font-bold text-slate-700">India Post pincode directory</h2>
+                  <p class="text-xs text-slate-400 mt-0.5">The official <b>All India Pincode Directory</b> CSV from data.gov.in (circle, division, office, pincode, district, state, lat/long). Import it once and every pincode's city, district and state is answered from it — no API calls. <span id="zs-dir-status" class="text-slate-500"></span></p>
+                </div>
+                <label class="flex items-center gap-2 text-xs text-slate-500 cursor-pointer"><input id="zs-dir-replace" type="checkbox" class="rounded border-slate-300"> Replace the existing directory</label>
+              </div>
+              <div id="zs-dir-drop" class="mt-3 border border-dashed border-slate-300 rounded-lg p-5 text-center cursor-pointer hover:border-indigo-400 transition-colors">
+                <p class="text-sm text-slate-500">Drop the directory CSV here, or <span class="text-indigo-600 font-semibold">browse</span></p>
+                <input id="zs-dir-file" type="file" accept=".csv" class="hidden">
+              </div>
+              <div id="zs-dir-out" class="mt-2 text-xs"></div>
+            </div>
+            <div class="card p-5">
+              <div class="flex flex-wrap items-end gap-3">
+                <div><label class="block text-[11px] font-semibold text-slate-400 uppercase mb-1">State</label><select id="zs-state" class="filter-select" style="min-width:240px"><option value="">All states</option></select></div>
+                <div><label class="block text-[11px] font-semibold text-slate-400 uppercase mb-1">Zone</label><select id="zs-zone" class="filter-select"><option value="">All zones</option><option value="A">Zone A</option><option value="B">Zone B</option><option value="C">Zone C</option><option value="D">Zone D</option><option value="E">Zone E</option></select></div>
+                <div><label class="block text-[11px] font-semibold text-slate-400 uppercase mb-1">City / District</label><input id="zs-place" type="text" placeholder="contains…" class="filter-input" style="width:180px"></div>
+                <div><label class="block text-[11px] font-semibold text-slate-400 uppercase mb-1">Pincode</label><input id="zs-q" type="text" inputmode="numeric" maxlength="6" placeholder="starts with…" class="filter-input" style="width:140px"></div>
+                <button id="zs-apply" class="filter-btn-primary">Apply</button>
+                <button id="zs-clear" class="filter-btn">Clear</button>
+                <div class="flex-1"></div>
+                <button id="zs-export" class="filter-btn-primary">⬇ Download Excel</button>
+              </div>
+              <p id="zs-source-note" class="text-xs text-slate-400 mt-3"></p>
+            </div>
+            <div class="card overflow-hidden">
+              <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2"><span id="zs-count" class="text-sm text-slate-600"></span><div class="flex items-center gap-2"><button id="zs-prev" class="filter-btn">‹ Prev</button><span id="zs-page" class="text-xs text-slate-500"></span><button id="zs-next" class="filter-btn">Next ›</button></div></div>
+              <div class="overflow-x-auto" id="zs-table"></div>
+            </div>
+          </div>
+          <div id="zm-pane-mapping" class="p-8 space-y-6">
             <div id="zm-kpis" class="grid grid-cols-2 md:grid-cols-4 gap-4"></div>
             <div id="zm-lookup-out"></div>
             <div id="zm-charges"></div>
@@ -3822,7 +3860,7 @@
      ONLY thing that makes a browser re-fetch. Forgetting it means the change ships and nobody sees it:
      on 2026-08-13 a whole session of Last-Mile + Purchase Order work was invisible for exactly this
      reason, and it looks identical to "the fix didn't work". -->
-<script src="/static/app.js?v=2026-08-29-inf-status"></script>
+<script src="/static/app.js?v=2026-08-29-zone-ladder"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

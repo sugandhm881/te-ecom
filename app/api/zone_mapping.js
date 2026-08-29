@@ -255,6 +255,11 @@ router.post('/zone-mapping/upload', async (req, res) => {
         // follow it or shipments KwikShip never weighed go straight back to unpriced.
         const { data: charges, error: chargeErr } = await require('./kwikship_sync').applyKwikshipCharges();
         if (chargeErr) console.error('[ZoneMapping] charge recalc after upload failed:', chargeErr.message);
+        // Zone & State: a ONE-TIME lookup per sheet (no cron, by instruction). First copy every cached India
+        // Post / order-address answer onto the new rows, then walk whatever is still unresolved through
+        // India Post in the background — a replaced sheet is usually the same ~30k pincodes, so most rows
+        // are answered from cache in one statement and the API is only asked about genuinely new ones.
+        supabase.rpc('zone_mapping_fill_all').then(() => enrichZoneStates({ limit: 31000 })).catch(e => console.warn('[ZoneMapping] state lookup after upload:', e.message));
 
         console.log(`[ZoneMapping] ${(req.user && req.user.sub) || 'admin'} uploaded ${filename || 'sheet'} — ${written} destination pincodes; remap: ${JSON.stringify(remap || (remapErr && remapErr.message))}; charges: ${JSON.stringify(charges || (chargeErr && chargeErr.message))}`);
         res.json({
@@ -304,6 +309,147 @@ router.get('/zone-mapping/lookup', async (req, res) => {
 // ── POST /zone-mapping/remap ─────────────────────────────────────────────────────────────────────
 // Re-run the mapping over every KwikShip journey row. Safe to run repeatedly; pincodes in no range
 // keep their state-derived zone.
+// ── Zone & State tab (2026-08-29) — browse / filter the sheet by STATE, download as Excel ─────────
+// The sheet has no state/city column; `state` / `city` / `district` come from ONE source — India Post's
+// free API via pincode_geo_ecom (user: "don't guess anything") — filled by zone_mapping_fill_state() and the
+// trigger on pincode_geo_ecom; enrichZoneStates() walks the unanswered pincodes. See migration 20260829_zone_mapping_state.
+const PAGE_MAX = 500;
+function pinFilters(q, query) {
+    const state = String(query.state || '').trim(), zone = String(query.zone || '').trim().toUpperCase(), search = String(query.q || '').replace(/\D/g, '');
+    const place = String(query.place || '').trim().replace(/[,%()]/g, '');   // city OR district contains
+    if (place) q = q.or(`city.ilike.%${place}%,district.ilike.%${place}%`);
+    if (state === '(not an India Post pincode)') q = q.eq('state_source', 'not_in_directory');
+    else if (state === '(unknown)') q = q.is('state', null).is('state_source', null);
+    else if (state) q = q.eq('state', state);
+    if (zone) q = q.eq('Zone', zone);
+    if (search) q = q.gte('Pin_code_To', Number(search.padEnd(6, '0'))).lte('Pin_code_To', Number(search.padEnd(6, '9')));   // prefix search on a numeric column
+    return q;
+}
+router.get('/zone-mapping/states', async (_req, res) => {
+    try {
+        const [{ data: states, error }, { data: zones }] = await Promise.all([
+            supabase.rpc('zone_mapping_states'),
+            supabase.from('zone_mapping_with_pincode').select('Zone').limit(1),   // cheap existence check
+        ]);
+        if (error) throw new Error(error.message);
+        const tot = (states || []).reduce((a, s) => a + Number(s.pincodes), 0);
+        const src = { indiapost: 0, orders: 0, nearest: 0, prefix: 0, not_in_directory: 0 };
+        (states || []).forEach(s => { src.indiapost += Number(s.indiapost); src.orders += Number(s.orders); src.nearest += Number(s.nearest || 0); src.prefix += Number(s.prefix); src.not_in_directory += Number(s.not_in_directory || 0); });
+        res.json({ success: true, states: states || [], total: tot, sources: src, enrich: enrichStatus(), hasSheet: !!(zones && zones.length) });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+router.get('/zone-mapping/pincodes', async (req, res) => {
+    try {
+        const page = Math.max(0, parseInt(req.query.page, 10) || 0), size = Math.min(PAGE_MAX, Math.max(50, parseInt(req.query.size, 10) || 200));
+        let q = supabase.from('zone_mapping_with_pincode').select('"Pin_code_To", "Zone", state, city, district, state_source', { count: 'exact' });
+        q = pinFilters(q, req.query).order('Pin_code_To').range(page * size, page * size + size - 1);
+        const { data, error, count } = await q;
+        if (error) throw new Error(error.message);
+        res.json({ success: true, rows: (data || []).map(r => ({ pincode: r.Pin_code_To, zone: r.Zone, state: r.state, city: r.city, district: r.district, state_source: r.state_source })), total: count || 0, page, size });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+// Excel — SERVER-SIDE over the full filtered set, never the rendered page (the PG-recon lesson).
+router.get('/zone-mapping/pincodes.xlsx', async (req, res) => {
+    try {
+        const ExcelJS = require('exceljs');
+        const rows = [];
+        for (let page = 0; ; page++) {
+            let q = supabase.from('zone_mapping_with_pincode').select('"Pin_code_From", "Pin_code_To", "Zone", state, city, district, state_source');
+            const { data, error } = await pinFilters(q, req.query).order('Pin_code_To').range(page * 1000, page * 1000 + 999);
+            if (error) throw new Error(error.message);
+            rows.push(...(data || []));
+            if (!data || data.length < 1000) break;
+        }
+        const wb = new ExcelJS.Workbook(); wb.creator = 'Pravidhi';
+        const ws = wb.addWorksheet('Zone & State');
+        const state = String(req.query.state || '').trim(), zone = String(req.query.zone || '').trim().toUpperCase();
+        ws.addRow([`KwikShip zone mapping — ${state || 'all states'}${zone ? ' · zone ' + zone : ''}${req.query.place ? ' · ' + String(req.query.place).replace(/[^\w .-]/g, '') : ''} · ${rows.length.toLocaleString('en-IN')} pincodes · exported ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`]);
+        ws.mergeCells('A1:G1'); ws.getCell('A1').font = { bold: true, size: 12 };
+        const hdr = ws.addRow(['Pincode', 'City', 'District', 'State', 'Zone', 'Source', 'Pickup pincode']);
+        hdr.eachCell(c => { c.font = { bold: true, color: { argb: 'FFFFFFFF' } }; c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } }; });
+        rows.forEach(r => ws.addRow([Number(r.Pin_code_To), r.city || '', r.district || '', r.state || '', r.Zone || '', ({ indiapost: 'India Post', orders: 'our orders (customer-typed)', nearest: 'nearest real pincode', prefix: 'postal prefix', not_in_directory: 'not an India Post pincode' })[r.state_source] || 'resolving', r.Pin_code_From == null ? '' : Number(r.Pin_code_From)]));
+        ws.columns = [{ width: 12 }, { width: 24 }, { width: 24 }, { width: 28 }, { width: 8 }, { width: 12 }, { width: 16 }];
+        ws.views = [{ state: 'frozen', ySplit: 2 }]; ws.autoFilter = { from: 'A2', to: 'G2' };
+        const fname = `zone-state-${(state || 'all').replace(/[^a-z0-9]+/gi, '-').toLowerCase()}${zone ? '-' + zone : ''}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+        await wb.xlsx.write(res); res.end();
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+// India Post enrichment — walks pincodes whose state is not yet exact (prefix / unknown) through the
+// free API, caching each answer in pincode_geo_ecom; the DB trigger then stamps the zone row. Runs in
+// the background (one job at a time), paced ~3/s; the nightly cron continues where it left off.
+let _enrich = { running: false, done: 0, ok: 0, failed: 0, total: 0, startedAt: null, finishedAt: null, error: null };
+function enrichStatus() { return { ..._enrich }; }
+// Measured 2026-08-29: a one-off burst of 16 parallel calls is fine, but a SUSTAINED 10-worker run
+// failed 805 of 1,000 (throttling); 4 workers with a 150 ms pace and one retry (~5/s, the whole sheet in
+// ~1.7 h) is the rate it actually sustains. Sequential calls answer in ~500 ms each.
+async function enrichZoneStates({ limit = 5000, concurrency = 4, paceMs = 150 } = {}) {
+    if (_enrich.running) return enrichStatus();
+    const pincodeApi = require('./pincode');
+    _enrich = { running: true, done: 0, ok: 0, failed: 0, total: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null };
+    (async () => {
+        try {
+            // PostgREST caps any single response at 1,000 rows — page the candidate list (the first run
+            // silently did 1,000 of 31,000 and reported itself finished).
+            const all = [];
+            for (let page = 0; all.length < limit; page++) {
+                const { data, error } = await supabase.from('zone_mapping_with_pincode').select('"Pin_code_To"')
+                    .or('state_source.is.null,state_source.in.(orders,nearest,prefix)').order('Pin_code_To').range(page * 1000, page * 1000 + 999);
+                if (error) throw new Error(error.message);
+                all.push(...(data || []));
+                if (!data || data.length < 1000) break;
+            }
+            const pins = [...new Set(all.slice(0, limit).map(r => String(r.Pin_code_To).padStart(6, '0')))];
+            _enrich.total = pins.length;
+            let i = 0;
+            const worker = async () => {
+                while (i < pins.length && _enrich.running) {
+                    const pin = pins[i++];
+                    try {
+                        let hit = await pincodeApi.fromCache(pin) || await pincodeApi.fromIndiaPost(pin);
+                        if (!hit) { await new Promise(r => setTimeout(r, 1500)); hit = await pincodeApi.fromIndiaPost(pin); }   // one retry — a throttled miss is not a missing pincode
+                        if (hit && hit.state) {
+                            await supabase.from('pincode_geo_ecom').upsert({ pincode: hit.pincode, city: hit.city, state: hit.state, district: hit.district, source: hit.source || 'indiapost', updated_at: new Date().toISOString() }, { onConflict: 'pincode' });
+                            _enrich.ok++;
+                        } else _enrich.failed++;
+                    } catch (_) { _enrich.failed++; }
+                    _enrich.done++;
+                    await new Promise(r => setTimeout(r, paceMs));
+                }
+            };
+            await Promise.all(Array.from({ length: concurrency }, worker));
+            await supabase.rpc('zone_mapping_fill_all');   // re-run the whole ladder: a new India Post answer outranks nearest/prefix
+        } catch (e) { _enrich.error = e.message; }
+        finally { _enrich.running = false; _enrich.finishedAt = new Date().toISOString(); console.log(`[ZoneStates] enrichment: ${_enrich.ok} resolved, ${_enrich.failed} failed of ${_enrich.total}`); }
+    })();
+    return enrichStatus();
+}
+router.post('/zone-mapping/enrich-states', async (req, res) => {
+    res.json({ success: true, ...enrichZoneStates({ limit: Math.min(31000, parseInt((req.body || {}).limit, 10) || 5000) }) });
+});
+router.get('/zone-mapping/enrich-states', (_req, res) => res.json({ success: true, ...enrichStatus() }));
+// India Post directory (data.gov.in CSV) — permanent table; see pincode_directory.js.
+router.get('/zone-mapping/pincode-directory', async (_req, res) => {
+    try { res.json({ success: true, ...(await require('./pincode_directory').status()) }); }
+    catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+router.post('/zone-mapping/pincode-directory/upload', async (req, res) => {
+    const { contentBase64, replace } = req.body || {};
+    if (!contentBase64) return res.status(400).json({ success: false, error: 'No file was uploaded.' });
+    try {
+        const text = Buffer.from(String(contentBase64), 'base64').toString('utf8');
+        const r = await require('./pincode_directory').importDirectory(text, { replace: !!replace });
+        console.log(`[PincodeDirectory] ${(req.user && req.user.sub) || 'admin'} imported ${r.written} post offices (replace=${!!replace}); zone rows filled: ${r.filled}`);
+        res.json({ success: true, ...r });
+    } catch (e) { res.status(400).json({ success: false, error: e.message }); }
+});
+router.post('/zone-mapping/fill-states', async (_req, res) => {
+    const { data, error } = await supabase.rpc('zone_mapping_fill_all');
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, updated: data });
+});
+
 router.post('/zone-mapping/remap', async (req, res) => {
     try {
         const { data, error } = await supabase.rpc('remap_kwikship_zones');
@@ -344,3 +490,4 @@ async function zoneForPincode(pincode) {
 module.exports = router;
 module.exports.zoneForPincode = zoneForPincode;
 module.exports.cleanPin = cleanPin;
+module.exports.enrichZoneStates = enrichZoneStates;

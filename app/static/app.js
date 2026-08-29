@@ -6548,7 +6548,7 @@ const NAV_HREF = {
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon', 'nav-kwikship-recon': 'kwikship-recon',
-    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics',
+    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics', 'nav-zone-mapping': 'zone-mapping',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
@@ -7594,6 +7594,111 @@ function zmInit() {
     document.getElementById('zm-lookup')?.addEventListener('click', zmLookup);
     document.getElementById('zm-pin')?.addEventListener('keydown', e => { if (e.key === 'Enter') zmLookup(); });
     document.getElementById('zm-remap')?.addEventListener('click', zmRemap);
+    // Zone & State tab (2026-08-29)
+    document.querySelectorAll('.zm-tab').forEach(b => b.addEventListener('click', () => zmTab(b.dataset.tab)));
+    document.getElementById('zs-apply')?.addEventListener('click', () => { _zs.page = 0; zsLoad(); });
+    document.getElementById('zs-clear')?.addEventListener('click', () => { const st=document.getElementById('zs-state'), zn=document.getElementById('zs-zone'), q=document.getElementById('zs-q'), pl=document.getElementById('zs-place'); st.value=''; zn.value=''; q.value=''; if(pl) pl.value=''; ecSyncSelect(st); ecSyncSelect(zn); _zs.page = 0; zsLoad(); });
+    document.getElementById('zs-q')?.addEventListener('keydown', e => { if (e.key === 'Enter') { _zs.page = 0; zsLoad(); } });
+    document.getElementById('zs-place')?.addEventListener('keydown', e => { if (e.key === 'Enter') { _zs.page = 0; zsLoad(); } });
+    document.getElementById('zs-state')?.addEventListener('change', () => { _zs.page = 0; zsLoad(); });
+    document.getElementById('zs-zone')?.addEventListener('change', () => { _zs.page = 0; zsLoad(); });
+    document.getElementById('zs-prev')?.addEventListener('click', () => { if (_zs.page > 0) { _zs.page--; zsLoad(); } });
+    document.getElementById('zs-next')?.addEventListener('click', () => { if ((_zs.page + 1) * _zs.size < _zs.total) { _zs.page++; zsLoad(); } });
+    document.getElementById('zs-export')?.addEventListener('click', zsExport);
+    // India Post directory upload (CSV → india_pincode_directory_ecom, then the zone rows are filled from it)
+    const dd = document.getElementById('zs-dir-drop'), df = document.getElementById('zs-dir-file');
+    if (dd && df) {
+        dd.addEventListener('click', () => df.click());
+        dd.addEventListener('dragover', e => { e.preventDefault(); dd.classList.add('border-indigo-400'); });
+        dd.addEventListener('dragleave', () => dd.classList.remove('border-indigo-400'));
+        dd.addEventListener('drop', e => { e.preventDefault(); dd.classList.remove('border-indigo-400'); if (e.dataTransfer.files && e.dataTransfer.files[0]) zsDirUpload(e.dataTransfer.files[0]); });
+        df.addEventListener('change', () => { if (df.files && df.files[0]) { zsDirUpload(df.files[0]); df.value = ''; } });
+    }
+}
+async function zsDirStatus() {
+    const el = document.getElementById('zs-dir-status'); if (!el) return;
+    try { const d = await supFetch('/api/zone-mapping/pincode-directory');
+        el.textContent = d.offices ? `Loaded: ${Number(d.offices).toLocaleString('en-IN')} post offices · ${Number(d.pincodes).toLocaleString('en-IN')} pincodes · last import ${d.last_import ? new Date(d.last_import).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}.` : 'Not imported yet.'; }
+    catch (e) { el.textContent = ''; }
+}
+async function zsDirUpload(file) {
+    const out = document.getElementById('zs-dir-out');
+    if (!/\.csv$/i.test(file.name)) { out.innerHTML = '<span class="text-rose-600">Please upload the CSV export.</span>'; return; }
+    out.innerHTML = brandLoaderSm(`Importing ${escapeHtml(file.name)} (${(file.size / 1048576).toFixed(1)} MB) — a full directory takes a minute or two…`);
+    try {
+        const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(file); });
+        const d = await supFetch('/api/zone-mapping/pincode-directory/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contentBase64: b64, replace: !!document.getElementById('zs-dir-replace')?.checked }) });
+        out.innerHTML = `<span class="text-emerald-700 font-semibold">Imported ${Number(d.written).toLocaleString('en-IN')} post offices</span> (${d.skipped} skipped) · <b>${Number(d.filled).toLocaleString('en-IN')}</b> zone rows filled from it · coverage now ${Number(d.coverage.indiapost).toLocaleString('en-IN')} of ${Number(d.coverage.total).toLocaleString('en-IN')} verified by India Post.`;
+        _zs.states = null; zsDirStatus(); zsLoad();
+    } catch (e) { out.innerHTML = `<span class="text-rose-600">${escapeHtml(e.message)}</span>`; }
+}
+// ── Zone & State — browse the sheet by state, download Excel (2026-08-29) ────────────────────────
+// The sheet has no state column; the server fills one per pincode (India Post > order addresses >
+// postal-circle prefix) and says which — a prefix guess is labelled, never passed off as exact.
+let _zs = { page: 0, size: 200, total: 0, states: null, statesAt: 0 };
+function zmTab(tab) {
+    document.querySelectorAll('.zm-tab').forEach(b => { const on = b.dataset.tab === tab; b.classList.toggle('border-indigo-600', on); b.classList.toggle('text-indigo-700', on); b.classList.toggle('border-transparent', !on); b.classList.toggle('text-slate-500', !on); });
+    document.getElementById('zm-pane-mapping')?.classList.toggle('hidden', tab !== 'mapping');
+    document.getElementById('zm-pane-state')?.classList.toggle('hidden', tab !== 'state');
+    if (tab === 'state') { zsLoad(); zsDirStatus(); }
+}
+async function zsStates() {
+    if (_zs.states && Date.now() - _zs.statesAt < 60000) return _zs.states;
+    const d = await supFetch('/api/zone-mapping/states');
+    _zs.states = d; _zs.statesAt = Date.now();
+    const sel = document.getElementById('zs-state'); const cur = sel.value;
+    sel.innerHTML = '<option value="">All states</option>' + (d.states || []).map(s => `<option value="${escapeHtml(s.state)}">${escapeHtml(s.state)} (${Number(s.pincodes).toLocaleString('en-IN')})</option>`).join('');
+    sel.value = cur; ecSyncSelect(sel);
+    const src = d.sources || {}, exact = (src.indiapost || 0), fromOrders = (src.orders || 0), nearest = (src.nearest || 0), prefix = (src.prefix || 0), notReal = (src.not_in_directory || 0), pending = Math.max(0, (d.total || 0) - exact - fromOrders - nearest - prefix - notReal);
+    document.getElementById('zs-kpis').innerHTML = [
+        zmTile('Pincodes in the sheet', Number(d.total || 0).toLocaleString('en-IN'), 'one row per destination'),
+        zmTile('States', String((d.states || []).filter(s => s.state !== '(unknown)').length), 'as resolved for these pincodes'),
+        zmTile('Verified by India Post', d.total ? Math.round(exact / d.total * 100) + '%' : '—', `${exact.toLocaleString('en-IN')} pincodes · ${fromOrders.toLocaleString('en-IN')} more from our order addresses (until India Post answers)`),
+        zmTile('Derived (courier-only codes)', (nearest + prefix).toLocaleString('en-IN'), `${nearest.toLocaleString('en-IN')} from the nearest real pincode · ${prefix.toLocaleString('en-IN')} from the postal prefix${notReal ? ` · ${notReal.toLocaleString('en-IN')} unresolvable` : ''}${pending ? ` · ${pending.toLocaleString('en-IN')} resolving` : ''}`),
+    ].join('');
+    document.getElementById('zs-source-note').innerHTML = `Source per row, best first — <b>India Post</b>: the official directory (city, district, state). <b>our orders</b>: the state/city customers typed on orders to that pincode. <b>nearest real pincode</b>: the courier sheet lists a code India Post does not have (sheets pad ranges — 110000, 110100–110108 …), so the state and district are taken from the closest real pincode in the same 3-digit sorting district. <b>postal prefix</b>: state only, from the first digits, when no neighbour exists. A better source always replaces a weaker one.`;
+    return d;
+}
+async function zsLoad() {
+    const tbl = document.getElementById('zs-table'); if (!tbl) return;
+    tbl.innerHTML = brandLoaderSm('Loading pincodes…');
+    try {
+        await zsStates();
+        const qs = new URLSearchParams({ page: _zs.page, size: _zs.size });
+        const st = document.getElementById('zs-state').value, zn = document.getElementById('zs-zone').value, q = document.getElementById('zs-q').value.trim(), pl = (document.getElementById('zs-place')?.value || '').trim();
+        if (st) qs.set('state', st); if (zn) qs.set('zone', zn); if (q) qs.set('q', q); if (pl) qs.set('place', pl);
+        const d = await supFetch('/api/zone-mapping/pincodes?' + qs.toString());
+        _zs.total = d.total || 0;
+        const TH = 'px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+        const TD = 'px-3 py-2 text-sm text-slate-700 border-b border-slate-100';
+        // Ranked by trust; every row says which one it came from.
+        const SRC = { indiapost: ['India Post', 'bg-emerald-50 text-emerald-700'], orders: ['our orders (customer-typed)', 'bg-sky-50 text-sky-700'], nearest: ['nearest real pincode', 'bg-violet-50 text-violet-700'], prefix: ['postal prefix', 'bg-amber-50 text-amber-700'], not_in_directory: ['not an India Post pincode', 'bg-rose-50 text-rose-700'] };
+        tbl.innerHTML = d.rows.length ? `<table class="w-full"><thead><tr>${['Pincode', 'City', 'District', 'State', 'Zone', 'Source'].map(h => `<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${d.rows.map(r => {
+            const [sl, sc] = SRC[r.state_source] || ['resolving…', 'bg-slate-100 text-slate-500'];
+            return `<tr class="hover:bg-slate-50"><td class="${TD} font-mono">${escapeHtml(String(r.pincode))}</td><td class="${TD}">${escapeHtml(r.city || '—')}</td><td class="${TD}">${escapeHtml(r.district || '—')}</td><td class="${TD}">${escapeHtml(r.state || '—')}</td><td class="${TD}"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 text-indigo-700">Zone ${escapeHtml(r.zone || '?')}</span></td><td class="${TD}"><span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${sc}">${sl}</span></td></tr>`; }).join('')}</tbody></table>`
+            : '<div class="text-slate-400 text-sm p-6">No pincodes match.</div>';
+        const from = _zs.total ? _zs.page * _zs.size + 1 : 0, to = Math.min(_zs.total, (_zs.page + 1) * _zs.size);
+        document.getElementById('zs-count').textContent = `${_zs.total.toLocaleString('en-IN')} pincode${_zs.total === 1 ? '' : 's'}${st ? ' · ' + st : ''}${zn ? ' · zone ' + zn : ''}${pl ? ' · ' + pl : ''}${q ? ' · starts with ' + q : ''}`;
+        document.getElementById('zs-page').textContent = _zs.total ? `${from.toLocaleString('en-IN')}–${to.toLocaleString('en-IN')}` : '';
+        document.getElementById('zs-prev').disabled = _zs.page === 0; document.getElementById('zs-next').disabled = to >= _zs.total;
+    } catch (e) { tbl.innerHTML = `<div class="text-rose-500 text-sm p-6">${escapeHtml(e.message)}</div>`; }
+}
+// The download is a fetch with the bearer token, never an <a href> (a link carries no headers and
+// saves the 401 body as a file). Exports the FULL filtered set server-side, not the page on screen.
+async function zsExport() {
+    const btn = document.getElementById('zs-export'); const label = btn.textContent; btn.disabled = true; btn.textContent = 'Preparing…';
+    try {
+        const qs = new URLSearchParams();
+        const st = document.getElementById('zs-state').value, zn = document.getElementById('zs-zone').value, q = document.getElementById('zs-q').value.trim(), pl = (document.getElementById('zs-place')?.value || '').trim();
+        if (st) qs.set('state', st); if (zn) qs.set('zone', zn); if (q) qs.set('q', q); if (pl) qs.set('place', pl);
+        const r = await fetch('/api/zone-mapping/pincodes.xlsx?' + qs.toString(), { headers: getAuthHeaders() });
+        if (!r.ok) { let msg = `Export failed (${r.status})`; try { const j = await r.json(); if (j && j.error) msg = j.error; } catch (_) {} throw new Error(msg); }
+        const blob = await r.blob(); if (!blob.size) throw new Error('The server returned an empty file.');
+        const cd = r.headers.get('Content-Disposition') || ''; const m = cd.match(/filename="([^"]+)"/);
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = m ? m[1] : 'zone-state.xlsx'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        showNotification(`Downloaded ${_zs.total.toLocaleString('en-IN')} pincodes`);
+    } catch (e) { showNotification(e.message, 'error'); }
+    finally { btn.disabled = false; btn.textContent = label; }
 }
 
 

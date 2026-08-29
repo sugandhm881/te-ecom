@@ -60,7 +60,13 @@ async function fromCache(pin) {
     try {
         const { data } = await supabase.from('pincode_geo_ecom')
             .select('pincode, city, state, district, source').eq('pincode', pin).maybeSingle();
-        return data || null;
+        if (data) return data;
+        // The permanent India Post directory (india_pincode_directory_ecom, 2026-08-29) — answers offline,
+        // same data the live API serves. Checked before the API, after the per-pincode cache.
+        const { data: dir } = await supabase.rpc('pincode_directory_lookup', { p_pin: pin });
+        const row = Array.isArray(dir) ? dir[0] : dir;
+        if (row && row.state) return { pincode: pin, city: row.city, state: row.state, district: row.district, source: 'indiapost_directory' };
+        return null;
     } catch (_) { return null; }
 }
 
@@ -100,4 +106,7 @@ router.get('/pincode/:pin', tokenRequired, async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// The zone-mapping state enrichment walks unresolved pincodes through the same India Post call + cache.
+router.fromIndiaPost = fromIndiaPost;
+router.fromCache = fromCache;
 module.exports = router;

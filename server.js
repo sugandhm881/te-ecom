@@ -28,6 +28,7 @@ app.use('/api/tally/bank/parse', express.json({ limit: '32mb' }));   // statemen
 // Kwikship pincode→zone sheet (base64 in JSON). India has ~19k live pincodes and a courier's
 // serviceability export lists one row per pincode, so the whole file is a few MB.
 app.use('/api/zone-mapping/upload', express.json({ limit: '32mb' }));
+app.use('/api/zone-mapping/pincode-directory/upload', express.json({ limit: '80mb' }));   // India Post directory CSV (~25 MB → ~34 MB base64)
 
 // Capture the raw body (used by the Shopify webhook HMAC check); does not change JSON parsing.
 // limit 5mb (default 100kb was too tight): the Ad-Set PDF/Excel download POSTs the full computed report JSON
@@ -540,6 +541,9 @@ cronJob('WA CodReminder (*/5 * * * *)', '*/5 * * * *', async () => {
     await codInitialTick().catch(e => console.error('[WA auto] COD V1 backstop error:', e.message));
     await codReminderTick().catch(e => console.error('[WA auto] reminder cron error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
+// (Zone & State lookups are a ONE-TIME job per sheet — run once at backfill and once after each upload
+//  from zone_mapping.js; no cron, by instruction 2026-08-29: "this is a one-time job, not frequent work".)
+
 // Voice-agent self-learning: review yesterday's calls, merge lessons, activate the well-evidenced ones.
 // 02:15 IST — after the day's calls, before anyone dials. Also runnable from the dashboard button.
 cronJob('AgentLearn (15 2 * * *)', '15 2 * * *', async () => {

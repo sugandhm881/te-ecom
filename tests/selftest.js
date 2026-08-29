@@ -1954,6 +1954,55 @@ function check(name, got, want) {
     check('dtd filter: client buckets equal server buckets', labels(cli), labels(srv));
 }
 
+// ── 4l. Zone Mapping → Zone & State: state per pincode, filter by state, Excel over the full set ──
+{
+    const zm = fs.readFileSync(path.join(ROOT, 'app/api/zone_mapping.js'), 'utf8');
+    const mig = fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260829_zone_mapping_state.sql'), 'utf8');
+    const app = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+    check('zone-state: India Post first, order addresses second, then nearest real pincode, then prefix (labelled, each replaced by a better source); city + district; trigger; per-state RPC',
+        [/state_source = 'indiapost'/.test(mig), /state_source = 'orders'\n    from addr a\n   where a\.pin = z\."Pin_code_To"::text and a\.state <> '' and z\.state_source is distinct from 'indiapost'/.test(mig), /state_from_pin_prefix/.test(fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260829_pincode_directory.sql'), 'utf8')), /function public\.canon_state/.test(mig),
+         /city = nullif\(initcap\(trim\(g\.city\)\),''\), district = nullif/.test(mig), /create trigger trg_pincode_geo_zone after insert or update of state, city, district/.test(mig), /function public\.zone_mapping_states\(\)/.test(mig)], [true, true, true, true, true, true, true]);
+    const pd = fs.readFileSync(path.join(ROOT, 'app/api/pincode_directory.js'), 'utf8');
+    const { parseCsv, parseDirectoryCsv } = require(path.join(ROOT, 'app/api/pincode_directory'));
+    check('pincode directory: the data.gov.in header parses, quoted commas survive, a bad header names the gap',
+        [parseDirectoryCsv('circlename,regionname,divisionname,officename,pincode,officetype,delivery,district,statename,latitude,longitude\nDelhi Circle,DivReportingCircle,New Delhi Central Division,Baroda House SO,110001,PO,Non Delivery,NEW DELHI,DELHI,28.6174167,77.2129167\n').rows.length,
+         parseCsv('a,"b, c",d\n')[0][1], (() => { try { parseDirectoryCsv('pincode,foo\n1,2\n'); return 'accepted'; } catch (e) { return /missing columns: officename, district, statename/.test(e.message) ? 'named' : e.message; } })()],
+        [1, 'b, c', 'named']);
+    check('pincode directory: the full ladder — directory > orders > nearest real pincode > prefix — one function, every caller uses it, every source labelled',
+        [/function public\.zone_mapping_fill_all\(\)/.test(fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260829_pincode_directory.sql'), 'utf8')), /zone_mapping_fill_from_directory\(\) \+ public\.zone_mapping_fill_state\(\) \+ public\.zone_mapping_fill_nearest\(\) \+ public\.zone_mapping_fill_prefix\(\)/.test(fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260829_pincode_directory.sql'), 'utf8')),
+         /nearest: \['nearest real pincode'/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8')), /prefix: \['postal prefix'/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8')),
+         (zm.match(/rpc\('zone_mapping_fill_all'\)/g) || []).length >= 3, /rpc\('zone_mapping_fill_all'\)/.test(pd), /state_source\.in\.\(orders,nearest,prefix\)/.test(zm)], [true, true, true, true, true, true, true]);
+    check('pincode directory: upsert on (pincode, officename), fills the zone rows, table + lookup on record, autofill reads it before the API',
+        [/onConflict: 'pincode,officename'/.test(pd), /rpc\('zone_mapping_fill_all'\)/.test(pd), /unique \(pincode, officename\)/.test(fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260829_pincode_directory.sql'), 'utf8')),
+         /rpc\('pincode_directory_lookup', \{ p_pin: pin \}\)/.test(fs.readFileSync(path.join(ROOT, 'app/api/pincode.js'), 'utf8')), /\/zone-mapping\/pincode-directory\/upload/.test(zm), /pincode-directory\/upload', express\.json\(\{ limit: '80mb' \}\)/.test(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8'))],
+        [true, true, true, true, true, true]);
+    check('zone-state: routes exist and the Excel export walks EVERY page server-side (never the rendered table)',
+        [/router\.get\('\/zone-mapping\/states'/.test(zm), /router\.get\('\/zone-mapping\/pincodes'/.test(zm), /router\.get\('\/zone-mapping\/pincodes\.xlsx'/.test(zm), /'Pincode', 'City', 'District', 'State', 'Zone', 'Source', 'Pickup pincode'/.test(zm), /city\.ilike\.%\$\{place\}%,district\.ilike\.%\$\{place\}%/.test(zm),
+         /for \(let page = 0; ; page\+\+\)/.test(zm), /if \(!data \|\| data\.length < 1000\) break;/.test(zm), /enrichZoneStates/.test(zm)], [true, true, true, true, true, true, true, true]);
+    // The lookup is a ONE-TIME job per sheet (backfill once, and once after each upload) — never a cron.
+    check('zone-state: UI tab, state + city/district filters, download via fetch + bearer (not a link), one-time lookup after upload and NO cron',
+        [/id="zm-pane-state"/.test(html), /id="zs-state"/.test(html) && /id="zs-place"/.test(html), /fetch\('\/api\/zone-mapping\/pincodes\.xlsx\?' \+ qs\.toString\(\), \{ headers: getAuthHeaders\(\) \}\)/.test(app),
+         /cronJob\('ZoneStates/.test(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8')), /rpc\('zone_mapping_fill_all'\)\.then\(\(\) => enrichZoneStates\(/.test(zm)], [true, true, true, false, true]);
+}
+
+// ── 4m. Every sidebar view survives a hard reload (NAV_HREF is the deep-link whitelist) ──────────
+// 2026-08-29: a hard reload on Zone Mapping bounced to Home — `nav-zone-mapping` had never been added
+// to NAV_HREF, so viewFromHash() rejected '#zone-mapping'. Structural: every `<a id="nav-…">` in the
+// sidebar must have a NAV_HREF entry, and every entry must point at an existing `<div id="…-view">`.
+{
+    const html = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+    const app = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+    const navIds = [...html.matchAll(/<a href="#" id="(nav-[a-z0-9-]+)"/g)].map(m => m[1]);
+    const mapSrc = (app.match(/const NAV_HREF = \{([\s\S]*?)\};/) || [])[1] || '';
+    const map = {}; [...mapSrc.matchAll(/'(nav-[a-z0-9-]+)': '([a-z0-9-]+)'/g)].forEach(m => { map[m[1]] = m[2]; });
+    const missing = navIds.filter(id => !map[id]);
+    // `reports-view` is the one view whose NAME already ends in -view (its element is id="reports-view").
+    const noView = Object.values(map).filter(v => !new RegExp(`id="${v.endsWith('-view') ? v : v + '-view'}"`).test(html));
+    check('deep links: every sidebar item is in NAV_HREF (reload-safe)', missing, []);
+    check('deep links: every NAV_HREF view has a matching *-view element', noView, []);
+}
+
 // ── 4h. Secrets vault: every credential is AES-256-GCM at rest, and nothing reads around it ─────
 // Added 2026-08-27. `.env` is sealed into `.env.vault` by app/secrets.js; config.js and every
 // standalone script go through that one loader, and the rotated Teams refresh token is written back
