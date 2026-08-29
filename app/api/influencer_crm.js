@@ -54,7 +54,7 @@ const actorName = req => (req && req.user && (req.user.name || req.user.sub)) ||
 
 // Full outreach lifecycle — mirrors the statuses the original standalone Influencer CRM writes (the shared
 // DB already contains declined / not_replying / hold rows), so the portal can display AND set them all.
-const STATUSES = ['not_contacted', 'reached_out', 'in_discussion', 'partnered', 'not_replying', 'declined', 'rejected', 'hold', 'expensive_profile'];
+const STATUSES = ['not_contacted', 'reached_out', 'in_discussion', 'partnered', 'not_replying', 'declined', 'rejected', 'hold', 'expensive_profile', 'not_reached_from_list'];   // not_reached_from_list added 2026-08-29 (user request)
 
 // ── Dashboard summary ────────────────────────────────────────────────────────
 router.get('/inf/summary', async (req, res) => {

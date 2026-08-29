@@ -13207,7 +13207,7 @@ function icaHistory(sku){
 // ═══════════════ INFLUENCER MARKETING CRM (port of the standalone Influencer CRM) ═══════════════
 // Views: inf-dashboard · inf-discover · inf-influencers · inf-lists · inf-calendar · inf-mentions
 async function infFetch(url, opts){ const r=await fetch(url,{...(opts||{}),headers:{'Content-Type':'application/json',...getAuthHeaders(),...((opts||{}).headers||{})}}); const d=await r.json().catch(()=>({})); if(!r.ok||d.success===false) throw new Error(d.error||d.message||('HTTP '+r.status)); return d; }
-const INF_STATUS={not_contacted:['Not Contacted','bg-slate-100 text-slate-600'],reached_out:['Reached Out','bg-sky-50 text-sky-700'],in_discussion:['In Conversation','bg-violet-50 text-violet-700'],partnered:['Partnered','bg-emerald-50 text-emerald-700'],not_replying:['Not Replying','bg-amber-100 text-amber-700'],declined:['Declined','bg-rose-50 text-rose-600'],rejected:['Rejected','bg-red-100 text-red-700'],hold:['Hold','bg-yellow-100 text-yellow-800'],expensive_profile:['Expensive Profile','bg-orange-100 text-orange-700']};
+const INF_STATUS={not_contacted:['Not Contacted','bg-slate-100 text-slate-600'],reached_out:['Reached Out','bg-sky-50 text-sky-700'],in_discussion:['In Conversation','bg-violet-50 text-violet-700'],partnered:['Partnered','bg-emerald-50 text-emerald-700'],not_replying:['Not Replying','bg-amber-100 text-amber-700'],declined:['Declined','bg-rose-50 text-rose-600'],rejected:['Rejected','bg-red-100 text-red-700'],hold:['Hold','bg-yellow-100 text-yellow-800'],expensive_profile:['Expensive Profile','bg-orange-100 text-orange-700'],not_reached_from_list:['Not Reached From List','bg-slate-200 text-slate-700']};
 function infBadge(s){ const [l,c]=INF_STATUS[s]||[s||'—','bg-slate-100 text-slate-500']; return `<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap ${c}">${escapeHtml(l)}</span>`; }
 // Optional note prompt shown when an influencer's status is changed. Resolves to the note text ('' if the
 // user skips) — the status is applied either way (the note is non-mandatory, just logged to the activity feed).
@@ -13267,7 +13267,7 @@ function infQuickNotePrompt(){
 const INFL_STATUS_STYLE={
   not_contacted:['#f1f5f9','#475569'], reached_out:['#e0f2fe','#0369a1'], in_discussion:['#ede9fe','#6d28d9'],
   partnered:['#d1fae5','#047857'], not_replying:['#fef3c7','#b45309'], declined:['#ffe4e6','#e11d48'],
-  rejected:['#fee2e2','#b91c1c'], hold:['#fef9c3','#a16207'], expensive_profile:['#ffedd5','#c2410c'],
+  rejected:['#fee2e2','#b91c1c'], hold:['#fef9c3','#a16207'], expensive_profile:['#ffedd5','#c2410c'], not_reached_from_list:['#e2e8f0','#334155'],
 };
 function inflColorStatusBtn(sel){
   if(!sel) return; const wrap=sel.closest('.csel'); if(!wrap) return;

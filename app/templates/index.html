@@ -3637,7 +3637,7 @@
                 </header>
                 <div class="px-8 py-3 border-b border-slate-200 bg-white flex flex-wrap items-center gap-2">
                     <input id="infi-q" type="text" class="filter-input w-56" placeholder="Search name or @handle…">
-                    <select id="infi-status" class="filter-select"><option value="">All statuses</option><option value="not_contacted">Not contacted</option><option value="reached_out">Reached out</option><option value="in_discussion">In discussion</option><option value="partnered">Partnered</option><option value="not_replying">Not replying</option><option value="declined">Declined</option><option value="rejected">Rejected</option><option value="hold">Hold</option><option value="expensive_profile">Expensive Profile</option></select>
+                    <select id="infi-status" class="filter-select"><option value="">All statuses</option><option value="not_contacted">Not contacted</option><option value="reached_out">Reached out</option><option value="in_discussion">In discussion</option><option value="partnered">Partnered</option><option value="not_replying">Not replying</option><option value="declined">Declined</option><option value="rejected">Rejected</option><option value="hold">Hold</option><option value="expensive_profile">Expensive Profile</option><option value="not_reached_from_list">Not Reached From List</option></select>
                     <select id="infi-niche" class="filter-select"><option value="">All niches</option></select>
                     <select id="infi-bucket" class="filter-select"><option value="">All sizes</option><option value="nano">Nano &lt;10K</option><option value="micro">Micro 10-100K</option><option value="macro">Macro 100K-1M</option><option value="mega">Mega &gt;1M</option></select>
                     <select id="infi-contact" class="filter-select"><option value="">Contact: any</option><option value="phone">Has phone</option><option value="email">Has email</option><option value="none">No contact info</option></select>
@@ -3822,7 +3822,7 @@
      ONLY thing that makes a browser re-fetch. Forgetting it means the change ships and nobody sees it:
      on 2026-08-13 a whole session of Last-Mile + Purchase Order work was invisible for exactly this
      reason, and it looks identical to "the fix didn't work". -->
-<script src="/static/app.js?v=2026-08-29-dtd-filter"></script>
+<script src="/static/app.js?v=2026-08-29-inf-status"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {
