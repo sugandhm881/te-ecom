@@ -311,6 +311,14 @@ async function performAutoSend(orderName, sequenceKey, version, extraFields) {
     const { data: tpl } = await supabase.from('wa_template_sequences_msg91').select('*')
         .eq('sequence_key', sequenceKey).eq('version', version).eq('active', true).maybeSingle();
     if (!tpl) return { skip: `no active template for ${sequenceKey} v${version}` };
+    // Turnstile check BEFORE the insert (2026-08-30). The UNIQUE (order_name, sequence_key, version)
+    // key is still the guarantee against a double send, but relying on its 23505 rejection as the
+    // normal "already done" path meant every sweep re-inserted every settled row — ~1,500 guaranteed
+    // failures per NDR tick, 88k Postgres errors in a week. One cheap read here keeps the log quiet;
+    // the 23505 branch below now only fires for a true race between two paths.
+    const { data: done } = await supabase.from('wa_sends_msg91').select('id')
+        .eq('order_name', orderName).eq('sequence_key', sequenceKey).eq('version', version).limit(1);
+    if (done && done.length) return { skip: 'already sent/sealed' };
     // Same template already delivered to this phone (our log or the MSG91 mirror, e.g. n8n) → record
     // a 'skipped' row so the turnstile stops every later path from retrying, and send nothing.
     const dup = await sentToPhoneRecently(order.phone, tpl.template_name);
@@ -471,10 +479,20 @@ async function ndrTick() {
     const { count } = await supabase.from('wa_sends_msg91').select('*', { count: 'exact', head: true }).eq('sequence_key', 'ndr_auto');
     if (!count) await ndrSeed();                                    // first ever run → seal the backlog
     const rows = await ndrJourneys(30, 48);
+    // One read for the whole batch: every (order, version) already logged — sent, failed, skipped or
+    // seeded — is skipped in memory, so a tick where nothing changed makes zero writes.
+    const settled = new Set();
+    const names = [...new Set(rows.map(r => r.order_name).filter(Boolean))];
+    for (let i = 0; i < names.length; i += 200) {
+        const { data } = await supabase.from('wa_sends_msg91').select('order_name, version')
+            .eq('sequence_key', 'ndr_auto').in('order_name', names.slice(i, i + 200));
+        (data || []).forEach(r => settled.add(r.order_name + '|' + r.version));
+    }
     let sent = 0;
     for (const row of rows) {
         if (sent >= 25) break;                                      // per-tick blast cap
         for (const v of ndrTargets(row)) {
+            if (settled.has(row.order_name + '|' + v)) continue;
             const extra = v === 3 ? {} : { ndr_reason: ndrReason(row) };
             const r = await performAutoSend(row.order_name, 'ndr_auto', v, extra);
             if (r.sent) { sent++; await new Promise(rs => setTimeout(rs, 1200)); }

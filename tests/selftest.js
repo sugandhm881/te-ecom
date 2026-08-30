@@ -706,6 +706,11 @@ function check(name, got, want) {
     check('wa auto: orders/create webhook arms the COD confirmation',
         [/autoCodOnCreate\(o\)/.test(fs.readFileSync(path.join(ROOT, 'app/api/webhook_handler.js'), 'utf8'))],
         [true]);
+    check('wa auto: the turnstile is READ before it is written — no sweep re-inserts settled rows (88k Postgres 23505 errors, 2026-08-30)',
+        [/const \{ data: done \} = await supabase\.from\('wa_sends_msg91'\)\.select\('id'\)/.test(wa) && /\.eq\('version', version\)\.limit\(1\);\s*if \(done && done\.length\) return \{ skip: 'already sent\/sealed' \}/.test(wa),
+         /settled\.has\(row\.order_name \+ '\|' \+ v\)/.test(wa), /String\(ins\.error\.code\) === '23505'/.test(wa),
+         fs.existsSync(path.join(ROOT, 'supabase/migrations/20260830_amazon_order_items_unique.sql'))],
+        [true, true, true, true]);
     check('wa auto: COD V1 is delayed 3 minutes, not instant, and has a restart-safe backstop',
         [/COD_V1_DELAY_MS = 3 \* 60e3/.test(wa), /setTimeout\(\(\) => sendCodV1\(orderName, 'timer'\), delayMs\)/.test(wa),
          /async function codInitialTick/.test(wa), /codInitialTick\(\)/.test(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8')),
