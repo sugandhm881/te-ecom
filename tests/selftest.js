@@ -739,6 +739,13 @@ function check(name, got, want) {
                  fs.existsSync(path.join(ROOT, 'docs/PRODUCT_KNOWLEDGE.md')),
                  fs.existsSync(path.join(ROOT, 'supabase/migrations/20260831_product_knowledge.sql'))],
                 [true, true, true, true, true, true, true]);
+            check('voice voicemail: the machine identifying itself hangs the call up instantly — no 125s chats with answering machines; carrier phrases only, a customer saying "I am busy" never matches',
+                [/VOICEMAIL_RX/.test(vb2), /voicemail greeting detected/.test(vb2),
+                 (() => { const m = vb2.match(/const VOICEMAIL_RX = (\/.*?\/i);/); if (!m) return false;
+                    const rx = eval(m[1]);
+                    return rx.test("The person you're trying to reach is not available. At the tone, please record your message.")
+                        && !rx.test('haan main busy hoon abhi') && !rx.test('yes I placed the order'); })()],
+                [true, true, true]);
             check('voice tone: no exclamation ever reaches the synthesizer (reads as excitement) — closing is calm, sanitize strips "!"',
                 [/s = s\.replace\(\/!\+\/g, '\.'\)/.test(vb2), /Have a great day\."/.test(vb2),
                  /spoken CALM and settled/.test(vb2)],

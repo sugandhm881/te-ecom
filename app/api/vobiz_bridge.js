@@ -459,6 +459,19 @@ class VoiceCall {
     }
 
     onCustomer(text) {
+        // VOICEMAIL: hang up the moment the machine identifies itself (user, 2026-08-31: "The person
+        // you're trying to reach is not available… hang up the call, don't wait") — before this, the
+        // agent chatted with an answering machine for 125 seconds (TE25-45530). Carrier phrases only,
+        // third-person, so a real customer saying "I am busy" can never match. The close reason makes
+        // the summary say voicemail → classifyOutcome files it no_answer → the retry ladder proceeds.
+        const VOICEMAIL_RX = /person you.?re trying to reach|at the tone|record your message|after the (beep|tone)|please record|customer you (are|have) (called|calling)|is not reachable|switched off|coverage area|not answering (the|your) call|जिस व्यक्ति|ग्राहक.{0,20}(व्यस्त|उपलब्ध नहीं|पहुंच)|संदेश रिकॉर्ड/i;
+        if (VOICEMAIL_RX.test(text)) {
+            this.s.transcript.push('Customer: ' + text);
+            this.s.transcript.push('[voicemail greeting detected — hung up immediately, no message left]');
+            this.log('voicemail detected — hanging up:', text.slice(0, 60));
+            this.hangup(200);
+            return;
+        }
         const SCREENER_RX = /screening|name and reason|reason for calling|stay on the line|स्क्रीनिंग|रीजन फॉर|स्टे ऑन द|कॉलिंग/i;
         if (SCREENER_RX.test(text)) {
             this.screenerSeen = true;           // a robot answered — the REAL customer hasn't talked yet
