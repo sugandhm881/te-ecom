@@ -762,6 +762,12 @@ function check(name, got, want) {
             [/turn\.set\(r\.order_name, r\)/.test(hv), /await claim\(name, row, attemptNo\)/.test(hv),
              /h < WINDOW\.from \|\| h >= WINDOW\.to/.test(hv), /cod_confirmations_msg91/.test(hv)],
             [true, true, true, true]);
+        check('hv-call attempts: every DIAL is logged on the turnstile (attempt_log) and the order modal shows all of them — unanswered dials included',
+            [/attempt_log: \[\{ n: 1, at \}\]/.test(hv), /function logResult/.test(hv),
+             /ai_attempts/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8')),
+             /supAiAttemptsCard/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8')),
+             fs.existsSync(path.join(ROOT, 'supabase/migrations/20260831_vobiz_attempt_log.sql'))],
+            [true, true, true, true, true]);
         check('hv-call retry ladder: unanswered → +10 min → +20 min → exhausted (highlighted, no more auto calls); vague answers never redial',
             [/RETRY_DELAY_MIN = \{ 1: 10, 2: 20 \}/.test(hv), /attempts >= 3/.test(hv), /status: 'exhausted'/.test(hv),
              /sweepUnanswered\(\)/.test(hv), /outcome === 'no_answer'/.test(hv),

@@ -82,17 +82,26 @@ async function seal(orderName, status, detail, phone) {
 // a redial or a formerly gated row UPDATES in place, guarded on the status it left — two ticks can
 // never both dial the same order.
 async function claim(orderName, row, attemptNo) {
+    const at = new Date().toISOString();
     if (!row) {
         const { error } = await supabase.from('vobiz_auto_calls_ecom')
-            .insert({ order_name: orderName, purpose: PURPOSE, status: 'calling', attempts: 1, last_attempt_at: new Date().toISOString() });
+            .insert({ order_name: orderName, purpose: PURPOSE, status: 'calling', attempts: 1, last_attempt_at: at, attempt_log: [{ n: 1, at }] });
         if (error && String(error.code) !== '23505') console.warn('[HVCall] turnstile write failed:', error.message);
         return !error;
     }
     const { data, error } = await supabase.from('vobiz_auto_calls_ecom')
-        .update({ status: 'calling', attempts: attemptNo, last_attempt_at: new Date().toISOString(), next_attempt_at: null })
+        .update({ status: 'calling', attempts: attemptNo, last_attempt_at: at, next_attempt_at: null,
+            attempt_log: [...(row.attempt_log || []), { n: attemptNo, at }] })
         .eq('order_name', orderName).eq('purpose', PURPOSE).eq('status', row.status).select('id');
     if (error) { console.warn('[HVCall] turnstile claim failed:', error.message); return false; }
     return !!(data && data.length);
+}
+
+// Stamp the result onto the LAST attempt entry — the modal's per-attempt history reads these.
+function logResult(row, result) {
+    const log = (row && Array.isArray(row.attempt_log)) ? row.attempt_log.slice() : [];
+    if (log.length) log[log.length - 1] = { ...log[log.length - 1], result };
+    return log;
 }
 
 // After an unanswered attempt: 1st → redial 10 min later, 2nd → 20 min after that, 3rd → exhausted
@@ -104,7 +113,7 @@ async function scheduleRetryOrExhaust(row, why) {
     const attempts = Number(row.attempts) || 1;
     if (attempts >= 3) {
         await supabase.from('vobiz_auto_calls_ecom')
-            .update({ status: 'exhausted', next_attempt_at: null,
+            .update({ status: 'exhausted', next_attempt_at: null, attempt_log: logResult(row, 'no_answer'),
                 detail: { ...(row.detail || {}), outcome: 'no_answer', outcome_note: 'no answer after 3 calls', last_reason: why, at: new Date().toISOString() } })
             .eq('order_name', row.order_name).eq('purpose', PURPOSE);
         console.log(`[HVCall] ${row.order_name}: 3 calls unanswered — exhausted, no more auto calls`);
@@ -113,6 +122,7 @@ async function scheduleRetryOrExhaust(row, why) {
         const base = row.last_attempt_at ? new Date(row.last_attempt_at).getTime() : Date.now();
         await supabase.from('vobiz_auto_calls_ecom')
             .update({ status: 'retry', next_attempt_at: new Date(base + mins * 60e3).toISOString(),
+                attempt_log: logResult(row, 'no_answer'),
                 detail: { ...(row.detail || {}), last_reason: why } })
             .eq('order_name', row.order_name).eq('purpose', PURPOSE);
         console.log(`[HVCall] ${row.order_name}: ${why} (attempt ${attempts}) — retry ${mins} min after the attempt`);
@@ -124,7 +134,7 @@ async function scheduleRetryOrExhaust(row, why) {
 async function sweepUnanswered() {
     const cut = new Date(Date.now() - UNANSWERED_AFTER_MS).toISOString();
     const { data } = await supabase.from('vobiz_auto_calls_ecom')
-        .select('order_name, status, attempts, last_attempt_at, created_at, detail')
+        .select('order_name, status, attempts, last_attempt_at, created_at, detail, attempt_log')
         .eq('purpose', PURPOSE).in('status', ['calling', 'placed'])
         .or(`last_attempt_at.lt.${cut},and(last_attempt_at.is.null,created_at.lt.${cut})`)
         .limit(100);
@@ -173,7 +183,7 @@ async function highValueCallTick(opts = {}) {
     const nameList = targets.map(t => t.name);
     for (let i = 0; i < nameList.length; i += 200) {
         const { data } = await supabase.from('vobiz_auto_calls_ecom')
-            .select('order_name, status, attempts, next_attempt_at, detail')
+            .select('order_name, status, attempts, next_attempt_at, detail, attempt_log')
             .eq('purpose', PURPOSE).in('order_name', nameList.slice(i, i + 200));
         (data || []).forEach(r => turn.set(r.order_name, r));
     }
@@ -284,7 +294,7 @@ async function handleCodCallOutcome({ orderName, summary, customerTurns }) {
     if (outcome === 'no_answer') {
         // Busy / picked up and dropped — the retry ladder owns this, not the outcome record.
         const { data: row } = await supabase.from('vobiz_auto_calls_ecom')
-            .select('order_name, attempts, last_attempt_at, detail')
+            .select('order_name, attempts, last_attempt_at, detail, attempt_log')
             .eq('order_name', name).eq('purpose', PURPOSE).maybeSingle();
         if (row) await scheduleRetryOrExhaust(row, note);
         return;
@@ -314,7 +324,10 @@ async function handleCodCallOutcome({ orderName, summary, customerTurns }) {
     } else {
         console.log(`[HVCall] ${name}: call outcome '${outcome}' — no automatic action (${note})`);
     }
-    await supabase.from('vobiz_auto_calls_ecom').update({ detail }).eq('order_name', name).eq('purpose', PURPOSE);
+    const { data: cur } = await supabase.from('vobiz_auto_calls_ecom').select('attempt_log')
+        .eq('order_name', name).eq('purpose', PURPOSE).maybeSingle();
+    await supabase.from('vobiz_auto_calls_ecom').update({ detail, attempt_log: logResult(cur, outcome) })
+        .eq('order_name', name).eq('purpose', PURPOSE);
 }
 
 module.exports = { router, highValueCallTick, handleCodCallOutcome, classifyOutcome };

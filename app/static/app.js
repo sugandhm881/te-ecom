@@ -5001,6 +5001,23 @@ const SUP_REASON_META={
   high_value:['💰','Above ₹1500','bg-emerald-100 text-emerald-700','Order value is above ₹1500','bg-emerald-50 text-emerald-700'],
   short_address:['📍','Short address','bg-amber-100 text-amber-700','Address is under 60 characters (often incomplete → RTO-prone); skipped if a past order was delivered to the same address','bg-amber-50 text-amber-700'],
 };
+// Per-ATTEMPT history of the AI auto-caller for the order modal — every dial shows, answered or not
+// (an unanswered dial has no transcript row, so the transcript cards alone under-count attempts).
+function supAiAttemptsCard(a){
+  if(!a||!(a.attempts>0)) return '';
+  const RES={no_answer:['no answer','text-violet-700'],confirmed:['confirmed','text-emerald-700'],denied:['denied','text-rose-700'],unclear:['not confirmed','text-amber-700'],failed:['failed','text-rose-700'],gated:['gated (test)','text-slate-400']};
+  const fmt=t=>new Date(t).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+  const log=Array.isArray(a.attempt_log)?a.attempt_log:[];
+  const lines=log.map(e=>{const r=RES[e.result]||(e.result?[e.result,'text-slate-500']:['in progress / see call below','text-slate-400']);
+    return `<div class="flex items-center gap-2"><span class="font-semibold tabular-nums">#${e.n}</span><span class="text-slate-500 tabular-nums">${fmt(e.at)}</span><span class="${r[1]} font-semibold">${escapeHtml(r[0])}</span></div>`;}).join('');
+  const older=a.attempts-log.length;
+  const nxt=a.status==='retry'&&a.next_attempt_at?`<div class="text-slate-500 mt-0.5">next attempt ~${fmt(a.next_attempt_at)}</div>`:'';
+  const done=a.status==='exhausted'?`<div class="text-violet-700 font-semibold mt-0.5">3 calls unanswered — no more auto calls</div>`:'';
+  return `<div class="rounded-lg border border-indigo-100 bg-indigo-50/40 p-2.5 text-xs">
+    <div class="font-semibold text-indigo-700 mb-1">📞 AI dial attempts — ${a.attempts} of 3</div>
+    ${older>0?`<div class="text-slate-400">${older} earlier attempt${older===1?'':'s'} (before per-attempt logging)</div>`:''}
+    ${lines}${nxt}${done}</div>`;
+}
 // AI COD-confirmation call state (repeat tab) — the chip says what the CALL concluded; only a
 // confirmed call ever acts (auto-unhold, server-side). Denied / not-confirmed rows are highlighted
 // by conditional row color below and left for a person, by explicit instruction (2026-08-31).
@@ -5802,7 +5819,7 @@ async function supOrderModal(orderId){
       </div>
       <div class="grid md:grid-cols-2 gap-6 mt-5">
         <div class="card p-4"><div class="flex items-center justify-between mb-2"><p id="supd-calls-count" class="text-xs font-bold text-slate-500 uppercase tracking-wide">Call history (${(d.calls||[]).length+(d.ai_calls||[]).length})</p></div>
-          <div id="supd-calls-list" class="space-y-2 max-h-52 overflow-auto">${(d.ai_calls||[]).map((ac,i)=>`<div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-2.5 text-xs">
+          <div id="supd-calls-list" class="space-y-2 max-h-52 overflow-auto">${supAiAttemptsCard(d.ai_attempts)}${(d.ai_calls||[]).map((ac,i)=>`<div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-2.5 text-xs">
             <div class="flex items-center gap-2 flex-wrap"><span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">\u{1F916} AI call</span>
               <span class="text-slate-400">${escapeHtml((ac.call_type||'').replace('_vobiz','').replace(/_/g,' '))} · ${escapeHtml(ac.language||'')} · ${ac.called_at?new Date(ac.called_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span></div>
             ${ac.summary?`<p class="text-slate-700 mt-1 whitespace-pre-wrap">${escapeHtml(ac.summary)}</p>`:''}
