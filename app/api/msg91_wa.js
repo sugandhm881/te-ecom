@@ -501,6 +501,43 @@ async function ndrTick() {
     if (sent) console.log(`[WA auto] NDR tick: ${sent} sent`);
 }
 
+// ── Rejection pinning — a REJECT the webhook could not tie to an order gets tied here ─────────
+// MSG91's button-reply payload sometimes carries no order number, so the webhook stores the CANCEL
+// as id_key 'PHONE:<10 digits>' — an unmatched stub in the Rejected tab, invisible to every
+// order-keyed check, and the parcel ships anyway (TE25-45549, 2026-08-30: REJECT 10:54, shipped
+// 14:03). Every 5 min: match recent phone-only CANCELs to that phone's newest still-pending COD
+// order (unfulfilled, un-cancelled, ≤7 days old) and rewrite id_key to the order name, keeping the
+// original key in data. By explicit instruction rejections take NO automatic action — this changes
+// WHERE the rejection shows (with its order, order-keyed checks see it), never what is done about it.
+async function rejectionPinTick() {
+    const cut = new Date(Date.now() - 48 * 3600e3).toISOString();
+    const { data: stubs } = await supabase.from('cod_confirmations_msg91')
+        .select('id_key, data, updated_at').like('id_key', 'PHONE:%')
+        .eq('data->>Confirmation received', 'CANCEL').gte('updated_at', cut).limit(100);
+    let pinned = 0;
+    for (const row of (stubs || [])) {
+        const p10 = last10(String(row.id_key).slice(6));
+        if (p10.length !== 10) continue;
+        const from = new Date(Date.now() - 7 * 86400e3).toISOString();
+        const { data: orders } = await supabase.from('orders')
+            .select('name, created_at').eq('financial_status', 'pending').is('cancelled_at', null)
+            .neq('test', true).is('fulfillment_status', null).gte('created_at', from)
+            .or(`phone.ilike.%${p10},phone.eq.${p10}`)
+            .order('created_at', { ascending: false }).limit(2);
+        if (!orders || orders.length !== 1) continue;               // none or ambiguous — leave the stub
+        const orderName = String(orders[0].name || '').replace(/^#/, '').trim();
+        if (!orderName) continue;
+        const { data: existing } = await supabase.from('cod_confirmations_msg91')
+            .select('id_key').eq('id_key', orderName).limit(1);
+        if (existing && existing.length) continue;                  // order already has its own reply row
+        const newData = { ...(row.data || {}), 'Order Number': orderName, original_id_key: row.id_key, pinned_by: 'rejectionPinTick' };
+        const { error } = await supabase.from('cod_confirmations_msg91')
+            .update({ id_key: orderName, data: newData }).eq('id_key', row.id_key);
+        if (!error) { pinned++; console.log(`[WA] rejection pinned: ${row.id_key} → ${orderName}`); }
+    }
+    return pinned;
+}
+
 // ── The template catalog: the REAL registered bodies, synced from MSG91 ──// ── The template catalog: the REAL registered bodies, synced from MSG91 ──
 // control.msg91.com/api/v5/whatsapp/get-template-client/:number returns every template with its
 // registered components (the endpoint the docs hide — recovered from the docs page source; the
@@ -589,11 +626,19 @@ router.get('/support/wa/chat', async (req, res) => {
             } catch (_) { return null; }
         };
         const msgs = [];
+        // ⚠ The msg91-sync mirror stores MSG91's IST wall-clock in a UTC column — every mirror
+        // timestamp reads 5h30m late. Every consumer compensates (sentToPhoneRecently does); the chat
+        // must too, or the SAME send renders twice: once at the true time from wa_sends_msg91 and once
+        // +5:30 from the mirror, 5.5h apart — past the 5-minute dedupe window. (Seen on TE25-45549,
+        // 2026-08-31: cod_confirmation_v1 at 07:47 am AND "01:17 pm".) Correct here, never in the
+        // data — the stored shape is load-bearing for the other consumers.
+        const MIRROR_SKEW_MS = 5.5 * 3600e3;
         (outs || []).forEach(m => {
             const raw = m.content || m.raw_content || null;
-            msgs.push({ at: m.sent_at, dir: 'out', template: m.template_name || m.campaign_name || null,
+            const t = new Date(m.sent_at).getTime() - MIRROR_SKEW_MS;
+            msgs.push({ at: new Date(t).toISOString(), dir: 'out', template: m.template_name || m.campaign_name || null,
                 raw, text: renderFromVars(m.template_name, raw), status: m.status || null, source: 'msg91',
-                _t: new Date(m.sent_at).getTime() });
+                _t: t });
         });
         const fieldsCache = new Map();          // per-order resolve, once — for sends predating field snapshots
         for (const s2 of (sends || [])) {
@@ -621,4 +666,4 @@ router.get('/support/wa/chat', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-module.exports = { router, resolveOrderFields, allowlistBlocks, allowlistBlocksFor, sentToPhoneRecently, autoCodOnCreate, codInitialTick, codReminderTick, ndrTick, COD_V1_DELAY_MS };
+module.exports = { router, resolveOrderFields, allowlistBlocks, allowlistBlocksFor, sentToPhoneRecently, autoCodOnCreate, codInitialTick, codReminderTick, ndrTick, rejectionPinTick, COD_V1_DELAY_MS };

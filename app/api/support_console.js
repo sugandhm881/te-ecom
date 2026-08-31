@@ -782,8 +782,17 @@ router.get('/support/queue', async (req, res) => {
             const releasedAt = {}; relRows.forEach(m => { releasedAt[nk(m.order_name)] = m.created_at; });
             const staleHold = (k, syncedAt) => { const rel = releasedAt[k]; if (!rel) return false;
                 return !syncedAt || new Date(rel) > new Date(syncedAt); };
+            // AI COD-confirmation call state (vobiz_auto_calls.js): outcome rides on each row so the
+            // panel can highlight "denied on call" (red) / "not confirmed on call" (amber) — by explicit
+            // instruction those take NO automatic action; only a confirmed call auto-releases the hold.
+            const aiRows = names.length ? await chunkedIn('vobiz_auto_calls_ecom', 'order_name, status, detail, attempts, created_at', 'order_name', names, q => q.eq('purpose', 'cod_confirm')) : [];
+            const aiBy = {}; aiRows.forEach(a => { aiBy[nk(a.order_name)] = a; });
             rows.forEach(r => {
                 const k = nk(r.order_name);
+                const a = aiBy[k];
+                if (a) r.ai_call = { status: a.status, at: a.created_at, attempts: a.attempts || 1,
+                    outcome: (a.detail && a.detail.outcome) || null,
+                    note: (a.detail && (a.detail.outcome_note || a.detail.why)) || null };
                 r.shopify_hold = holds[k] || null;
                 const ee = eeBy[k];
                 r.in_ee = !!ee;                                                   // imported into EasyEcom?
@@ -858,7 +867,7 @@ router.get('/support/order/:orderId', async (req, res) => {
             supabase.from('order_tracking').select('tracking_status, courier_name, awb_number, last_tracked_at, edd').eq('order_id', oid).order('last_tracked_at', { ascending: false }),
             supabase.from('call_logs').select('id, outcome, notes, called_at, next_followup_at, agent_id').eq('order_id', oid).order('called_at', { ascending: false }),
             // REAL AI phone calls (Vobiz bridge) — keyed by order NAME in agent_call_logs
-            supabase.from('agent_call_logs').select('call_type, language, summary, transcript, exchanges, recording_url, called_at').eq('order_id', String(b.order_name || '').replace(/^#/, '')).order('called_at', { ascending: false }).limit(10),
+            supabase.from('agent_call_logs').select('id, call_type, language, summary, transcript, transcript_en, exchanges, recording_url, called_at').eq('order_id', String(b.order_name || '').replace(/^#/, '')).order('called_at', { ascending: false }).limit(10),
             supabase.from('order_notes').select('id, content, created_at, agent_id').eq('order_id', oid).order('created_at', { ascending: false }),
             supabase.from('escalation_contacts').select('*'),
             last10 ? supabase.from('order_buckets').select(CUST_SEL).ilike('phone', `%${last10}`).order('created_at', { ascending: false }).limit(30) : Promise.resolve({ data: [] }),
@@ -1136,4 +1145,28 @@ router.post('/support/refresh-tracking', async (req, res) => {
 module.exports = router;
 module.exports.findRepeatCandidates = findRepeatCandidates;   // reused by the Shopify auto-hold cron
 // Exported for the backfill/verification harness and any future cron — see the comment on the function.
+// Translate an AI-call transcript to English on demand (dashboard button, user 2026-08-31: calls
+// now open in English but switch to the customer's language — the team must be able to READ the
+// regional half). Cached in agent_call_logs.transcript_en, so each call costs ONE AI pass ever.
+router.post('/support/ai-call-translate/:id', async (req, res) => {
+    try {
+        const { data: call, error } = await supabase.from('agent_call_logs')
+            .select('id, language, transcript, transcript_en').eq('id', req.params.id).maybeSingle();
+        if (error || !call) return res.status(404).json({ success: false, error: 'call not found' });
+        if (!call.transcript) return res.status(400).json({ success: false, error: 'no transcript on this call' });
+        if (call.transcript_en) return res.json({ success: true, transcript_en: call.transcript_en, cached: true });
+        // Language is the CALL's opening language — a call can open in English and end in Punjabi.
+        // The transcript's own content decides: no Indic script anywhere -> nothing to translate.
+        if (!/[\u0900-\u0D7F]/.test(String(call.transcript))) return res.json({ success: true, transcript_en: call.transcript, cached: true });
+        const ai = require('./ai');
+        const en = String(await ai.aiComplete([
+            { role: 'system', content: 'Translate this Indian-language customer support phone transcript to English. Keep the exact line structure: every line starts with "agent:" or "customer:" exactly as in the input, followed by the English translation of that line. Lines in [square brackets] stay unchanged. Output ONLY the translated transcript, nothing else.' },
+            { role: 'user', content: String(call.transcript).slice(0, 12000) },
+        ], { temperature: 0.2, maxTokens: 2000 }) || '').trim();
+        if (!en) return res.status(502).json({ success: false, error: ai.lastAiError ? (ai.lastAiError() || 'translation failed') : 'translation failed' });
+        await supabase.from('agent_call_logs').update({ transcript_en: en }).eq('id', call.id);
+        res.json({ success: true, transcript_en: en });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 module.exports.syncUndeliveredFromJourney = syncUndeliveredFromJourney;

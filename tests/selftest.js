@@ -713,6 +713,88 @@ function check(name, got, want) {
     check('wa auto: orders/create webhook arms the COD confirmation',
         [/autoCodOnCreate\(o\)/.test(fs.readFileSync(path.join(ROOT, 'app/api/webhook_handler.js'), 'utf8'))],
         [true]);
+    {
+        const hv = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8');
+        const vb = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+        const sv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+        {
+            const vb2 = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+            const sc2 = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+            const ap2 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+            check('voice lang: every call OPENS in English; a few words in another script trigger an OFFER, and only a yes switches (2026-08-31)',
+                [/return 'en-IN';\s+\/\/ English for all/.test(vb2), /\[\/\[\\u0900-\\u097F\]\/, 'hi-IN'\]/.test(vb2),
+                 /understand ONLY ENGLISH/.test(vb2), /this\.s\.offerAsk = seen/.test(vb2),
+                 /AFFIRM_RX\.test\(text\)/.test(vb2)],
+                [true, true, true, true, true]);
+            check('voice product-answer rules (Ele behavior, PRODUCT QUESTIONS ONLY, own names kept): brand-only, no diagnosis, prices → theelement.skin, drops 15 days/bottle; the call flow itself unchanged',
+                [/PRODUCT-ANSWER RULES \(apply ONLY when the customer asks about a product/.test(vb2),
+                 /Brightening Drops last 15 days per bottle/.test(vb2),
+                 /I have noted that <their reason, briefly>\. Thank you for your time\./.test(vb2),
+                 /You are \$\{sp\.name\}/.test(vb2)],
+                [true, true, true, true]);
+            check('voice product knowledge: curated product_knowledge_ecom first (Claude-authored, docs/PRODUCT_KNOWLEDGE.md master), Shopify description fallback — never invented claims',
+                [/async function productKnowledgeFor/.test(vb2), /product_knowledge_ecom/.test(vb2),
+                 /your ONLY source for product answers/.test(vb2), /NEVER invent claims/.test(vb2),
+                 /ctx\.productInfo = await productKnowledgeFor/.test(vb2),
+                 fs.existsSync(path.join(ROOT, 'docs/PRODUCT_KNOWLEDGE.md')),
+                 fs.existsSync(path.join(ROOT, 'supabase/migrations/20260831_product_knowledge.sql'))],
+                [true, true, true, true, true, true, true]);
+            check('voice call polish 2026-08-31: denial asks the reason once; other-language replies are never a direct outcome; recordings not capped at 60s',
+                [/May I know the reason please\?/.test(vb2), /DIFFERENT-LANGUAGE REPLY/.test(vb2),
+                 /no confirming, no cancelling, no reason-asking, no closing/.test(vb2),
+                 /time_limit: 3600/.test(vb2)],
+                [true, true, true, true]);
+            check('voice lang: translate offered whenever the transcript CONTAINS Indic text (an English call can end in Punjabi)',
+                [/\[\\u0900-\\u0D7F\]\/\.test\(ac\.transcript\)/.test(ap2), /\[\\u0900-\\u0D7F\]\/\.test\(c\.transcript\)/.test(ap2),
+                 /\[\\u0900-\\u0D7F\]\/\.test\(String\(call\.transcript\)\)/.test(sc2)],
+                [true, true, true]);
+            check('voice lang: transcript Translate-to-English button in both transcript views, cached in agent_call_logs.transcript_en',
+                [/\/support\/ai-call-translate\/:id/.test(sc2), /transcript_en/.test(sc2),
+                 /supd-aic-en/.test(ap2), /sal-tr-en/.test(ap2)],
+                [true, true, true, true]);
+        }
+        check('hv-call: high_value-only holds call automatically; a multi-reason hold calls ONLY when the last 3 orders (incl. this) include a delivered one',
+            [/soleReason: e\.reasons\.length === 1/.test(hv), /reasons\.includes\('high_value'\)/.test(hv),
+             /lastThreeIncludeDelivered\(t\.identity, name, ord\.created_at\)/.test(hv),
+             /window3\.some\(h => h\.bucket === 'delivered'\)/.test(hv)],
+            [true, true, true, true]);
+        check('hv-call: turnstile read before written, gated rows retryable, claim before dial, calling window enforced',
+            [/turn\.set\(r\.order_name, r\)/.test(hv), /await claim\(name, row, attemptNo\)/.test(hv),
+             /h < WINDOW\.from \|\| h >= WINDOW\.to/.test(hv), /cod_confirmations_msg91/.test(hv)],
+            [true, true, true, true]);
+        check('hv-call retry ladder: unanswered → +10 min → +20 min → exhausted (highlighted, no more auto calls); vague answers never redial',
+            [/RETRY_DELAY_MIN = \{ 1: 10, 2: 20 \}/.test(hv), /attempts >= 3/.test(hv), /status: 'exhausted'/.test(hv),
+             /sweepUnanswered\(\)/.test(hv), /outcome === 'no_answer'/.test(hv),
+             /no_answer'\|\|a\.status==='exhausted'/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8'))],
+            [true, true, true, true, true, true]);
+        // Behavioural: the real classifier — negations can never read as confirmation, a short
+        // call is never an outcome, and only 'confirmed' unlocks any automatic action.
+        const { classifyOutcome } = require(path.join(ROOT, 'app/api/vobiz_auto_calls.js'));
+        check('hv-call outcome: confirmed / denied / unclear classified from the summary vocabulary',
+            [classifyOutcome('OUTCOME (confirmed): order confirmed', 3).outcome,
+             classifyOutcome('OUTCOME (wants cancel): does not want it', 3).outcome,
+             classifyOutcome('OUTCOME (no clear answer): noisy line', 3).outcome,
+             classifyOutcome('not confirmed by customer', 4).outcome,
+             classifyOutcome('anything', 1).outcome],
+            ['confirmed', 'denied', 'unclear', 'unclear', 'no_answer']);
+        check('hv-call outcome: confirmed auto-unholds BOTH systems, denied/unclear take NO action and are highlighted in the queue',
+            [/releaseOrder\(name, ord\.id, BY\)/.test(hv), /unholdOrderByAutomation\(name, BY\)/.test(hv),
+             /no automatic action/.test(hv),
+             /supAiRowTint/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8')),
+             /ai_call/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8'))],
+            [true, true, true, true, true]);
+        check('hv-call: route and auto-caller share ONE placeOrderCall (allowlist inside it), cron wired, endpoint capability-gated',
+            [/async function placeOrderCall\(b\)/.test(vb), /placeOrderCall, vobizConfigured/.test(hv),
+             /HighValueCall \(\*\/10/.test(sv), /high-value-call-tick\)\$\/i, \['support-voice', 'support-queue'\]/.test(sv)],
+            [true, true, true, true]);
+    }
+    check('wa chat: mirror timestamps are de-skewed at merge (IST-as-UTC, 5h30m) so one send renders ONCE at the true time (TE25-45549 lesson)',
+        [/MIRROR_SKEW_MS = 5\.5 \* 3600e3/.test(wa), /new Date\(m\.sent_at\)\.getTime\(\) - MIRROR_SKEW_MS/.test(wa)],
+        [true, true]);
+    check('wa rejections: phone-only CANCEL stubs are pinned to their order every 5 min — visibility only, NO auto hold/cancel',
+        [/async function rejectionPinTick/.test(wa), /orders\.length !== 1\) continue/.test(wa),
+         /original_id_key: row\.id_key/.test(wa), /rejectionPinTick\(\)\.catch/.test(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8'))],
+        [true, true, true, true]);
     check('wa auto: the turnstile is READ before it is written — no sweep re-inserts settled rows (88k Postgres 23505 errors, 2026-08-30)',
         [/const \{ data: done \} = await supabase\.from\('wa_sends_msg91'\)\.select\('id'\)/.test(wa) && /\.eq\('version', version\)\.limit\(1\);\s*if \(done && done\.length\) return \{ skip: 'already sent\/sealed' \}/.test(wa),
          /settled\.has\(row\.order_name \+ '\|' \+ v\)/.test(wa), /String\(ins\.error\.code\) === '23505'/.test(wa),

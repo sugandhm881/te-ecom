@@ -5001,6 +5001,21 @@ const SUP_REASON_META={
   high_value:['💰','Above ₹1500','bg-emerald-100 text-emerald-700','Order value is above ₹1500','bg-emerald-50 text-emerald-700'],
   short_address:['📍','Short address','bg-amber-100 text-amber-700','Address is under 60 characters (often incomplete → RTO-prone); skipped if a past order was delivered to the same address','bg-amber-50 text-amber-700'],
 };
+// AI COD-confirmation call state (repeat tab) — the chip says what the CALL concluded; only a
+// confirmed call ever acts (auto-unhold, server-side). Denied / not-confirmed rows are highlighted
+// by conditional row color below and left for a person, by explicit instruction (2026-08-31).
+function supAiCallChip(r){ const a=r.ai_call; if(!a) return '';
+  const o=a.outcome;
+  if(o==='confirmed') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700" title="AI confirmation call: customer CONFIRMED the order — hold released automatically, release recorded as ai-call (customer confirmed)">📞✅ Confirmed on call</span>`;
+  if(o==='denied') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-100 text-rose-700" title="AI confirmation call: ${escapeHtml(a.note||'customer denied on call')} — no automatic action taken, decide manually">📞❌ Denied on call</span>`;
+  if(o==='unclear') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700" title="AI confirmation call: ${escapeHtml(a.note||'customer did not clearly confirm')} — no automatic action taken, decide manually">📞😕 Not confirmed on call</span>`;
+  if(o==='no_answer'||a.status==='exhausted') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-violet-100 text-violet-700" title="AI confirmation call: no answer on 3 attempts (instant, +10 min, +20 min) — no more auto calls, decide manually">📞🔇 No answer (3 calls)</span>`;
+  if(a.status==='retry') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500" title="AI call not answered — will retry automatically (attempt ${(a.attempts||1)+1} of 3)">📞 Retrying ${a.attempts||1}/3</span>`;
+  if(a.status==='placed'||a.status==='calling') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500" title="AI confirmation call placed — outcome pending">📞 AI called</span>`;
+  return ''; }
+// Row tint for the same signal: denied = red wash, not-confirmed = amber wash (repeat tab only).
+function supAiRowTint(r){ const a=r.ai_call||{}; const o=a.outcome;
+  return o==='denied'?'bg-rose-50':o==='unclear'?'bg-amber-50':(o==='no_answer'||a.status==='exhausted')?'bg-violet-50':''; }
 // Courier PLATFORM tag (the aggregator, not the courier) — RapidShyp / DocPharma / KwikShip. Sits next to
 // the courier name on the shipped panels so an agent knows which partner portal / escalation route owns the
 // parcel before opening it. Server-resolved from shipment_journey_ecom.source (see platformByOrder).
@@ -5285,7 +5300,7 @@ function supQueueTable(){
           <button style="flex-shrink:0" class="sup-note-btn inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors ${r.note_count?'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100':'bg-white text-slate-400 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}" data-oid="${escapeHtml(r.order_id)}" data-oname="${escapeHtml(r.order_name||'')}" title="${r.note_count?'View / add notes':'Add a note'}">📝${r.note_count?` <span class="min-w-[16px] h-4 px-1 rounded-full bg-amber-200/80 text-amber-800 text-[10px] leading-4 text-center">${r.note_count}</span>`:' <span class="font-medium">+</span>'}</button>
         </div></td></tr>`;
       }
-      return `<tr class="sup-row cursor-pointer hover:bg-slate-50 ${r.msg91_confirmed?'bg-sky-50/50':''}" data-oid="${escapeHtml(r.order_id)}">
+      return `<tr class="sup-row cursor-pointer hover:bg-slate-50 ${supAiRowTint(r)||(r.msg91_confirmed?'bg-sky-50/50':'')}" data-oid="${escapeHtml(r.order_id)}">
       <td class="${TD} font-mono font-semibold"${dupN>1?' style="border-left:4px solid #d946ef"':''}>${escapeHtml(r.order_name||r.order_id)}${_supTab!=='repeat'?eeHoldChip(r.order_name):''}</td>
       <td class="${TD}">
         <div class="flex items-center gap-1.5 flex-wrap">
@@ -5294,7 +5309,7 @@ function supQueueTable(){
           ${dupN>1?`<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold" style="background:#fdf4ff;color:#a21caf" title="This customer has ${dupN} orders in the queue right now — likely duplicate / concurrent orders">🔁 ${dupN}×</span>`:''}
           ${r.msg91_confirmed?`<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-50 text-sky-700" title="Customer confirmed via MSG91">✓ Confirmed</span>`:''}
         </div>
-        ${_supTab==='repeat'&&r.reasons&&r.reasons.length?`<div class="flex items-center gap-1 flex-wrap mt-1">${supReasonChips(r)}</div>`:''}
+        ${_supTab==='repeat'&&((r.reasons&&r.reasons.length)||r.ai_call)?`<div class="flex items-center gap-1 flex-wrap mt-1">${r.reasons&&r.reasons.length?supReasonChips(r):''}${supAiCallChip(r)}</div>`:''}
       </td>
       ${showBucket?`<td class="${TD}">${showPlat?supStatusChip(r):supBadge(r.bucket)}</td>`:''}
       ${showPay?`<td class="${TD}">${supPayChip(r)}</td>`:''}
@@ -5794,6 +5809,7 @@ async function supOrderModal(orderId){
             <div class="flex items-center gap-2 mt-1.5">
               ${ac.recording_url?`<button class="supd-aic-play px-2 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700" data-u="${escapeHtml(ac.recording_url)}">\u25B6 Play recording</button>`:''}
               ${ac.transcript?`<button class="supd-aic-tr px-2 py-1 rounded-lg text-[11px] font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300" data-i="${i}">Transcript</button>`:''}
+              ${ac.transcript&&ac.id&&/[\u0900-\u0D7F]/.test(ac.transcript)?`<button class="supd-aic-en px-2 py-1 rounded-lg text-[11px] font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300" data-id="${ac.id}" data-i="${i}">Translate to English</button>`:''}
             </div>
             ${ac.transcript?`<pre class="supd-aic-tx hidden mt-2 text-[11px] leading-relaxed whitespace-pre-wrap text-slate-600" data-i="${i}">${escapeHtml(ac.transcript)}</pre>`:''}
           </div>`).join('')}${(d.calls||[]).map(cl=>`<div class="rounded-lg border border-slate-100 p-2.5 text-xs">
@@ -5843,6 +5859,17 @@ async function supOrderModal(orderId){
     wrap.querySelectorAll('.supd-cust-row').forEach(row=>{ if(row.dataset.oid!==o.order_id) row.addEventListener('click',()=>supOrderModal(row.dataset.oid)); });
     supWaButtons(o.order_name||o.order_id, ()=>supOrderModal(orderId));
     supAiCallMount(o);
+    // Translate an AI call's transcript to English (server caches it — one AI pass per call ever).
+    wrap.querySelectorAll('.supd-aic-en').forEach(b=>b.addEventListener('click',async()=>{
+      const pre=wrap.querySelector(`.supd-aic-tx[data-i="${b.dataset.i}"]`); if(!pre) return;
+      if(b.dataset.state==='en'){ pre.textContent=pre.dataset.orig; b.dataset.state=''; b.textContent='Translate to English'; return; }
+      if(!pre.dataset.en){
+        b.textContent='Translating…';
+        try{ const r=await supFetch('/api/support/ai-call-translate/'+b.dataset.id,{method:'POST'}); pre.dataset.orig=pre.textContent; pre.dataset.en=r.transcript_en; }
+        catch(e){ b.textContent='Translate to English'; showNotification(e.message,true); return; }
+      }
+      pre.textContent=pre.dataset.en; pre.classList.remove('hidden'); b.dataset.state='en'; b.textContent='Show original';
+    }));
     wrap.querySelectorAll('.supd-aic-tr').forEach(b=>b.addEventListener('click',()=>{
       wrap.querySelector(`.supd-aic-tx[data-i="${b.dataset.i}"]`)?.classList.toggle('hidden');
     }));
@@ -7844,7 +7871,7 @@ async function salCallModal(callId){
     const lines=String(c.transcript||'').split('\n').filter(Boolean).map(l=>{ const ag=/^agent:/i.test(l); return `<div class="max-w-[85%] ${ag?'ml-auto text-right':''}"><div class="inline-block px-3 py-1.5 rounded-xl text-sm ${ag?'bg-indigo-50 text-indigo-900':'bg-slate-100 text-slate-800'}">${escapeHtml(l.replace(/^(agent|customer):\s*/i,''))}</div></div>`; }).join('');
     wrap.firstElementChild.innerHTML=`<div class="flex items-start justify-between gap-3"><div><h3 class="text-lg font-bold text-slate-800">${escapeHtml(c.call_type||'call')} · ${escapeHtml(c.customer_name||'')}</h3><div class="text-xs text-slate-400">${new Date(c.called_at).toLocaleString('en-IN')} · ${escapeHtml(c.language||'')} · ${c.exchanges||0} exchanges${c.order_id?' · order '+escapeHtml(c.order_id):''}</div></div><button class="filter-btn" onclick="document.getElementById('sal-modal').remove()">Close</button></div>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-        <div><div class="text-[11px] font-semibold text-slate-400 uppercase mb-2">Transcript</div><div class="space-y-1.5">${lines||'<span class="text-slate-400 text-sm">no transcript</span>'}</div>${c.summary?`<div class="mt-3 text-xs text-slate-500 border-t pt-2">${escapeHtml(c.summary)}</div>`:''}</div>
+        <div><div class="text-[11px] font-semibold text-slate-400 uppercase mb-2 flex items-center gap-2">Transcript${c.transcript&&/[\u0900-\u0D7F]/.test(c.transcript)?`<button id="sal-tr-en" class="normal-case tracking-normal px-2 py-0.5 rounded-lg text-[11px] font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300">Translate to English</button>`:''}</div><div id="sal-tr-lines" class="space-y-1.5">${lines||'<span class="text-slate-400 text-sm">no transcript</span>'}</div>${c.summary?`<div class="mt-3 text-xs text-slate-500 border-t pt-2">${escapeHtml(c.summary)}</div>`:''}</div>
         <div><div class="text-[11px] font-semibold text-slate-400 uppercase mb-2">AI review</div>
           ${r.scores?`<div class="flex flex-wrap gap-1.5 mb-3">${Object.entries(r.scores).map(([k,v])=>`<span class="text-xs text-slate-500">${k.replace('_',' ')} ${salScoreChip(v)}</span>`).join('')}</div>`:'<div class="text-sm text-slate-400">Not reviewed yet.</div>'}
           ${r.outcome?`<div class="text-sm mb-2">Outcome: <b>${SAL_OUT_LABEL[r.outcome]||r.outcome}</b></div>`:''}
@@ -7853,6 +7880,16 @@ async function salCallModal(callId){
           ${(r.customer_signals||[]).length?`<div class="text-xs font-semibold text-slate-500 mt-2">Customer signals</div><ul class="text-sm text-slate-700 list-disc pl-5">${r.customer_signals.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul>`:''}
           ${d.lessons.length?`<div class="text-xs font-semibold text-indigo-700 mt-3">What the agent learnt from this call</div>${d.lessons.map(l=>`<div class="mt-1.5 rounded-lg border border-indigo-100 bg-indigo-50/40 px-3 py-2 text-sm"><div class="flex items-center gap-2">${salStatusChip(l.status)}<b>${escapeHtml(l.title)}</b></div><div class="text-slate-700 mt-1">${escapeHtml(l.rule)}</div></div>`).join('')}`:'<div class="text-xs text-slate-400 mt-3">No new lesson from this call — it was routine.</div>'}
         </div></div>`;
+    const trBtn=wrap.querySelector('#sal-tr-en');
+    if(trBtn){
+      const cont=wrap.querySelector('#sal-tr-lines'); const orig=c.transcript; let en=c.transcript_en||null, showing=false;
+      const render=t=>{ cont.innerHTML=String(t||'').split('\n').filter(Boolean).map(l=>{ const ag=/^agent:/i.test(l); return `<div class="max-w-[85%] ${ag?'ml-auto text-right':''}"><div class="inline-block px-3 py-1.5 rounded-xl text-sm ${ag?'bg-indigo-50 text-indigo-900':'bg-slate-100 text-slate-800'}">${escapeHtml(l.replace(/^(agent|customer):\s*/i,''))}</div></div>`; }).join(''); };
+      trBtn.addEventListener('click',async()=>{
+        if(showing){ render(orig); showing=false; trBtn.textContent='Translate to English'; return; }
+        if(!en){ trBtn.textContent='Translating…'; try{ const r=await supFetch('/api/support/ai-call-translate/'+encodeURIComponent(callId),{method:'POST'}); en=r.transcript_en; }catch(e){ trBtn.textContent='Translate to English'; showNotification(e.message,true); return; } }
+        render(en); showing=true; trBtn.textContent='Show original';
+      });
+    }
   }catch(e){ wrap.firstElementChild.innerHTML=`<div class="text-rose-500 text-sm">${escapeHtml(e.message)}</div>`; }
 }
 function salRuns(){

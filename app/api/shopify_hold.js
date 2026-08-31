@@ -100,7 +100,9 @@ async function recordFailed(orderName, error) { await clearHoldMarks(orderName, 
 // one Unhold button:
 //   • `shopify_hold_released` — written by releaseOrder() / recordReleased()
 //   • `ee_hold_released`      — written by POST /api/easyecom/unhold-order
-// Neither is ever written by automation (there is no auto-unhold), so a tombstone always means a person.
+// The ONE automation allowed to write them (2026-08-31): the AI COD-confirmation call, and only after
+// the CUSTOMER explicitly confirmed the order on the phone — the decision is still a person's, the
+// customer's own (by = 'ai-call (customer confirmed)'). Every other tombstone means a dashboard human.
 //
 // ⚠️ Do NOT fold this into getHoldStates(): that function reads only the three `shopify_*` HOLD_TYPES and
 // is used for DISPLAY (which button to show). This is the automation gate, and it must see the EasyEcom

@@ -201,7 +201,7 @@ const _VIEW_PERMS = [
     // shared with live, so users carry both until the old key is retired.
     [/^\/customer\//i, ['customer-profile', 'support-blacklist']],
     [/^\/voice-(config|order-lookup|order-list)/i, 'support-voice'],   // Voice Agent tool endpoints — permitted users / admins only
-    [/^\/vobiz\/(call|recording)$/i, ['support-voice', 'support-queue']],   // real outbound AI call + recording playback (Vobiz bridge)
+    [/^\/vobiz\/(call|recording|high-value-call-tick)$/i, ['support-voice', 'support-queue']],   // real outbound AI call + recording playback + high-value auto-call test trigger (Vobiz bridge)
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
     // Inventory Analytics. Stock Count (WH-only) + its deep Count Analysis (manager-only) are separate perms —
@@ -335,6 +335,7 @@ app.use('/api', require('./app/api/msg91_wa').router);   // manual WhatsApp send
 app.use('/api', require('./app/api/agent_learning').router);   // voice-agent self-learning — /support/agent-learning/*, /voice-lessons
 const vobizBridge = require('./app/api/vobiz_bridge');    // real phone calls: Vobiz telephony ⇄ Sarvam voice agent
 app.use('/api', vobizBridge.router);
+app.use('/api', require('./app/api/vobiz_auto_calls').router);   // high-value COD confirmation auto-caller (test trigger)
 app.use('/api', require('./app/api/user_activity').router);   // activity logging (POST /activity — any signed-in user)
 app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
 app.use('/api', require('./app/api/inventory').router);       // Inventory Analytics (daily snapshot dashboard + Teams report)
@@ -537,9 +538,10 @@ cronJob('WH Report (every 2h)', process.env.WH_REPORT_CRON || '30 8-20/2 * * *',
 // The same 5-minute tick also runs the COD V1 BACKSTOP: the 3-minute confirm is armed in-process by
 // the orders/create webhook, so an order whose timer died with a restart is picked up here.
 cronJob('WA CodReminder (*/5 * * * *)', '*/5 * * * *', async () => {
-    const { codInitialTick, codReminderTick } = require('./app/api/msg91_wa');
+    const { codInitialTick, codReminderTick, rejectionPinTick } = require('./app/api/msg91_wa');
     await codInitialTick().catch(e => console.error('[WA auto] COD V1 backstop error:', e.message));
     await codReminderTick().catch(e => console.error('[WA auto] reminder cron error:', e.message));
+    await rejectionPinTick().catch(e => console.error('[WA auto] rejection pin error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 // (Zone & State lookups are a ONE-TIME job per sheet — run once at backfill and once after each upload
 //  from zone_mapping.js; no cron, by instruction 2026-08-29: "this is a one-time job, not frequent work".)
@@ -554,6 +556,13 @@ cronJob('AgentLearn (15 2 * * *)', '15 2 * * *', async () => {
 cronJob('WA NDR (*/15 * * * *)', '*/15 * * * *', async () => {
     const { ndrTick } = require('./app/api/msg91_wa');
     await ndrTick().catch(e => console.error('[WA auto] NDR cron error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// High-value COD confirmation CALLS (2026-08-31): orders held for the ≥₹1500 rule ALONE get an AI
+// confirmation call (Vobiz). 10:00–19:59 IST only; VOBIZ_CALL_ALLOWLIST gates every dial while set.
+cronJob('HighValueCall (*/10 * * * *)', '*/10 * * * *', async () => {
+    const { highValueCallTick } = require('./app/api/vobiz_auto_calls');
+    await highValueCallTick().catch(e => console.error('[HVCall] cron error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // Influencer video metrics — every Friday 11:00 PM IST, refresh the last-30-days videos so the

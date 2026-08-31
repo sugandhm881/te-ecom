@@ -1025,3 +1025,24 @@ module.exports.ourCompanyCid = ourCompanyCid;
 module.exports.markWarehouseRouted = markWarehouseRouted;
 module.exports.SHIFUPRO_CID = SHIFUPRO_CID;
 module.exports.holdOrderInEasyecom = holdOrderInEasyecom;
+// EasyEcom unhold for the ONE sanctioned automation: the AI COD-confirmation call, after the customer
+// EXPLICITLY confirmed the order on the phone (vobiz_auto_calls.js). Same EE call, same mark handling
+// and same tombstone as POST /unhold-order — `by` names the caller ('ai-call (customer confirmed)') so
+// the timeline shows who released and why. The tombstone still means "final, never auto-re-hold".
+module.exports.unholdOrderByAutomation = async function unholdOrderByAutomation(orderName, by) {
+    const nm = String(orderName || '').replace('#', '').trim();
+    const inv = await resolveInvoiceId(nm);
+    if (!inv) return { ok: false, error: 'not in EasyEcom (no invoice id yet)' };
+    const r = await eeHoldCall('/orders/unholdOrders', { invoice_id: inv.invoiceId });
+    const body = r.data || {};
+    await supabase.from('api_logs_ecom').insert({ action: 'easyecom_unhold_order', status_code: r.status, payload: { orderName: nm, invoice_id: inv.invoiceId, by }, response: body }).then(() => {}).catch(() => {});
+    const ok = r.status === 200 && (body.code === 200 || body.status === true || body.success === true || /success/i.test(String(body.message || '')));
+    const alreadyUnheld = /already.{0,25}unhold|not.{0,15}on ?hold/i.test(String(body.message || ''));
+    if (!(ok || alreadyUnheld)) return { ok: false, error: String(body.message || ('HTTP ' + r.status)).slice(0, 200) };
+    await supabase.from('order_marks_ecom').delete().eq('order_name', nm).eq('mark_type', 'ee_hold').then(() => {}).catch(() => {});
+    await supabase.from('order_marks_ecom').upsert({
+        order_name: nm, mark_type: 'ee_hold_released', note: 'released by ' + by, created_by: by,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }, { onConflict: 'order_name,mark_type' }).then(() => {}).catch(() => {});
+    return { ok: true, already: alreadyUnheld || undefined };
+};

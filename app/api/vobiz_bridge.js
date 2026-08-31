@@ -43,6 +43,74 @@ const V_TOKEN = () => String(process.env.VOBIZ_WEBHOOK_TOKEN || '').trim();
 const L16_SWAP = () => String(process.env.VOBIZ_L16_SWAP || 'none').trim();
 const vobizConfigured = () => !!(V_AUTH_ID() && V_AUTH_TOKEN() && V_FROM() && V_BASE() && V_TOKEN() && SARVAM_KEY());
 
+// ── product knowledge for the call (user, 2026-08-31: "before confirmation if customer asks for
+// product detail and benefit, provide info, then take confirmation") ─────────────────────────────
+// The REAL store descriptions, never invented claims: order line-item titles → shopify_products
+// (title → product id) → Shopify Admin API body_html, stripped to speakable text and clamped.
+// In-memory cache, 24h TTL — descriptions barely change and a restart just refetches. Any failure
+// returns '' and the call proceeds without the block (the prompt then defers details to WhatsApp).
+const _pkCache = new Map();                                        // product_title → { text, at }
+function stripHtml(h) {
+    return String(h || '').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<br\s*\/?>/gi, '. ').replace(/<\/(p|li|h\d|div)>/gi, '. ').replace(/<[^>]+>/g, ' ')
+        .replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').replace(/&#?\w+;/g, ' ')
+        .replace(/\s+/g, ' ').replace(/(\.\s*)+/g, '. ').trim();
+}
+// The CURATED knowledge base wins (product_knowledge_ecom — authored by Claude on the store
+// catalog, master copy docs/PRODUCT_KNOWLEDGE.md, user 2026-08-31: "shopify description is not
+// enough, make a document created by claude"): one row per base formula, matched by regex against
+// each line title so a combo/kit picks up every component. Shopify body_html stays as the fallback
+// for anything the table does not cover yet.
+let _kbRows = null, _kbAt = 0;
+async function knowledgeRows() {
+    if (_kbRows && Date.now() - _kbAt < 10 * 60e3) return _kbRows;
+    const { data } = await supabase.from('product_knowledge_ecom').select('title, match_rx, knowledge');
+    if (data) { _kbRows = data; _kbAt = Date.now(); }
+    return _kbRows || [];
+}
+async function productKnowledgeFor(orderName) {
+    try {
+        const { data: items } = await supabase.from('orders')
+            .select('order_line_items(title)').or(`name.eq.${orderName},name.eq.#${orderName}`)
+            .order('created_at', { ascending: false }).limit(1).maybeSingle();
+        const li = items && items.order_line_items;
+        const titles = [...new Set((Array.isArray(li) ? li : (li ? [li] : [])).map(x => String(x.title || '').trim()).filter(Boolean))].slice(0, 3);
+        if (!titles.length) return '';
+        // 1) curated knowledge — every base formula whose regex hits any line title, capped at 3
+        try {
+            const rows = await knowledgeRows();
+            const hits = [];
+            for (const r of rows) {
+                let rx; try { rx = new RegExp(r.match_rx, 'i'); } catch (_) { continue; }
+                if (titles.some(t => rx.test(t)) && !hits.some(h => h.title === r.title)) hits.push(r);
+                if (hits.length >= 3) break;
+            }
+            if (hits.length) return hits.map(r => `${r.title}: ${r.knowledge}`).join('\n');
+        } catch (_) { /* fall through to the store description */ }
+        // 2) fallback — the store's own description from Shopify
+        if (!config.SHOPIFY_SHOP_URL || !config.SHOPIFY_TOKEN) return '';
+        const parts = [];
+        for (const title of titles) {
+            const hit = _pkCache.get(title);
+            if (hit && Date.now() - hit.at < 24 * 3600e3) { if (hit.text) parts.push(hit.text); continue; }
+            let text = '';
+            try {
+                const { data: prod } = await supabase.from('shopify_products')
+                    .select('shopify_product_id').ilike('product_title', title.split(' - ')[0].trim() + '%').limit(1).maybeSingle();
+                if (prod && prod.shopify_product_id) {
+                    const r = await axios.get(`https://${config.SHOPIFY_SHOP_URL}/admin/api/2024-10/products/${prod.shopify_product_id}.json?fields=title,body_html`,
+                        { headers: { 'X-Shopify-Access-Token': config.SHOPIFY_TOKEN }, timeout: 8000, validateStatus: () => true });
+                    const b = r.status === 200 && r.data && r.data.product ? stripHtml(r.data.product.body_html) : '';
+                    if (b) text = `${title}: ${b.slice(0, 550)}`;
+                }
+            } catch (_) { /* knowledge is optional — the call must never wait on it failing */ }
+            _pkCache.set(title, { text, at: Date.now() });
+            if (text) parts.push(text);
+        }
+        return parts.join('\n');
+    } catch (_) { return ''; }
+}
+
 // ── sessions: one per placed call, keyed by sid carried through webhook + WS URLs ──
 const sessions = new Map();
 setInterval(() => { const cut = Date.now() - 3600e3; for (const [k, s] of sessions) if (s.createdAt < cut) sessions.delete(k); }, 600e3).unref();
@@ -62,7 +130,7 @@ const HI_CLOSE = 'The Element को चुनने के लिए आपक�
 const PURPOSES = {
     cod_confirm: {
         intro: 'on a REAL outbound call to verify a Cash on Delivery order the customer placed, BEFORE it is dispatched.',
-        objectives: 'Objectives: greet by first name and introduce yourself; mention their order briefly (product and amount) and ask them to CONFIRM that they placed it and want it delivered; if they confirm, tell them it will be dispatched soon and close with thanks; if they say they did not order it or want to cancel, note it politely and close. Do NOT ask about delivery-time availability — this call is only about confirming the order itself.',
+        objectives: 'Objectives: greet by first name and introduce yourself; mention their order briefly (product and amount) and ask them to CONFIRM that they placed it and want it delivered; if they confirm, tell them it will be dispatched soon and close with thanks. If they say NO, deny placing it, or want to cancel (in ANY language): do NOT close yet — first ask politely, in the language they used: "May I know the reason please?"; listen, then close with "I have noted that <their reason, briefly>. Thank you for your time." plus the brand closing. Ask the reason only ONCE — if they refuse or repeat the no, close politely with it noted. Do NOT ask about delivery-time availability — this call is only about confirming the order itself.',
     },
     undelivered: {
         intro: 'on a REAL outbound call because the courier could NOT complete the delivery of their order.',
@@ -79,19 +147,24 @@ function buildPrompt(s) {
     const forms = sp.gender === 'male' ? 'कर रहा हूँ / बोल रहा हूँ' : 'कर रही हूँ / बोल रही हूँ';
     const purpose = PURPOSES[s.callType] || PURPOSES.cod_confirm;
     const offer = s.offerAsk
-        ? `\nLANGUAGE OFFER: the customer's last reply appears to be in ${LANG_NAMES[s.offerAsk] || s.offerAsk}. In THIS reply, ask ONE short polite question — in both ${langName} and ${LANG_NAMES[s.offerAsk] || s.offerAsk} — whether they would prefer to continue in ${LANG_NAMES[s.offerAsk] || s.offerAsk}. Nothing else in this turn.`
+        ? `\nLANGUAGE OFFER: the customer's last reply appears to be in ${LANG_NAMES[s.offerAsk] || s.offerAsk}. In THIS reply, ask ONE short polite question — in both ${langName} and ${LANG_NAMES[s.offerAsk] || s.offerAsk} — whether they would prefer to continue in ${LANG_NAMES[s.offerAsk] || s.offerAsk}. Nothing else in this turn: do NOT act on what they just said — no confirming, no cancelling, no reason-asking, no closing.`
         : '';
     if (s.offerAsk) s.offerAsk = null;
     const override = s.langSwitched
         ? `\nLANGUAGE OVERRIDE: the customer has asked for ${langName}. Earlier turns were in a different language — that no longer matters. From your very next word, reply ONLY in ${langName}.`
         : '';
-    return `You are ${sp.name}, a ${sp.gender} phone agent for The Element, an Ayurvedic skincare brand, ${purpose.intro}
-Order: ${s.ctx.product || 'their order'} for Rs.${s.ctx.amount || ''}. Customer first name: ${s.ctx.firstName}.
+    const kb = s.ctx.productInfo
+        ? `\nPRODUCT KNOWLEDGE (the store's own description — your ONLY source for product answers):\n${s.ctx.productInfo}\nIf the customer asks about the product, its use, ingredients or benefits: answer briefly (1-2 spoken sentences) FROM THIS KNOWLEDGE ONLY, then return to the confirmation question. If the answer is not here, say the support team will share full details on WhatsApp — NEVER invent claims or results.`
+        : `\nIf the customer asks about the product or its benefits: share only what the order line says (${s.ctx.product || 'their order'}), tell them the support team will send full details on WhatsApp, then return to the confirmation question. NEVER invent claims.`;
+    return `You are ${sp.name}, a ${sp.gender} skincare consultant and customer-care agent for The Element, an Ayurvedic skincare brand — confident, professional, knowledgeable and reassuring, always gentle and respectful — ${purpose.intro}
+Order: ${s.ctx.product || 'their order'} for Rs.${s.ctx.amount || ''}. Customer first name: ${s.ctx.firstName}.${kb}
 ${purpose.objectives}${override}${offer}
 If the customer indicates IN ANY WAY that they prefer or only understand another language (a direct ask, or statements like they only know Bengali), switch to that language IMMEDIATELY and continue the whole call in it.
+DIFFERENT-LANGUAGE REPLY: when the customer answers in a language different from the one you are speaking, do NOT treat that reply as their final yes or no. First ask — one short question, in both your language and theirs — whether they would prefer to continue in their language, then repeat the confirmation question in whichever language they choose. If in any circumstance you do act on such a reply directly, your response MUST be spoken in the CUSTOMER'S language, never in yours.
 TONE: courteous, professional and calm from the greeting to the goodbye — a trained customer-care executive, never a friend. No slang, no jokes, no cheeky or over-familiar phrases (never things like \u0905\u0930\u0947 \u0935\u093e\u0939, \u0915\u094d\u092f\u093e \u092c\u093e\u0924 \u0939\u0948, \u091a\u093f\u0932, boss, dear). Warmth comes from politeness, not casualness.
-CALL SCREENING: some phones answer with an automated screening assistant that asks for your name and the reason for the call (usually in English: "your name and reason for calling", "please stay on the line"). When you hear that: reply in the SAME language the assistant used, with ONE short sentence only — "This is ${sp.name} from The Element, calling ${s.ctx.firstName} about their order confirmation." Then stop speaking and wait silently for the real person; never speak stage directions. Do NOT ask the order-confirmation question to the assistant, and do NOT repeat yourself to it. When the real customer then speaks (a hello or greeting), start fresh: your FIRST sentence is only the greeting and your introduction (your name and The Element); the order details and the confirmation question come in the NEXT sentence — never all in one breath.
+CALL SCREENING: some phones answer with an automated screening assistant that asks for your name and the reason for the call ("your name and reason for calling", "please stay on the line"). Screening assistants (Apple's included) understand ONLY ENGLISH — when you hear one, reply in ENGLISH regardless of the call language, with ONE short sentence only — "This is ${sp.name} from The Element, calling ${s.ctx.firstName} about their order confirmation." Then stop speaking and wait silently for the real person; never speak stage directions. Do NOT ask the order-confirmation question to the assistant, and do NOT repeat yourself to it. When the real customer then speaks (a hello or greeting), start fresh IN ${langName}: your FIRST sentence is only the greeting and your introduction (your name and The Element); the order details and the confirmation question come in the NEXT sentence — never all in one breath.
 CONFIRMATION DISCIPLINE: sounds like hmm / haan-haan WHILE you are still explaining are listening signals, NOT confirmation. A confirmation counts ONLY as a clear affirmative (जी हाँ / हाँ / yes) given AFTER you finish asking the confirm question. If the reply is unclear or just a hum, politely ask once more for a clear हाँ या ना — never assume agreement.
+PRODUCT-ANSWER RULES (apply ONLY when the customer asks about a product, its use, ingredients or benefits — every other part of the call follows its own flow above): recommend and mention ONLY The Element products — never name, compare or acknowledge any other brand. Never give a diagnostic label (never "you have eczema/rosacea") and never advise on prescription medicines; for a severe or worsening skin condition politely suggest seeing a dermatologist. If asked about safety: The Element formulations are created with inputs from India's leading dermatologists. Prices and offers change — for prices, politely point them to theelement.skin. DURATIONS — never invent a volume, dose or how long a pack lasts. The ONLY confirmed fact: Brightening Drops last 15 days per bottle at the recommended 5 to 6 drops twice daily (multiply for packs: 4 bottles is 60 days, about 2 months; 3 bottles is 45 days — say days or weeks, never round to months). For every other product say duration depends on usage — refer to the label.
 SPOKEN DELIVERY RULES (your words go DIRECTLY to a voice synthesizer):
 - Respond ONLY in ${langName} (if the customer asks for another supported language, switching is REQUIRED, never refused). Max 2 short sentences per turn. Only speakable words: no emoji, symbols, dashes, brackets, quotes or lists.
 - NEVER read out a full order ID. Amounts stay in digits. Every sentence carries its own SUBJECT.
@@ -461,15 +534,24 @@ class VoiceCall {
                 exchanges: Math.ceil(this.s.transcript.length / 2),
                 recording_url: this.s.recordingUrl || null,
             });
+            // AUTO cod_confirm call → outcome drives the hold (2026-08-31 spec): customer confirmed on
+            // the call = auto-unhold, documented; denied / unclear = NO action, just recorded so the
+            // Call Queue can highlight it. Manual button calls are untouched — a human is already there.
+            if (this.s.auto && (this.s.callType || '') === 'cod_confirm' && this.s.ctx.order_name) {
+                require('./vobiz_auto_calls').handleCodCallOutcome({
+                    orderName: this.s.ctx.order_name, summary,
+                    exchanges: Math.ceil(this.s.transcript.length / 2),
+                }).catch(e => this.log('outcome handling failed:', e.message));
+            }
         } catch (e) { this.log('log save failed:', e.message); }
     }
 }
 
 // Session creation is separate from the Vobiz API call so the LOCAL SIMULATOR
 // (tests/vobiz_call_sim.js) can exercise the whole bridge without a Vobiz account.
-function createSession({ phone, ctx, lang, voice, callType }) {
+function createSession({ phone, ctx, lang, voice, callType, auto }) {
     const sid = crypto.randomBytes(8).toString('hex');
-    sessions.set(sid, { sid, phone, ctx, lang: lang || 'hi-IN', voice: voice || 'kavya', callType: PURPOSES[callType] ? callType : 'cod_confirm', transcript: [], createdAt: Date.now() });
+    sessions.set(sid, { sid, phone, ctx, lang: lang || 'en-IN', voice: voice || 'kavya', callType: PURPOSES[callType] ? callType : 'cod_confirm', auto: !!auto, transcript: [], createdAt: Date.now() });
     // Self-learning: the lessons the agent has learnt from earlier calls ride on the session and are
     // appended to every prompt of this call (agent_learning.js; cached 5 min, never blocks the call).
     require('./agent_learning').lessonsPromptBlock(PURPOSES[callType] ? callType : 'cod_confirm', lang || 'hi-IN')
@@ -494,9 +576,11 @@ async function synthOpening(s) {
     if (!b64) throw new Error('opening synth: no audio');
     return Buffer.from(b64, 'base64').subarray(44).toString('base64');   // strip WAV header → raw L16 @24k
 }
-// The ORDER'S REGION picks the call language (asked for with the language-texture work): a Tamil
-// Nadu order gets a Tamil call, and the persona rules already make each language speak its own
-// native register. States not mapped fall back to Hindi. Explicit lang in the request wins.
+// DEFAULT LANGUAGE IS ENGLISH FOR EVERY CALL (user, 2026-08-31): the region no longer picks the
+// opening language — screening bots and unknown callers get English, and the moment the customer
+// speaks a few words in another language the agent OFFERS that language and switches on their yes
+// (the offer/switch flow below). REGION_LANG is retained for reference only; langForOrder() now
+// always answers en-IN. Explicit lang in the request still wins.
 const REGION_LANG = [
     [/tamil nadu|puducherry|pondicherry/i, 'ta-IN'],
     [/karnataka/i, 'kn-IN'],
@@ -508,13 +592,7 @@ const REGION_LANG = [
     [/punjab|chandigarh/i, 'pa-IN'],
 ];
 async function langForOrder(orderId) {
-    try {
-        const { data: addr } = await supabase.from('order_shipping_addresses')
-            .select('province').eq('order_id', orderId).maybeSingle();
-        const state = String((addr && addr.province) || '');
-        for (const [rx, lang] of REGION_LANG) if (rx.test(state)) return lang;
-    } catch (_) {}
-    return 'hi-IN';
+    return 'en-IN';                                     // English for all — see the note above
 }
 const LANG_REQUEST = [
     [/english|\u0905\u0902\u0917\u094d\u0930\u0947\u091c|\u0907\u0902\u0917\u094d\u0932\u093f\u0936/i, 'en-IN'],
@@ -524,7 +602,7 @@ const LANG_REQUEST = [
     [/bengali|bangla|\u092c\u093e\u0902\u0917\u094d\u0932\u093e|\u092c\u0902\u0917\u093e\u0932|\u092c\u0902\u0917\u0932\u093e/i, 'bn-IN'], [/marathi|\u092e\u0930\u093e\u0920\u0940/i, 'mr-IN'],
     [/gujarati|\u0917\u0941\u091c\u0930\u093e\u0924\u0940/i, 'gu-IN'], [/punjabi|\u092a\u0902\u091c\u093e\u092c\u0940/i, 'pa-IN'],
 ];
-const LANG_CUE = /(\u092e\u0947\u0902|mein|me)\s*(\u092c\u093e\u0924|\u092c\u094b\u0932)|speak|talk|language|only|\u092d\u093e\u0937\u093e|samajh|\u0938\u092e\u091d|\u0906\u0924|\u091c\u093e\u0928|\u0938\u093f\u0930\u094d\u092b|\u092a\u0924\u093e|बता|बोलो/i;   // आत=aata, जान=jaan, सिर्फ=sirf
+const LANG_CUE = /(\u092e\u0947\u0902|mein|me|ch|vich)\s*(\u092c\u093e\u0924|\u092c\u094b\u0932|bol)|speak|talk|language|only|bolo|boliye|bhasha|\u092d\u093e\u0937\u093e|samajh|\u0938\u092e\u091d|\u0906\u0924|\u091c\u093e\u0928|\u0938\u093f\u0930\u094d\u092b|\u092a\u0924\u093e|बता|बोलो/i;   // आत=aata, जान=jaan, सिर्फ=sirf
 function requestedLanguage(text, currentLang) {
     if (!LANG_CUE.test(text)) return null;
     for (const [rx, code] of LANG_REQUEST) if (rx.test(text) && code !== currentLang) return code;
@@ -547,6 +625,9 @@ const HELLO_CHECK = {
 };
 
 const SCRIPT_LANG = [
+    // Devanagari first (Hindi is the usual answer; an explicit ask can still pick Marathi) — needed
+    // now that calls OPEN in English: a customer replying in Hindi must trigger the language offer.
+    [/[\u0900-\u097F]/, 'hi-IN'],
     [/[\u0980-\u09FF]/, 'bn-IN'], [/[\u0A00-\u0A7F]/, 'pa-IN'], [/[\u0A80-\u0AFF]/, 'gu-IN'],
     [/[\u0B80-\u0BFF]/, 'ta-IN'], [/[\u0C00-\u0C7F]/, 'te-IN'], [/[\u0C80-\u0CFF]/, 'kn-IN'],
     [/[\u0D00-\u0D7F]/, 'ml-IN'],
@@ -570,36 +651,45 @@ function armOpening(s) {
     s.openingPcmP = synthOpening(s).catch(e => { console.log('[vobiz] opening pre-synth failed (will fall back to live turn):', e.message); return null; });
 }
 
+// ── place a call — ONE path for the dashboard button (/vobiz/call) and the high-value auto-caller
+// (vobiz_auto_calls.js). Returns { success, sid } or { error, code, gated } — gated marks an
+// allowlist refusal so the auto-caller can leave the order retryable instead of failed.
+async function placeOrderCall(b) {
+    if (!vobizConfigured()) return { error: 'Vobiz not configured — set VOBIZ_AUTH_ID / VOBIZ_AUTH_TOKEN / VOBIZ_FROM_NUMBER / VOBIZ_PUBLIC_BASE / VOBIZ_WEBHOOK_TOKEN in .env', code: 400 };
+    let ctx = { customer_name: b.customer_name || '', product: b.product || '', amount: b.amount || '', order_name: b.order_name || '' };
+    let orderRow = null, orderPhone = '';
+    if (b.order_name) {
+        try { const { order, fields } = await resolveOrderFields(b.order_name);
+            orderRow = order;
+            orderPhone = fields.phone || '';
+            ctx = { customer_name: fields.customer_name, product: fields.product, amount: fields.amount, order_name: fields.order_name }; } catch (_) {}
+    }
+    const phone = String(b.phone || orderPhone || '').replace(/\D/g, '').slice(-10);
+    if (!/^[6-9]\d{9}$/.test(phone)) return { error: b.order_name ? `no usable phone on ${b.order_name}` : 'valid 10-digit phone required', code: 400 };
+    // Same test turnstile as WhatsApp: while the allowlist is set, only listed numbers ring.
+    const gate = allowlistBlocks(b.order_name || '', phone);
+    if (gate) return { error: gate, code: 403, gated: true, phone };
+    ctx.firstName = String(ctx.customer_name || 'ji').trim().split(/\s+/)[0];
+    if (b.order_name) ctx.productInfo = await productKnowledgeFor(String(b.order_name).replace(/^#/, '').trim());
+    const lang = b.lang || (orderRow ? await langForOrder(orderRow.id) : 'en-IN');
+    const sid = createSession({ phone, ctx, lang, voice: b.voice || 'kavya', callType: b.call_type, auto: !!b.auto });
+    armOpening(sessions.get(sid));            // synthesize the greeting while the phone rings
+    const answerUrl = `${V_BASE()}/api/vobiz/answer?token=${V_TOKEN()}&sid=${sid}`;
+    const r = await axios.post(`https://api.vobiz.ai/api/v1/Account/${V_AUTH_ID()}/Call/`, {
+        from: V_FROM(), to: '91' + phone,
+        answer_url: answerUrl, answer_method: 'POST',
+        hangup_url: `${V_BASE()}/api/vobiz/hangup?token=${V_TOKEN()}&sid=${sid}`,
+    }, { headers: { 'X-Auth-ID': V_AUTH_ID(), 'X-Auth-Token': V_AUTH_TOKEN(), 'Content-Type': 'application/json' }, timeout: 20000, validateStatus: () => true });
+    if (r.status >= 300) return { error: `Vobiz ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}`, code: 502 };
+    return { success: true, sid, phone, vobiz: r.data };
+}
+
 // ── HTTP: place a call ──
 router.post('/vobiz/call', async (req, res) => {
     try {
-        if (!vobizConfigured()) return res.status(400).json({ success: false, error: 'Vobiz not configured — set VOBIZ_AUTH_ID / VOBIZ_AUTH_TOKEN / VOBIZ_FROM_NUMBER / VOBIZ_PUBLIC_BASE / VOBIZ_WEBHOOK_TOKEN in .env' });
-        const b = req.body || {};
-        let ctx = { customer_name: b.customer_name || '', product: b.product || '', amount: b.amount || '', order_name: b.order_name || '' };
-        let orderRow = null, orderPhone = '';
-        if (b.order_name) {
-            try { const { order, fields } = await resolveOrderFields(b.order_name);
-                orderRow = order;
-                orderPhone = fields.phone || '';
-                ctx = { customer_name: fields.customer_name, product: fields.product, amount: fields.amount, order_name: fields.order_name }; } catch (_) {}
-        }
-        const phone = String(b.phone || orderPhone || '').replace(/\D/g, '').slice(-10);
-        if (!/^[6-9]\d{9}$/.test(phone)) return res.status(400).json({ success: false, error: b.order_name ? `no usable phone on ${b.order_name}` : 'valid 10-digit phone required' });
-        // Same test turnstile as WhatsApp: while the allowlist is set, only listed numbers ring.
-        const gate = allowlistBlocks(b.order_name || '', phone);
-        if (gate) return res.status(403).json({ success: false, error: gate });
-        ctx.firstName = String(ctx.customer_name || 'ji').trim().split(/\s+/)[0];
-        const lang = b.lang || (orderRow ? await langForOrder(orderRow.id) : 'hi-IN');
-        const sid = createSession({ phone, ctx, lang, voice: b.voice || 'kavya', callType: b.call_type });
-        armOpening(sessions.get(sid));            // synthesize the greeting while the phone rings
-        const answerUrl = `${V_BASE()}/api/vobiz/answer?token=${V_TOKEN()}&sid=${sid}`;
-        const r = await axios.post(`https://api.vobiz.ai/api/v1/Account/${V_AUTH_ID()}/Call/`, {
-            from: V_FROM(), to: '91' + phone,
-            answer_url: answerUrl, answer_method: 'POST',
-            hangup_url: `${V_BASE()}/api/vobiz/hangup?token=${V_TOKEN()}&sid=${sid}`,
-        }, { headers: { 'X-Auth-ID': V_AUTH_ID(), 'X-Auth-Token': V_AUTH_TOKEN(), 'Content-Type': 'application/json' }, timeout: 20000, validateStatus: () => true });
-        if (r.status >= 300) return res.status(502).json({ success: false, error: `Vobiz ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}` });
-        res.json({ success: true, sid, vobiz: r.data });
+        const r = await placeOrderCall(req.body || {});
+        if (r.error) return res.status(r.code || 500).json({ success: false, error: r.error });
+        res.json({ success: true, sid: r.sid, vobiz: r.vobiz });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
@@ -611,8 +701,10 @@ const recordXml = () => '';   // retired: the XML Record verb captured only the 
 async function startCallRecording(callId, tag, session) {
     if (String(process.env.VOBIZ_RECORD || 'true') === 'false' || !callId) return;
     try {
+        // time_limit defaults to 60s on the Record API (Plivo-style) — every recording was cut at
+        // 00:59 (user, 2026-08-31: "i want all recording"). 3600s covers any real support call.
         const r = await axios.post(`https://api.vobiz.ai/api/v1/Account/${V_AUTH_ID()}/Call/${callId}/Record/`,
-            { file_format: 'mp3' },
+            { file_format: 'mp3', time_limit: 3600 },
             { headers: { 'X-Auth-ID': V_AUTH_ID(), 'X-Auth-Token': V_AUTH_TOKEN(), 'Content-Type': 'application/json' }, timeout: 10000, validateStatus: () => true });
         console.log(`[vobiz ${tag}] record API:`, r.status, JSON.stringify(r.data || {}).slice(0, 140));
         if (session && r.data) session.recordingUrl = r.data.recording_url || r.data.url || null;
@@ -657,7 +749,7 @@ router.all('/vobiz/answer', async (req, res) => {
             catch (e) { console.log('[vobiz] inbound order lookup failed:', e.message); }
         }
         ctx.firstName = String(ctx.customer_name || 'ji').trim().split(/\s+/)[0];
-        const sid = createSession({ phone: from, ctx, lang: process.env.VOBIZ_INBOUND_LANG || 'hi-IN', voice: process.env.VOBIZ_INBOUND_VOICE || 'kavya' });
+        const sid = createSession({ phone: from, ctx, lang: process.env.VOBIZ_INBOUND_LANG || 'en-IN', voice: process.env.VOBIZ_INBOUND_VOICE || 'kavya' });
         armOpening(sessions.get(sid));
         console.log(`[vobiz ${sid.slice(0, 6)}] INBOUND call from ${from} — order ${ctx.order_name || '(none)'}`);
         const wssIn = `${V_BASE().replace(/^https/, 'wss')}/api/vobiz/media?token=${V_TOKEN()}&amp;sid=${sid}`;
@@ -730,4 +822,4 @@ function attachVobizWs(httpServer) {
     });
 }
 
-module.exports = { router, attachVobizWs, createSession, sessions };
+module.exports = { router, attachVobizWs, createSession, sessions, placeOrderCall, vobizConfigured };
