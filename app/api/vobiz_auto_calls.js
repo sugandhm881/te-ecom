@@ -261,19 +261,26 @@ router.post('/vobiz/high-value-call-tick', async (req, res) => {
 // The summary's first line is summarizeCall's fixed vocabulary (confirmed / wants cancel / will
 // reattempt / no clear answer / other) — negations are checked FIRST so "not confirmed" and
 // "no clear answer" can never read as a confirmation.
-function classifyOutcome(summary, exchanges) {
+// `customerTurns` = how many times the CUSTOMER spoke — never the agent's own lines (the
+// TE25-45877 lesson: an unanswered call carried 2 agent lines, counted as 2 exchanges, read as
+// 'unclear', and the retry ladder never armed). Zero customer speech is ALWAYS no_answer; one brief
+// turn with a disconnect cue in the summary (busy, dropped, cut) is no_answer too — both retry.
+// 'unclear' stays reserved for a customer who actually talked but gave no clear yes/no.
+function classifyOutcome(summary, customerTurns) {
     const line = String(summary || '').split('\n')[0] || '';
-    if (!exchanges || exchanges < 2) return { outcome: 'no_answer', note: 'call not answered or too short' };
+    if (!customerTurns) return { outcome: 'no_answer', note: 'call not answered — customer never spoke' };
+    if (customerTurns <= 1 && /disconnect|no response|did not respond|never answered|line dropped|call dropped|call cut/i.test(line))
+        return { outcome: 'no_answer', note: 'customer could not respond (busy or call dropped)' };
     if (/no clear|not confirm|unclear|no answer|couldn'?t|did not/i.test(line)) return { outcome: 'unclear', note: 'customer did not clearly confirm on call' };
     if (/cancel|denie|reject|refus|does ?n.t want|not want/i.test(line)) return { outcome: 'denied', note: 'customer denied on call' };
     if (/confirm/i.test(line)) return { outcome: 'confirmed', note: 'customer confirmed the order on call' };
     return { outcome: 'unclear', note: 'customer did not clearly confirm on call' };
 }
 
-async function handleCodCallOutcome({ orderName, summary, exchanges }) {
+async function handleCodCallOutcome({ orderName, summary, customerTurns }) {
     const name = String(orderName || '').replace(/^#/, '').trim();
     if (!name) return;
-    const { outcome, note } = classifyOutcome(summary, exchanges);
+    const { outcome, note } = classifyOutcome(summary, customerTurns);
     if (outcome === 'no_answer') {
         // Busy / picked up and dropped — the retry ladder owns this, not the outcome record.
         const { data: row } = await supabase.from('vobiz_auto_calls_ecom')

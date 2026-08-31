@@ -770,13 +770,15 @@ function check(name, got, want) {
         // Behavioural: the real classifier — negations can never read as confirmation, a short
         // call is never an outcome, and only 'confirmed' unlocks any automatic action.
         const { classifyOutcome } = require(path.join(ROOT, 'app/api/vobiz_auto_calls.js'));
-        check('hv-call outcome: confirmed / denied / unclear classified from the summary vocabulary',
+        check('hv-call outcome: classified from CUSTOMER speech + summary — silence/dropped retries, vague talk goes to a human (TE25-45877 lesson)',
             [classifyOutcome('OUTCOME (confirmed): order confirmed', 3).outcome,
              classifyOutcome('OUTCOME (wants cancel): does not want it', 3).outcome,
              classifyOutcome('OUTCOME (no clear answer): noisy line', 3).outcome,
              classifyOutcome('not confirmed by customer', 4).outcome,
-             classifyOutcome('anything', 1).outcome],
-            ['confirmed', 'denied', 'unclear', 'unclear', 'no_answer']);
+             classifyOutcome('no clear answer: call disconnected without response', 0).outcome,
+             classifyOutcome('no clear answer: call disconnected without response', 1).outcome,
+             classifyOutcome('anything', 0).outcome],
+            ['confirmed', 'denied', 'unclear', 'unclear', 'no_answer', 'no_answer', 'no_answer']);
         check('hv-call outcome: confirmed auto-unholds BOTH systems, denied/unclear take NO action and are highlighted in the queue',
             [/releaseOrder\(name, ord\.id, BY\)/.test(hv), /unholdOrderByAutomation\(name, BY\)/.test(hv),
              /no automatic action/.test(hv),

@@ -538,9 +538,12 @@ class VoiceCall {
             // the call = auto-unhold, documented; denied / unclear = NO action, just recorded so the
             // Call Queue can highlight it. Manual button calls are untouched — a human is already there.
             if (this.s.auto && (this.s.callType || '') === 'cod_confirm' && this.s.ctx.order_name) {
+                // customerTurns, NOT transcript length: on the first live call (TE25-45877) the agent's
+                // own two lines ("Hello… Can you hear me?") counted as exchanges, so a never-answered
+                // call read as 'unclear' (no retry) instead of 'no_answer' (retry ladder).
                 require('./vobiz_auto_calls').handleCodCallOutcome({
                     orderName: this.s.ctx.order_name, summary,
-                    exchanges: Math.ceil(this.s.transcript.length / 2),
+                    customerTurns: this.s.transcript.filter(l => /^customer:/i.test(l)).length,
                 }).catch(e => this.log('outcome handling failed:', e.message));
             }
         } catch (e) { this.log('log save failed:', e.message); }
