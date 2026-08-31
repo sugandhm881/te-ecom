@@ -91,30 +91,25 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
     // after it (was: paginate fully, THEN await FB — the two slow parts ran back-to-back).
     const fbAdsPromise = getFacebookAds(since, until);
 
-    // Fetch orders in parallel: page 0 with an exact count to learn the total, then request every
-    // remaining page at once via Promise.all (was: one sequential .range() round-trip per 1000 rows).
-    const buildOrdersPage = (from, withCount) => supabase.from('enriched_orders_ecom')
-        .select(COLS, withCount ? { count: 'exact' } : undefined)
+    // Page until a short page comes back — NO `count: 'exact'` (2026-08-31). The exact count made
+    // PostgREST scan the whole month range twice in one statement; at month-end (6.4k orders of
+    // heavy JSON) during a checkpoint that statement hit the DB's statement timeout, the error was
+    // logged-and-swallowed, and the 8:07 report emailed every ad set with spend but ZERO orders.
+    // Now a failed page is retried once and a still-failing fetch THROWS — the caller must abort
+    // (cron skips the PDF, the route returns 500) because no report beats a wrong report.
+    const buildOrdersPage = (from) => supabase.from('enriched_orders_ecom')
+        .select(COLS)
         .gte(dateCol, startDate).lte(dateCol, endDate)
         .order('shopify_id', { ascending: true })
         .range(from, from + PAGE - 1);
 
     const shopifyOrdersInRange = [];
-    const firstPage = await buildOrdersPage(0, true);
-    if (firstPage.error) {
-        console.error('[Supabase] enriched_orders_ecom fetch error:', firstPage.error.message);
-    } else {
-        shopifyOrdersInRange.push(...(firstPage.data || []));
-        const totalOrders = firstPage.count != null ? firstPage.count : shopifyOrdersInRange.length;
-        if (totalOrders > shopifyOrdersInRange.length) {
-            const reqs = [];
-            for (let from = PAGE; from < totalOrders; from += PAGE) reqs.push(buildOrdersPage(from, false));
-            const pages = await Promise.all(reqs);
-            for (const p of pages) {
-                if (p.error) { console.error('[Supabase] enriched_orders_ecom fetch error:', p.error.message); continue; }
-                shopifyOrdersInRange.push(...(p.data || []));
-            }
-        }
+    for (let from = 0; ; from += PAGE) {
+        let page = await buildOrdersPage(from);
+        if (page.error) page = await buildOrdersPage(from);        // one retry (transient timeout/load)
+        if (page.error) throw new Error(`enriched_orders_ecom fetch failed at row ${from}: ${page.error.message}`);
+        shopifyOrdersInRange.push(...(page.data || []));
+        if ((page.data || []).length < PAGE) break;
     }
 
     const orders = (shopifyOrdersInRange || []).map(row => ({
@@ -136,8 +131,11 @@ async function getAdsetPerformanceData(since, until, dateFilterType = 'created_a
     const journeyByAwb = {};
     const awbList = [...new Set(orders.map(o => o.awb).filter(Boolean).map(String))];
     for (let i = 0; i < awbList.length; i += 200) {
-        const { data, error } = await supabase.from('shipment_journey_ecom')
+        let r = await supabase.from('shipment_journey_ecom')
             .select('awb, outcome').in('awb', awbList.slice(i, i + 200));
+        if (r.error) r = await supabase.from('shipment_journey_ecom')
+            .select('awb, outcome').in('awb', awbList.slice(i, i + 200));
+        const { data, error } = r;
         if (error) { console.warn('[Adset] journey lookup failed:', error.message); break; }
         (data || []).forEach(j => { if (j.awb) journeyByAwb[String(j.awb)] = j.outcome; });
     }

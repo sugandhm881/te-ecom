@@ -67,6 +67,13 @@ function check(name, got, want) {
     const { normalizeStatus } = require(path.join(ROOT, 'app/api/helpers'));
     const kwikshipDelivered = { fulfillment_status: 'fulfilled', fulfillments: [{}] };
 
+    {
+        const ap = fs.readFileSync(path.join(ROOT, 'app/api/adset_performance.js'), 'utf8');
+        check('adset: order fetch has no exact count (double scan hit the statement timeout), retries once, and THROWS instead of emailing zeros (2026-08-31)',
+            [!/\{ count: 'exact' \}/.test(ap), /if \(page\.error\) page = await buildOrdersPage\(from\)/.test(ap),
+             /throw new Error\(`enriched_orders_ecom fetch failed/.test(ap)],
+            [true, true, true]);
+    }
     check('adset: courier delivered beats Shopify FULFILLED',
         normalizeStatus(kwikshipDelivered, 'FULFILLED', null, 'delivered'), 'Delivered');
     check('adset: courier rto wins',
