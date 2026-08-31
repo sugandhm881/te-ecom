@@ -66,13 +66,13 @@ function slackToHtml(payload) {
 // Cell values are mrkdwn strings. align: 'Center' (default — header and body share it) | 'Left' | 'Right'.
 function tableCols(b) {
     return (b.columns || []).map(c => (typeof c === 'string' ? { title: c } : c))
-        .map((c, i) => ({ title: c.title || '', width: String(c.width || (i === 0 ? 3 : 2)), align: c.align || 'Center' }));
+        .map((c, i) => ({ title: c.title || '', width: String(c.width || (i === 0 ? 3 : 2)), align: c.align || 'Center', wrap: !!c.wrap }));
 }
 function tableToCard(b) {
     const cols = tableCols(b);
     const rows = b.rows || [];
     const cellBlock = (txt, c, opts = {}) => ({
-        type: 'TextBlock', text: mrkdwn(txt == null ? '' : String(txt)), wrap: false, spacing: opts.spacing || 'Small',
+        type: 'TextBlock', text: mrkdwn(txt == null ? '' : String(txt)), wrap: !!c.wrap, spacing: opts.spacing || 'Small',
         horizontalAlignment: c.align, size: opts.size || 'Default',
         weight: opts.weight, isSubtle: opts.isSubtle, separator: opts.separator,
     });
@@ -98,7 +98,7 @@ function tableToNativeCard(b) {
     const cell = (txt, c, opts = {}) => ({
         type: 'TableCell',
         items: [{
-            type: 'TextBlock', text: mrkdwn(txt == null ? '' : String(txt)), wrap: false,
+            type: 'TextBlock', text: mrkdwn(txt == null ? '' : String(txt)), wrap: !!c.wrap,
             horizontalAlignment: c.align, size: 'Small',
             weight: opts.weight, isSubtle: opts.isSubtle,
         }],

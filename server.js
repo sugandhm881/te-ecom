@@ -201,7 +201,7 @@ const _VIEW_PERMS = [
     // shared with live, so users carry both until the old key is retired.
     [/^\/customer\//i, ['customer-profile', 'support-blacklist']],
     [/^\/voice-(config|order-lookup|order-list)/i, 'support-voice'],   // Voice Agent tool endpoints — permitted users / admins only
-    [/^\/vobiz\/(call|recording|high-value-call-tick)$/i, ['support-voice', 'support-queue']],   // real outbound AI call + recording playback + high-value auto-call test trigger (Vobiz bridge)
+    [/^\/vobiz\/(call|recording|high-value-call-tick|ai-call-report)$/i, ['support-voice', 'support-queue']],   // real outbound AI call + recording playback + high-value auto-call test trigger (Vobiz bridge)
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
     // Inventory Analytics. Stock Count (WH-only) + its deep Count Analysis (manager-only) are separate perms —
@@ -336,6 +336,7 @@ app.use('/api', require('./app/api/agent_learning').router);   // voice-agent se
 const vobizBridge = require('./app/api/vobiz_bridge');    // real phone calls: Vobiz telephony ⇄ Sarvam voice agent
 app.use('/api', vobizBridge.router);
 app.use('/api', require('./app/api/vobiz_auto_calls').router);   // high-value COD confirmation auto-caller (test trigger)
+app.use('/api', require('./app/api/ai_call_report').router);     // daily AI calling report → Teams (manual trigger/preview)
 app.use('/api', require('./app/api/user_activity').router);   // activity logging (POST /activity — any signed-in user)
 app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
 app.use('/api', require('./app/api/inventory').router);       // Inventory Analytics (daily snapshot dashboard + Teams report)
@@ -563,6 +564,13 @@ cronJob('WA NDR (*/15 * * * *)', '*/15 * * * *', async () => {
 cronJob('HighValueCall (*/10 * * * *)', '*/10 * * * *', async () => {
     const { highValueCallTick } = require('./app/api/vobiz_auto_calls');
     await highValueCallTick().catch(e => console.error('[HVCall] cron error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// Daily AI Calling Report → Teams (Ops › Daily Reports), 20:15 IST — right after the calling window
+// closes. Skips quietly when TEAMS_WEBHOOK_AI_CALLS is unset or the day had no calls.
+cronJob('AICallReport (15 20 * * *)', '15 20 * * *', async () => {
+    const { sendAiCallReport } = require('./app/api/ai_call_report');
+    await sendAiCallReport().catch(e => console.error('[AI-CallReport] cron error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // Influencer video metrics — every Friday 11:00 PM IST, refresh the last-30-days videos so the

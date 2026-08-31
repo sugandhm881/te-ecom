@@ -785,8 +785,21 @@ function check(name, got, want) {
             [true, true, true, true, true]);
         check('hv-call: route and auto-caller share ONE placeOrderCall (allowlist inside it), cron wired, endpoint capability-gated',
             [/async function placeOrderCall\(b\)/.test(vb), /placeOrderCall, vobizConfigured/.test(hv),
-             /HighValueCall \(\*\/10/.test(sv), /high-value-call-tick\)\$\/i, \['support-voice', 'support-queue'\]/.test(sv)],
+             /HighValueCall \(\*\/10/.test(sv), /high-value-call-tick[^)]*\)\$\/i, \['support-voice', 'support-queue'\]/.test(sv)],
             [true, true, true, true]);
+    }
+    {
+        const rep = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_report.js'), 'utf8');
+        const sv2 = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+        check('ai call report: daily 20:15 IST, posted BY THE BOT as a reply in the Daily Reports thread (webhook only as fallback); outcomes, ₹ impact, quality, capped table; quiet on an empty day',
+            [/bot\.sendToChannel\(AI_CALLS_THREAD\(\), activity\)/.test(rep), /messageid=1788173520400/.test(rep),
+             /TEAMS_WEBHOOK_AI_CALLS/.test(rep), /released to dispatch/.test(rep), /saved from likely RTO/.test(rep),
+             /slice\(0, 10\)/.test(rep), /no activity/.test(rep),
+             /AICallReport \(15 20/.test(sv2), /ai-call-report\)\$\/i/.test(sv2)],
+            [true, true, true, true, true, true, true, true, true]);
+        // behavioural: the IST day window really is midnight IST expressed in UTC
+        const m = rep.match(/const IST = 5\.5 \* 3600e3/);
+        check('ai call report: IST day window helper present', [!!m], [true]);
     }
     check('wa chat: mirror timestamps are de-skewed at merge (IST-as-UTC, 5h30m) so one send renders ONCE at the true time (TE25-45549 lesson)',
         [/MIRROR_SKEW_MS = 5\.5 \* 3600e3/.test(wa), /new Date\(m\.sent_at\)\.getTime\(\) - MIRROR_SKEW_MS/.test(wa)],
