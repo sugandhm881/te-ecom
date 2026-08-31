@@ -739,6 +739,10 @@ function check(name, got, want) {
                  fs.existsSync(path.join(ROOT, 'docs/PRODUCT_KNOWLEDGE.md')),
                  fs.existsSync(path.join(ROOT, 'supabase/migrations/20260831_product_knowledge.sql'))],
                 [true, true, true, true, true, true, true]);
+            check('voice tone: no exclamation ever reaches the synthesizer (reads as excitement) — closing is calm, sanitize strips "!"',
+                [/s = s\.replace\(\/!\+\/g, '\.'\)/.test(vb2), /Have a great day\."/.test(vb2),
+                 /spoken CALM and settled/.test(vb2)],
+                [true, true, true]);
             check('voice call polish 2026-08-31: denial asks the reason once; other-language replies are never a direct outcome; recordings not capped at 60s',
                 [/May I know the reason please\?/.test(vb2), /DIFFERENT-LANGUAGE REPLY/.test(vb2),
                  /no confirming, no cancelling, no reason-asking, no closing/.test(vb2),

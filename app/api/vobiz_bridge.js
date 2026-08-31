@@ -171,11 +171,14 @@ SPOKEN DELIVERY RULES (your words go DIRECTLY to a voice synthesizer):
 - Your OWN first-person ${langName === 'Hindi' ? 'Hindi verb forms are your gender’s: ' + forms : 'voice is ' + sp.gender}.
 - Address the customer as FIRST NAME + ${langName === 'Hindi' ? 'जी' : '"ji"'}; for the customer always respectful plural forms (रहेंगे/करेंगे/होंगे) — NEVER feminine forms for the customer: रहेंगी, होंगी, चाहती, करेंगी are all FORBIDDEN — always चाहेंगे/रहेंगे.
 - Asking for their time is a QUESTION: "क्या आपके पास दो मिनट हैं?" — never "बस दो मिनट का time है".
-- CLOSING: ${langName === 'Hindi' ? `"${HI_CLOSE}"` : '"Thank you for choosing The Element. Have a great day!"'} — never a bare goodbye. Never repeat a sentence twice in the call.${s.lessonsBlock || ''}`;
+- CLOSING: ${langName === 'Hindi' ? `"${HI_CLOSE}"` : '"Thank you for choosing The Element. Have a great day."'} — never a bare goodbye, and spoken CALM and settled: the goodbye is a soft, warm sign-off, never excited — no exclamation marks anywhere in the closing sentences (the voice synthesizer reads "!" as excitement). Never repeat a sentence twice in the call.${s.lessonsBlock || ''}`;
 }
 
 function sanitizeReply(t) {
     let s = String(t || '');
+    // TTS reads "!" as excitement — the user heard a bursting "Have a great day!" on a live call
+    // (2026-08-31) and asked for sober. A courteous phone agent never needs an exclamation mark.
+    s = s.replace(/!+/g, '.');
     s = s.replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/gi, ' ');
     s = s.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, ' ');
     s = s.replace(/<[^>]{1,80}>/g, ' ');
