@@ -766,6 +766,9 @@ function check(name, got, want) {
             [/turn\.set\(r\.order_name, r\)/.test(hv), /await claim\(name, row, attemptNo\)/.test(hv),
              /h < WINDOW\.from \|\| h >= WINDOW\.to/.test(hv), /cod_confirmations_msg91/.test(hv)],
             [true, true, true, true]);
+        check('hv-call retries ride their own rail: a due retry redials even after the hold leaves the 48h ladder window (TE25-45530)',
+            [/DUE RETRIES ride on their own rail/.test(hv), /eq\('status', 'retry'\)[\s\S]{0,20}\.lte\('next_attempt_at'/.test(hv)],
+            [true, true]);
         check('hv-call attempts: every DIAL is logged on the turnstile (attempt_log) and the order modal shows all of them — unanswered dials included',
             [/attempt_log: \[\{ n: 1, at \}\]/.test(hv), /function logResult/.test(hv),
              /ai_attempts/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8')),
@@ -787,8 +790,9 @@ function check(name, got, want) {
              classifyOutcome('not confirmed by customer', 4).outcome,
              classifyOutcome('no clear answer: call disconnected without response', 0).outcome,
              classifyOutcome('no clear answer: call disconnected without response', 1).outcome,
+             classifyOutcome('no clear answer: voicemail only, customer unavailable', 3).outcome,
              classifyOutcome('anything', 0).outcome],
-            ['confirmed', 'denied', 'unclear', 'unclear', 'no_answer', 'no_answer', 'no_answer']);
+            ['confirmed', 'denied', 'unclear', 'unclear', 'no_answer', 'no_answer', 'no_answer', 'no_answer']);
         check('hv-call outcome: confirmed auto-unholds BOTH systems, denied/unclear take NO action and are highlighted in the queue',
             [/releaseOrder\(name, ord\.id, BY\)/.test(hv), /unholdOrderByAutomation\(name, BY\)/.test(hv),
              /no automatic action/.test(hv),

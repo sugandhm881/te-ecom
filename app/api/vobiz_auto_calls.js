@@ -172,6 +172,18 @@ async function highValueCallTick(opts = {}) {
         }
     }
     if (opts.testOrder) targets = targets.map(name => ({ name, soleReason: true, identity: null }));
+
+    // DUE RETRIES ride on their own rail (TE25-45530 lesson, 2026-08-31): a retry that comes due
+    // after the order's hold crosses the 48h ladder edge would otherwise never be seen again — the
+    // ladder window gates the FIRST call, not the follow-ups an unanswered customer is owed.
+    // Eligibility was already proven at attempt 1; the needs-a-call guards below still re-check.
+    if (!opts.testOrder) {
+        const have = new Set(targets.map(t => t.name));
+        const { data: due } = await supabase.from('vobiz_auto_calls_ecom')
+            .select('order_name').eq('purpose', PURPOSE).eq('status', 'retry')
+            .lte('next_attempt_at', new Date().toISOString()).limit(50);
+        (due || []).forEach(r => { if (!have.has(r.order_name)) targets.push({ name: r.order_name, soleReason: true, identity: null }); });
+    }
     if (!targets.length) return { placed: 0, targets: 0 };
 
     // Unanswered calls first: they decide which rows below are due a redial.
@@ -279,6 +291,10 @@ router.post('/vobiz/high-value-call-tick', async (req, res) => {
 function classifyOutcome(summary, customerTurns) {
     const line = String(summary || '').split('\n')[0] || '';
     if (!customerTurns) return { outcome: 'no_answer', note: 'call not answered — customer never spoke' };
+    // VOICEMAIL looks like a talking customer (the machine's greeting transcribes as customer turns —
+    // TE25-45530: 125s with an answering machine, filed 'unclear', no retry). The summary names it.
+    if (/voice ?mail|answering machine|customer unavailable/i.test(line))
+        return { outcome: 'no_answer', note: 'voicemail — customer unavailable' };
     if (customerTurns <= 1 && /disconnect|no response|did not respond|never answered|line dropped|call dropped|call cut/i.test(line))
         return { outcome: 'no_answer', note: 'customer could not respond (busy or call dropped)' };
     if (/no clear|not confirm|unclear|no answer|couldn'?t|did not/i.test(line)) return { outcome: 'unclear', note: 'customer did not clearly confirm on call' };
