@@ -18,8 +18,9 @@
 // written — the 2026-08-30 lesson: the unique key is the race guard, never the normal path.
 //
 // A call is placed only when ALL of these hold:
-//   · hold ledger has verdict='hold' with reasons exactly ["high_value"], 30 min – 48 h old
-//     (30 min gives the WhatsApp confirm + reminder first word; 48 h is the age seal)
+//   · hold ledger has verdict='hold' with reasons exactly ["high_value"], 5 min – 48 h old
+//     (5 min — user 2026-09-01, "auto call should initiate after 5 minute of order placed"; the
+//     WhatsApp confirm still fires first at 3 min. 48 h is the age seal)
 //   · the order is still COD-pending, not cancelled, not fulfilled
 //   · the customer has NOT already replied to the WhatsApp confirmation (any reply = they spoke)
 //   · IST clock is inside the calling window (10:00–19:59) — nobody gets a 2 AM robot call
@@ -163,7 +164,7 @@ async function highValueCallTick(opts = {}) {
         targets = [String(opts.testOrder).replace(/^#/, '').trim()];
     } else {
         const from = new Date(Date.now() - 48 * 3600e3).toISOString();
-        const to = new Date(Date.now() - 30 * 60e3).toISOString();
+        const to = new Date(Date.now() - 5 * 60e3).toISOString();   // 5 min after placement (user, 2026-09-01; was 30)
         const { data: evals, error } = await supabase.from('hold_evaluations_ecom')
             .select('order_name, reasons, identity').eq('verdict', 'hold')
             .gte('created_at', from).lte('created_at', to)
@@ -185,9 +186,11 @@ async function highValueCallTick(opts = {}) {
     // Eligibility was already proven at attempt 1; the needs-a-call guards below still re-check.
     if (!opts.testOrder) {
         const have = new Set(targets.map(t => t.name));
+        // 65s grace: the cron fires at :00 and a retry armed at :00:02 would otherwise slip a whole
+        // 10-minute cycle over two seconds (TE25-46030, 2026-09-01).
         const { data: due } = await supabase.from('vobiz_auto_calls_ecom')
             .select('order_name').eq('purpose', PURPOSE).eq('status', 'retry')
-            .lte('next_attempt_at', new Date().toISOString()).limit(50);
+            .lte('next_attempt_at', new Date(Date.now() + 65e3).toISOString()).limit(50);
         (due || []).forEach(r => { if (!have.has(r.order_name)) targets.push({ name: r.order_name, soleReason: true, identity: null }); });
     }
     if (!targets.length) return { placed: 0, targets: 0 };
@@ -213,7 +216,7 @@ async function highValueCallTick(opts = {}) {
         let redial = false;
         if (row) {
             if (row.status === 'retry') {
-                if (!row.next_attempt_at || new Date(row.next_attempt_at) > new Date()) continue;   // not due yet
+                if (!row.next_attempt_at || new Date(row.next_attempt_at) > new Date(Date.now() + 65e3)) continue;   // not due (65s grace — see the rail note)
                 redial = true;
             } else if (row.status !== 'gated') {
                 if (opts.testOrder) results.push({ order: name, skip: 'already called (turnstile)' });

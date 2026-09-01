@@ -132,6 +132,17 @@ router.post('/inf/influencers', async (req, res) => {
 });
 
 // Full detail: influencer + videos + activity timeline + list memberships
+// Discovery popup → profile popup: resolve the CRM id for a handle (2026-09-01). 404 = not in CRM yet.
+router.get('/inf/influencer-by-handle/:handle', async (req, res) => {
+    try {
+        const handle = cleanHandle(req.params.handle);
+        if (!handle) return res.status(400).json({ success: false, error: 'handle required' });
+        const { data } = await supabase.from('influencers').select('id').eq('instagram_handle', handle).maybeSingle();
+        if (!data) return res.status(404).json({ success: false, error: 'not in CRM' });
+        res.json({ success: true, id: data.id });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
 router.get('/inf/influencer/:id', async (req, res) => {
     try {
         const id = req.params.id;
@@ -565,6 +576,12 @@ router.get('/inf/discover/history', async (req, res) => {
 // Drain pending analysis_queue rows (brand-scan discoveries) via the worker edge fn
 router.post('/inf/discover/process-queue', async (req, res) => {
     try {
+        // Unclaim ZOMBIES first (2026-09-01: 31 rows sat 'processing' for 3 days after a worker died
+        // mid-run — the worker only picks 'pending', so a crashed claim was stuck forever). Anything
+        // claimed over an hour ago is a dead worker's leftovers, never live work.
+        await supabase.from('analysis_queue').update({ status: 'pending' })
+            .eq('status', 'processing').lt('created_at', new Date(Date.now() - 3600e3).toISOString())
+            .then(() => {}).catch(() => {});
         const r = await invokeFn('process-analysis-queue', {}, 30000);
         if (r.status >= 400) return res.status(502).json({ success: false, error: (r.data && r.data.error) || `process-analysis-queue returned ${r.status}` });
         res.json({ success: true, result: r.data });

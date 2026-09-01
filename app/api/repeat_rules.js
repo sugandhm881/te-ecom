@@ -17,7 +17,8 @@
 //   in_flight           an OLDER non-terminal order of this customer is still open (COD only)
 //   recent_undelivered  none of the last 3 PRIOR orders delivered, and ≥1 of them is a non-delivery
 //                       (RTO counts; cancelled does not; if ANY of the 3 delivered the customer is trusted)
-//   high_value          ≥ ₹1500 — unless the customer has EVER taken delivery of a ≥ ₹1500 order (COD + partial-paid)
+//   high_value          ≥ ₹1500 — unless the customer EVER took delivery of a ≥ ₹1500 order, OR any of
+//                       their last 3 orders INCLUDING this one (= the 2 prior) was delivered, any value (user rule 2026-09-01)
 //   short_address       < 60 chars — unless a PAST DELIVERED order used the same address (COD only)
 // Fully prepaid orders never hold; partially-paid orders hold on high_value only.
 'use strict';
@@ -140,13 +141,19 @@ function evaluateReasons({ cand, history, deliveredHighValue, deliveredAddrNorms
     const before = new Date(cand.created_at || Date.now());
     const prior = history.filter(h => String(h.order_id) !== String(cand.order_id) && new Date(h.created_at) < before);
     const reasons = [];
+    const last3 = prior.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
+    const reliable = last3.some(h => h.bucket === 'delivered');
     if (!isPartialPaid) {
-        const last3 = prior.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 3);
-        const reliable = last3.some(h => h.bucket === 'delivered');
         if (prior.some(h => !TERMINAL_BUCKETS.has(h.bucket) && !cancelled(h))) reasons.push('in_flight');
         if (!reliable && last3.some(h => h.bucket !== 'delivered' && !cancelled(h))) reasons.push('recent_undelivered');
     }
-    if (Number(cand.total_price || 0) >= HIGH_VALUE_MIN && !deliveredHighValue) reasons.push('high_value');
+    // high_value exemptions: EVER took delivery of a ≥₹1500 order, OR (user rule 2026-09-01, from
+    // TE25-46030: "if last 3 orders any is delivered then don't hold 1500 & above order… last three
+    // mean including that current order") a delivered order of ANY value among the last 3 counting
+    // THIS order — i.e. the 2 orders before it. A customer who provably accepts parcels is not a
+    // first-time-high-value risk.
+    const deliveredInWindow = last3.slice(0, 2).some(h => h.bucket === 'delivered');
+    if (Number(cand.total_price || 0) >= HIGH_VALUE_MIN && !deliveredHighValue && !deliveredInWindow) reasons.push('high_value');
     if (!isPartialPaid) {
         const addr = String(cand.address || '').trim();
         if (addr && addr.length < SHORT_ADDR_MAX && !(deliveredAddrNorms && deliveredAddrNorms.has(normAddr(addr)))) reasons.push('short_address');

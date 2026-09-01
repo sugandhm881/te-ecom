@@ -5823,8 +5823,8 @@ async function supOrderModal(orderId){
         </div>
       </div>
       <div class="grid md:grid-cols-2 gap-6 mt-5">
-        <div class="card p-4"><div class="flex items-center justify-between mb-2"><p id="supd-calls-count" class="text-xs font-bold text-slate-500 uppercase tracking-wide">Call history (${(d.calls||[]).length+(d.ai_calls||[]).length})</p></div>
-          <div id="supd-calls-list" class="space-y-2 max-h-52 overflow-auto">${supAiAttemptsCard(d.ai_attempts)}${(d.ai_calls||[]).map((ac,i)=>`<div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-2.5 text-xs">
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><p id="supd-calls-count" class="text-xs font-bold text-slate-500 uppercase tracking-wide">Call history (${(d.calls||[]).length+(d.ai_calls||[]).length} answered${d.ai_attempts&&d.ai_attempts.attempts?` · ${d.ai_attempts.attempts} AI dial${d.ai_attempts.attempts===1?'':'s'}`:''})</p></div>
+          <div id="supd-calls-list" class="space-y-2 max-h-52 overflow-auto">${supAiAttemptsCard(d.ai_attempts)}${(!(d.calls||[]).length&&!(d.ai_calls||[]).length&&d.ai_attempts&&d.ai_attempts.attempts)?'<p class="text-[11px] text-slate-400">Dialed but not answered yet — a transcript and recording appear only when a call connects.</p>':''}${(d.ai_calls||[]).map((ac,i)=>`<div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-2.5 text-xs">
             <div class="flex items-center gap-2 flex-wrap"><span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">\u{1F916} AI call</span>
               <span class="text-slate-400">${escapeHtml((ac.call_type||'').replace('_vobiz','').replace(/_/g,' '))} · ${escapeHtml(ac.language||'')} · ${ac.called_at?new Date(ac.called_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span></div>
             ${ac.summary?`<p class="text-slate-700 mt-1 whitespace-pre-wrap">${escapeHtml(ac.summary)}</p>`:''}
@@ -8016,72 +8016,129 @@ async function loadUsers(){
   try{
     const r=await fetch('/api/admin/users',{headers:getAuthHeaders()});
     const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed to load users');
-    renderUsers(d.users||[]);
+    _usersCache=d.users||[];
+    renderUsers(_usersCache);
   }catch(e){ if(box) box.innerHTML='<p class="text-sm text-rose-500">'+ecEsc(e.message)+'</p>'; }
 }
+let _usersCache=[];
+let _usersUI={q:'',st:'all'};
+// Premium redesign 2026-09-01 (user: "make premium and professional"): toolbar with search + status
+// filter chips, one elevated list with dividers, gradient avatars, an access METER per user, calm
+// primary action + a kebab menu holding the destructive/rare actions. No gradient utilities exist in
+// the prebuilt Tailwind, so avatar/meter gradients are inline styles.
+const _AVGRAD={'bg-rose-500':'linear-gradient(135deg,#f43f5e,#d946ef)','bg-orange-500':'linear-gradient(135deg,#f97316,#f59e0b)','bg-amber-500':'linear-gradient(135deg,#f59e0b,#eab308)','bg-emerald-500':'linear-gradient(135deg,#10b981,#14b8a6)','bg-teal-500':'linear-gradient(135deg,#14b8a6,#06b6d4)','bg-sky-500':'linear-gradient(135deg,#0ea5e9,#6366f1)','bg-indigo-500':'linear-gradient(135deg,#6366f1,#8b5cf6)','bg-violet-500':'linear-gradient(135deg,#8b5cf6,#d946ef)','bg-fuchsia-500':'linear-gradient(135deg,#d946ef,#ec4899)','bg-pink-500':'linear-gradient(135deg,#ec4899,#f43f5e)'};
 function renderUsers(users){
   const box=document.getElementById('users-list'); if(!box) return;
   const rank={pending:0,active:1,disabled:2};
-  users=[...users].sort((a,b)=>(a.role==='admin'?9:(rank[a.status]??3))-(b.role==='admin'?9:(rank[b.status]??3)));
-  const pending=users.filter(u=>u.status==='pending'&&u.role!=='admin').length;
-  const badge=st=>({active:'bg-emerald-50 text-emerald-700 ring-emerald-200',pending:'bg-amber-50 text-amber-700 ring-amber-200',disabled:'bg-slate-100 text-slate-500 ring-slate-200'}[st]||'bg-slate-100 text-slate-500 ring-slate-200');
-  const summary=`<div class="flex items-center gap-2 mb-4 text-sm"><span class="text-slate-500"><b class="text-slate-800">${users.length}</b> user${users.length!==1?'s':''}</span>${pending?`<span class="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-xs font-semibold ring-1 ring-amber-200">${pending} pending approval</span>`:''}</div>`;
-  box.innerHTML = summary + (users.map(u=>{
+  const allUsers=[...users].sort((a,b)=>(a.role==='admin'?9:(rank[a.status]??3))-(b.role==='admin'?9:(rank[b.status]??3)));
+  const counts={all:allUsers.length,active:0,pending:0,disabled:0};
+  allUsers.forEach(u=>{ if(counts[u.status]!=null&&u.role!=='admin') counts[u.status]++; });
+  const q=_usersUI.q.toLowerCase();
+  const shown=allUsers.filter(u=>(_usersUI.st==='all'||u.status===_usersUI.st)
+    &&(!q||String(u.name||'').toLowerCase().includes(q)||String(u.email||'').toLowerCase().includes(q)||String(u.mobile||'').includes(q)));
+  const chip=(key,label,n,cls)=>`<button data-ufilter="${key}" class="px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${_usersUI.st===key?'bg-slate-800 text-white shadow-sm':'bg-white text-slate-500 ring-1 ring-slate-200 hover:bg-slate-50'}">${label}${n!=null?` <span class="${_usersUI.st===key?'text-slate-300':cls}">${n}</span>`:''}</button>`;
+  const toolbar=`<div class="flex items-center gap-3 flex-wrap mb-5">
+      <div class="relative flex-1 min-w-[220px] max-w-sm">
+        <svg class="w-4 h-4 text-slate-300 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z"/></svg>
+        <input id="users-search" type="text" value="${ecEsc(_usersUI.q)}" placeholder="Search name, email or mobile…" class="filter-input w-full" style="padding-left:2.25rem">
+      </div>
+      <div class="flex items-center gap-1.5 flex-wrap">
+        ${chip('all','All',counts.all,'text-slate-400')}${chip('active','Active',counts.active,'text-emerald-600')}${chip('pending','Pending',counts.pending,'text-amber-600')}${chip('disabled','Disabled',counts.disabled,'text-slate-400')}
+      </div></div>`;
+  const dot=st=>({active:'bg-emerald-500',pending:'bg-amber-400',disabled:'bg-slate-300'}[st]||'bg-slate-300');
+  const pill=st=>({active:'bg-emerald-50 text-emerald-700 ring-emerald-200',pending:'bg-amber-50 text-amber-700 ring-amber-200',disabled:'bg-slate-100 text-slate-500 ring-slate-200'}[st]||'bg-slate-100 text-slate-500 ring-slate-200');
+  const rows=shown.map(u=>{
     const isAdmin=(u.role==='admin');
     const av=_avatar(u.email, u.name);
     const all=(u.permissions&&u.permissions.includes('*'));
-    const perms=new Set(all?PERM_CATALOG.map(p=>p[0]):(u.permissions||[]));
-    const granted=isAdmin?PERM_TOTAL:perms.size;
-    const collapsed = u.status !== 'pending';   // pending users open (need action); active collapsed by default
-    const head=`<div class="flex items-start justify-between gap-3 flex-wrap">
-      <div class="flex items-center gap-3 min-w-0">
-        <div class="w-10 h-10 rounded-full ${av.color} text-white flex items-center justify-center font-bold text-sm shrink-0">${av.initials}</div>
-        <div class="min-w-0">
-          <div class="flex items-center gap-2 flex-wrap"><span class="font-semibold text-slate-800 break-all">${ecEsc(u.name || u.email)}</span>
-            <span class="text-[11px] px-2 py-0.5 rounded-full ring-1 ${badge(u.status)}">${ecEsc(u.status)}</span>
-            ${isAdmin?'<span class="text-[11px] px-2 py-0.5 rounded-full ring-1 bg-indigo-50 text-indigo-700 ring-indigo-200">admin</span>':''}
-            <button data-act="name" title="${u.name?'Edit':'Set'} display name" class="text-slate-400 hover:text-indigo-600 p-0.5 rounded hover:bg-indigo-50">${SUP_ICON_EDIT}</button></div>
-          ${u.name?`<div class="text-xs text-slate-400 mt-0.5 break-all">${ecEsc(u.email)}</div>`:''}
-          <div class="text-xs text-slate-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
-            <span>${isAdmin?'Full access — signs in with the app credentials':`<span class="dpu-count font-semibold text-slate-500">${granted}</span> of ${PERM_TOTAL} dashboards`}</span>
-            <span class="text-slate-300">·</span>
-            ${u.mobile?`<span class="inline-flex items-center gap-1 text-slate-500 font-medium"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 7V5z"/></svg>${ecEsc(u.mobile)}</span>`
-                     :'<span class="text-amber-600 font-semibold">No mobile added</span>'}
-            <button data-act="mobile" title="${u.mobile?'Edit':'Add'} mobile number" class="text-slate-400 hover:text-indigo-600 p-0.5 rounded hover:bg-indigo-50">${SUP_ICON_EDIT}</button>
-          </div>
+    const granted=isAdmin?PERM_TOTAL:(all?PERM_TOTAL:new Set(u.permissions||[]).size);
+    const pct=Math.round(granted/PERM_TOTAL*100);
+    const meter=isAdmin
+      ? `<span class="text-[11px] font-semibold text-indigo-600">Full access</span>`
+      : `<div class="flex items-center gap-2.5" title="${granted} of ${PERM_TOTAL} dashboards">
+           <div class="w-24 h-1.5 rounded-full bg-slate-100 overflow-hidden"><div class="h-full rounded-full" style="width:${pct}%;background:${pct>=80?'linear-gradient(90deg,#10b981,#14b8a6)':'linear-gradient(90deg,#6366f1,#8b5cf6)'}"></div></div>
+           <span class="text-xs tabular-nums text-slate-500"><b class="dpu-count text-slate-700">${granted}</b>/${PERM_TOTAL}</span></div>`;
+    const primary=isAdmin?'' : (u.status==='pending'
+      ? `<button data-act="access" class="text-xs px-3.5 py-2 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700 shadow-sm whitespace-nowrap">Review & approve</button>`
+      : `<button data-act="access" class="text-xs px-3.5 py-2 rounded-lg bg-indigo-50 text-indigo-700 font-semibold hover:bg-indigo-100 whitespace-nowrap">Manage access</button>`);
+    const kebab=isAdmin?'':`<div class="relative">
+        <button data-act="menu" title="More actions" class="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100"><svg class="w-4 h-4 pointer-events-none" fill="currentColor" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+        <div class="usr-menu hidden absolute right-0 top-9 z-30 w-44 bg-white rounded-xl shadow-lg ring-1 ring-slate-100 py-1.5 text-sm">
+          <button data-act="reset-pw" class="w-full text-left px-4 py-2 text-slate-600 hover:bg-slate-50">🔑 Reset password</button>
+          ${u.status==='active'?'<button data-act="disable" class="w-full text-left px-4 py-2 text-slate-600 hover:bg-slate-50">⏸ Disable user</button>':''}
+          <button data-act="delete" class="w-full text-left px-4 py-2 text-rose-600 hover:bg-rose-50">🗑 Delete user</button>
+        </div></div>`;
+    return `<div class="usr-row flex items-center gap-4 px-5 py-4 hover:bg-slate-50/60 transition-all" data-uid="${u.id}" data-email="${ecEsc(u.email)}" data-name="${ecEsc(u.name||'')}" data-mobile="${ecEsc(u.mobile||'')}" ${u.status==='pending'?'style="box-shadow:inset 3px 0 0 #f59e0b;background:#fffbeb66"':''}>
+      <div class="w-11 h-11 rounded-full text-white flex items-center justify-center font-bold text-sm shrink-0 shadow-sm" style="background:${_AVGRAD[av.color]||'linear-gradient(135deg,#64748b,#475569)'}">${av.initials}</div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="font-semibold text-slate-800 text-[15px] break-all">${ecEsc(u.name || u.email)}</span>
+          <span class="inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-full ring-1 ${pill(u.status)}"><span class="w-1.5 h-1.5 rounded-full ${dot(u.status)}"></span>${ecEsc(u.status)}</span>
+          ${isAdmin?'<span class="text-[11px] px-2 py-0.5 rounded-full ring-1 bg-indigo-50 text-indigo-700 ring-indigo-200 font-semibold">admin</span>':''}
+          <button data-act="name" title="${u.name?'Edit':'Set'} display name" class="text-slate-300 hover:text-indigo-600 p-0.5 rounded hover:bg-indigo-50">${SUP_ICON_EDIT}</button>
+        </div>
+        <div class="text-xs text-slate-400 mt-1 flex items-center gap-2 flex-wrap">
+          <span class="break-all">${ecEsc(u.email)}</span><span class="text-slate-200">·</span>
+          ${u.mobile?`<span class="text-slate-500 font-medium tabular-nums">${ecEsc(u.mobile)}</span>`
+                    :'<span class="text-amber-600 font-semibold">No mobile added</span>'}
+          <button data-act="mobile" title="${u.mobile?'Edit':'Add'} mobile number" class="text-slate-300 hover:text-indigo-600 p-0.5 rounded hover:bg-indigo-50">${SUP_ICON_EDIT}</button>
         </div>
       </div>
-      <div class="flex items-center gap-2">
-        ${!isAdmin?`<button data-act="toggle" class="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1.5">Manage access <svg class="dpu-chev w-3.5 h-3.5 transition-transform ${collapsed?'':'rotate-180'}" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg></button>`:''}
-        ${(u.status==='active'&&!isAdmin)?'<button data-act="disable" class="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">Disable</button>':''}
-        ${!isAdmin?'<button data-act="reset-pw" class="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">Reset password</button>':''}
-        ${!isAdmin?'<button data-act="delete" title="Delete user" class="text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg w-8 h-8 flex items-center justify-center"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>':''}
-      </div>
+      <div class="hidden sm:block shrink-0">${meter}</div>
+      <div class="flex items-center gap-2 shrink-0">${primary}${kebab}</div>
     </div>`;
-    if(isAdmin) return `<div class="card p-5" data-uid="${u.id}" data-email="${ecEsc(u.email)}" data-name="${ecEsc(u.name||'')}" data-mobile="${ecEsc(u.mobile||'')}">${head}</div>`;
-    const groups=PERM_GROUPS.map(([gname,items])=>{
-      const chips=items.map(([k,label])=>`<button type="button" data-perm="${k}" class="perm-chip ${perms.has(k)?'is-on':''}"><span class="pc-box">${_PC_CHECK}</span>${ecEsc(label)}</button>`).join('');
-      return `<div><div class="flex items-center justify-between mb-1.5"><span class="text-[11px] font-bold uppercase tracking-wide text-slate-400">${gname}</span><button type="button" data-group="${gname}" class="text-[11px] text-indigo-500 hover:text-indigo-700 font-medium">toggle all</button></div><div class="flex flex-wrap gap-1.5">${chips}</div></div>`;
-    }).join('');
-    const primary=(u.status==='active')
-      ? '<button data-act="save" class="text-xs px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 shadow-sm">Save access</button>'
-      : '<button data-act="approve" class="text-xs px-4 py-2 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700 shadow-sm">✓ Approve &amp; grant</button>';
-    return `<div class="card p-5 ${u.status==='pending'?'ring-1 ring-amber-200':''}" data-uid="${u.id}" data-email="${ecEsc(u.email)}" data-name="${ecEsc(u.name||'')}" data-mobile="${ecEsc(u.mobile||'')}">
-      ${head}
-      <div class="dpu-perms ${collapsed?'hidden':''}">
-        <div class="mt-4 grid sm:grid-cols-2 gap-x-8 gap-y-4">${groups}</div>
-        <div class="flex items-center justify-between mt-4 pt-3 border-t border-slate-100 flex-wrap gap-2">
-          <div class="flex items-center gap-3 text-xs"><button type="button" data-all="1" class="text-indigo-600 font-medium hover:underline">Select all</button><span class="text-slate-300">·</span><button type="button" data-all="0" class="text-slate-500 hover:underline">Clear</button></div>
-          ${primary}
-        </div>
-      </div>
-    </div>`;
-  }).join('') || '<p class="text-sm text-slate-400">No users yet.</p>');
+  }).join('');
+  box.innerHTML = toolbar + `<div class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-100 divide-y divide-slate-50">${rows || '<p class="text-sm text-slate-400 p-8 text-center">No users match.</p>'}</div>`;
+  const si=document.getElementById('users-search');
+  si.addEventListener('input',()=>{ _usersUI.q=si.value; clearTimeout(si._t); si._t=setTimeout(()=>{ const pos=si.selectionStart; renderUsers(_usersCache); const s2=document.getElementById('users-search'); s2.focus(); s2.setSelectionRange(pos,pos); },250); });
+  box.querySelectorAll('[data-ufilter]').forEach(b=>b.addEventListener('click',()=>{ _usersUI.st=b.dataset.ufilter; renderUsers(_usersCache); }));
 }
-async function usersUpdate(id, patch, okMsg){
+// Manage access in a POPUP (user, 2026-09-01 — was an inline expander). Same chips/groups, same
+// data-act wiring: the modal body carries data-uid, and usersListClick is bound to the modal too.
+function usrAccessModal(id){
+  const u=(_usersCache||[]).find(x=>String(x.id)===String(id)); if(!u) return;
+  const all=(u.permissions&&u.permissions.includes('*'));
+  const perms=new Set(all?PERM_CATALOG.map(p=>p[0]):(u.permissions||[]));
+  const groups=PERM_GROUPS.map(([gname,items])=>{
+    const chips=items.map(([k,label])=>`<button type="button" data-perm="${k}" class="perm-chip ${perms.has(k)?'is-on':''}"><span class="pc-box">${_PC_CHECK}</span>${ecEsc(label)}</button>`).join('');
+    return `<div><div class="flex items-center justify-between mb-1.5"><span class="text-[11px] font-bold uppercase tracking-wide text-slate-400">${gname}</span><button type="button" data-group="${gname}" class="text-[11px] text-indigo-500 hover:text-indigo-700 font-medium">toggle all</button></div><div class="flex flex-wrap gap-1.5">${chips}</div></div>`;
+  }).join('');
+  const primary=(u.status==='active')
+    ? '<button data-act="save" class="text-sm px-5 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 shadow-sm">Save access</button>'
+    : '<button data-act="approve" class="text-sm px-5 py-2 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700 shadow-sm">✓ Approve &amp; grant</button>';
+  document.getElementById('usr-access-modal')?.remove();
+  const wrap=document.createElement('div');
+  wrap.id='usr-access-modal';
+  wrap.className='fixed inset-0 z-[70] bg-slate-900/40 backdrop-blur-[2px] flex items-center justify-center p-4';
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col sup-pop" data-uid="${u.id}" data-email="${ecEsc(u.email)}">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
+      <div><h3 class="font-bold text-slate-800">Manage access</h3>
+        <p class="text-xs text-slate-400 mt-0.5">${ecEsc(u.name||u.email)} · <span class="dpu-count font-semibold text-slate-500">${perms.size}</span> of ${PERM_TOTAL} dashboards</p></div>
+      <button data-x class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
+    <div class="p-5 overflow-y-auto grid sm:grid-cols-2 gap-x-8 gap-y-4">${groups}</div>
+    <div class="flex items-center justify-between px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl flex-wrap gap-2 shrink-0">
+      <div class="flex items-center gap-3 text-xs"><button type="button" data-all="1" class="text-indigo-600 font-medium hover:underline">Select all</button><span class="text-slate-300">·</span><button type="button" data-all="0" class="text-slate-500 hover:underline">Clear</button></div>
+      <div class="flex items-center gap-2"><button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>${primary}</div></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap||e.target.closest('[data-x]')) wrap.remove(); });
+  wrap.addEventListener('click',usersListClick);
+}
+// Busy state for a popup save button: disabled + "Saving…", flash "✓ Saved" before the popup closes.
+async function _usrBusy(btn, fn){
+  const orig=btn.innerHTML; btn.disabled=true; btn.innerHTML='⏳ Saving…';
+  try{ await fn(); btn.innerHTML='✓ Saved'; btn.classList.add('!bg-emerald-600'); await new Promise(r=>setTimeout(r,450)); return true; }
+  catch(e){ btn.disabled=false; btn.innerHTML=orig; throw e; }
+}
+async function usersUpdate(id, patch, okMsg, btn){
+  const orig=btn&&btn.innerHTML;
+  if(btn){ btn.disabled=true; btn.innerHTML='⏳ Saving…'; }
   try{ const r=await fetch('/api/admin/users/'+id,{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify(patch)});
-    const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed'); showNotification(okMsg||'Saved'); loadUsers();
-  }catch(e){ showNotification(e.message,true); }
+    const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed');
+    if(btn){ btn.innerHTML='✓ Saved'; btn.classList.add('!bg-emerald-600'); }
+    showNotification(okMsg||'Saved');
+    setTimeout(()=>{ document.getElementById('usr-access-modal')?.remove(); },450);   // let the ✓ be seen
+    loadUsers();
+  }catch(e){ showNotification(e.message,true); if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
 }
 function usersListClick(e){
   const card=e.target.closest('[data-uid]'); if(!card) return;
@@ -8092,16 +8149,19 @@ function usersListClick(e){
     const anyOff=chips.some(c=>!c.classList.contains('is-on')); chips.forEach(c=>c.classList.toggle('is-on',anyOff)); _usersUpdateCount(card); return; }
   const all=e.target.closest('[data-all]');
   if(all){ const on=all.dataset.all==='1'; card.querySelectorAll('.perm-chip').forEach(c=>c.classList.toggle('is-on',on)); _usersUpdateCount(card); return; }
-  const btn=e.target.closest('button[data-act]'); if(!btn) return;
+  const btn=e.target.closest('button[data-act]'); if(!btn){ document.querySelectorAll('.usr-menu').forEach(m=>m.classList.add('hidden')); return; }
   const id=card.dataset.uid, act=btn.dataset.act;
-  if(act==='toggle'){ const sec=card.querySelector('.dpu-perms'), chev=btn.querySelector('.dpu-chev'); if(sec){ sec.classList.toggle('hidden'); if(chev) chev.classList.toggle('rotate-180', !sec.classList.contains('hidden')); } return; }
+  if(act==='menu'){ const m=btn.parentElement.querySelector('.usr-menu'); const open=m.classList.contains('hidden');
+    document.querySelectorAll('.usr-menu').forEach(x=>x.classList.add('hidden')); if(open) m.classList.remove('hidden'); return; }
+  document.querySelectorAll('.usr-menu').forEach(m=>m.classList.add('hidden'));
+  if(act==='access'){ usrAccessModal(id); return; }
   if(act==='mobile'){ usrMobileModal(id, card.dataset.email, card.dataset.mobile||''); return; }
   if(act==='name'){ usrNameModal(id, card.dataset.email, card.dataset.name||''); return; }
   if(act==='reset-pw'){ usrResetPwModal(id, card.dataset.email); return; }
   const perms=()=>[...card.querySelectorAll('.perm-chip.is-on')].map(c=>c.dataset.perm);
-  if(act==='approve') usersUpdate(id,{status:'active',permissions:perms()},'Approved & access granted');
-  else if(act==='disable') usersUpdate(id,{status:'disabled'},'Disabled');
-  else if(act==='save') usersUpdate(id,{permissions:perms()},'Access updated');
+  if(act==='approve') usersUpdate(id,{status:'active',permissions:perms()},'Approved & access granted',btn);
+  else if(act==='disable') usersUpdate(id,{status:'disabled'},'User disabled',btn);
+  else if(act==='save') usersUpdate(id,{permissions:perms()},'Access updated',btn);
   else if(act==='delete'){
     supConfirm({ title:'Delete this user?', message:card.dataset.email+' will lose access permanently. This cannot be undone.', confirmLabel:'Delete', danger:true }).then(ok=>{ if(!ok) return;
       fetch('/api/admin/users/'+id,{method:'DELETE',headers:getAuthHeaders()}).then(r=>r.json()).then(d=>{ showNotification(d.success?'Deleted':(d.message||'Failed'),!d.success); loadUsers(); }); }); }
@@ -8126,11 +8186,12 @@ function usrNameModal(id, email, current){
   document.body.appendChild(wrap);
   wrap.addEventListener('click',e=>{ if(e.target===wrap||e.target.closest('[data-x]')) wrap.remove(); });
   const inp=document.getElementById('usrname-input');
-  document.getElementById('usrname-save').addEventListener('click', async ()=>{
+  document.getElementById('usrname-save').addEventListener('click', async function(){
     const name=inp.value.trim();
-    const perr=document.getElementById('usrname-err');
-    try{ const r=await fetch('/api/admin/users/'+id,{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({name})});
-      const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed');
+    const perr=document.getElementById('usrname-err'); perr.classList.add('hidden');
+    try{ await _usrBusy(this, async()=>{
+        const r=await fetch('/api/admin/users/'+id,{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({name})});
+        const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed'); });
       wrap.remove(); showNotification('Display name saved'); loadUsers();
     }catch(e){ perr.textContent=e.message; perr.classList.remove('hidden'); }
   });
@@ -8164,12 +8225,13 @@ function usrResetPwModal(id, email){
   const inp=document.getElementById('usrpw-input');
   _bindPwMeter(inp, document.getElementById('usrpw-meter'));
   document.getElementById('usrpw-gen').addEventListener('click',()=>{ inp.value=_genPassword(); inp.dispatchEvent(new Event('input')); });
-  document.getElementById('usrpw-save').addEventListener('click', async ()=>{
+  document.getElementById('usrpw-save').addEventListener('click', async function(){
     const password=inp.value.trim();
-    const perr=document.getElementById('usrpw-err');
+    const perr=document.getElementById('usrpw-err'); perr.classList.add('hidden');
     if(password.length<8){ perr.textContent='Password must be at least 8 characters.'; perr.classList.remove('hidden'); return; }
-    try{ const r=await fetch('/api/admin/users/'+id+'/password',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({password})});
-      const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed');
+    try{ await _usrBusy(this, async()=>{
+        const r=await fetch('/api/admin/users/'+id+'/password',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({password})});
+        const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed'); });
       wrap.remove(); showNotification('Password reset for '+email);
     }catch(e){ perr.textContent=e.message; perr.classList.remove('hidden'); }
   });
@@ -8247,12 +8309,13 @@ function usrMobileModal(id, email, current){
   wrap.addEventListener('click',e=>{ if(e.target===wrap||e.target.closest('[data-x]')) wrap.remove(); });
   const inp=document.getElementById('usrmob-input');
   inp.addEventListener('input',e=>{ e.target.value=e.target.value.replace(/\D/g,'').slice(0,10); });
-  document.getElementById('usrmob-save').addEventListener('click', async ()=>{
+  document.getElementById('usrmob-save').addEventListener('click', async function(){
     const m=inp.value.trim();
-    const perr=document.getElementById('usrmob-err');
+    const perr=document.getElementById('usrmob-err'); perr.classList.add('hidden');
     if(!/^[6-9]\d{9}$/.test(m)){ perr.textContent='Enter a valid 10-digit mobile number.'; perr.classList.remove('hidden'); return; }
-    try{ const r=await fetch('/api/admin/users/'+id,{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({mobile:m})});
-      const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed');
+    try{ await _usrBusy(this, async()=>{
+        const r=await fetch('/api/admin/users/'+id,{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({mobile:m})});
+        const d=await r.json(); if(!d.success) throw new Error(d.message||'Failed'); });
       wrap.remove(); showNotification('Mobile number saved'); loadUsers();
     }catch(e){ perr.textContent=e.message; perr.classList.remove('hidden'); }
   });
@@ -14356,15 +14419,18 @@ async function infDiscoverRun(){
   }catch(e){ st.textContent=''; out.innerHTML=`<div class="rounded-xl bg-rose-50 ring-1 ring-rose-100 p-4 text-sm text-rose-600">${escapeHtml(e.message)}</div>`; }
   finally{ btn.disabled=false; }
 }
-function infDiscoverRenderResult(r){
+// Renders the analysis card into `mount` (default: the page-top panel). The SAME card also renders
+// inside the Discovery popup (2026-09-01: history clicks open a popup instead of painting the top),
+// so every control is class-scoped to the mount — ids would collide between the two copies.
+function infDiscoverRenderResult(r, mount){
   if(!r) return;
-  const out=document.getElementById('infdis-result');
+  const out=mount||document.getElementById('infdis-result');
   const recCls={'Recommended':'bg-emerald-50 text-emerald-700 ring-emerald-200','Maybe':'bg-amber-50 text-amber-700 ring-amber-200','Not Recommended':'bg-rose-50 text-rose-600 ring-rose-200'}[r.recommendation]||'bg-slate-100 text-slate-600 ring-slate-200';
   out.innerHTML=`<div class="rounded-2xl ring-1 ring-slate-100 p-5">
     <div class="flex flex-wrap items-center gap-3">
       ${infAvatar({instagram_handle:r.handle,name:r.name,profile_image_url:r.profile_pic_url},'w-12 h-12 text-sm')}
-      <div class="flex-1 min-w-0"><p class="font-bold text-slate-800">${escapeHtml(r.name||'@'+(r.handle||''))} ${r.is_verified?'✔':''}</p>
-        <p class="text-xs text-slate-400">@${escapeHtml(r.handle||'')} · ${infN(r.follower_count||r.estimated_followers)} followers · ${escapeHtml(r.niche||'—')} · via ${r.data_source==='apify'?'live scrape':'AI estimate'}</p></div>
+      <div class="flex-1 min-w-0"><p class="font-bold text-slate-800"><a href="#" class="infdis-open-profile hover:text-indigo-600 hover:underline" title="Open the full influencer profile">${escapeHtml(r.name||'@'+(r.handle||''))}</a> ${r.is_verified?'✔':''}</p>
+        <p class="text-xs text-slate-400"><a href="#" class="infdis-open-profile text-indigo-600 hover:underline" title="Open the full influencer profile">@${escapeHtml(r.handle||'')}</a> · ${infN(r.follower_count||r.estimated_followers)} followers · ${escapeHtml(r.niche||'—')} · via ${r.data_source==='apify'?'live scrape':'AI estimate'}</p></div>
       <span class="px-3 py-1 rounded-full text-sm font-bold ring-1 ${recCls}">${escapeHtml(r.recommendation||'—')}</span>
     </div>
     <p class="text-sm text-slate-700 mt-3">${escapeHtml(r.recommendation_summary||'')}</p>
@@ -14378,12 +14444,13 @@ function infDiscoverRenderResult(r){
       ${r.audience_type?`<br><b>Audience:</b> ${escapeHtml(r.audience_type)}`:''}${r.content_style?`<br><b>Style:</b> ${escapeHtml(r.content_style)}`:''}
     </div>
     <div class="flex flex-wrap items-center gap-2 mt-4">
-      <button id="infdis-addcrm" class="text-sm px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">➕ Add to CRM</button>
-      <select id="infdis-addlist" class="filter-select hidden"><option value="">Add to list…</option></select>
-      <span id="infdis-added" class="text-sm text-emerald-600 font-semibold hidden">Added ✓</span>
+      <button class="infdis-addcrm text-sm px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">➕ Add to CRM</button>
+      <select class="infdis-addlist filter-select hidden"><option value="">Add to list…</option></select>
+      <span class="infdis-added text-sm text-emerald-600 font-semibold hidden">Added ✓</span>
     </div></div>`;
-  document.getElementById('infdis-addcrm').addEventListener('click',async()=>{
-    const btn=document.getElementById('infdis-addcrm'); btn.disabled=true;
+  out.querySelectorAll('.infdis-open-profile').forEach(a=>a.addEventListener('click',e=>{ e.preventDefault(); infOpenProfileByHandle(r.handle, r); }));
+  out.querySelector('.infdis-addcrm').addEventListener('click',async()=>{
+    const btn=out.querySelector('.infdis-addcrm'); btn.disabled=true;
     try{
       // Raw fetch (not infFetch) so we can read the 409 "already in CRM" body — it carries the existing id.
       const rr=await fetch('/api/inf/influencers',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({
@@ -14395,15 +14462,45 @@ function infDiscoverRenderResult(r){
       if(!rr.ok && !already) throw new Error(dd.error||dd.message||('HTTP '+rr.status));
       const infId=dd.id;                                   // present on both a fresh insert and the 409 body
       btn.classList.add('hidden');
-      const added=document.getElementById('infdis-added');
+      const added=out.querySelector('.infdis-added');
       added.textContent=already?'Already in CRM ✓':'Added ✓'; added.classList.remove('hidden');
-      const sel=document.getElementById('infdis-addlist'); sel.classList.remove('hidden');
-      _infListsCache=null; await infLoadListsInto('infdis-addlist','Add to list…');
+      const sel=out.querySelector('.infdis-addlist'); sel.classList.remove('hidden'); sel.id='infdis-addlist-live';
+      _infListsCache=null; await infLoadListsInto('infdis-addlist-live','Add to list…');
       sel.onchange=async e=>{ if(!e.target.value) return;
         try{ await infFetch('/api/inf/lists/'+e.target.value+'/members',{method:'POST',body:JSON.stringify({influencerId:infId})}); showNotification('Added to list'); }catch(err){ showNotification(err.message,true); } e.target.value=''; };
       _infRows=null;
       showNotification(already?('@'+r.handle+' is already in the CRM'):('@'+r.handle+' added to CRM'));
     }catch(e){ showNotification(e.message,true); btn.disabled=false; } });
+}
+// Discovery analysis in a POPUP (2026-09-01: "show detail on popup, and on that popup username
+// should be clickable → open the influencer profile popup like the Influencers list").
+function infDiscoverModal(r){
+  if(!r) return;
+  const wrap=infModal('infdis-detail-modal',`${INF_MODAL_HEAD('Discovery analysis','@'+escapeHtml(r.handle||''))}<div class="p-4 infdis-mount"></div>`,'max-w-3xl');
+  infDiscoverRenderResult(r, wrap.querySelector('.infdis-mount'));
+}
+async function infOpenProfileByHandle(handle, r){
+  const h=String(handle||'').replace(/^@/,'').trim(); if(!h) return;
+  try{
+    const d=await infFetch('/api/inf/influencer-by-handle/'+encodeURIComponent(h));
+    infDetailModal(d.id);
+  }catch(e){
+    // Not in the CRM yet — the click should still LEAD to the profile (2026-09-01): offer to add
+    // right here using the analysis data we are looking at, then open it.
+    if(!r) return showNotification('@'+h+' is not in the CRM yet — use “Add to CRM” first.',true);
+    if(!(await supConfirm({ title:'@'+h+' is not in the CRM yet', icon:'➕', tone:'go', confirmLabel:'Add & open profile',
+      message:'Add this influencer to the CRM with the analysis details, and open the full profile?' }))) return;
+    try{
+      const rr=await fetch('/api/inf/influencers',{method:'POST',headers:{'Content-Type':'application/json',...getAuthHeaders()},body:JSON.stringify({
+        instagram_handle:r.handle,name:r.name,niche:r.niche,location:r.location,
+        follower_count:r.follower_count||r.estimated_followers,engagement_rate:r.avg_engagement_rate,
+        engagement_quality:r.engagement_quality,bio:r.bio,profile_image_url:r.profile_pic_url,source:'discover'})});
+      const dd=await rr.json().catch(()=>({}));
+      if(!rr.ok && rr.status!==409) throw new Error(dd.error||dd.message||('HTTP '+rr.status));
+      _infRows=null;
+      if(dd.id) infDetailModal(dd.id); else throw new Error('added, but no id returned');
+    }catch(err){ showNotification(err.message,true); }
+  }
 }
 async function infDiscoverHistory(){
   const h=document.getElementById('infdis-history'); if(h) h.innerHTML=brandLoaderSm();
@@ -14412,14 +14509,14 @@ async function infDiscoverHistory(){
       const rec=r.result&&r.result.recommendation;
       const recCls={'Recommended':'text-emerald-600','Maybe':'text-amber-600','Not Recommended':'text-rose-500'}[rec]||'text-slate-400';
       const stCls={completed:'bg-emerald-50 text-emerald-700',complete:'bg-emerald-50 text-emerald-700',pending:'bg-amber-50 text-amber-700',processing:'bg-sky-50 text-sky-700',failed:'bg-rose-50 text-rose-600'}[r.status]||'bg-slate-100 text-slate-500';
-      return `<div class="flex items-center gap-3 py-2.5 ${r.result?'cursor-pointer hover:bg-slate-50 rounded-lg px-2 -mx-2':''}" data-i="${i}">
+      return `<div class="flex items-center gap-3 py-2.5 ${r.result?'cursor-pointer hover:bg-slate-50 rounded-lg px-2 -mx-2':'opacity-60'}" data-i="${i}" title="${r.result?'Open the analysis':'Analysis not finished yet — nothing to open. Use “Process pending queue”.'}">
         <span class="font-semibold text-indigo-600 text-sm">@${escapeHtml(r.handle)}</span>
         <span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${stCls}">${escapeHtml(r.status)}</span>
         ${rec?`<span class="text-xs font-semibold ${recCls}">${escapeHtml(rec)}</span>`:''}
         ${r.source==='brand_mention'?`<span class="text-[10px] text-slate-400">via @${escapeHtml(r.source_brand||'scan')}</span>`:''}
         <span class="text-xs text-slate-400 ml-auto whitespace-nowrap">${supRelTime(r.created_at)}</span></div>`; }).join('')}</div>`
       :'<p class="text-sm text-slate-400">No analyses yet — try a handle above.</p>';
-    h.querySelectorAll('[data-i]').forEach(el=>el.addEventListener('click',()=>{ const r=_infdisRows[Number(el.dataset.i)]; if(r&&r.result&&r.result.recommendation) infDiscoverRenderResult(r.result); }));
+    h.querySelectorAll('[data-i]').forEach(el=>el.addEventListener('click',()=>{ const r=_infdisRows[Number(el.dataset.i)]; if(r&&r.result&&r.result.recommendation) infDiscoverModal(r.result); }));
   }catch(e){ if(h) h.innerHTML=`<p class="text-sm text-rose-500">${escapeHtml(e.message)}</p>`; }
 }
 

@@ -764,6 +764,17 @@ function check(name, got, want) {
                  /reattempt agreed \/ cancelled \/ no answer \/ unclear/.test(vb2),
                  /AI RTO call/.test(vb2)],
                 [true, true, true, true, true, true, true]);
+            check('users page 2026-09-01: access popup, busy + Saved feedback, premium list (search, status chips, access meter, kebab menu, gradient avatars)',
+                [/function usrAccessModal/.test(ap2), !/data-act="toggle"/.test(ap2),
+                 /function _usrBusy/.test(ap2), /'⏳ Saving…'/.test(ap2), /'✓ Saved'/.test(ap2),
+                 /usersUpdate\(id,\{permissions:perms\(\)\},'Access updated',btn\)/.test(ap2),
+                 /users-search/.test(ap2), /data-ufilter/.test(ap2), /_AVGRAD/.test(ap2), /usr-menu/.test(ap2)],
+                [true, true, true, true, true, true, true, true, true, true]);
+            check('inf discover popup 2026-09-01: history click opens the analysis in a modal, username inside opens the full profile modal via by-handle lookup',
+                [/function infDiscoverModal/.test(ap2), /infdis-open-profile/.test(ap2),
+                 /infOpenProfileByHandle/.test(ap2), /infDiscoverModal\(r\.result\)/.test(ap2),
+                 /influencer-by-handle/.test(fs.readFileSync(path.join(ROOT, 'app/api/influencer_crm.js'), 'utf8'))],
+                [true, true, true, true, true]);
             check('voice rto kill-switch: rto_recovery dials ONLY where VOBIZ_RTO_ENABLED=true — live stays untouched while testing',
                 [/VOBIZ_RTO_ENABLED/.test(vb2), /disabled here \(still under test\)/.test(vb2)],
                 [true, true]);
@@ -794,6 +805,20 @@ function check(name, got, want) {
                 [/\/support\/ai-call-translate\/:id/.test(sc2), /transcript_en/.test(sc2),
                  /supd-aic-en/.test(ap2), /sal-tr-en/.test(ap2)],
                 [true, true, true, true]);
+        }
+        {
+            // Behavioural: the delivered-in-last-3-INCLUDING-current hold exemption (user, 2026-09-01).
+            const { evaluateReasons } = require(path.join(ROOT, 'app/api/repeat_rules.js'));
+            const mk = (id, bucket, daysAgo) => ({ order_id: id, order_name: id, bucket, created_at: new Date(Date.now() - daysAgo * 864e5).toISOString(), phone: '9', email: 'e' });
+            const cand = { order_id: 'X', created_at: new Date().toISOString(), total_price: 1822, financial_status: 'pending', address: 'A long enough address so short-address stays quiet here OK' };
+            const run = h => evaluateReasons({ cand, history: h, deliveredHighValue: false, deliveredAddrNorms: new Set(), isCancelled: null });
+            check('hold rule: a delivered order in the last 3 INCLUDING current (= 2 prior) exempts ≥₹1500 from high_value; outside that window it still holds',
+                [run([mk('A', 'cancelled', 10), mk('B', 'delivered', 15)]).includes('high_value'),
+                 run([mk('A', 'cancelled', 10), mk('B', 'cancelled', 15), mk('C', 'delivered', 20)]).includes('high_value'),
+                 run([]).includes('high_value')],
+                [false, true, true]);
+            check('hv-call: first dial 5 minutes after placement (user, 2026-09-01 — was 30)',
+                [/Date\.now\(\) - 5 \* 60e3/.test(hv)], [true]);
         }
         check('hv-call: high_value-only holds call automatically; a multi-reason hold calls ONLY when the last 3 orders (incl. this) include a delivered one',
             [/soleReason: e\.reasons\.length === 1/.test(hv), /reasons\.includes\('high_value'\)/.test(hv),
