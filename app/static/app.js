@@ -893,6 +893,9 @@ function canView(view) { return !currentUser || currentUser.isAdmin || (currentU
 function canSendEmails() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('send-escalation-emails'))); }
 // Cancel-order capability (Support Call Queue) — admin, or the 'support-cancel-order' permission. Server enforces it too.
 function canCancelOrders() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('support-cancel-order'))); }
+// Placing a real AI phone call is its own right (2026-09-01) — the button hides without it, and the
+// server enforces the same key on /vobiz/call, so hiding is UX, not the security boundary.
+function canAiCall() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('support-ai-call'))); }
 
 async function handleSignup() {
     const name = String((document.getElementById('signup-name') || {}).value || '').trim();
@@ -5007,8 +5010,10 @@ function supAiAttemptsCard(a){
   if(!a||!(a.attempts>0)) return '';
   const RES={no_answer:['no answer','text-violet-700'],confirmed:['confirmed','text-emerald-700'],denied:['denied','text-rose-700'],unclear:['not confirmed','text-amber-700'],failed:['failed','text-rose-700'],gated:['gated (test)','text-slate-400']};
   const fmt=t=>new Date(t).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
-  const log=Array.isArray(a.attempt_log)?a.attempt_log:[];
-  const lines=log.map(e=>{const r=RES[e.result]||(e.result?[e.result,'text-slate-500']:['in progress / see call below','text-slate-400']);
+  const raw=Array.isArray(a.attempt_log)?a.attempt_log:[];
+  const byN=new Map(); raw.forEach(e=>byN.set(e.n,e));               // one line per attempt — latest state wins
+  const log=[...byN.values()];
+  const lines=log.map(e=>{const r=RES[e.result]||(e.result?[e.result,'text-slate-500']:['ringing / awaiting result','text-slate-400']);
     return `<div class="flex items-center gap-2"><span class="font-semibold tabular-nums">#${e.n}</span><span class="text-slate-500 tabular-nums">${fmt(e.at)}</span><span class="${r[1]} font-semibold">${escapeHtml(r[0])}</span></div>`;}).join('');
   const older=a.attempts-log.length;
   const nxt=a.status==='retry'&&a.next_attempt_at?`<div class="text-slate-500 mt-0.5">next attempt ~${fmt(a.next_attempt_at)}</div>`:'';
@@ -5984,6 +5989,7 @@ function supAiCallMount(o){
   const host=document.getElementById('supd-aicall'); if(!host) return;
   const map=(currentView==='support-queue' && SUP_AI_CALL_BY_TAB[_supTab]) || SUP_AI_CALL_BY_TAB.repeat;
   if(!o.order_name) return;
+  if(!canAiCall()){ host.innerHTML=''; return; }
   host.innerHTML=`<button id="supd-aicall-btn" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700" title="The AI agent calls the customer to ${escapeHtml(map.label)}">🤖 AI Call</button>`;
   document.getElementById('supd-aicall-btn').addEventListener('click',()=>{
     supConfirm({
@@ -7927,7 +7933,7 @@ const PERM_GROUPS = [
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
   // Capabilities (not dashboard views) — granted per-user by the admin. Server enforces each one too.
-  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)'],['delivery-perf-revenue','See ₹ revenue on Delivery Performance & Last-Mile Funnel (order values)'],['purchase-orders-write','Create purchase orders & change PO status (EasyEcom)'],['grn-write','Receive stock — create GRNs in EasyEcom (Auto & against PO)']]]
+  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-ai-call','Place manual AI calls (🤖 AI Call button — real phone calls to customers)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)'],['delivery-perf-revenue','See ₹ revenue on Delivery Performance & Last-Mile Funnel (order values)'],['purchase-orders-write','Create purchase orders & change PO status (EasyEcom)'],['grn-write','Receive stock — create GRNs in EasyEcom (Auto & against PO)']]]
 ];
 const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
 const PERM_TOTAL = PERM_CATALOG.length;

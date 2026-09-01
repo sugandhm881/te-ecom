@@ -739,6 +739,37 @@ function check(name, got, want) {
                  fs.existsSync(path.join(ROOT, 'docs/PRODUCT_KNOWLEDGE.md')),
                  fs.existsSync(path.join(ROOT, 'supabase/migrations/20260831_product_knowledge.sql'))],
                 [true, true, true, true, true, true, true]);
+            check('voice kannada lesson 2026-09-01: name-only switch, no refusals, two clarifying attempts max, SECOND foreign utterance auto-switches, region hints the likely language',
+                [/const short = String\(text\)\.trim\(\)\.split/.test(vb2),
+                 /NEVER say you do not understand or cannot speak/.test(vb2),
+                 /at most TWO clarifying attempts/.test(vb2),
+                 /langSeen\[seen\] >= 2/.test(vb2),
+                 /regionLangForOrder/.test(vb2), /LIKELY LANGUAGE/.test(vb2)],
+                [true, true, true, true, true, true]);
+            check('ai-call permission: placing a manual AI call needs support-ai-call (server-enforced), button hides without it, catalog lists it',
+                [fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8').includes("'support-ai-call'"),
+                 /function canAiCall/.test(ap2), /if\(!canAiCall\(\)\)\{ host\.innerHTML=''; return; \}/.test(ap2),
+                 /\['support-ai-call','Place manual AI calls/.test(ap2)],
+                [true, true, true, true]);
+            check('voice stt noise guard + real note id: looped-phrase hallucinations are dropped before the model, and the RTO note uses the AI agent uuid (order_notes.agent_id is uuid)',
+                [/STT NOISE GUARD/.test(vb2), /uniq \/ words\.length < 0\.25/.test(vb2),
+                 /00000000-0000-4000-8000-00000000a1ca/.test(vb2)],
+                [true, true, true]);
+            check('voice rto training 2026-09-01: consistent one-register delivery, news-then-ask pacing, real address in RTO context, RTO summary vocabulary, outcome note on the order',
+                [/CONSISTENT DELIVERY: one voice from the first word to the last/.test(vb2),
+                 /May I know what went wrong with the delivery\?/.test(vb2),
+                 /NEVER speak a standalone one- or two-word sentence/.test(vb2),
+                 /NEVER offer to confirm the address/.test(vb2),
+                 /order_shipping_addresses/.test(vb2),
+                 /reattempt agreed \/ cancelled \/ no answer \/ unclear/.test(vb2),
+                 /AI RTO call/.test(vb2)],
+                [true, true, true, true, true, true, true]);
+            check('voice rto kill-switch: rto_recovery dials ONLY where VOBIZ_RTO_ENABLED=true — live stays untouched while testing',
+                [/VOBIZ_RTO_ENABLED/.test(vb2), /disabled here \(still under test\)/.test(vb2)],
+                [true, true]);
+            check('voice rto_recovery: the phone bridge has the RTO recovery call type (mirrored from the browser tool)',
+                [/rto_recovery: \{/.test(vb2), /returned to origin \(RTO\)/.test(vb2), /offer to send it again/.test(vb2)],
+                [true, true, true]);
             check('voice voicemail: the machine identifying itself hangs the call up instantly — no 125s chats with answering machines; carrier phrases only, a customer saying "I am busy" never matches',
                 [/VOICEMAIL_RX/.test(vb2), /voicemail greeting detected/.test(vb2),
                  (() => { const m = vb2.match(/const VOICEMAIL_RX = (\/.*?\/i);/); if (!m) return false;
@@ -808,7 +839,7 @@ function check(name, got, want) {
             [true, true, true, true, true]);
         check('hv-call: route and auto-caller share ONE placeOrderCall (allowlist inside it), cron wired, endpoint capability-gated',
             [/async function placeOrderCall\(b\)/.test(vb), /placeOrderCall, vobizConfigured/.test(hv),
-             /HighValueCall \(\*\/10/.test(sv), /high-value-call-tick[^)]*\)\$\/i, \['support-voice', 'support-queue'\]/.test(sv)],
+             /HighValueCall \(\*\/10/.test(sv), /high-value-call-tick\)\$\/i, 'support-ai-call'/.test(sv)],
             [true, true, true, true]);
     }
     {
@@ -1318,7 +1349,7 @@ function check(name, got, want) {
              vb.indexOf('this.presence = true') < vb.indexOf('FILLER_RX')], [true, true, true]);
         check('vobiz bridge: wired into the server — public webhooks, gated call route, WS upgrade',
             [/\/vobiz\\\/\(answer\|hangup\)\$\//.test(srvV.replace(/\\/g, '\\\\')) || /vobiz\\\/\(answer\|hangup\)/.test(srvV),
-             /vobiz.{0,30}call\|recording.{0,60}'support-voice', 'support-queue'/.test(srvV),
+             srvV.includes("'support-ai-call'"),
              /attachVobizWs\(httpServer\)/.test(srvV)], [true, true, true]);
     }
     // Language texture is PER LANGUAGE: a static "everyday Hinglish" rule dragged even English

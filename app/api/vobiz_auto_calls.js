@@ -89,9 +89,15 @@ async function claim(orderName, row, attemptNo) {
         if (error && String(error.code) !== '23505') console.warn('[HVCall] turnstile write failed:', error.message);
         return !error;
     }
+    // One log entry per attempt NUMBER: a re-claim of the same attempt (a dial that never connected,
+    // a second tick) refreshes the entry instead of appending a duplicate — the modal card showed
+    // "#2 … in progress" and "#2 … no answer" side by side (TE25-45950, 2026-09-01).
+    const log = (row.attempt_log || []).slice();
+    if (log.length && Number(log[log.length - 1].n) === attemptNo) log[log.length - 1] = { n: attemptNo, at };
+    else log.push({ n: attemptNo, at });
     const { data, error } = await supabase.from('vobiz_auto_calls_ecom')
         .update({ status: 'calling', attempts: attemptNo, last_attempt_at: at, next_attempt_at: null,
-            attempt_log: [...(row.attempt_log || []), { n: attemptNo, at }] })
+            attempt_log: log })
         .eq('order_name', orderName).eq('purpose', PURPOSE).eq('status', row.status).select('id');
     if (error) { console.warn('[HVCall] turnstile claim failed:', error.message); return false; }
     return !!(data && data.length);

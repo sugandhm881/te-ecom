@@ -201,7 +201,10 @@ const _VIEW_PERMS = [
     // shared with live, so users carry both until the old key is retired.
     [/^\/customer\//i, ['customer-profile', 'support-blacklist']],
     [/^\/voice-(config|order-lookup|order-list)/i, 'support-voice'],   // Voice Agent tool endpoints — permitted users / admins only
-    [/^\/vobiz\/(call|recording|high-value-call-tick|ai-call-report)$/i, ['support-voice', 'support-queue']],   // real outbound AI call + recording playback + high-value auto-call test trigger (Vobiz bridge)
+    // Placing a REAL outbound AI call is its own right (user, 2026-09-01: "manual AI Call Button
+    // make permission based") — support-queue alone no longer dials; admins always pass.
+    [/^\/vobiz\/(call|high-value-call-tick)$/i, 'support-ai-call'],
+    [/^\/vobiz\/(recording|ai-call-report)$/i, ['support-voice', 'support-queue', 'support-ai-call']],   // playback + report stay broad
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
     // Inventory Analytics. Stock Count (WH-only) + its deep Count Analysis (manager-only) are separate perms —
