@@ -37,7 +37,25 @@
 'use strict';
 const express = require('express');
 const router = express.Router();
+const axios = require('axios');
 const { supabase } = require('../supabase');
+
+// The carrier's own record of one dial (user, 2026-09-01: "complete ringing till hangup in call
+// log"): ring seconds + hangup cause (Busy Line / No Answer / Rejected...). An unanswered call has
+// no audio to record - this CDR is its complete story. Best-effort: a miss never blocks the ladder.
+async function fetchVobizCdr(uuid) {
+    try {
+        if (!uuid) return null;
+        const id = process.env.VOBIZ_AUTH_ID;
+        const r = await axios.get(`https://api.vobiz.ai/api/v1/Account/${id}/Call/${uuid}/`,
+            { headers: { 'X-Auth-ID': id, 'X-Auth-Token': process.env.VOBIZ_AUTH_TOKEN }, timeout: 10000, validateStatus: () => true });
+        if (r.status !== 200 || !r.data) return null;
+        const c = r.data;
+        const t = v => v ? new Date(String(v).replace(' ', 'T')).getTime() : null;
+        const ring = (t(c.initiation_time) && t(c.end_time)) ? Math.max(0, Math.round((t(c.end_time) - t(c.initiation_time)) / 1000)) : null;
+        return { cause: c.hangup_cause_name || c.hangup_cause || null, by: c.hangup_source || null, ring_s: ring, answered: !!c.answer_time };
+    } catch (_) { return null; }
+}
 
 const PURPOSE = 'cod_confirm';
 const WINDOW = { from: 10, to: 20 };                                // IST hours, [from, to)
@@ -85,10 +103,11 @@ async function seal(orderName, status, detail, phone) {
 async function claim(orderName, row, attemptNo) {
     const at = new Date().toISOString();
     if (!row) {
+        const log0 = [{ n: 1, at }];
         const { error } = await supabase.from('vobiz_auto_calls_ecom')
-            .insert({ order_name: orderName, purpose: PURPOSE, status: 'calling', attempts: 1, last_attempt_at: at, attempt_log: [{ n: 1, at }] });
+            .insert({ order_name: orderName, purpose: PURPOSE, status: 'calling', attempts: 1, last_attempt_at: at, attempt_log: log0 });
         if (error && String(error.code) !== '23505') console.warn('[HVCall] turnstile write failed:', error.message);
-        return !error;
+        return error ? null : log0;
     }
     // One log entry per attempt NUMBER: a re-claim of the same attempt (a dial that never connected,
     // a second tick) refreshes the entry instead of appending a duplicate — the modal card showed
@@ -100,8 +119,8 @@ async function claim(orderName, row, attemptNo) {
         .update({ status: 'calling', attempts: attemptNo, last_attempt_at: at, next_attempt_at: null,
             attempt_log: log })
         .eq('order_name', orderName).eq('purpose', PURPOSE).eq('status', row.status).select('id');
-    if (error) { console.warn('[HVCall] turnstile claim failed:', error.message); return false; }
-    return !!(data && data.length);
+    if (error) { console.warn('[HVCall] turnstile claim failed:', error.message); return null; }
+    return (data && data.length) ? log : null;
 }
 
 // Stamp the result onto the LAST attempt entry — the modal's per-attempt history reads these.
@@ -118,6 +137,16 @@ const UNANSWERED_AFTER_MS = 7 * 60e3;
 const RETRY_DELAY_MIN = { 1: 10, 2: 20 };
 async function scheduleRetryOrExhaust(row, why) {
     const attempts = Number(row.attempts) || 1;
+    // Pull the carrier's record for the dial being closed: ring seconds + hangup cause land on the
+    // attempt entry ("no answer - Busy Line, 8s"), which the order modal shows.
+    try {
+        const log = row.attempt_log || [];
+        const last = log[log.length - 1];
+        if (last && last.uuid && !last.cause) {
+            const cdr = await fetchVobizCdr(last.uuid);
+            if (cdr) { last.cause = cdr.cause; last.ring_s = cdr.ring_s; last.hangup_by = cdr.by; }
+        }
+    } catch (_) {}
     if (attempts >= 3) {
         await supabase.from('vobiz_auto_calls_ecom')
             .update({ status: 'exhausted', next_attempt_at: null, attempt_log: logResult(row, 'no_answer'),
@@ -134,6 +163,22 @@ async function scheduleRetryOrExhaust(row, why) {
             .eq('order_name', row.order_name).eq('purpose', PURPOSE);
         console.log(`[HVCall] ${row.order_name}: ${why} (attempt ${attempts}) — retry ${mins} min after the attempt`);
     }
+}
+
+// INSTANT no-answer (user, 2026-09-01): Vobiz's hangup webhook fires seconds after a call dies
+// unanswered — the bridge routes never-connected hangups here. A short delay lets the carrier CDR
+// materialize so the attempt line carries the cause immediately ("Busy Line, 0s · by carrier").
+async function handleUnansweredHangup(orderName) {
+    const name = String(orderName || '').replace(/^#/, '').trim();
+    if (!name) return;
+    await new Promise(r => setTimeout(r, 4000));
+    const { data: row } = await supabase.from('vobiz_auto_calls_ecom')
+        .select('order_name, status, attempts, last_attempt_at, detail, attempt_log')
+        .eq('order_name', name).eq('purpose', PURPOSE).maybeSingle();
+    if (!row || !['calling', 'placed'].includes(row.status)) return;   // already settled/answered
+    if (row.detail && row.detail.outcome) return;
+    await scheduleRetryOrExhaust(row, 'call not answered (hangup webhook)');
+    console.log(`[HVCall] ${name}: unanswered — marked instantly from the hangup webhook`);
 }
 
 // A call nobody picked up leaves NO hangup-side outcome (the bridge session never opens), so the
@@ -246,7 +291,8 @@ async function highValueCallTick(opts = {}) {
 
         // Claim the turnstile BEFORE dialing (unique key / status guard = the race guard).
         const attemptNo = redial ? (Number(row.attempts) || 1) + 1 : (row ? (Number(row.attempts) || 1) : 1);
-        if (!await claim(name, row, attemptNo)) { results.push({ order: name, skip: 'claimed by another tick' }); continue; }
+        const claimedLog = await claim(name, row, attemptNo);
+        if (!claimedLog) { results.push({ order: name, skip: 'claimed by another tick' }); continue; }
         let r;
         try { r = await placeOrderCall({ order_name: name, call_type: PURPOSE, auto: true }); }
         catch (e) { r = { error: e.message }; }
@@ -261,7 +307,10 @@ async function highValueCallTick(opts = {}) {
             results.push({ order: name, error: r.error });
         } else {
             placed++;
-            await supabase.from('vobiz_auto_calls_ecom').update({ status: 'placed', sid: r.sid, phone: r.phone || null })
+            // remember the Vobiz call uuid on this attempt - the no-answer sweep pulls its CDR later
+            const vuuid = (r.vobiz && (r.vobiz.request_uuid || r.vobiz.call_uuid)) || null;
+            if (vuuid && claimedLog.length) claimedLog[claimedLog.length - 1].uuid = vuuid;
+            await supabase.from('vobiz_auto_calls_ecom').update({ status: 'placed', sid: r.sid, phone: r.phone || null, attempt_log: claimedLog })
                 .eq('order_name', name).eq('purpose', PURPOSE);
             console.log(`[HVCall] ${name}: COD confirmation call placed (sid ${r.sid})`);
             results.push({ order: name, placed: true, sid: r.sid });
@@ -355,4 +404,4 @@ async function handleCodCallOutcome({ orderName, summary, customerTurns }) {
         .eq('order_name', name).eq('purpose', PURPOSE);
 }
 
-module.exports = { router, highValueCallTick, handleCodCallOutcome, classifyOutcome };
+module.exports = { router, highValueCallTick, handleCodCallOutcome, handleUnansweredHangup, classifyOutcome };

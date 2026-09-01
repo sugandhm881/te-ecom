@@ -564,7 +564,9 @@ cronJob('WA NDR (*/15 * * * *)', '*/15 * * * *', async () => {
 
 // High-value COD confirmation CALLS (2026-08-31): orders held for the ≥₹1500 rule ALONE get an AI
 // confirmation call (Vobiz). 10:00–19:59 IST only; VOBIZ_CALL_ALLOWLIST gates every dial while set.
-cronJob('HighValueCall (*/10 * * * *)', '*/10 * * * *', async () => {
+// */5 (2026-09-01, was */10): with the 5-minute placement floor, a 10-minute tick made the first
+// call land 5-15 min after placement (TE25-46042 waited 13) — a 5-minute tick keeps it at 5-10.
+cronJob('HighValueCall (*/5 * * * *)', '*/5 * * * *', async () => {
     const { highValueCallTick } = require('./app/api/vobiz_auto_calls');
     await highValueCallTick().catch(e => console.error('[HVCall] cron error:', e.message));
 }, { timezone: 'Asia/Kolkata' });

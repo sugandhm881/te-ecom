@@ -5014,7 +5014,8 @@ function supAiAttemptsCard(a){
   const byN=new Map(); raw.forEach(e=>byN.set(e.n,e));               // one line per attempt — latest state wins
   const log=[...byN.values()];
   const lines=log.map(e=>{const r=RES[e.result]||(e.result?[e.result,'text-slate-500']:['ringing / awaiting result','text-slate-400']);
-    return `<div class="flex items-center gap-2"><span class="font-semibold tabular-nums">#${e.n}</span><span class="text-slate-500 tabular-nums">${fmt(e.at)}</span><span class="${r[1]} font-semibold">${escapeHtml(r[0])}</span></div>`;}).join('');
+    const cdr=e.cause?`<span class="text-slate-400">— ${escapeHtml(e.cause)}${e.ring_s!=null?`, ${e.ring_s}s`:''}${e.hangup_by?` · by ${escapeHtml(String(e.hangup_by).toLowerCase())}`:''}</span>`:'';
+    return `<div class="flex items-center gap-2 flex-wrap"><span class="font-semibold tabular-nums">#${e.n}</span><span class="text-slate-500 tabular-nums">${fmt(e.at)}</span><span class="${r[1]} font-semibold">${escapeHtml(r[0])}</span>${cdr}</div>`;}).join('');
   const older=a.attempts-log.length;
   const nxt=a.status==='retry'&&a.next_attempt_at?`<div class="text-slate-500 mt-0.5">next attempt ~${fmt(a.next_attempt_at)}</div>`:'';
   const done=a.status==='exhausted'?`<div class="text-violet-700 font-semibold mt-0.5">3 calls unanswered — no more auto calls</div>`:'';

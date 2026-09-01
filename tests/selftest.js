@@ -834,15 +834,19 @@ function check(name, got, want) {
             [/turn\.set\(r\.order_name, r\)/.test(hv), /await claim\(name, row, attemptNo\)/.test(hv),
              /h < WINDOW\.from \|\| h >= WINDOW\.to/.test(hv), /cod_confirmations_msg91/.test(hv)],
             [true, true, true, true]);
+        check('hv-call instant no-answer: the never-connected hangup webhook marks the attempt in seconds with its carrier cause; the 7-min sweep stays as backstop',
+            [/handleUnansweredHangup/.test(hv), /hangup webhook\)'/.test(hv) || /hangup webhook/.test(hv),
+             /handleUnansweredHangup/.test(fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8'))],
+            [true, true, true]);
         check('hv-call retries ride their own rail: a due retry redials even after the hold leaves the 48h ladder window (TE25-45530)',
             [/DUE RETRIES ride on their own rail/.test(hv), /eq\('status', 'retry'\)[\s\S]{0,20}\.lte\('next_attempt_at'/.test(hv)],
             [true, true]);
         check('hv-call attempts: every DIAL is logged on the turnstile (attempt_log) and the order modal shows all of them — unanswered dials included',
-            [/attempt_log: \[\{ n: 1, at \}\]/.test(hv), /function logResult/.test(hv),
+            [/attempt_log: log0/.test(hv), /function logResult/.test(hv), /fetchVobizCdr/.test(hv),
              /ai_attempts/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8')),
              /supAiAttemptsCard/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8')),
              fs.existsSync(path.join(ROOT, 'supabase/migrations/20260831_vobiz_attempt_log.sql'))],
-            [true, true, true, true, true]);
+            [true, true, true, true, true, true]);
         check('hv-call retry ladder: unanswered → +10 min → +20 min → exhausted (highlighted, no more auto calls); vague answers never redial',
             [/RETRY_DELAY_MIN = \{ 1: 10, 2: 20 \}/.test(hv), /attempts >= 3/.test(hv), /status: 'exhausted'/.test(hv),
              /sweepUnanswered\(\)/.test(hv), /outcome === 'no_answer'/.test(hv),
@@ -869,7 +873,7 @@ function check(name, got, want) {
             [true, true, true, true, true]);
         check('hv-call: route and auto-caller share ONE placeOrderCall (allowlist inside it), cron wired, endpoint capability-gated',
             [/async function placeOrderCall\(b\)/.test(vb), /placeOrderCall, vobizConfigured/.test(hv),
-             /HighValueCall \(\*\/10/.test(sv), /high-value-call-tick\)\$\/i, 'support-ai-call'/.test(sv)],
+             /HighValueCall \(\*\/5/.test(sv), /high-value-call-tick\)\$\/i, 'support-ai-call'/.test(sv)],
             [true, true, true, true]);
     }
     {

@@ -774,6 +774,10 @@ async function placeOrderCall(b) {
         from: V_FROM(), to: '91' + phone,
         answer_url: answerUrl, answer_method: 'POST',
         hangup_url: `${V_BASE()}/api/vobiz/hangup?token=${V_TOKEN()}&sid=${sid}`,
+        // Ring a FULL minute before giving up (user, 2026-09-01: "complete ringing till hangup") —
+        // explicit instead of the platform default, so an unanswered-but-ringing call shows ~60s in
+        // every log and nobody is hung up on mid-ring. A carrier busy/refusal still ends it early.
+        ring_timeout: 60,
     }, { headers: { 'X-Auth-ID': V_AUTH_ID(), 'X-Auth-Token': V_AUTH_TOKEN(), 'Content-Type': 'application/json' }, timeout: 20000, validateStatus: () => true });
     if (r.status >= 300) return { error: `Vobiz ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}`, code: 502 };
     return { success: true, sid, phone, vobiz: r.data };
@@ -861,6 +865,14 @@ router.all('/vobiz/answer', async (req, res) => {
 router.all('/vobiz/hangup', (req, res) => {
     const s = sessions.get((req.query || {}).sid);
     if (s && s.call) s.call.close('hangup webhook');
+    // NEVER-CONNECTED hangup (user, 2026-09-01: "why wait 7 minutes — do it instantly"): the carrier
+    // refused/timed out before any answer, so no session close will ever run. Vobiz tells us within
+    // seconds via this webhook — hand it to the engine NOW; the 7-minute sweep stays as the backstop
+    // for a lost webhook.
+    else if (s && !s.call && s.auto && (s.callType || '') === 'cod_confirm' && s.ctx.order_name) {
+        require('./vobiz_auto_calls').handleUnansweredHangup(s.ctx.order_name)
+            .catch(e => console.log('[vobiz] unanswered-hangup handling failed:', e.message));
+    }
     res.json({ ok: true });
 });
 
