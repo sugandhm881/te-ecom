@@ -765,10 +765,10 @@ function check(name, got, want) {
                  /reattempt agreed \/ cancelled \/ no answer \/ unclear/.test(vb2),
                  /AI RTO call/.test(vb2)],
                 [true, true, true, true, true, true, true, true]);
-            check('influencer panel 2026-09-01: search matches with or without @, DM composer popup logs to Activity, render token kills the stuck-search paint race',
-                [/replace\(\/\^@\+\/,''\)/.test(ap2), /function infDmModal/.test(ap2), /DM sent: /.test(ap2),
+            check('influencer panel 2026-09-01: search matches with or without @, DM is the direct Instagram redirect (composer reverted by user), render token kills the stuck-search paint race',
+                [/replace\(\/\^@\+\/,''\)/.test(ap2), !/function infDmModal/.test(ap2),
                  /gen!==_infRenderGen/.test(ap2)],
-                [true, true, true, true]);
+                [true, true, true]);
             check('users page 2026-09-01: access popup, busy + Saved feedback, premium list (search, status chips, access meter, kebab menu, gradient avatars)',
                 [/function usrAccessModal/.test(ap2), !/data-act="toggle"/.test(ap2),
                  /function _usrBusy/.test(ap2), /'⏳ Saving…'/.test(ap2), /'✓ Saved'/.test(ap2),

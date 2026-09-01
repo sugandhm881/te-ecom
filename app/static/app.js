@@ -13777,35 +13777,6 @@ function infEditModal(inf, onDone){
 }
 
 // ── Influencer detail modal (sidebar + Videos / Activity tabs) ───────────────
-// DM composer popup (user, 2026-09-01: "instead of redirect, a message box popup"). Straight truth
-// about the platform: Instagram allows NO outside app to send a first DM to an arbitrary user or to
-// read that thread — only replies to people who message the brand first, via Meta's business
-// messaging. Automating around that risks the brand account. So this is the closest legit flow:
-// compose here → message copied → the exact chat opens → paste-send; the message is logged to the
-// influencer's Activity (with author) and the status flips to reached-out. Replies live in Instagram.
-function infDmModal(inf, parentWrap){
-  const def=`Hi ${inf.name?inf.name.split(' ')[0]:'@'+(inf.instagram_handle||'')}! We're The Element — an Ayurvedic skincare brand. We love your content and would like to collaborate on a paid partnership. Are you open to it?`;
-  const w=infModal('inf-dm-modal',`${INF_MODAL_HEAD('Instagram DM','@'+escapeHtml(inf.instagram_handle||''))}
-    <div class="p-5 space-y-3">
-      <textarea id="infdm-text" rows="6" class="filter-input w-full !h-auto py-2 resize-none">${escapeHtml(def)}</textarea>
-      <p class="text-[11px] text-slate-400 leading-relaxed">Instagram doesn't let outside apps send the first DM or show its replies — so Pravidhi copies your message, opens the exact chat, and you paste-send there. The message is saved to this influencer's <b>Activity</b> so the team knows what was sent.</p>
-    </div>
-    <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-100 bg-slate-50/60 rounded-b-2xl">
-      <button data-x class="px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100">Cancel</button>
-      <button id="infdm-send" class="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700">📋 Copy & open chat</button>
-    </div>`,'max-w-lg');
-  w.querySelector('#infdm-send').addEventListener('click',async function(){
-    const text=w.querySelector('#infdm-text').value.trim();
-    if(!text) return showNotification('Write a message first.',true);
-    this.disabled=true; this.textContent='Opening…';
-    try{ await navigator.clipboard.writeText(text); }catch(_){/* clipboard may need permission — the chat still opens */}
-    window.open('https://ig.me/m/'+encodeURIComponent(inf.instagram_handle||''),'_blank');
-    try{ await infFetch('/api/inf/activities',{method:'POST',body:JSON.stringify({influencer_id:inf.id,description:'📩 DM sent: "'+text.slice(0,380)+'"'})}); }catch(_){}
-    if(inf.outreach_status==='not_contacted'){ try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({outreach_status:'reached_out'})}); _infRows=null; if(parentWrap) infDetailReload(parentWrap); }catch(_){}}
-    w.remove(); showNotification('Message copied — paste it in the Instagram chat that just opened.');
-  });
-  setTimeout(()=>w.querySelector('#infdm-text').focus(),50);
-}
 let _infDetTab='videos';
 async function infDetailModal(id){
   _infDetTab='videos';
@@ -13948,7 +13919,10 @@ function infDetailRender(wrap){
     try{ await infFetch('/api/inf/activities',{method:'POST',body:JSON.stringify({influencer_id:inf.id,description:t})}); showNotification('Note added'); infDetailReload(wrap); }
     catch(e){ showNotification(e.message,true); } });
   infListsControl(wrap);                                       // 🗂 Lists dropdown — map to / unmap from campaign lists + create new
-  wrap.querySelector('#infd-dm').addEventListener('click',()=>infDmModal(inf,wrap));
+  wrap.querySelector('#infd-dm').addEventListener('click',async()=>{
+    window.open('https://ig.me/m/'+encodeURIComponent(inf.instagram_handle||''),'_blank');
+    if(inf.outreach_status==='not_contacted'){ try{ await infFetch('/api/inf/influencer/'+inf.id,{method:'POST',body:JSON.stringify({outreach_status:'reached_out'})}); _infRows=null; infDetailReload(wrap); }catch(_){}}
+  });
   wrap.querySelector('#infd-thread')?.addEventListener('click',()=>infThreadModal(inf.id, (inf.name||'')+' · @'+(inf.instagram_handle||'')));
   wrap.querySelector('#infd-email')?.addEventListener('click',()=>infEmailModal(inf.id,()=>{ infDetailReload(wrap); inflSyncMember(inf.id,{email_sent:true}); }));
   wrap.querySelector('#infd-edit').addEventListener('click',()=>infEditModal(inf,()=>infDetailReload(wrap)));
