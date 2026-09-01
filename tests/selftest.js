@@ -758,12 +758,17 @@ function check(name, got, want) {
             check('voice rto training 2026-09-01: consistent one-register delivery, news-then-ask pacing, real address in RTO context, RTO summary vocabulary, outcome note on the order',
                 [/CONSISTENT DELIVERY: one voice from the first word to the last/.test(vb2),
                  /May I know what went wrong with the delivery\?/.test(vb2),
-                 /NEVER speak a standalone one- or two-word sentence/.test(vb2),
+                 /NEVER open or stand alone with a bare acknowledgement/.test(vb2),
+                 /NEVER REPEAT A COMPLETED STEP/.test(vb2),
                  /NEVER offer to confirm the address/.test(vb2),
                  /order_shipping_addresses/.test(vb2),
                  /reattempt agreed \/ cancelled \/ no answer \/ unclear/.test(vb2),
                  /AI RTO call/.test(vb2)],
-                [true, true, true, true, true, true, true]);
+                [true, true, true, true, true, true, true, true]);
+            check('influencer panel 2026-09-01: search matches with or without @, DM composer popup logs to Activity, render token kills the stuck-search paint race',
+                [/replace\(\/\^@\+\/,''\)/.test(ap2), /function infDmModal/.test(ap2), /DM sent: /.test(ap2),
+                 /gen!==_infRenderGen/.test(ap2)],
+                [true, true, true, true]);
             check('users page 2026-09-01: access popup, busy + Saved feedback, premium list (search, status chips, access meter, kebab menu, gradient avatars)',
                 [/function usrAccessModal/.test(ap2), !/data-act="toggle"/.test(ap2),
                  /function _usrBusy/.test(ap2), /'⏳ Saving…'/.test(ap2), /'✓ Saved'/.test(ap2),
