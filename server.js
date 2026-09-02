@@ -192,6 +192,7 @@ const _VIEW_PERMS = [
     [/^\/kwikship\//i, 'delivery-perf'],   // manual Kwikship tracking re-sync (cron runs nightly 2 AM)
     // Customer Support console — any support view permission unlocks its API group.
     [/^\/support\/agent-learning/i, ['support-agent-learning', 'support-voice']],   // self-learning dashboard (router re-checks)
+    [/^\/support\/ai-call-costs/i, ['support-ai-costs', 'support-agent-learning', 'support-voice']],   // AI calling cost statement
     [/^\/voice-lessons/i, ['support-voice', 'support-agent-learning']],             // lessons block for the browser agent
     [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist', 'customer-profile']],
     // Customer Profile page (replaces Blacklist Numbers) — same audience. Issuing store credit is gated
@@ -203,7 +204,7 @@ const _VIEW_PERMS = [
     [/^\/voice-(config|order-lookup|order-list)/i, 'support-voice'],   // Voice Agent tool endpoints — permitted users / admins only
     // Placing a REAL outbound AI call is its own right (user, 2026-09-01: "manual AI Call Button
     // make permission based") — support-queue alone no longer dials; admins always pass.
-    [/^\/vobiz\/(call|high-value-call-tick)$/i, 'support-ai-call'],
+    [/^\/vobiz\/(call|high-value-call-tick|rto-call-tick)$/i, 'support-ai-call'],
     [/^\/vobiz\/(recording|ai-call-report)$/i, ['support-voice', 'support-queue', 'support-ai-call']],   // playback + report stay broad
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
@@ -340,6 +341,7 @@ const vobizBridge = require('./app/api/vobiz_bridge');    // real phone calls: V
 app.use('/api', vobizBridge.router);
 app.use('/api', require('./app/api/vobiz_auto_calls').router);   // high-value COD confirmation auto-caller (test trigger)
 app.use('/api', require('./app/api/ai_call_report').router);     // daily AI calling report → Teams (manual trigger/preview)
+app.use('/api', require('./app/api/ai_call_costs').router);      // AI Calling Statement — per-call cost breakdown dashboard
 app.use('/api', require('./app/api/user_activity').router);   // activity logging (POST /activity — any signed-in user)
 app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
 app.use('/api', require('./app/api/inventory').router);       // Inventory Analytics (daily snapshot dashboard + Teams report)
@@ -569,6 +571,15 @@ cronJob('WA NDR (*/15 * * * *)', '*/15 * * * *', async () => {
 cronJob('HighValueCall (*/5 * * * *)', '*/5 * * * *', async () => {
     const { highValueCallTick } = require('./app/api/vobiz_auto_calls');
     await highValueCallTick().catch(e => console.error('[HVCall] cron error:', e.message));
+}, { timezone: 'Asia/Kolkata' });
+
+// RTO recovery auto-calls (user spec 2026-09-02 rev.2): an order newly in NDR gets its first call
+// ~5 minutes after the update lands, ONE retry an hour later, then no more — the 2-minute tick keeps
+// the 5-minute floor precise. Inert unless VOBIZ_RTO_ENABLED=true (the tick checks it), so this
+// ships everywhere and activates only where the flag is set.
+cronJob('RtoCall (*/2 * * * *)', '*/2 * * * *', async () => {
+    const { rtoCallTick } = require('./app/api/vobiz_auto_calls');
+    await rtoCallTick().catch(e => console.error('[RTOCall] cron error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // Daily AI Calling Report → Teams (Ops › Daily Reports), 20:15 IST — right after the calling window

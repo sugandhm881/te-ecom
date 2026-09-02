@@ -870,7 +870,7 @@ router.get('/support/order/:orderId', async (req, res) => {
             supabase.from('agent_call_logs').select('id, call_type, language, summary, transcript, transcript_en, exchanges, recording_url, called_at').eq('order_id', String(b.order_name || '').replace(/^#/, '')).order('called_at', { ascending: false }).limit(10),
             // AI dial-ATTEMPT history (turnstile) — an unanswered dial opens no bridge session and so
             // has no agent_call_logs row; without this the modal showed only answered calls.
-            supabase.from('vobiz_auto_calls_ecom').select('status, attempts, next_attempt_at, attempt_log, detail').eq('order_name', String(b.order_name || '').replace(/^#/, '')).eq('purpose', 'cod_confirm').maybeSingle(),
+            supabase.from('vobiz_auto_calls_ecom').select('purpose, status, attempts, next_attempt_at, attempt_log, detail').eq('order_name', String(b.order_name || '').replace(/^#/, '')).in('purpose', ['cod_confirm', 'rto_recovery']),
             supabase.from('order_notes').select('id, content, created_at, agent_id').eq('order_id', oid).order('created_at', { ascending: false }),
             supabase.from('escalation_contacts').select('*'),
             last10 ? supabase.from('order_buckets').select(CUST_SEL).ilike('phone', `%${last10}`).order('created_at', { ascending: false }).limit(30) : Promise.resolve({ data: [] }),
@@ -946,7 +946,10 @@ router.get('/support/order/:orderId', async (req, res) => {
             tracking: tracking.data || [], msg91,
             calls: (calls.data || []).map(c => ({ ...c, agent_name: nameById[c.agent_id] || null })),
             ai_calls: (aiCalls.data || []),
-            ai_attempts: aiAttempts.data || null,
+            // both engines' dial-attempt ladders (2026-09-02): ai_attempts keeps its cod shape for the
+            // existing card; rto_attempts is the RTO recovery ladder, rendered as its own card.
+            ai_attempts: (aiAttempts.data || []).find(a => a.purpose === 'cod_confirm') || null,
+            rto_attempts: (aiAttempts.data || []).find(a => a.purpose === 'rto_recovery') || null,
             notes: (notes.data || []).map(n => ({ ...n, agent_name: nameById[n.agent_id] || null, mine: n.agent_id === myId })),
             escalation, customer_orders: custOrders.data || [],   // includes the current order (marked client-side)
             holdLog, isAdmin: isAdmin(req) });

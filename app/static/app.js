@@ -1256,6 +1256,11 @@ function navigate(view) {
             activeLinkElement = document.getElementById('nav-support-voice');
             activeViewElement = document.getElementById('support-voice-view');
             break;   // self-contained iframe (/static/voice-agent.html) — no init needed
+        case 'support-ai-costs':
+            activeLinkElement = document.getElementById('nav-support-ai-costs');
+            activeViewElement = document.getElementById('support-ai-costs-view');
+            if (typeof sacInit === 'function') sacInit();
+            break;
         case 'support-agent-learning':
             activeLinkElement = document.getElementById('nav-support-agent-learning');
             activeViewElement = document.getElementById('support-agent-learning-view');
@@ -5006,9 +5011,10 @@ const SUP_REASON_META={
 };
 // Per-ATTEMPT history of the AI auto-caller for the order modal — every dial shows, answered or not
 // (an unanswered dial has no transcript row, so the transcript cards alone under-count attempts).
-function supAiAttemptsCard(a){
+function supAiAttemptsCard(a, title, maxA){
   if(!a||!(a.attempts>0)) return '';
-  const RES={no_answer:['no answer','text-violet-700'],confirmed:['confirmed','text-emerald-700'],denied:['denied','text-rose-700'],unclear:['not confirmed','text-amber-700'],failed:['failed','text-rose-700'],gated:['gated (test)','text-slate-400']};
+  const mx=maxA||3;
+  const RES={no_answer:['no answer','text-violet-700'],confirmed:['confirmed','text-emerald-700'],denied:['denied','text-rose-700'],unclear:['not confirmed','text-amber-700'],failed:['failed','text-rose-700'],gated:['gated (test)','text-slate-400'],reattempt:['reattempt agreed','text-emerald-700'],cancelled:['wants cancel','text-rose-700']};
   const fmt=t=>new Date(t).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
   const raw=Array.isArray(a.attempt_log)?a.attempt_log:[];
   const byN=new Map(); raw.forEach(e=>byN.set(e.n,e));               // one line per attempt — latest state wins
@@ -5018,9 +5024,9 @@ function supAiAttemptsCard(a){
     return `<div class="flex items-center gap-2 flex-wrap"><span class="font-semibold tabular-nums">#${e.n}</span><span class="text-slate-500 tabular-nums">${fmt(e.at)}</span><span class="${r[1]} font-semibold">${escapeHtml(r[0])}</span>${cdr}</div>`;}).join('');
   const older=a.attempts-log.length;
   const nxt=a.status==='retry'&&a.next_attempt_at?`<div class="text-slate-500 mt-0.5">next attempt ~${fmt(a.next_attempt_at)}</div>`:'';
-  const done=a.status==='exhausted'?`<div class="text-violet-700 font-semibold mt-0.5">3 calls unanswered — no more auto calls</div>`:'';
+  const done=a.status==='exhausted'?`<div class="text-violet-700 font-semibold mt-0.5">${mx} calls unanswered — no more auto calls</div>`:'';
   return `<div class="rounded-lg border border-indigo-100 bg-indigo-50/40 p-2.5 text-xs">
-    <div class="font-semibold text-indigo-700 mb-1">📞 AI dial attempts — ${a.attempts} of 3</div>
+    <div class="font-semibold text-indigo-700 mb-1">📞 ${title||'AI dial attempts'} — ${a.attempts} of ${mx}</div>
     ${older>0?`<div class="text-slate-400">${older} earlier attempt${older===1?'':'s'} (before per-attempt logging)</div>`:''}
     ${lines}${nxt}${done}</div>`;
 }
@@ -5825,12 +5831,12 @@ async function supOrderModal(orderId){
       </div>
       <div class="grid md:grid-cols-2 gap-6 mt-5">
         <div class="card p-4"><div class="flex items-center justify-between mb-2"><p id="supd-calls-count" class="text-xs font-bold text-slate-500 uppercase tracking-wide">Call history (${(d.calls||[]).length+(d.ai_calls||[]).length} answered${d.ai_attempts&&d.ai_attempts.attempts?` · ${d.ai_attempts.attempts} AI dial${d.ai_attempts.attempts===1?'':'s'}`:''})</p></div>
-          <div id="supd-calls-list" class="space-y-2 max-h-52 overflow-auto">${supAiAttemptsCard(d.ai_attempts)}${(!(d.calls||[]).length&&!(d.ai_calls||[]).length&&d.ai_attempts&&d.ai_attempts.attempts)?'<p class="text-[11px] text-slate-400">Dialed but not answered yet — a transcript and recording appear only when a call connects.</p>':''}${(d.ai_calls||[]).map((ac,i)=>`<div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-2.5 text-xs">
+          <div id="supd-calls-list" class="space-y-2 max-h-52 overflow-auto">${supAiAttemptsCard(d.ai_attempts)}${supAiAttemptsCard(d.rto_attempts,'RTO recovery dials',2*((d.rto_attempts&&d.rto_attempts.detail&&d.rto_attempts.detail.ndr_no)||1))}${(!(d.calls||[]).length&&!(d.ai_calls||[]).length&&d.ai_attempts&&d.ai_attempts.attempts)?'<p class="text-[11px] text-slate-400">Dialed but not answered yet — a transcript and recording appear only when a call connects.</p>':''}${(d.ai_calls||[]).map((ac,i)=>`<div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-2.5 text-xs">
             <div class="flex items-center gap-2 flex-wrap"><span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">\u{1F916} AI call</span>
               <span class="text-slate-400">${escapeHtml((ac.call_type||'').replace('_vobiz','').replace(/_/g,' '))} · ${escapeHtml(ac.language||'')} · ${ac.called_at?new Date(ac.called_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span></div>
             ${ac.summary?`<p class="text-slate-700 mt-1 whitespace-pre-wrap">${escapeHtml(ac.summary)}</p>`:''}
             <div class="flex items-center gap-2 mt-1.5">
-              ${ac.recording_url?`<button class="supd-aic-play px-2 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700" data-u="${escapeHtml(ac.recording_url)}">\u25B6 Play recording</button>`:''}
+              ${ac.recording_url?`<button class="supd-aic-play px-2 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700" data-u="${escapeHtml(ac.recording_url)}">\u25B6 Play recording</button><button class="supd-aic-dl px-2 py-1 rounded-lg text-[11px] font-semibold bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50" data-u="${escapeHtml(ac.recording_url)}" title="Download recording">\u2B07 Download</button>`:''}
               ${ac.transcript?`<button class="supd-aic-tr px-2 py-1 rounded-lg text-[11px] font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300" data-i="${i}">Transcript</button>`:''}
               ${ac.transcript&&ac.id&&/[\u0900-\u0D7F]/.test(ac.transcript)?`<button class="supd-aic-en px-2 py-1 rounded-lg text-[11px] font-semibold bg-white border border-slate-200 text-slate-600 hover:border-indigo-300" data-id="${ac.id}" data-i="${i}">Translate to English</button>`:''}
             </div>
@@ -5895,6 +5901,21 @@ async function supOrderModal(orderId){
     }));
     wrap.querySelectorAll('.supd-aic-tr').forEach(b=>b.addEventListener('click',()=>{
       wrap.querySelector(`.supd-aic-tx[data-i="${b.dataset.i}"]`)?.classList.toggle('hidden');
+    }));
+    // Download name rule (user, 2026-09-01): AWB_OrderID_VOC.mp3, or OrderID_VOC.mp3 when no AWB yet.
+    wrap.querySelectorAll('.supd-aic-dl').forEach(b=>b.addEventListener('click',async()=>{
+      const orig=b.textContent; b.disabled=true; b.textContent='⏳';
+      try{
+        const r=await fetch('/api/vobiz/recording?u='+encodeURIComponent(b.dataset.u),{headers:getAuthHeaders()});
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        const awb=(d.tracking||[]).map(t=>t.awb_number).find(Boolean)||'';
+        const a=document.createElement('a');
+        a.href=URL.createObjectURL(await r.blob());
+        a.download=(awb?awb+'_':'')+(o.order_name||o.order_id)+'_VOC.mp3';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(()=>URL.revokeObjectURL(a.href),30000);
+        b.disabled=false; b.textContent=orig;
+      }catch(e){ b.disabled=false; b.textContent='⬇ (failed: '+e.message+')'; }
     }));
     wrap.querySelectorAll('.supd-aic-play').forEach(b=>b.addEventListener('click',async()=>{
       b.disabled=true; b.textContent='Loading\u2026';
@@ -6601,7 +6622,7 @@ const NAV_HREF = {
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon', 'nav-kwikship-recon': 'kwikship-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics', 'nav-zone-mapping': 'zone-mapping',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
-    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning',
+    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning', 'nav-support-ai-costs': 'support-ai-costs',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
     'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions',
     'nav-finance-entry': 'finance-entry', 'nav-finance-register': 'finance-register', 'nav-finance-books': 'finance-books'
@@ -7758,16 +7779,169 @@ async function zsExport() {
 // issues), the LESSONS distilled from them (active / proposed / retired, with before-vs-after numbers),
 // and the learning runs. Lessons can be activated, retired, edited, or taught by hand — every change
 // reaches the next call within five minutes (the prompt block is cached that long on the server).
-let _sal = { data: null, charts: {}, wired: false, filter: '' };
+let _sal = { data: null, charts: {}, wired: false, filter: '', sort: 'seen',
+  // Agent Learning keeps its OWN date range (user, 2026-09-02: "remove preset and make date filter
+  // workable") — the shared preset widget updated a hidden state without refreshing the inputs, so
+  // the dates on screen and the data never matched. Default: last 7 days; remembered per browser.
+  rangeSel: '7',
+  range: (() => { try { const r = JSON.parse(localStorage.getItem('sal.dateRange')); if (r && r.from && r.to) return r; } catch (_) {}
+    const d = new Date(), f = new Date(d.getFullYear(), d.getMonth(), d.getDate() - 7);
+    return { from: _ymd(f), to: _ymd(d) }; })() };
+try { const r = JSON.parse(localStorage.getItem('sal.dateRange')); if (r && r.sel) _sal.rangeSel = r.sel; } catch (_) {}
+function salRenderRange(){
+  const el=document.getElementById('sal-range'); if(!el) return;
+  // Quick ranges kept, placeholder "Presets" option dropped (user, 2026-09-02: "remove only preset
+  // option — other filter required along with custom date"). Picking a range also UPDATES the visible
+  // date inputs (the old shared widget's bug: dates on screen never matched the data); a manual
+  // Apply flips the dropdown to Custom.
+  el.innerHTML=`<div class="flex items-center gap-2 flex-wrap">
+    <select class="filter-select sal-preset">
+      <option value="custom" ${_sal.rangeSel==='custom'?'selected':''}>Custom</option>
+      <option value="0" ${_sal.rangeSel==='0'?'selected':''}>Today</option>
+      <option value="7" ${_sal.rangeSel==='7'?'selected':''}>Last 7 days</option>
+      <option value="14" ${_sal.rangeSel==='14'?'selected':''}>Last 14 days</option>
+      <option value="30" ${_sal.rangeSel==='30'?'selected':''}>Last 30 days</option>
+      <option value="90" ${_sal.rangeSel==='90'?'selected':''}>Last 90 days</option>
+    </select>
+    <span class="sal-custom items-center gap-2 ${_sal.rangeSel==='custom'?'flex':'hidden'}">
+      <input type="date" class="filter-input sal-from" value="${_sal.range.from}"><span class="text-slate-400">→</span>
+      <input type="date" class="filter-input sal-to" value="${_sal.range.to}">
+      <button class="filter-btn sal-apply-range">Apply</button></span></div>`;
+  const save=()=>{ localStorage.setItem('sal.dateRange',JSON.stringify({..._sal.range,sel:_sal.rangeSel})); };
+  const custom=el.querySelector('.sal-custom');
+  el.querySelector('.sal-preset').addEventListener('change',e=>{
+    const v=e.target.value;
+    // the date inputs appear ONLY for Custom (user, 2026-09-02) — a quick range needs no dates on screen
+    if(v==='custom'){ _sal.rangeSel='custom'; custom.classList.remove('hidden'); custom.classList.add('flex'); return; }
+    custom.classList.add('hidden'); custom.classList.remove('flex');
+    const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-(+v));
+    _sal.range={from:_ymd(f),to:_ymd(d)}; _sal.rangeSel=v; save();
+    el.querySelector('.sal-from').value=_sal.range.from;
+    el.querySelector('.sal-to').value=_sal.range.to;
+    salLoad();
+  });
+  el.querySelector('.sal-apply-range').addEventListener('click',()=>{
+    const f=el.querySelector('.sal-from').value, t=el.querySelector('.sal-to').value;
+    if(!f||!t) return showNotification('Pick both dates',true);
+    if(f>t) return showNotification('The From date is after the To date',true);
+    _sal.range={from:f,to:t}; _sal.rangeSel='custom'; save();
+    el.querySelector('.sal-preset').value='custom';
+    salLoad();
+  });
+}
 const SAL_CAT_LABEL = { opening: 'Opening', screening: 'Call screening', confirmation: 'Confirmation', language: 'Language', tone: 'Tone', objection: 'Objections', closing: 'Closing', other: 'Other' };
 const SAL_OUT_LABEL = { confirmed: 'Confirmed', cancelled: 'Cancelled', reattempt: 'Re-attempt', no_answer: 'No answer', unclear: 'Unclear', other: 'Other' };
 const SAL_OUT_COLOR = { confirmed: '#10b981', cancelled: '#f43f5e', reattempt: '#f59e0b', no_answer: '#94a3b8', unclear: '#a78bfa', other: '#cbd5e1' };
+// ── AI Calling Statement (2026-09-02): the honest per-call cost sheet — telephony + Sarvam voice +
+// Claude brain per call, fixed bills amortized, every rate visible so a wrong estimate can be seen.
+let _sac = { wired: false,
+  range: (() => { try { const r = JSON.parse(localStorage.getItem('sac.dateRange')); if (r && r.from && r.to) return r; } catch (_) {}
+    const d = new Date(), f = new Date(d.getFullYear(), d.getMonth(), d.getDate() - 7);
+    return { from: _ymd(f), to: _ymd(d) }; })(), rangeSel: '7' };
+try { const r = JSON.parse(localStorage.getItem('sac.dateRange')); if (r && r.sel) _sac.rangeSel = r.sel; } catch (_) {}
+function sacRenderRange(){
+  const el=document.getElementById('sac-range'); if(!el) return;
+  el.innerHTML=`<div class="flex items-center gap-2 flex-wrap">
+    <select class="filter-select sac-preset">
+      <option value="custom" ${_sac.rangeSel==='custom'?'selected':''}>Custom</option>
+      <option value="0" ${_sac.rangeSel==='0'?'selected':''}>Today</option>
+      <option value="7" ${_sac.rangeSel==='7'?'selected':''}>Last 7 days</option>
+      <option value="30" ${_sac.rangeSel==='30'?'selected':''}>Last 30 days</option>
+      <option value="90" ${_sac.rangeSel==='90'?'selected':''}>Last 90 days</option>
+    </select>
+    <span class="sac-custom items-center gap-2 ${_sac.rangeSel==='custom'?'flex':'hidden'}">
+      <input type="date" class="filter-input sac-from" value="${_sac.range.from}"><span class="text-slate-400">→</span>
+      <input type="date" class="filter-input sac-to" value="${_sac.range.to}">
+      <button class="filter-btn sac-apply">Apply</button></span></div>`;
+  const save=()=>localStorage.setItem('sac.dateRange',JSON.stringify({..._sac.range,sel:_sac.rangeSel}));
+  const custom=el.querySelector('.sac-custom');
+  el.querySelector('.sac-preset').addEventListener('change',e=>{
+    const v=e.target.value;
+    if(v==='custom'){ _sac.rangeSel='custom'; custom.classList.remove('hidden'); custom.classList.add('flex'); return; }
+    custom.classList.add('hidden'); custom.classList.remove('flex');
+    const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-(+v));
+    _sac.range={from:_ymd(f),to:_ymd(d)}; _sac.rangeSel=v; save();
+    el.querySelector('.sac-from').value=_sac.range.from; el.querySelector('.sac-to').value=_sac.range.to;
+    sacLoad();
+  });
+  el.querySelector('.sac-apply').addEventListener('click',()=>{
+    const f=el.querySelector('.sac-from').value, t=el.querySelector('.sac-to').value;
+    if(!f||!t) return showNotification('Pick both dates',true);
+    if(f>t) return showNotification('The From date is after the To date',true);
+    _sac.range={from:f,to:t}; _sac.rangeSel='custom'; save(); sacLoad();
+  });
+}
+function sacInit(){
+  if(!_sac.wired){ _sac.wired=true; sacRenderRange(); }
+  sacLoad();
+}
+// REALTIME (user, 2026-09-02): the statement refreshes itself every 45s while the page is open —
+// a call that just ended appears with its cost without touching anything. The timer stops the
+// moment the view is hidden, so no background churn (each refresh also pages the Vobiz CDR API).
+function sacArmRefresh(){
+  clearTimeout(_sac.timer);
+  _sac.timer=setTimeout(()=>{
+    const v=document.getElementById('support-ai-costs-view');
+    if(v && !v.classList.contains('view-hidden')) sacLoad(true);
+  },45000);
+}
+const _sacInr=n=>'₹'+Number(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+async function sacLoad(silent){
+  const k=document.getElementById('sac-kpis');
+  if(k && !silent) k.innerHTML='<div class="col-span-full">'+brandLoader('Adding up the bills…')+'</div>';
+  try{
+    const d=await supFetch(`/api/support/ai-call-costs?from=${_sac.range.from}&to=${_sac.range.to}`);
+    const t=d.totals;
+    const tile=(label,val,sub,cls)=>`<div class="card p-4"><p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${label}</p><p class="text-xl font-bold ${cls||'text-slate-800'} mt-1">${val}</p>${sub?`<p class="text-[11px] text-slate-400 mt-0.5">${sub}</p>`:''}</div>`;
+    k.innerHTML =
+      tile('Grand total', _sacInr(t.grand), `${d.range.days} day${d.range.days===1?'':'s'}`,'text-indigo-700')+
+      tile('Variable (calls)', _sacInr(t.variable), `${t.calls} call${t.calls===1?'':'s'} logged`)+
+      tile('Fixed (amortized)', _sacInr(t.fixed), 'number rental etc.')+
+      tile('Connected calls', t.connected, `${t.calls-t.connected} unanswered logs`)+
+      tile('Talk time', `${Math.round(t.talk_seconds/60)} min`, `${t.talk_seconds}s total`)+
+      tile('Avg / connected call', _sacInr(t.avg_per_call), 'incl. fixed share','text-emerald-700');
+    const row=(name,val,sub)=>`<div class="flex items-center justify-between py-1.5 border-b border-slate-50 text-sm"><span class="text-slate-600">${name}${sub?` <span class="text-[11px] text-slate-400">${sub}</span>`:''}</span><span class="font-semibold tabular-nums text-slate-800">${val}</span></div>`;
+    const c=d.components, src=d.sources||{};
+    document.getElementById('sac-components').innerHTML =
+      row('📞 Vobiz telephony', _sacInr(c.telephony), escapeHtml(src.telephony||''))+
+      row('👂 Sarvam STT (ears)', _sacInr(c.stt), 'measured minutes')+
+      row('🗣 Sarvam TTS (voice)', _sacInr(c.tts), 'measured characters')+
+      row('🧠 Claude brain', _sacInr(c.brain), escapeHtml(src.brain||''))+
+      `<div class="text-[11px] text-slate-400 mt-1.5">${escapeHtml(src.sarvam||'')}</div>`+
+      `<div class="flex items-center justify-between pt-2 text-sm font-bold"><span>Variable total</span><span class="tabular-nums text-indigo-700">${_sacInr(t.variable)}</span></div>`;
+    document.getElementById('sac-fixed').innerHTML =
+      (d.fixed||[]).map(f=>row(f.name, _sacInr(f.in_range), `${f.note||''} · ${_sacInr(f.amount)}/month`)).join('')+
+      `<div class="flex items-center justify-between pt-2 text-sm font-bold"><span>Fixed total (range share)</span><span class="tabular-nums text-slate-800">${_sacInr(t.fixed)}</span></div>`;
+    document.getElementById('sac-bytype').innerHTML =
+      Object.entries(d.by_type||{}).sort((a,b)=>b[1].cost-a[1].cost).map(([ty,v])=>row(ty.replace(/_/g,' '), _sacInr(v.cost), `${v.calls} call${v.calls===1?'':'s'} · ${Math.round(v.seconds/60)} min`)).join('')||'<p class="text-sm text-slate-400">No calls in this range.</p>';
+    document.getElementById('sac-rates').textContent = '🟢 live · updated '+new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})+' · ~ marks an estimated cell · USD→INR @ '+(d.sources&&d.sources.usd_inr||88);
+    sacArmRefresh();
+    const fmt=x=>new Date(x).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+    document.getElementById('sac-table').innerHTML = (d.calls||[]).length ? `<table class="w-full text-sm">
+      <thead><tr>${['When','Order','Type','Dur','Turns','Telephony','STT','TTS','Brain','Total ₹','Outcome'].map(h=>`<th class="text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider py-2 pr-3 border-b border-slate-200 whitespace-nowrap">${h}</th>`).join('')}</tr></thead>
+      <tbody>${d.calls.map(cl=>`<tr class="hover:bg-slate-50">
+        <td class="py-1.5 pr-3 border-b border-slate-50 text-xs tabular-nums whitespace-nowrap">${fmt(cl.at)}</td>
+        <td class="py-1.5 pr-3 border-b border-slate-50 font-mono text-indigo-700 text-xs">${escapeHtml(cl.order||'—')}</td>
+        <td class="py-1.5 pr-3 border-b border-slate-50 text-xs">${escapeHtml(cl.type)}</td>
+        <td class="py-1.5 pr-3 border-b border-slate-50 text-xs tabular-nums">${cl.seconds?cl.seconds+'s':'—'}</td>
+        <td class="py-1.5 pr-3 border-b border-slate-50 text-xs tabular-nums">${cl.turns}</td>
+        <td class="py-1.5 pr-3 border-b border-slate-50 text-xs tabular-nums">${cl.actual&&cl.actual.telephony?'':'~'}${_sacInr(cl.cost.telephony)}</td>
+        <td class="py-1.5 pr-3 border-b border-slate-50 text-xs tabular-nums">${_sacInr(cl.cost.stt)}</td>
+        <td class="py-1.5 pr-3 border-b border-slate-50 text-xs tabular-nums">${_sacInr(cl.cost.tts)}</td>
+        <td class="py-1.5 pr-3 border-b border-slate-50 text-xs tabular-nums">${cl.actual&&cl.actual.brain?'':'~'}${_sacInr(cl.cost.brain)}</td>
+        <td class="py-1.5 pr-3 border-b border-slate-50 font-semibold tabular-nums">${_sacInr(cl.cost.total)}</td>
+        <td class="py-1.5 border-b border-slate-50 text-xs text-slate-500 max-w-[260px] truncate" title="${escapeHtml(cl.outcome)}">${escapeHtml(cl.outcome)}</td>
+      </tr>`).join('')}</tbody></table>` : '<p class="text-sm text-slate-400">No calls in this range.</p>';
+  }catch(e){ if(k) k.innerHTML=`<div class="text-rose-500 text-sm col-span-full">${escapeHtml(e.message)}</div>`; }
+}
+
 function salInit(){
   if(!_sal.wired){
     _sal.wired=true;
-    supRenderRange('sal-range', salLoad);
+    salRenderRange();
     document.getElementById('sal-run')?.addEventListener('click', salRun);
     document.getElementById('sal-lesson-filter')?.addEventListener('change', e=>{ _sal.filter=e.target.value; salRenderLessons(); });
+    document.getElementById('sal-lesson-sort')?.addEventListener('change', e=>{ _sal.sort=e.target.value; salRenderLessons(); });
     document.getElementById('sal-add-lesson')?.addEventListener('click', salTeach);
   }
   salLoad();
@@ -7775,7 +7949,7 @@ function salInit(){
 async function salLoad(){
   const k=document.getElementById('sal-kpis'); if(k) k.innerHTML=brandLoader('Loading learning data…');
   try{
-    _sal.data=await supFetch('/api/support/agent-learning/summary?'+supRangeQS());
+    _sal.data=await supFetch(`/api/support/agent-learning/summary?from=${_sal.range.from}&to=${_sal.range.to}`);
     salRender();
   }catch(e){ if(k) k.innerHTML=`<div class="text-rose-500 text-sm col-span-6">${escapeHtml(e.message)}</div>`; }
 }
@@ -7828,7 +8002,18 @@ function salStatusChip(st){ const m={active:'bg-emerald-50 text-emerald-700 bord
 function salRenderLessons(){
   const el=document.getElementById('sal-lessons'); let list=_sal.data.lessons;
   if(_sal.filter) list=list.filter(l=>l.status===_sal.filter);
-  const order={active:0,proposed:1,retired:2}; list=list.slice().sort((a,b)=>(order[a.status]-order[b.status])||(b.times_reinforced-a.times_reinforced));
+  // Proper sorting (user, 2026-09-02): always grouped active → proposed → retired, then the chosen
+  // key. "Newest first" uses the freshest of last-seen/created so a just-proposed lesson surfaces;
+  // "Highest impact" puts measured lessons first (nulls sink), tie-broken by seen-count.
+  const order={active:0,proposed:1,retired:2};
+  const KEYS={
+    seen:(a,b)=>(b.times_reinforced-a.times_reinforced)||(new Date(b.last_seen_at||0)-new Date(a.last_seen_at||0)),
+    recent:(a,b)=>(new Date(b.last_seen_at||b.created_at||0)-new Date(a.last_seen_at||a.created_at||0)),
+    impact:(a,b)=>((b.delta_score??-1e9)-(a.delta_score??-1e9))||(b.times_reinforced-a.times_reinforced),
+    confidence:(a,b)=>(Number(b.confidence||0)-Number(a.confidence||0))||(b.times_reinforced-a.times_reinforced),
+  };
+  const key=KEYS[_sal.sort]||KEYS.seen;
+  list=list.slice().sort((a,b)=>(order[a.status]-order[b.status])||key(a,b));
   if(!list.length){ el.innerHTML='<div class="text-slate-400 text-sm">Nothing learnt yet — run learning once there are reviewed calls.</div>'; return; }
   el.innerHTML=list.map(l=>{
     const ev=(l.evidence||[]).filter(e=>e.quote).slice(-3);
@@ -7928,7 +8113,7 @@ const PERM_GROUPS = [
   ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon'],['gokwik-pg-recon','GoKwik PG Recon'],['kwikship-recon','KwikShip Freight Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
-  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)'],['support-agent-learning','Agent Learning (self-learning voice agent)']]],
+  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)'],['support-agent-learning','Agent Learning (self-learning voice agent)'],['support-ai-costs','AI Calling Statement (cost per call)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
   ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)'],['purchase-orders','Purchase Order (EasyEcom PO book)'],['grn','GRN (EasyEcom goods receiving)'],['po-approvals','PO Approvals (release drafted POs to EasyEcom)']]],
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],

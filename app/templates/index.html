@@ -1080,6 +1080,10 @@
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
                         <span class="ml-3 text-sm font-medium">Agent Learning</span>
                     </a>
+                    <a href="#" id="nav-support-ai-costs" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 8h6m-5 4h4m-7 8h8a2 2 0 002-2V6a2 2 0 00-2-2H7a2 2 0 00-2 2v12a2 2 0 002 2zm3-16v2m0 12v2"/></svg>
+                        <span class="ml-3 text-sm font-medium">AI Calling Statement</span>
+                    </a>
                 </div>
             </div>
 
@@ -2142,6 +2146,26 @@
             <iframe src="/static/voice-agent.html?v=2026-08-31-ele" allow="microphone; autoplay" title="Voice Agent" style="width:100%;height:calc(100vh - 92px);border:0;display:block;background:#F7F6F3"></iframe>
         </div>
 
+        <div id="support-ai-costs-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">AI Calling Statement</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">What every AI call costs — telephony, Sarvam voice, the Claude brain, and the fixed bills — added up honestly</p></div>
+                <div id="sac-range"></div>
+            </header>
+            <div class="p-8 space-y-6">
+                <div id="sac-kpis" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4"></div>
+                <div class="grid lg:grid-cols-2 gap-6">
+                    <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">Cost by component</h3><div id="sac-components"></div></div>
+                    <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">Fixed expenses <span class="text-xs font-normal text-slate-400">(amortized over the selected days)</span></h3><div id="sac-fixed"></div>
+                        <h3 class="font-semibold text-slate-700 mb-3 mt-5">By call type</h3><div id="sac-bytype"></div></div>
+                </div>
+                <div class="card p-5">
+                    <div class="flex items-center justify-between mb-3 flex-wrap gap-2"><h3 class="font-semibold text-slate-700">Statement — every call</h3><span id="sac-rates" class="text-[11px] text-slate-400"></span></div>
+                    <div id="sac-table" class="overflow-x-auto"></div>
+                </div>
+            </div>
+        </div>
+
         <div id="support-agent-learning-view" class="view-hidden">
             <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
                 <div><h1 class="text-xl font-bold text-slate-800">Agent Learning</h1>
@@ -2166,7 +2190,7 @@
                 <div class="card p-5">
                     <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
                         <div><h3 class="font-semibold text-slate-700">What the agent learnt</h3><p class="text-xs text-slate-400">Each lesson is a rule distilled from real calls. <b>Active</b> lessons are injected into every call's prompt; <b>proposed</b> ones wait for a second call to confirm them (or your click).</p></div>
-                        <div class="flex items-center gap-2"><select id="sal-lesson-filter" class="filter-select"><option value="">All lessons</option><option value="active">Active</option><option value="proposed">Proposed</option><option value="retired">Retired</option></select><button id="sal-add-lesson" class="filter-btn">+ Teach a rule</button></div>
+                        <div class="flex items-center gap-2"><select id="sal-lesson-filter" class="filter-select"><option value="">All lessons</option><option value="active">Active</option><option value="proposed">Proposed</option><option value="retired">Retired</option></select><select id="sal-lesson-sort" class="filter-select"><option value="seen">Most seen</option><option value="recent">Newest first</option><option value="impact">Highest impact</option><option value="confidence">Confidence</option></select><button id="sal-add-lesson" class="filter-btn">+ Teach a rule</button></div>
                     </div>
                     <div id="sal-lessons" class="space-y-3"></div>
                 </div>
@@ -3860,7 +3884,7 @@
      ONLY thing that makes a browser re-fetch. Forgetting it means the change ships and nobody sees it:
      on 2026-08-13 a whole session of Last-Mile + Purchase Order work was invisible for exactly this
      reason, and it looks identical to "the fix didn't work". -->
-<script src="/static/app.js?v=2026-09-01-cdr"></script>
+<script src="/static/app.js?v=2026-09-02-rto2-live"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

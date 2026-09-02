@@ -2,7 +2,10 @@
 // plaintext `.env`, and keep the file's own values. A stray machine/user-level env var (e.g. PORT=4000
 // set by another tool) would otherwise win over the file, since the loader (like dotenv) never overrides
 // an existing env var — so for PORT we prefer the file value to keep this app on its configured port.
-const _envFile = require('./app/secrets').load().parsed || {};
+// override: true — the .env file (or vault) is this system's declared source of truth; a stale
+// machine-level environment variable must never shadow it (2026-09-02: a leftover Windows User-level
+// SARVAM_API_KEY with an empty account silently muted every call while .env held the funded key).
+const _envFile = require('./app/secrets').load({ override: true }).parsed || {};
 const path = require('path');
 
 const CACHE_DIR = process.env.CACHE_DIR || '.';

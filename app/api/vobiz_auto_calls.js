@@ -84,13 +84,13 @@ async function lastThreeIncludeDelivered(identity, orderName, orderCreatedAt) {
 
 // Record a settled non-call state (skipped, and its why). Upserts: a retry/gated row that turns out
 // to be cancelled/paid/replied must be closed too, or it would redial a dead order forever.
-async function seal(orderName, status, detail, phone) {
+async function seal(orderName, status, detail, phone, purpose = PURPOSE) {
     const { error } = await supabase.from('vobiz_auto_calls_ecom')
-        .insert({ order_name: orderName, purpose: PURPOSE, status, detail: detail || null, phone: phone || null, last_attempt_at: new Date().toISOString() });
+        .insert({ order_name: orderName, purpose, status, detail: detail || null, phone: phone || null, last_attempt_at: new Date().toISOString() });
     if (!error) return true;
     if (String(error.code) === '23505') {
         await supabase.from('vobiz_auto_calls_ecom').update({ status, detail: detail || null, next_attempt_at: null })
-            .eq('order_name', orderName).eq('purpose', PURPOSE);
+            .eq('order_name', orderName).eq('purpose', purpose);
         return true;
     }
     console.warn('[HVCall] turnstile write failed:', error.message);
@@ -100,12 +100,12 @@ async function seal(orderName, status, detail, phone) {
 // Claim the turnstile before dialing. A first attempt INSERTS (the UNIQUE key is the race guard);
 // a redial or a formerly gated row UPDATES in place, guarded on the status it left — two ticks can
 // never both dial the same order.
-async function claim(orderName, row, attemptNo) {
+async function claim(orderName, row, attemptNo, purpose = PURPOSE) {
     const at = new Date().toISOString();
     if (!row) {
         const log0 = [{ n: 1, at }];
         const { error } = await supabase.from('vobiz_auto_calls_ecom')
-            .insert({ order_name: orderName, purpose: PURPOSE, status: 'calling', attempts: 1, last_attempt_at: at, attempt_log: log0 });
+            .insert({ order_name: orderName, purpose, status: 'calling', attempts: 1, last_attempt_at: at, attempt_log: log0 });
         if (error && String(error.code) !== '23505') console.warn('[HVCall] turnstile write failed:', error.message);
         return error ? null : log0;
     }
@@ -118,7 +118,7 @@ async function claim(orderName, row, attemptNo) {
     const { data, error } = await supabase.from('vobiz_auto_calls_ecom')
         .update({ status: 'calling', attempts: attemptNo, last_attempt_at: at, next_attempt_at: null,
             attempt_log: log })
-        .eq('order_name', orderName).eq('purpose', PURPOSE).eq('status', row.status).select('id');
+        .eq('order_name', orderName).eq('purpose', purpose).eq('status', row.status).select('id');
     if (error) { console.warn('[HVCall] turnstile claim failed:', error.message); return null; }
     return (data && data.length) ? log : null;
 }
@@ -134,8 +134,16 @@ function logResult(row, result) {
 // (highlighted, no more auto calls). Delays anchor on the attempt time, so a late cron tick does
 // not stretch the ladder.
 const UNANSWERED_AFTER_MS = 7 * 60e3;
-const RETRY_DELAY_MIN = { 1: 10, 2: 20 };
-async function scheduleRetryOrExhaust(row, why) {
+const RETRY_DELAY_MIN = { 1: 10, 2: 20 };                       // cod_confirm ladder (user spec 2026-08-31): 3 calls
+const RTO_RETRY_DELAY_MIN = { 1: 60 };                          // rto_recovery ladder (user spec 2026-09-02 rev.2): only TWO calls — 2nd one hour after the 1st, then stop
+// Each courier NDR attempt gets its OWN 2-call ladder (user rev.3: "NDR call should happen on NDR1,
+// NDR2 & NDR3"): attempts count cumulatively (ladder 2 = attempts 3–4, ladder 3 = 5–6), the ladder
+// number rides in detail.ndr_no, and the retry-delay key is the attempt's position INSIDE its ladder.
+const rtoNdrNo = (row) => Math.min(3, Number(((row || {}).detail || {}).ndr_no || 1));
+const DELAYS_FOR = (purpose, row) => purpose === 'rto_recovery' ? RTO_RETRY_DELAY_MIN : RETRY_DELAY_MIN;
+const ladderKey = (purpose, row, attempts) => purpose === 'rto_recovery' ? attempts - 2 * (rtoNdrNo(row) - 1) : attempts;
+const MAX_ATTEMPTS = (purpose, row) => purpose === 'rto_recovery' ? 2 * rtoNdrNo(row) : 3;
+async function scheduleRetryOrExhaust(row, why, purpose = PURPOSE) {
     const attempts = Number(row.attempts) || 1;
     // Pull the carrier's record for the dial being closed: ring seconds + hangup cause land on the
     // attempt entry ("no answer - Busy Line, 8s"), which the order modal shows.
@@ -147,52 +155,53 @@ async function scheduleRetryOrExhaust(row, why) {
             if (cdr) { last.cause = cdr.cause; last.ring_s = cdr.ring_s; last.hangup_by = cdr.by; }
         }
     } catch (_) {}
-    if (attempts >= 3) {
+    const maxA = MAX_ATTEMPTS(purpose, row);
+    if (attempts >= maxA) {
         await supabase.from('vobiz_auto_calls_ecom')
             .update({ status: 'exhausted', next_attempt_at: null, attempt_log: logResult(row, 'no_answer'),
-                detail: { ...(row.detail || {}), outcome: 'no_answer', outcome_note: 'no answer after 3 calls', last_reason: why, at: new Date().toISOString() } })
-            .eq('order_name', row.order_name).eq('purpose', PURPOSE);
-        console.log(`[HVCall] ${row.order_name}: 3 calls unanswered — exhausted, no more auto calls`);
+                detail: { ...(row.detail || {}), outcome: 'no_answer', outcome_note: `no answer after ${maxA} calls`, last_reason: why, at: new Date().toISOString() } })
+            .eq('order_name', row.order_name).eq('purpose', purpose);
+        console.log(`[HVCall] ${row.order_name}/${purpose}: ${maxA} calls unanswered — exhausted, no more auto calls`);
     } else {
-        const mins = RETRY_DELAY_MIN[attempts] || 10;
+        const mins = DELAYS_FOR(purpose, row)[ladderKey(purpose, row, attempts)] || 10;
         const base = row.last_attempt_at ? new Date(row.last_attempt_at).getTime() : Date.now();
         await supabase.from('vobiz_auto_calls_ecom')
             .update({ status: 'retry', next_attempt_at: new Date(base + mins * 60e3).toISOString(),
                 attempt_log: logResult(row, 'no_answer'),
                 detail: { ...(row.detail || {}), last_reason: why } })
-            .eq('order_name', row.order_name).eq('purpose', PURPOSE);
-        console.log(`[HVCall] ${row.order_name}: ${why} (attempt ${attempts}) — retry ${mins} min after the attempt`);
+            .eq('order_name', row.order_name).eq('purpose', purpose);
+        console.log(`[HVCall] ${row.order_name}/${purpose}: ${why} (attempt ${attempts}) — retry ${mins} min after the attempt`);
     }
 }
 
 // INSTANT no-answer (user, 2026-09-01): Vobiz's hangup webhook fires seconds after a call dies
 // unanswered — the bridge routes never-connected hangups here. A short delay lets the carrier CDR
 // materialize so the attempt line carries the cause immediately ("Busy Line, 0s · by carrier").
-async function handleUnansweredHangup(orderName) {
+async function handleUnansweredHangup(orderName, purpose = PURPOSE) {
     const name = String(orderName || '').replace(/^#/, '').trim();
     if (!name) return;
     await new Promise(r => setTimeout(r, 4000));
     const { data: row } = await supabase.from('vobiz_auto_calls_ecom')
         .select('order_name, status, attempts, last_attempt_at, detail, attempt_log')
-        .eq('order_name', name).eq('purpose', PURPOSE).maybeSingle();
+        .eq('order_name', name).eq('purpose', purpose).maybeSingle();
     if (!row || !['calling', 'placed'].includes(row.status)) return;   // already settled/answered
     if (row.detail && row.detail.outcome) return;
-    await scheduleRetryOrExhaust(row, 'call not answered (hangup webhook)');
-    console.log(`[HVCall] ${name}: unanswered — marked instantly from the hangup webhook`);
+    await scheduleRetryOrExhaust(row, 'call not answered (hangup webhook)', purpose);
+    console.log(`[HVCall] ${name}/${purpose}: unanswered — marked instantly from the hangup webhook`);
 }
 
 // A call nobody picked up leaves NO hangup-side outcome (the bridge session never opens), so the
 // row sits at 'calling'/'placed' with no outcome. After 7 minutes that IS the outcome: no answer.
-async function sweepUnanswered() {
+async function sweepUnanswered(purpose = PURPOSE) {
     const cut = new Date(Date.now() - UNANSWERED_AFTER_MS).toISOString();
     const { data } = await supabase.from('vobiz_auto_calls_ecom')
         .select('order_name, status, attempts, last_attempt_at, created_at, detail, attempt_log')
-        .eq('purpose', PURPOSE).in('status', ['calling', 'placed'])
+        .eq('purpose', purpose).in('status', ['calling', 'placed'])
         .or(`last_attempt_at.lt.${cut},and(last_attempt_at.is.null,created_at.lt.${cut})`)
         .limit(100);
     for (const row of (data || [])) {
         if (row.detail && row.detail.outcome) continue;              // an outcome landed after all
-        await scheduleRetryOrExhaust(row, 'call not answered');
+        await scheduleRetryOrExhaust(row, 'call not answered', purpose);
     }
 }
 
@@ -404,4 +413,164 @@ async function handleCodCallOutcome({ orderName, summary, customerTurns }) {
         .eq('order_name', name).eq('purpose', PURPOSE);
 }
 
-module.exports = { router, highValueCallTick, handleCodCallOutcome, handleUnansweredHangup, classifyOutcome };
+// ── RTO RECOVERY AUTO-CALLS (user spec 2026-09-02: "after live, any order that goes to NDR — call
+// initiated 2 minutes after the NDR update; max three attempts: 1st call, if no answer or busy the
+// 2nd after 5 minutes, if same the 3rd after 10 minutes of the 2nd; proper logs in the database and
+// on the dashboard"). Same turnstile table (purpose 'rto_recovery'), same attempt_log/CDR/dashboard
+// rails as the COD engine. GATED by VOBIZ_RTO_ENABLED — shipping this is inert until that flag is
+// true (the same kill-switch that already gates rto_recovery in placeOrderCall), so "live for all"
+// happens exactly when the user flips it on the VPS.
+const RTO_PURPOSE = 'rto_recovery';
+async function rtoCallTick(opts = {}) {
+    const { placeOrderCall, vobizConfigured } = require('./vobiz_bridge');
+    if (!vobizConfigured()) return { skip: 'Vobiz not configured' };
+    if (String(process.env.VOBIZ_RTO_ENABLED || '') !== 'true') return { skip: 'RTO calling disabled (VOBIZ_RTO_ENABLED)' };
+    const h = istHour();
+    if (!opts.testOrder && (h < WINDOW.from || h >= WINDOW.to)) return { skip: `outside calling window (${WINDOW.from}:00–${WINDOW.to}:00 IST)` };
+
+    let targets = [];
+    if (opts.testOrder) {
+        targets = [String(opts.testOrder).replace(/^#/, '').trim()];
+    } else {
+        // An order "goes to NDR" = its shipment journey shows outcome 'ndr_pending' with an NDR on
+        // record. 5-minute floor after the update lands in our DB (user rev.2, 2026-09-02); 48h
+        // ceiling so a backfill sweep can never robo-dial ancient history. One ladder per order.
+        const from = new Date(Date.now() - 48 * 3600e3).toISOString();
+        const to = new Date(Date.now() - 5 * 60e3).toISOString();
+        const { data: rows, error } = await supabase.from('shipment_journey_ecom')
+            .select('order_name, ndr_count, updated_at').eq('outcome', 'ndr_pending').gte('ndr_count', 1)
+            .gte('updated_at', from).lte('updated_at', to)
+            .order('updated_at', { ascending: true }).limit(300);
+        if (error) throw new Error('journey read failed: ' + error.message);
+        const seen = new Set();
+        for (const r of (rows || [])) {
+            const nm = String(r.order_name || '').replace(/^#/, '').trim();
+            if (nm && !seen.has(nm)) { seen.add(nm); targets.push({ name: nm, ndr: Math.min(3, Number(r.ndr_count) || 1) }); }
+        }
+        // due retries ride their own rail (same 65s-grace lesson as the COD ladder)
+        const { data: due } = await supabase.from('vobiz_auto_calls_ecom')
+            .select('order_name').eq('purpose', RTO_PURPOSE).eq('status', 'retry')
+            .lte('next_attempt_at', new Date(Date.now() + 65e3).toISOString()).limit(50);
+        (due || []).forEach(r => { if (!seen.has(r.order_name)) { seen.add(r.order_name); targets.push({ name: r.order_name, ndr: null }); } });
+    }
+    if (opts.testOrder) targets = targets.map(t => (typeof t === 'string' ? { name: t, ndr: null } : t));
+    if (!targets.length) return { placed: 0, targets: 0 };
+
+    await sweepUnanswered(RTO_PURPOSE);
+
+    const turn = new Map();
+    const nameList = targets.map(t => t.name);
+    for (let i = 0; i < nameList.length; i += 200) {
+        const { data } = await supabase.from('vobiz_auto_calls_ecom')
+            .select('order_name, status, attempts, next_attempt_at, detail, attempt_log')
+            .eq('purpose', RTO_PURPOSE).in('order_name', nameList.slice(i, i + 200));
+        (data || []).forEach(r => turn.set(r.order_name, r));
+    }
+
+    let placed = 0, gated = 0; const results = [];
+    for (const t of targets) {
+        const name = t.name;
+        let row = turn.get(name);
+        let redial = false;
+        // A NEW courier NDR (NDR2/NDR3) re-arms a settled row with a FRESH 2-call ladder (user
+        // rev.3): the old outcome is archived into prev_outcome, ndr_no advances, and the row is
+        // treated as a due redial — attempts keep counting up so the modal shows the full history.
+        if (row && t.ndr && t.ndr > rtoNdrNo(row) && t.ndr <= 3
+            && !['calling', 'retry', 'gated'].includes(row.status)) {
+            const det = { ...(row.detail || {}) };
+            if (det.outcome) { det['prev_outcome_ndr' + rtoNdrNo(row)] = det.outcome + (det.outcome_note ? ` (${det.outcome_note})` : ''); }
+            delete det.outcome; delete det.outcome_note; delete det.summary;
+            det.ndr_no = t.ndr;
+            const { data: upd } = await supabase.from('vobiz_auto_calls_ecom')
+                .update({ status: 'retry', next_attempt_at: new Date().toISOString(), detail: det })
+                .eq('order_name', name).eq('purpose', RTO_PURPOSE).eq('status', row.status).select('order_name, status, attempts, next_attempt_at, detail, attempt_log');
+            if (upd && upd.length) { row = upd[0]; console.log(`[RTOCall] ${name}: courier NDR${t.ndr} recorded — fresh ladder armed`); }
+        }
+        if (row) {
+            if (row.status === 'retry') {
+                if (!row.next_attempt_at || new Date(row.next_attempt_at) > new Date(Date.now() + 65e3)) continue;
+                redial = true;
+            } else if (row.status !== 'gated') {
+                if (opts.testOrder) results.push({ order: name, skip: 'already called (turnstile)' });
+                continue;
+            }
+        }
+        if (placed >= PER_TICK_CAP) break;
+
+        // still worth the call? cancelled orders and journeys that moved on are sealed, never dialed
+        const { data: ord } = await supabase.from('orders').select('cancelled_at')
+            .or(`name.eq.${name},name.eq.#${name}`).order('created_at', { ascending: false }).limit(1).maybeSingle();
+        if (ord && ord.cancelled_at) { await seal(name, 'skipped', { why: 'order cancelled' }, null, RTO_PURPOSE); results.push({ order: name, skip: 'order cancelled' }); continue; }
+        if (!opts.testOrder) {
+            const { data: j } = await supabase.from('shipment_journey_ecom').select('outcome')
+                .eq('order_name', name).order('updated_at', { ascending: false }).limit(1).maybeSingle();
+            if (j && j.outcome !== 'ndr_pending') { await seal(name, 'skipped', { why: `no longer NDR (${j.outcome})` }, null, RTO_PURPOSE); results.push({ order: name, skip: `no longer NDR (${j.outcome})` }); continue; }
+        }
+
+        const attemptNo = redial ? (Number(row.attempts) || 1) + 1 : (row ? (Number(row.attempts) || 1) : 1);
+        const claimedLog = await claim(name, row, attemptNo, RTO_PURPOSE);
+        if (!claimedLog) { results.push({ order: name, skip: 'claimed by another tick' }); continue; }
+        let r;
+        try { r = await placeOrderCall({ order_name: name, call_type: 'rto_recovery', auto: true }); }
+        catch (e) { r = { error: e.message }; }
+        const ndrStamp = { ...((row && row.detail) || {}), ndr_no: t.ndr || rtoNdrNo(row) };
+        if (r.gated) {
+            gated++;
+            await supabase.from('vobiz_auto_calls_ecom').update({ status: 'gated', detail: { ...ndrStamp, gate: r.error }, phone: r.phone || null })
+                .eq('order_name', name).eq('purpose', RTO_PURPOSE);
+            results.push({ order: name, gated: r.error });
+        } else if (r.error) {
+            await supabase.from('vobiz_auto_calls_ecom').update({ status: 'failed', detail: { ...ndrStamp, error: r.error } })
+                .eq('order_name', name).eq('purpose', RTO_PURPOSE);
+            results.push({ order: name, error: r.error });
+        } else {
+            placed++;
+            const vuuid = (r.vobiz && (r.vobiz.request_uuid || r.vobiz.call_uuid)) || null;
+            if (vuuid && claimedLog.length) claimedLog[claimedLog.length - 1].uuid = vuuid;
+            await supabase.from('vobiz_auto_calls_ecom').update({ status: 'placed', sid: r.sid, phone: r.phone || null, attempt_log: claimedLog, detail: ndrStamp })
+                .eq('order_name', name).eq('purpose', RTO_PURPOSE);
+            console.log(`[RTOCall] ${name}: RTO recovery call placed (sid ${r.sid})`);
+            results.push({ order: name, placed: true, sid: r.sid });
+        }
+    }
+    if (placed || gated) console.log(`[RTOCall] tick: ${placed} placed, ${gated} gated (allowlist), ${targets.length} candidates`);
+    return { placed, gated, targets: targets.length, results };
+}
+
+// Outcome for AUTO rto_recovery calls, from the bridge's close(): answered calls record the result
+// (reattempt / cancelled / unclear) on the turnstile; unanswered ones arm the 5/10-minute ladder.
+async function handleRtoCallOutcome({ orderName, summary, customerTurns }) {
+    const name = String(orderName || '').replace(/^#/, '').trim();
+    if (!name) return;
+    const line = String(summary || '').split('\n')[0] || '';
+    let outcome = 'unclear', note = 'customer talked but outcome unclear';
+    if (!customerTurns || /voice ?mail|answering machine/i.test(line)) { outcome = 'no_answer'; note = 'call not answered'; }
+    else if (/reattempt agreed|will reattempt|agreed/i.test(line)) { outcome = 'reattempt'; note = 'customer agreed to the reattempt'; }
+    else if (/cancel/i.test(line)) { outcome = 'cancelled'; note = 'customer wants to cancel'; }
+    if (outcome === 'no_answer') {
+        const { data: row } = await supabase.from('vobiz_auto_calls_ecom')
+            .select('order_name, attempts, last_attempt_at, detail, attempt_log')
+            .eq('order_name', name).eq('purpose', RTO_PURPOSE).maybeSingle();
+        if (row) await scheduleRetryOrExhaust(row, note, RTO_PURPOSE);
+        return;
+    }
+    const { data: cur } = await supabase.from('vobiz_auto_calls_ecom').select('attempt_log, detail')
+        .eq('order_name', name).eq('purpose', RTO_PURPOSE).maybeSingle();
+    await supabase.from('vobiz_auto_calls_ecom')
+        .update({ detail: { ...((cur && cur.detail) || {}), outcome, outcome_note: note, summary: String(summary || '').slice(0, 400), at: new Date().toISOString() },
+            attempt_log: logResult(cur, outcome), next_attempt_at: null })
+        .eq('order_name', name).eq('purpose', RTO_PURPOSE);
+    console.log(`[RTOCall] ${name}: outcome '${outcome}' (${note})`);
+}
+
+// Manual trigger, same capability gate pattern as the COD tick:
+// POST /api/vobiz/rto-call-tick            → run a tick now (window + RTO flag still apply)
+// POST /api/vobiz/rto-call-tick {order_name} → force ONE order through (skips windows, keeps gates)
+router.post('/vobiz/rto-call-tick', async (req, res) => {
+    try {
+        const r = await rtoCallTick({ testOrder: (req.body || {}).order_name || null });
+        res.json({ success: true, ...r });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+module.exports = { router, highValueCallTick, rtoCallTick, handleCodCallOutcome, handleRtoCallOutcome, handleUnansweredHangup, classifyOutcome };

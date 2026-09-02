@@ -721,11 +721,13 @@ function check(name, got, want) {
             const vb2 = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
             const sc2 = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
             const ap2 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
-            check('voice lang: every call OPENS in English; a few words in another script trigger an OFFER, and only a yes switches (2026-08-31)',
+            // 2026-09-02 (user): the confirmation ask is GONE — one reliable sighting switches directly.
+            check('voice lang: every call OPENS in English; the FIRST reliable sighting of another language switches DIRECTLY, no confirmation question',
                 [/return 'en-IN';\s+\/\/ English for all/.test(vb2), /\[\/\[\\u0900-\\u097F\]\/, 'hi-IN'\]/.test(vb2),
-                 /understand ONLY ENGLISH/.test(vb2), /this\.s\.offerAsk = seen/.test(vb2),
-                 /AFFIRM_RX\.test\(text\)/.test(vb2)],
-                [true, true, true, true, true]);
+                 /understand ONLY ENGLISH/.test(vb2), /DIRECT SWITCH — no confirmation question/.test(vb2),
+                 /if \(seen && seen !== this\.s\.lang\) this\.switchLanguage\(seen\)/.test(vb2),
+                 !/this\.s\.offerAsk = seen/.test(vb2)],
+                [true, true, true, true, true, true]);
             check('voice product-answer rules (Ele behavior, PRODUCT QUESTIONS ONLY, own names kept): brand-only, no diagnosis, prices → theelement.skin, drops 15 days/bottle; the call flow itself unchanged',
                 [/PRODUCT-ANSWER RULES \(apply ONLY when the customer asks about a product/.test(vb2),
                  /Brightening Drops last 15 days per bottle/.test(vb2),
@@ -743,7 +745,7 @@ function check(name, got, want) {
                 [/const short = String\(text\)\.trim\(\)\.split/.test(vb2),
                  /NEVER say you do not understand or cannot speak/.test(vb2),
                  /at most TWO clarifying attempts/.test(vb2),
-                 /langSeen\[seen\] >= 2/.test(vb2),
+                 /One sighting = switch/.test(vb2),
                  /regionLangForOrder/.test(vb2), /LIKELY LANGUAGE/.test(vb2)],
                 [true, true, true, true, true, true]);
             check('ai-call permission: placing a manual AI call needs support-ai-call (server-enforced), button hides without it, catalog lists it',
@@ -760,7 +762,7 @@ function check(name, got, want) {
                  /May I know what went wrong with the delivery\?/.test(vb2),
                  /NEVER open or stand alone with a bare acknowledgement/.test(vb2),
                  /NEVER REPEAT A COMPLETED STEP/.test(vb2),
-                 /NEVER offer to confirm the address/.test(vb2),
+                 /there is NO address step AT ALL/.test(vb2),
                  /order_shipping_addresses/.test(vb2),
                  /reattempt agreed \/ cancelled \/ no answer \/ unclear/.test(vb2),
                  /AI RTO call/.test(vb2)],
@@ -784,8 +786,221 @@ function check(name, got, want) {
                 [/VOBIZ_RTO_ENABLED/.test(vb2), /disabled here \(still under test\)/.test(vb2)],
                 [true, true]);
             check('voice rto_recovery: the phone bridge has the RTO recovery call type (mirrored from the browser tool)',
-                [/rto_recovery: \{/.test(vb2), /returned to origin \(RTO\)/.test(vb2), /offer to send it again/.test(vb2)],
+                [/rto_recovery: \{/.test(vb2), /returned to origin \(RTO\)/.test(vb2), /team will arrange the reattempt/.test(vb2)],
                 [true, true, true]);
+            // 2026-09-01 test-call review: address was confirmed 3× (a leftover duplicate clause told
+            // the model to redo address+time after the strict order); a "Yes" meant for the address
+            // accepted a language offer the agent never asked; "Noted." openers slipped past the prompt.
+            check('voice rto review 2026-09-01: duplicate address/time clause removed; offer-accept needs the agent to have ASKED; "Noted." opener stripped; failure-why answered honestly',
+                [/if they still want it, offer to send it again/.test(vb2),
+                 !/lastAgentAskedLang\(this\.s\.offeredLang\)/.test(vb2),   // offer-accept path removed with the offer itself (2026-09-02)
+                 /lastAgentAskedLang\(code\)/.test(vb2),
+                 /\(noted\|okay\|ok\|alright\|theek hai\|thik hai\)/.test(vb2),
+                 /never reply with only "noted"/.test(vb2),
+                 /address is ALREADY settled, never touch it again/.test(vb2)],
+                [false, true, true, true, true, true]);
+            // 2026-09-01: the customer spoke Hindi the whole call but saaras TRANSLATED it to English —
+            // script/roman detection never fired. The STT event's own detected language now leads; and
+            // the per-sentence TTS flush (prosody reset at every full stop = "reading" cadence) became
+            // one flush per turn, with a REST fallback so a dead TTS socket can no longer mute a turn.
+            check('voice lang+prosody 2026-09-01: language detected from STT PARTIALS (source words — finals arrive translated); one TTS flush per turn; REST fallback on dead socket',
+                [/this\._partialText = d\.text\.trim\(\)/.test(vb2),
+                 /const det = scriptLangOf\(src\) \|\| romanLangOf\(src, this\.s\.lang\)/.test(vb2),
+                 /onCustomer\(text, sttLang\)/.test(vb2),
+                 /\(sttLang && sttLang !== this\.s\.lang \? sttLang : null\) \|\| scriptLangOf\(text\)/.test(vb2),
+                 /pending\.join\(' '\)/.test(vb2),
+                 // fast lane (2026-09-02): exactly TWO flushes — first sentence immediately, the rest as one
+                 (vb2.match(/type: 'flush'/g) || []).length === 2,
+                 /REST turn fallback failed:/.test(vb2)],
+                [true, true, true, true, true, true, true]);
+            // MODEL_DECISION.md (2026-09-01): Claude brain — Haiku floor, Sonnet at distress ≥3,
+            // Opus OFF, Sarvam chat as the no-double-talk fallback.
+            check('voice brain: Claude ladder per MODEL_DECISION.md — haiku floor, sonnet escalation on distress, sticky, cache_control on the prompt, sarvam fallback only if nothing was spoken',
+                [/const CLAUDE_FLOOR = \(\) => process\.env\.CLAUDE_MODEL \|\| 'claude-haiku-4-5-20251001'/.test(vb2),
+                 /const CLAUDE_ESC = \(\) => process\.env\.CLAUDE_MODEL_ESCALATION \|\| 'claude-sonnet-5'/.test(vb2),
+                 /CLAUDE_ESCALATE_AT \|\| 2/.test(vb2),
+                 /const DISTRESS_RX = /.test(vb2),
+                 /brain escalated to/.test(vb2),
+                 /cache_control: \{ type: 'ephemeral' \}/.test(vb2),
+                 /e\.spoke\) throw e/.test(vb2),
+                 /claude brain failed — sarvam fallback:/.test(vb2),
+                 /chatStream\(messages, prompt, say, abort\.signal, brainModel, \(this\.s\.claudeUsage/.test(vb2),
+                 /this\.s\.escalated \? CLAUDE_ESC\(\) : CLAUDE_FLOOR\(\)/.test(vb2)],
+                [true, true, true, true, true, true, true, true, true, true]);
+            // 2026-09-02, "don't depend on fixed speech" + "I did not see any difference": the brain
+            // writes the opening (template = fallback only), every turn logs brain + TTFT, and the
+            // MODEL_DECISION.md training examples ride the prompt from agent_training_examples.
+            check('agent learning UI 2026-09-02: own date range — quick ranges WITHOUT the placeholder option, picking one syncs the visible dates, custom Apply works, remembered',
+                [/function salRenderRange/.test(ap2), /sal\.dateRange/.test(ap2),
+                 /agent-learning\/summary\?from=\$\{_sal\.range\.from\}/.test(ap2),
+                 !/supRenderRange\('sal-range'/.test(ap2),
+                 /sal-preset/.test(ap2), !/<option value="">Presets<\/option>[\s\S]{0,400}sal-from/.test(ap2),
+                 /el\.querySelector\('\.sal-from'\)\.value=_sal\.range\.from/.test(ap2),
+                 /_sal\.rangeSel='custom'/.test(ap2),
+                 /sal-custom items-center gap-2 \$\{_sal\.rangeSel==='custom'\?'flex':'hidden'\}/.test(ap2)],
+                [true, true, true, true, true, true, true, true, true]);
+            check('agent learning UI 2026-09-02: lesson sort control — status-grouped, then most-seen/newest/impact/confidence',
+                [/sal-lesson-sort/.test(fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8')),
+                 /_sal\.sort/.test(ap2), /impact:\(a,b\)=>\(\(b\.delta_score\?\?-1e9\)/.test(ap2),
+                 /sort: 'seen'/.test(ap2)],
+                [true, true, true, true]);
+            check('voice brain proof: Claude-authored opening, per-turn brain+TTFT log, training examples block in the prompt',
+                [/claude opening failed — template opening:/.test(vb2),
+                 /brain \$\{brainModel \|\| 'sarvam'\} — first sentence in/.test(vb2),
+                 /async function trainingExamplesBlock/.test(vb2),
+                 /s\.examplesBlock \|\| ''/.test(vb2),
+                 /trainingExamplesBlock\(PURPOSES\[callType\]/.test(vb2)],
+                [true, true, true, true, true]);
+            check('voice tts 2026-09-01: ElevenLabs as optional voice provider — VOBIZ_TTS=elevenlabs gated, pcm_24000 (no transcode), wired into opening + sayLine + turns, Sarvam REST stays the fallback',
+                [/const EL_ON = \(\) => String\(process\.env\.VOBIZ_TTS/.test(vb2),
+                 /output_format=pcm_24000/.test(vb2),
+                 /if \(EL_ON\(\)\) return elevenPcm\(s\.openingText, s\.lang\)/.test(vb2),
+                 /elevenlabs failed — Sarvam REST fallback:/.test(vb2),
+                 /const tts = elOn \? null : new WebSocket/.test(vb2)],
+                [true, true, true, true, true]);
+            check('voice hangup 2026-09-01: keepCallAlive means OUR socket close never ends the phone leg — the hangup API kills it, from hangup() and close() both',
+                [/killCallLeg\(\)/.test(vb2), /axios\.delete\(`https:\/\/api\.vobiz\.ai\/api\/v1\/Account\/\$\{V_AUTH_ID\(\)\}\/Call\/\$\{uuid\}\/`/.test(vb2),
+                 /this\.legKilled = true/.test(vb2),
+                 (vb2.match(/this\.killCallLeg\(\)/g) || []).length >= 2],
+                [true, true, true, true]);
+            // 2026-09-02: keepCallAlive="true" is LOAD-BEARING — without it Vobiz finishes the XML
+            // instantly and sends bye at answer ("End Of XML Instructions", 0s calls, "said hello,
+            // call cut"). It MUST stay on both Streams; the API kill handles the lingering-leg side.
+            check('voice stream: keepCallAlive present on BOTH Stream XMLs, uuid fallback for the leg kill',
+                [(vb2.match(/keepCallAlive="true"/g) || []).length === 2,
+                 /this\.callId \|\| this\.s\.vuuid/.test(vb2),
+                 /sess\.vuuid = r\.data\.request_uuid/.test(vb2)],
+                [true, true, true]);
+            // 2026-09-02: the goodbye was beheaded mid-sentence — synthesis finishing ≠ the customer
+            // having HEARD it. The drain clock (audioEndsAt) gates every non-forced cut.
+            // 2026-09-02 (final form): the RTO call asks NO delivery-time question at all — the
+            // courier team schedules it; "kab tak aayega?" gets the courier-team assurance, spoken
+            // in the language the customer asked in (a Hindi question never gets an English answer).
+            check('voice speech 2026-09-02: short product names; NO time question ever; kab-tak-aayega → courier-team assurance in the asker\'s language; closing matches the conversation language',
+                [/spoken "Acne Relief Face Wash"/.test(vb2), /never "2% Salicylic Acid \+ Niacinamide Acne Relief Face Wash"/.test(vb2),
+                 /NEVER ask for a preferred delivery time/.test(vb2),
+                 /raise कर देंगे और जल्द से जल्द delivery करवाने की कोशिश करेंगे/.test(vb2),
+                 /NEVER answer a Hindi question in English/.test(vb2),
+                 /NEVER ask for a delivery time or enumerate slots/.test(vb2),
+                 /An English goodbye on a Hindi conversation is a mismatch/i.test(vb2)],
+                [true, true, true, true, true, true, true]);
+            check('voice empathy 2026-09-02: trouble acknowledged FIRST in their language; expectation set unasked; one language per sentence',
+                [/EMPATHY: when the customer voices trouble/.test(vb2),
+                 /SET THE EXPECTATION UNASKED/.test(vb2),
+                 /ONE language per sentence/.test(vb2)],
+                [true, true, true]);
+            // Malayalam call, 2026-09-02: the agent asked to confirm a HALLUCINATED phone number
+            // ("9876543210 ആണോ?"). Facts discipline is now a hard prompt rule.
+            check('voice facts discipline: only prompt-given facts may be spoken; phone numbers never stated or confirmed',
+                [/FACTS DISCIPLINE: the ONLY customer facts/.test(vb2),
+                 /NEVER state, invent or ask to confirm a phone number/.test(vb2)],
+                [true, true]);
+            // Angry-call review 2026-09-02: "बार-बार" (hyphen), "जबरदस्ती", "again and again" all
+            // dodged the distress net; and a Sarvam summarizer failure left a call with no RESULT line.
+            // 2026-09-02: a stale Windows User-level SARVAM_API_KEY (empty account) shadowed the funded
+            // .env key for every process — the file/vault is canonical and now always wins.
+            check('secrets: config.js loads with override:true — the .env/vault beats inherited environment variables',
+                [/load\(\{ override: true \}\)/.test(fs.readFileSync(path.join(ROOT, 'config.js'), 'utf8'))],
+                [true]);
+            check('voice distress+summary: hyphen/real-anger phrasings hit the distress net; summarizer runs Claude-first with Sarvam fallback',
+                [(() => { const m = vb2.match(/const DISTRESS_RX = (\/.*\/i);/); if (!m) return false; const rx = eval(m[1]);
+                    return rx.test('बार-बार वही बातें') && rx.test('जबरदस्ती के फ़ोन पर फ़ोन') && rx.test('calling again and again') && !rx.test('ठीक है'); })(),
+                 /require\('\.\/ai'\)\.aiComplete/.test(vb2),
+                 /fall through to Sarvam/.test(vb2)],
+                [true, true, true]);
+            // 2026-09-02 evening: talking over the still-playing audio tail did NOT barge in (speaking
+            // ends at synthesis, audio plays on) — barge-in now keys on the drain clock; and the full
+            // address is spoken only when the courier's NDR reason blames the address itself.
+            // Call 18 (the 7-minute stonewall): the agent HAD the reason + 5 attempt dates and claimed
+            // "not recorded"; improvised an address step from the Destination line; asked the customer
+            // the reason question 5 times; refused a hangup request twice. All six are rules now.
+            // Call 19 (the rerun): dates + verbatim reason WORKED, but it promised a "full refund"
+            // (unauthorized!), asked the customer to dictate the address 3×, announced re-sending
+            // before any yes, and appended the want-it ask to ~10 turns.
+            // Call 20: address-dictation recurred (the flow's unconditional "confirm the address"
+            // beat the buried ban) — the address step is now CONDITIONAL inside the strict order
+            // itself; and want-it rewordings now count toward the twice-per-call cap.
+            check('voice latency 2026-09-02: first-sentence fast lane + 550ms VAD endpointing',
+                [/let firstFlushed = false/.test(vb2), /silence_duration_ms=550/.test(vb2),
+                 /firstFlushed = true; sentAny = true/.test(vb2)],
+                [true, true, true]);
+            // The escalation's first live firing (2026-09-02) hit "temperature is deprecated" on
+            // claude-sonnet-5 — those turns silently ran on Sarvam. No temperature in Claude calls;
+            // noise blips (min_speech 300ms + 300ms sustained barge-in) can't chop the agent.
+            check('voice noise+sonnet 2026-09-02: no temperature in Claude bodies; 300ms min-speech; sustained barge-in',
+                [/no `temperature`: Claude 5 models reject it/.test(vb2) && /model, stream: true, max_tokens: 200,\n/.test(vb2), /min_speech_duration_ms=300/.test(vb2),
+                 /_bargeTimer/.test(vb2), !/temperature, \.\.\.\(system/.test(fs.readFileSync(path.join(ROOT, 'app/api/ai.js'), 'utf8'))],
+                [true, true, true, true]);
+            check('voice call-20 rules: address step exists ONLY when an address is written; want-it cap counts any wording',
+                [/the address step EXISTS ONLY IF a delivery address is written above/.test(vb2),
+                 /NO address question of ANY kind, ever/.test(vb2),
+                 /in ANY wording \("receive करना चाहेंगे\?", "दुबारा भेज देने दें\?"/.test(vb2)],
+                [true, true, true]);
+            check('voice call-19 rules: no unauthorized promises; addressless call never mentions an address; no arranging before a yes; want-it asked at most twice; validation openers vary',
+                [/NEVER promise refunds, compensation, discounts or replacements/.test(vb2),
+                 /the address does not exist for this call/.test(vb2),
+                 /NEVER announce that you are re-sending or arranging the order before the customer/.test(vb2),
+                 /ASKED AT MOST TWICE IN THE WHOLE CALL/.test(vb2),
+                 /never the same validation opener twice in a row/.test(vb2)],
+                [true, true, true, true, true]);
+            check('voice call-18 fixes: pressed-again goes DEEPER with facts (never "not recorded" when one exists); no invented address step; end-on-request honored mechanically; no speculation; no fabricated confirmations',
+                [/go DEEPER using COURIER’S FAILURE REASON and CALL FACTS/.test(vb2),
+                 /is LYING and forbidden/.test(vb2),
+                 /never build one from a city or destination/.test(vb2),
+                 /THE CUSTOMER HAS ASKED TO END THE CALL/.test(vb2),
+                 /this\.s\.endRequested = true/.test(vb2),
+                 /NEVER speculate about what the customer was doing/.test(vb2),
+                 /NEVER claim the customer confirmed something they did not/.test(vb2),
+                 /hiding a fact they asked for is as bad as volunteering/.test(vb2),
+                 !/Destination: \$\{\[sj\.dest_city/.test(vb2)],
+                [true, true, true, true, true, true, true, true, true]);
+            check('voice call facts 2026-09-02: the order\'s full verified story (payment, courier, attempt dates, reasons, RTO date) fetched before EVERY call and injected under FACTS DISCIPLINE',
+                [/async function callFactsFor/.test(vb2), /ctx\.callFacts = await callFactsFor\(b\.order_name\)/.test(vb2),
+                 /CALL FACTS — the complete verified record/.test(vb2),
+                 /ofd_dates, first_edd, dest_city/.test(vb2),
+                 /ANSWER MATERIAL ONLY/.test(vb2), /A customer who asks nothing hears NONE of this/.test(vb2)],
+                [true, true, true, true, true, true]);
+            check('voice overlap+privacy: barge-in keys on the drain clock; address enters the prompt only on address-type NDR reasons',
+                [/this\._bargeTimer = setTimeout\(\(\) => \{ if \(this\.vadActive && !this\.closed\) this\.bargeIn\(\); \}, 300\)/.test(vb2),
+                 /premises\|location\|unlocatable\|not found\|incorrect\|incomplete\|wrong/.test(vb2),
+                 /privacy by default/.test(vb2)],
+                [true, true, true]);
+            check('voice drain clock: queued audio extends audioEndsAt; hangup and goodbye-cut wait for it; barge-in resets it; voicemail/silent cuts stay instant (force)',
+                [/this\.audioEndsAt = Math\.max\(this\.audioEndsAt \|\| Date\.now\(\), Date\.now\(\)\) \+ Math\.round\(buf\.length \/ 48\)/.test(vb2),
+                 /hangup\(delayMs, force\)/.test(vb2),
+                 /const drain = force \? 0 : Math\.max\(0, \(this\.audioEndsAt \|\| 0\) - Date\.now\(\) \+ 400\)/.test(vb2),
+                 /goodbye still PLAYING/.test(vb2),
+                 /this\.audioEndsAt = Date\.now\(\);\s*\/\/ clearAudio empties/.test(vb2) || /clearAudio empties Vobiz's buffer/.test(vb2),
+                 /this\.hangup\(200, true\)/.test(vb2), /this\.hangup\(500, true\)/.test(vb2)],
+                [true, true, true, true, true, true, true]);
+            check('voice lang direct-switch 2026-09-02: the offer machinery is out of the flow; roman lexicon covers kabhi/bhej/dijiye',
+                [!/offerLine\(seen\)/.test(vb2), !/this\.sayLine\(q, seen\)/.test(vb2),
+                 /sayLine\(text, langOverride\)/.test(vb2),
+                 /\bkabhi\b/.test(vb2) && /\bdijiye\b/.test(vb2) && /\bbhej\b/.test(vb2)],
+                [true, true, true, true]);
+            check('voice rto: "why was it not delivered?" answered with the REAL courier NDR reason (scan log → ctx.ndrReason → polite "As per our delivery partner")',
+                [/from\('shipment_journey_ecom'\)/.test(vb2), /ctx\.ndrReason = String\(rs\[rs\.length - 1\]\)/.test(vb2),
+                 /COURIER'S FAILURE REASON \(from the delivery partner's scan log\)/.test(vb2),
+                 /As per our delivery partner/.test(vb2), /NEVER blaming the customer/.test(vb2)],
+                [true, true, true, true, true]);
+            // Call 12 (2026-09-01 evening): want-it asked FIVE times through the customer's "yes, but
+            // what happened?" loop; same reason sentence repeated till the customer snapped; a language
+            // comment after the switch got a language question back; courier line spoken in English
+            // mid-Hindi-call. All four are prompt rules now.
+            check('voice rto call-12 rules: want-it settled by any yes; pressed-again reason varies; language is FINAL after switch; courier line in the call language',
+                [/SETTLED BY ANY CLEAR YES/.test(vb2), /press AGAIN for the failure reason/.test(vb2),
+                 /gets no language question back/.test(vb2), /हमारे delivery partner के अनुसार/.test(vb2)],
+                [true, true, true, true]);
+            {
+                // ai.js speaks Claude too (2026-09-01, Gemini free-tier 429s): api.anthropic.com in
+                // AI_API_URL routes to the native Messages API with the same null-on-error contract.
+                const ai2 = fs.readFileSync(path.join(ROOT, 'app/api/ai.js'), 'utf8');
+                check('ai: Anthropic Claude provider — URL-detected, native /v1/messages, system split out, 429/529 fallback model, text blocks joined',
+                    [/function isAnthropic\(\)/.test(ai2), /anthropicComplete\(messages/.test(ai2),
+                     /'anthropic-version': '2023-06-01'/.test(ai2), /r\.status === 529/.test(ai2),
+                     /blocks\.map\(b => b\.text \|\| ''\)\.join\(''\)/.test(ai2)],
+                    [true, true, true, true, true]);
+            }
             check('voice voicemail: the machine identifying itself hangs the call up instantly — no 125s chats with answering machines; carrier phrases only, a customer saying "I am busy" never matches',
                 [/VOICEMAIL_RX/.test(vb2), /voicemail greeting detected/.test(vb2),
                  (() => { const m = vb2.match(/const VOICEMAIL_RX = (\/.*?\/i);/); if (!m) return false;
@@ -810,6 +1025,35 @@ function check(name, got, want) {
                 [/\/support\/ai-call-translate\/:id/.test(sc2), /transcript_en/.test(sc2),
                  /supd-aic-en/.test(ap2), /sal-tr-en/.test(ap2)],
                 [true, true, true, true]);
+            // 2026-09-01: a server stop at 14:12 erased a 3-minute RTO call's log — the transcript now
+            // lives in the DB from the first seconds (upsert by a fixed id, finalized by close()).
+            check('voice backup: live transcript backup — row created at call start, refreshed on a timer, close() upserts the SAME id',
+                [/this\.logId = require\('crypto'\)\.randomUUID\(\)/.test(vb2),
+                 /this\.backupTimer = setInterval\(\(\) => this\.backupLog\(\)/.test(vb2),
+                 /call in progress \(live backup/.test(vb2),
+                 /from\('agent_call_logs'\)\.upsert\(\{\s*\n\s*id: this\.logId/.test(vb2),
+                 /if \(this\.backupTimer\) clearInterval\(this\.backupTimer\)/.test(vb2),
+                 /from\('agent_call_logs'\)\.insert\(/.test(vb2)],
+                [true, true, true, true, true, false]);
+            check('voice lang: romanized Hindi heard in English mode counts toward the offer/auto-switch; switched call never re-asks; detours resume where the flow stopped',
+                [/romanLangOf\(text, this\.s\.lang\)/.test(vb2), /ROMAN_HI_RX/.test(vb2),
+                 /the switch is ALREADY DONE/.test(vb2),
+                 /return to the EXACT point where the call flow stopped/.test(vb2),
+                 /even a "nothing" or a brush-off, settles it FOREVER/.test(vb2),
+                 /deliver the WHOLE news line again/.test(vb2),
+                 /WITHOUT re-reading the address/.test(vb2)],
+                [true, true, true, true, true, true, true]);
+            check('voice tone 2026-09-01: level premium delivery — no expression peaks, no reading cadence',
+                [/energy stay LEVEL/.test(vb2), /never with a reading cadence/.test(vb2)],
+                [true, true]);
+            // Recording download names (user, 2026-09-01): AWB_OrderID_VOC.mp3, no AWB → OrderID_VOC.mp3.
+            {
+                const va2 = fs.readFileSync(path.join(ROOT, 'app/static/voice-agent.html'), 'utf8');
+                check('voice recording download: ⬇ button in both UIs, named AWB_OrderID_VOC.mp3 (AWB optional)',
+                    [/supd-aic-dl/.test(ap2), /\(awb\?awb\+'_':''\)\+\(o\.order_name\|\|o\.order_id\)\+'_VOC\.mp3'/.test(ap2),
+                     /'_VOC\.mp3'/.test(va2), /awb_number\)\.find\(Boolean\)/.test(va2)],
+                    [true, true, true, true]);
+            }
         }
         {
             // Behavioural: the delivered-in-last-3-INCLUDING-current hold exemption (user, 2026-09-01).
@@ -848,7 +1092,7 @@ function check(name, got, want) {
              fs.existsSync(path.join(ROOT, 'supabase/migrations/20260831_vobiz_attempt_log.sql'))],
             [true, true, true, true, true, true]);
         check('hv-call retry ladder: unanswered → +10 min → +20 min → exhausted (highlighted, no more auto calls); vague answers never redial',
-            [/RETRY_DELAY_MIN = \{ 1: 10, 2: 20 \}/.test(hv), /attempts >= 3/.test(hv), /status: 'exhausted'/.test(hv),
+            [/RETRY_DELAY_MIN = \{ 1: 10, 2: 20 \}/.test(hv), /attempts >= maxA/.test(hv), /status: 'exhausted'/.test(hv),
              /sweepUnanswered\(\)/.test(hv), /outcome === 'no_answer'/.test(hv),
              /no_answer'\|\|a\.status==='exhausted'/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8'))],
             [true, true, true, true, true, true]);
@@ -873,8 +1117,38 @@ function check(name, got, want) {
             [true, true, true, true, true]);
         check('hv-call: route and auto-caller share ONE placeOrderCall (allowlist inside it), cron wired, endpoint capability-gated',
             [/async function placeOrderCall\(b\)/.test(vb), /placeOrderCall, vobizConfigured/.test(hv),
-             /HighValueCall \(\*\/5/.test(sv), /high-value-call-tick\)\$\/i, 'support-ai-call'/.test(sv)],
+             /HighValueCall \(\*\/5/.test(sv), /high-value-call-tick\|rto-call-tick\)\$\/i, 'support-ai-call'/.test(sv)],
             [true, true, true, true]);
+        // AI Calling Statement (2026-09-02): per-call cost sheet under Customer Support.
+        {
+            const cc = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_costs.js'), 'utf8');
+            const ap3 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+            const ix3 = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+            check('ai-call costs: ACTUALS-first (Vobiz CDR cost in ₹, Claude tokens × list price via cost_meta, Sarvam measured×rate); fixed ₹708 amortized; wired',
+                [/vobizActuals/.test(cc) && /claudeCostINR/.test(cc) && /cost_meta/.test(cc) && /COST_VOBIZ_CURRENCY/.test(cc),
+                 /amount: 708/.test(cc), /\(\\d\+\)s call to/.test(cc),
+                 /ai_call_costs'\)\.router/.test(sv), /\/support\\\/ai-call-costs/.test(sv),
+                 /function sacInit/.test(ap3), /'support-ai-costs','AI Calling Statement/.test(ap3),
+                 /nav-support-ai-costs/.test(ix3), /support-ai-costs-view/.test(ix3)],
+                [true, true, true, true, true, true, true, true, true]);
+        }
+        // RTO auto-call engine (user spec 2026-09-02): NDR → call at +2min, retries +5 then +10,
+        // max 3; VOBIZ_RTO_ENABLED-gated; logs in the shared turnstile; modal shows its own card.
+        // rev.2 (2026-09-02): first call at NDR+5min, ONE retry an hour later, max 2 per ladder.
+        // rev.3: each courier NDR (1/2/3) re-arms a FRESH 2-call ladder (detail.ndr_no advances,
+        // attempts count cumulatively, old outcome archived as prev_outcome_ndrN).
+        check('rto-call engine: flag-gated tick, ndr_pending candidates, 5min floor + 1hr retry, 2 calls per NDR ladder × NDR1-3, outcome + hangup wiring, dashboard card',
+            [/RtoCall \(\*\/2/.test(sv), /rtoCallTick/.test(sv),
+             /RTO calling disabled \(VOBIZ_RTO_ENABLED\)/.test(hv),
+             /eq\('outcome', 'ndr_pending'\)/.test(hv),
+             /const RTO_RETRY_DELAY_MIN = \{ 1: 60 \}/.test(hv),
+             /Date\.now\(\) - 5 \* 60e3/.test(hv),
+             /2 \* rtoNdrNo\(row\)/.test(hv), /fresh ladder armed/.test(hv), /prev_outcome_ndr/.test(hv),
+             /handleRtoCallOutcome/.test(hv) && /handleRtoCallOutcome/.test(vb),
+             /\['cod_confirm', 'rto_recovery'\]\.includes\(s\.callType/.test(vb),
+             /rto_attempts/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8')),
+             /supAiAttemptsCard\(d\.rto_attempts,'RTO recovery dials',2\*/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8'))],
+            [true, true, true, true, true, true, true, true, true, true, true, true, true]);
     }
     {
         const rep = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_report.js'), 'utf8');

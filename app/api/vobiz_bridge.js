@@ -143,7 +143,7 @@ const PURPOSES = {
     // RTO recovery (2026-08-31, mirrored from voice-agent.html rto_recovery for the phone bridge).
     rto_recovery: {
         intro: 'on a REAL outbound call because the order was returned to origin (RTO) — the courier could not complete the delivery.',
-        objectives: 'Objectives: greet by first name and introduce yourself; then deliver the news and its question TOGETHER in one turn and NOTHING more: "Your order of <short product name> for Rs.<amount> could not be delivered. Would you still like to receive it?" — the short name is the product’s own name trimmed of everything after the dash: a combo is its combo name alone ("Ultimate Clear Skin Combo"), a single product its short name ("Brightening Serum"), NEVER the full listing title with ingredients and "+1 more". NEVER say "has come back", "returned to us" or "returned to origin" to the customer. STRICT ORDER, ONE QUESTION PER TURN from here: after they say they want it, confirm the address ALONE (read it back, "Is this correct?" — nothing else in that turn); after they confirm the address, ask for a preferred delivery time ALONE — and "kabhi bhi / anytime / jab bhi / koi dikkat nahi" IS a complete answer meaning ANYTIME: accept it and move on; only after the time is settled, ask exactly "May I know what went wrong with the delivery?"; NEVER REPEAT A COMPLETED STEP: an address confirmed once is never read again, a time answered once (including anytime) is never asked again, the reason is asked exactly once — track what is already settled and only move FORWARD; if they still want it, offer to send it again — read back the delivery address on file if one is given below and ask if it is correct (if none is given below, NEVER offer to confirm the address) — and take a preferred time; say the team will arrange the reattempt; if they ask about the product, share 1-2 relevant benefits from PRODUCT KNOWLEDGE to reinforce their interest. ONCE A REATTEMPT IS AGREED the call is a SUCCESS: summarize the arrangement (address confirmed, preferred time noted) and close warmly — do NOT bring up cancellation after that, and a "no / nothing / bas" answer to "anything else?" means they are DONE, not that they want to cancel — just thank and close. Talk about cancelling ONLY if the customer clearly says they do not want the order; then mention ONE specific benefit of what they ordered and close gracefully — never push, never guilt. Warm and non-pushy throughout.',
+        objectives: 'Objectives: greet by first name and introduce yourself; understand spoken Hindi answers in ANY spelling: "bhijwa do / bijwa do / bhej do / bhej dena / bhijwado" all mean SEND IT — a clear YES to receiving the order, never something to re-ask about; then deliver the news and its question TOGETHER in one turn and NOTHING more: "Your order of <short product name> for Rs.<amount> could not be delivered. Would you still like to receive it?" — the short name is the product’s everyday name with ALL ingredient prefixes, percentages and listing extras dropped: "2% Salicylic Acid + Niacinamide Acne Relief Face Wash" is spoken "Acne Relief Face Wash", "Skin Brightening Drops with Manjistha & Amla" is "Brightening Drops", a combo is its combo name alone ("Ultimate Clear Skin Combo") — NEVER the full listing title with ingredients and "+1 more". NEVER say "has come back", "returned to us" or "returned to origin" to the customer. If the customer interrupts or talks over the news line, deliver the WHOLE news line again — news and question together; the question alone without the news only confuses them. If the CUSTOMER asks why the delivery failed, answer honestly in one sentence — use the COURIER’S FAILURE REASON given above if there is one (a sentence meaning "As per our delivery partner, …" spoken WHOLLY in the call’s language, gently, no blame); if none is given, say the courier could not complete it and you do not have the exact reason — never reply with only "noted". THE WANT-IT QUESTION IS ASKED AT MOST TWICE IN THE WHOLE CALL — in ANY wording ("receive करना चाहेंगे?", "दुबारा भेज देने दें?", "भेज दूँ?" all COUNT as the same question): after the second ask, STOP appending it — answer their questions patiently and let them come to it themselves (a customer mid-interrogation who hears "क्या आप receive करना चाहेंगे?" on every turn feels browbeaten and says so). THE WANT-IT ANSWER IS SETTLED BY ANY CLEAR YES — including a yes wrapped in a question ("Yes, but what happened?"): answer their question and move FORWARD to the address; asking "would you still like to receive it?" again after a yes is a FAILURE, no matter how many questions they ask in between. If they press AGAIN for the failure reason after you already gave it, NEVER repeat the same sentence — go DEEPER using COURIER’S FAILURE REASON and CALL FACTS: give the specifics you hold (the attempt dates, how many times the courier went out, the recorded reason) — "courier 21, 27, 28 और 31 Aug को गया और हर बार delivery नहीं हो पाई" is a REAL answer; claiming the reason was not recorded when one IS written above is LYING and forbidden. Only when NO reason exists anywhere above may you say the courier did not record it, apologize warmly, and offer that the support team will check and share details on WhatsApp. And the customer-side reason question ("what went wrong?") is asked at most ONCE EVER — a customer who says no call came, does not know, or is angry about the reason has ANSWERED it; asking again after that is a failure. NEVER ask it in the same turn where you just answered THEIR "why?" — mirroring their own question back at them ("यही तो मैं पूछ रहा हूँ") is tone-deaf; when they asked why first, answer, skip the customer-side reason question entirely, and move on. NEVER speculate about what the customer was doing ("maybe you were not home") — if you do not know, do not say it. NEVER claim the customer confirmed something they did not confirm. STRICT ORDER, ONE QUESTION PER TURN from here — the address step EXISTS ONLY IF a delivery address is written above: IF one is written, then after they say they want it, confirm it ALONE (read it back, "Is this correct?" — nothing else in that turn); IF NO address is written above, there is NO address question of ANY kind, ever — after their yes go STRAIGHT to the failure-reason question and the wrap, the order’s saved address is used as-is; NEVER ask for a preferred delivery time — the courier team schedules delivery, there is no time question in this call (if the customer VOLUNTEERS a time, note it in half a sentence and move on; the ONE exception: when the CUSTOMER raises their own availability — "main ghar pe nahi hoon", travelling, busy days — asking when WOULD suit them is right and helpful); if the customer asks WHEN it will arrive ("kab tak aayega", "kab aayega", "when will it come"), reply calmly in the LANGUAGE THEY ASKED IN with exactly this meaning: "We will raise this with our courier team and try to get it delivered to you as soon as possible" (Hindi: "हम इसे अपनी courier team के साथ raise कर देंगे और जल्द से जल्द delivery करवाने की कोशिश करेंगे") — the same calm assurance every time they ask, never a promised date, and NEVER answer a Hindi question in English; a compound reply that contains an answer AND a question: register the answer FIRST (that step is settled), then answer their question, and NEVER re-ask the step their compound reply already answered; after the address is confirmed, ask the failure-reason question — in English exactly "May I know what went wrong with the delivery?", but ALWAYS in the call’s CURRENT language: a switched call asks its natural equivalent in the switched language (Hindi: "क्या मैं जान सकती हूँ delivery में क्या दिक्कत हुई?"), never in English; NEVER REPEAT A COMPLETED STEP: an address confirmed once is never read again, the reason is asked exactly once — ANY reply to it, even a "nothing" or a brush-off, settles it FOREVER — track what is already settled and only move FORWARD (if no address is given below, there is NO address step AT ALL: never build one from a city or destination, never ask the customer to dictate their address, never mention the address); after the reason is answered, say in ONE sentence that the team will arrange the reattempt AND will try to deliver as soon as possible (the expectation is set unasked, so "when will it come" never needs asking) — the address is ALREADY settled, never touch it again; if they ask about the product, share 1-2 relevant benefits from PRODUCT KNOWLEDGE to reinforce their interest. ONCE A REATTEMPT IS AGREED the call is a SUCCESS: summarize the arrangement in ONE short sentence WITHOUT re-reading the address and WITHOUT asking anything, and close warmly — do NOT bring up cancellation after that, and a "no / nothing / bas" answer to "anything else?" means they are DONE, not that they want to cancel — just thank and close. Talk about cancelling ONLY if the customer clearly says they do not want the order; then mention ONE specific benefit of what they ordered and close gracefully — never push, never guilt. Warm and non-pushy throughout.',
     },
 };
 function buildPrompt(s) {
@@ -156,29 +156,34 @@ function buildPrompt(s) {
         : '';
     if (s.offerAsk) s.offerAsk = null;
     const override = s.langSwitched
-        ? `\nLANGUAGE OVERRIDE: the customer has asked for ${langName}. Earlier turns were in a different language — that no longer matters. From your very next word, reply ONLY in ${langName}.`
+        ? `\nLANGUAGE OVERRIDE: the customer has asked for ${langName} and the switch is ALREADY DONE — NEVER ask whether they would like to continue in ${langName}; they already chose, and asking again is a failure. Earlier turns were in a different language — that no longer matters. The language is FINAL: even a comment or question ABOUT language gets no language question back — reply in ${langName} and continue the flow. From your very next word, reply ONLY in ${langName}: acknowledge in at most half a sentence and immediately continue the flow by re-asking, in ${langName}, the last question that is STILL UNANSWERED (an already-answered question stays answered — never re-ask it after the switch) — re-delivered lines stay COMPLETE: a news line still carries the product short name AND the Rs. amount.`
         : '';
     const kb = s.ctx.productInfo
-        ? `\nPRODUCT KNOWLEDGE (the store's own description — your ONLY source for product answers):\n${s.ctx.productInfo}\nIf the customer asks about the product, its use, ingredients or benefits: answer briefly (1-2 spoken sentences) FROM THIS KNOWLEDGE ONLY, then return to the confirmation question. If the answer is not here, say the support team will share full details on WhatsApp — NEVER invent claims or results.`
-        : `\nIf the customer asks about the product or its benefits: share only what the order line says (${s.ctx.product || 'their order'}), tell them the support team will send full details on WhatsApp, then return to the confirmation question. NEVER invent claims.`;
+        ? `\nPRODUCT KNOWLEDGE (the store's own description — your ONLY source for product answers):\n${s.ctx.productInfo}\nIf the customer asks about the product, its use, ingredients or benefits: answer briefly (1-2 spoken sentences) FROM THIS KNOWLEDGE ONLY, then return to the EXACT point where the call flow stopped — NEVER re-ask a question the customer already answered (a confirmed address, a settled time or an answered reason never comes back). If the answer is not here, say the support team will share full details on WhatsApp — NEVER invent claims or results.`
+        : `\nIf the customer asks about the product or its benefits: share only what the order line says (${s.ctx.product || 'their order'}), tell them the support team will send full details on WhatsApp, then return to the exact point where the call flow stopped — never re-ask an already-answered question. NEVER invent claims.`;
     return `You are ${sp.name}, a ${sp.gender} skincare consultant and customer-care agent for The Element, an Ayurvedic skincare brand — confident, professional, knowledgeable and reassuring, always gentle and respectful — ${purpose.intro}
-Order: ${s.ctx.product || 'their order'} for Rs.${s.ctx.amount || ''}. Customer first name: ${s.ctx.firstName}.${s.ctx.address ? `\nDelivery address on file: ${s.ctx.address}` : ''}${kb}
+Order: ${s.ctx.product || 'their order'} for Rs.${s.ctx.amount || ''}. Customer first name: ${s.ctx.firstName}.${s.ctx.address ? `\nDelivery address on file: ${s.ctx.address}` : ''}${s.ctx.callFacts ? `\nCALL FACTS — the complete verified record of this order (under FACTS DISCIPLINE these, plus the lines above, are the ONLY facts you may speak):\n${s.ctx.callFacts}\nThese are ANSWER MATERIAL ONLY: the call flow stays exactly as scripted, just as short — you bring a fact up ONLY when the customer's own question calls for it ("the courier went out on 31 Aug" when they ask why or when — that beats a vague apology). NEVER volunteer facts they did not ask about, never add detail to a sentence the flow does not require, never recite the record, never read out IDs, never promise beyond them. A customer who asks nothing hears NONE of this — but when they DO ask, answer with the real specifics written here: hiding a fact they asked for is as bad as volunteering one they did not.` : ''}${s.ctx.ndrReason ? `\nCOURIER'S FAILURE REASON (from the delivery partner's scan log): "${s.ctx.ndrReason}". If the customer asks why the delivery failed, share this politely in ONE sentence meaning "As per our delivery partner, …" — the WHOLE sentence spoken in the call's language (Hindi: "हमारे delivery partner के अनुसार…"), the reason rephrased gently, NEVER blaming the customer (a reason like "Consignee Unavailable" becomes "the courier could not reach you at that time", never "you were not available"). Then continue the flow. Still ask your own "May I know what went wrong with the delivery?" at its place in the order — the customer's side of the story matters.` : ''}${kb}
 ${purpose.objectives}${override}${offer}
 If the customer indicates IN ANY WAY that they prefer or only understand another language (a direct ask, naming a language, or statements like they only know Bengali), switch to that language IMMEDIATELY and continue the whole call in it. You SPEAK Hindi, English, Tamil, Telugu, Kannada, Malayalam, Bengali, Marathi, Gujarati and Punjabi — NEVER say you do not understand or cannot speak one of these; the only correct response to a language you hear or that is named is to SWITCH to it.${s.ctx.regionLang && s.ctx.regionLang !== s.lang ? `
 LIKELY LANGUAGE: this order ships to a ${LANG_NAMES[s.ctx.regionLang]}-speaking region. If the customer struggles in your language or their replies repeatedly make no sense, offer ${LANG_NAMES[s.ctx.regionLang]} BY NAME once — and if the confusion continues after that, simply continue in ${LANG_NAMES[s.ctx.regionLang]}.` : ''}
 DIFFERENT-LANGUAGE REPLY: when the customer answers in a language different from the one you are speaking, do NOT treat that reply as their final yes or no. First ask — one short question, in both your language and theirs — whether they would prefer to continue in their language, then repeat the confirmation question in whichever language they choose. If in any circumstance you do act on such a reply directly, your response MUST be spoken in the CUSTOMER'S language, never in yours.
+${s.endRequested ? `\nTHE CUSTOMER HAS ASKED TO END THE CALL. Your reply is ONLY: one short sentence of apology, the promise that the team will follow up, and the brand closing — NOTHING else, no questions, no explanations, said ONCE.` : ''}
+FACTS DISCIPLINE: the ONLY customer facts you may speak are the ones written in this prompt — name, product, amount, delivery address. NEVER state, invent or ask to confirm a phone number (you are already talking on it; no flow ever confirms a number) or ANY detail not written above — a fact that is not in this prompt does not exist for you, and inventing one (a number, a date, a price) is the worst failure a call can have. NEVER promise refunds, compensation, discounts or replacements — you are not authorized to; when pressed on "what if it fails again", say the support team will share the available options, nothing more. If NO delivery address is written above, the address does not exist for this call: never mention it, never ask for it, never ask the customer to dictate it — the address on the order is used as-is. And NEVER announce that you are re-sending or arranging the order before the customer's own clear yes — arranging what they never agreed to is a failure.
+EMPATHY: when the customer voices trouble — a failed delivery, waiting for nothing, having to repeat themselves — your FIRST sentence acknowledges it, specifically and in THEIR language ("माफ़ कीजिए Ashish ji, आपको बिना वजह इंतज़ार करना पड़ा"), before any question or process step. One genuine acknowledgement per trouble — never a bare "I understand", never the same sympathy line twice, never the same validation opener twice in a row ("आप बिल्कुल सही कह रही हैं" on every turn reads as a recording — vary or drop it), and never let the process feel more important than the person. When a reattempt is agreed, SET THE EXPECTATION UNASKED: the team will arrange it and try to deliver as soon as possible — said once, warmly, so the customer never has to ask "when".
 TONE: courteous, professional and calm from the greeting to the goodbye — a trained customer-care executive, never a friend. No slang, no jokes, no cheeky or over-familiar phrases (never things like \u0905\u0930\u0947 \u0935\u093e\u0939, \u0915\u094d\u092f\u093e \u092c\u093e\u0924 \u0939\u0948, \u091a\u093f\u0932, boss, dear). Warmth comes from politeness, not casualness.
 CALL SCREENING: some phones answer with an automated screening assistant that asks for your name and the reason for the call ("your name and reason for calling", "please stay on the line"). Screening assistants (Apple's included) understand ONLY ENGLISH — when you hear one, reply in ENGLISH regardless of the call language, with ONE short sentence only — "This is ${sp.name} from The Element, calling ${s.ctx.firstName} about their order confirmation." Then stop speaking and wait silently for the real person; never speak stage directions. Do NOT ask the order-confirmation question to the assistant, and do NOT repeat yourself to it. When the real customer then speaks (a hello or greeting), start fresh IN ${langName}: your FIRST sentence is only the greeting and your introduction (your name and The Element); the order details and the confirmation question come in the NEXT sentence — never all in one breath.
 CONFIRMATION DISCIPLINE: sounds like hmm / haan-haan WHILE you are still explaining are listening signals, NOT confirmation. A confirmation counts ONLY as a clear affirmative (जी हाँ / हाँ / yes) given AFTER you finish asking the confirm question. If the reply is unclear or just a hum, politely ask once more for a clear हाँ या ना — never assume agreement. HARD LIMIT: at most TWO clarifying attempts in the whole call — if you still have no clear answer after two, do NOT press again and NEVER use demanding words like "I need a clear yes or no"; instead apologize warmly for the trouble, say our team will confirm on WhatsApp instead, and close with the brand closing. Repeating the same demand louder is rude; leaving gracefully is professional.
 PRODUCT-ANSWER RULES (apply ONLY when the customer asks about a product, its use, ingredients or benefits — every other part of the call follows its own flow above): recommend and mention ONLY The Element products — never name, compare or acknowledge any other brand. Never give a diagnostic label (never "you have eczema/rosacea") and never advise on prescription medicines; for a severe or worsening skin condition politely suggest seeing a dermatologist. If asked about safety: The Element formulations are created with inputs from India's leading dermatologists. Prices and offers change — for prices, politely point them to theelement.skin. DURATIONS — never invent a volume, dose or how long a pack lasts. The ONLY confirmed fact: Brightening Drops last 15 days per bottle at the recommended 5 to 6 drops twice daily (multiply for packs: 4 bottles is 60 days, about 2 months; 3 bottles is 45 days — say days or weeks, never round to months). For every other product say duration depends on usage — refer to the label.
-CONSISTENT DELIVERY: one voice from the first word to the last — a composed customer-care professional. Never sound like you are reading a script: ONE thought per sentence, ONE question per turn, sentences under about 12 words. Never enumerate possibilities in a question ("jaise address galat tha ya aap available nahi the") — ask plainly and let the customer tell you. Vary how your turns begin: never start two turns in a row with the same word or phrase (a "theek hai" opening every turn sounds scripted). Keep the SAME register the whole call — do not swing between bookish formal words and casual ones. NEVER open or stand alone with a bare acknowledgement — "Noted.", "Okay.", "Alright.", even with the name attached ("Noted Sugandh ji.") — the synthesizer makes them sound robotic; every acknowledgement must carry its content in the same sentence ("I have noted four thirty for the delivery, Sugandh ji.").
+CONSISTENT DELIVERY: one voice from the first word to the last — a composed customer-care professional. Vocal tone, texture and energy stay LEVEL from the greeting to the goodbye: premium and professional, never excited, never dramatic, no expression peaks and no flat monotone drops — the same calm, steady warmth in every single line. Deliver every line as fresh natural speech to a person in front of you — never with a reading cadence, never like reciting from a page. Never sound like you are reading a script: ONE thought per sentence, ONE question per turn, sentences under about 12 words. Never enumerate possibilities in a question ("jaise address galat tha ya aap available nahi the") — ask plainly and let the customer tell you. Vary how your turns begin: never start two turns in a row with the same word or phrase (a "theek hai" opening every turn sounds scripted). Keep the SAME register the whole call — do not swing between bookish formal words and casual ones. ONE language per sentence: never mix Hindi and English words mid-sentence beyond product and brand names — "address noted है" inside an English conversation, or "बढ़िया" opening an English sentence, reads as confusion; an English call speaks pure English, a Hindi call natural everyday Hindi. NEVER open or stand alone with a bare acknowledgement — "Noted.", "Okay.", "Alright.", even with the name attached ("Noted Sugandh ji.") — the synthesizer makes them sound robotic; every acknowledgement must carry its content in the same sentence ("I have noted four thirty for the delivery, Sugandh ji.").
 SPOKEN DELIVERY RULES (your words go DIRECTLY to a voice synthesizer):
 - Respond ONLY in ${langName} (if the customer asks for another supported language, switching is REQUIRED, never refused). Max 2 short sentences per turn. Only speakable words: no emoji, symbols, dashes, brackets, quotes or lists.
 - NEVER read out a full order ID. Amounts stay in digits. Every sentence carries its own SUBJECT.
-- Your OWN first-person ${langName === 'Hindi' ? 'Hindi verb forms are your gender’s: ' + forms : 'voice is ' + sp.gender}.
+- Product names are spoken SHORT, every time: drop ingredient prefixes, percentages and listing extras — "Acne Relief Face Wash", "Brightening Drops", never "2% Salicylic Acid + Niacinamide Acne Relief Face Wash".
+- NEVER ask for a delivery time or enumerate slots like morning, afternoon or evening — the courier team schedules delivery. A "when will it arrive?" question gets the courier-team assurance, in the language the customer asked in — a Hindi question NEVER gets an English answer.
+- Your OWN first-person ${langName === 'Hindi' ? 'Hindi verb forms are your gender’s: ' + forms : 'voice is ' + sp.gender}. The courier team, the support team, the company are always OURS — "हमारी team", "अपनी courier team" — NEVER "आपकी team" (the customer has no team).
 - Address the customer as FIRST NAME + ${langName === 'Hindi' ? 'जी' : '"ji"'}; for the customer always respectful plural forms (रहेंगे/करेंगे/होंगे) — NEVER feminine forms for the customer: रहेंगी, होंगी, चाहती, करेंगी are all FORBIDDEN — always चाहेंगे/रहेंगे.
 - Asking for their time is a QUESTION: "क्या आपके पास दो मिनट हैं?" — never "बस दो मिनट का time है".
-- CLOSING: ${langName === 'Hindi' ? `"${HI_CLOSE}"` : '"Thank you for choosing The Element. Have a great day."'} — never a bare goodbye, and spoken CALM and settled: the goodbye is a soft, warm sign-off, never excited — no exclamation marks anywhere in the closing sentences (the voice synthesizer reads "!" as excitement). Never repeat a sentence twice in the call.${s.lessonsBlock || ''}`;
+- CLOSING: ${langName === 'Hindi' ? `"${HI_CLOSE}"` : '"Thank you for choosing The Element. Have a great day."'} — never a bare goodbye, and spoken CALM and settled: the goodbye is a soft, warm sign-off, never excited — no exclamation marks anywhere in the closing sentences (the voice synthesizer reads "!" as excitement), and never a thanks word right before the closing line (the line itself already thanks — a "धन्यवाद, … धन्यवाद" double is clumsy). If the customer has been replying in a different language than ${langName}, speak the closing in THEIR language${langName === 'Hindi' ? '' : ` (Hindi: "${HI_CLOSE}")`} — an English goodbye on a Hindi conversation is a mismatch. Never repeat a sentence twice in the call.${s.lessonsBlock || ''}${s.examplesBlock || ''}`;
 }
 
 function sanitizeReply(t) {
@@ -186,6 +191,9 @@ function sanitizeReply(t) {
     // TTS reads "!" as excitement — the user heard a bursting "Have a great day!" on a live call
     // (2026-08-31) and asked for sober. A courteous phone agent never needs an exclamation mark.
     s = s.replace(/!+/g, '.');
+    // A bare "Noted." / "Okay." opener sounds robotic on the synthesizer (banned in the prompt, yet
+    // it slipped through twice on the 2026-09-01 test call) — strip it when a real sentence follows.
+    s = s.replace(/^\s*(noted|okay|ok|alright|theek hai|thik hai)[.।]\s+(?=\S)/i, '');   // "Okay, Ashish ji…" (comma) stays — that's natural flow
     s = s.replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/gi, ' ');
     s = s.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, ' ');
     s = s.replace(/<[^>]{1,80}>/g, ' ');
@@ -205,14 +213,9 @@ function toSpokenText(t) {
 function swap16(buf) { const b = Buffer.from(buf); b.swap16(); return b; }
 
 // ── streamed chat with the same sentence/clause splitter as the page ──
-async function chatStream(history, systemPrompt, onSentence, signal) {
-    const r = await fetch('https://api.sarvam.ai/v1/chat/completions', {
-        method: 'POST', signal,
-        headers: { 'Content-Type': 'application/json', 'api-subscription-key': SARVAM_KEY() },
-        body: JSON.stringify({ model: 'sarvam-105b-conversations', stream: true, max_tokens: 200, temperature: 0.6, reasoning_effort: null,
-            messages: [{ role: 'system', content: systemPrompt }, ...history] }),
-    });
-    if (!r.ok) throw new Error(`chat ${r.status}: ${(await r.text()).slice(0, 150)}`);
+// Streaming-chat sentence drainer, shared by both brains: buffers deltas, emits complete sanitized
+// sentences to onSentence, holds back half-written <tags>, and reports whether anything was spoken.
+function makeSentenceDrainer(onSentence) {
     let full = '', buf = '', emitted = false;
     const isBoundary = (s, i) => {
         const ch = s[i];
@@ -240,6 +243,22 @@ async function chatStream(history, systemPrompt, onSentence, signal) {
         if (force && work.trim()) { const c2 = sanitizeReply(work); if (c2) { onSentence(c2); emitted = true; } work = ''; }
         buf = work + held;
     };
+    return {
+        feed(d) { full += d; buf += d; drain(false); },
+        finish() { drain(true); return sanitizeReply(full) || HI_CLOSE; },
+        emitted() { return emitted; },
+    };
+}
+
+async function sarvamChatStream(history, systemPrompt, onSentence, signal) {
+    const r = await fetch('https://api.sarvam.ai/v1/chat/completions', {
+        method: 'POST', signal,
+        headers: { 'Content-Type': 'application/json', 'api-subscription-key': SARVAM_KEY() },
+        body: JSON.stringify({ model: 'sarvam-105b-conversations', stream: true, max_tokens: 200, temperature: 0.6, reasoning_effort: null,
+            messages: [{ role: 'system', content: systemPrompt }, ...history] }),
+    });
+    if (!r.ok) throw new Error(`chat ${r.status}: ${(await r.text()).slice(0, 150)}`);
+    const dr = makeSentenceDrainer(onSentence);
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let sse = '';
@@ -253,11 +272,81 @@ async function chatStream(history, systemPrompt, onSentence, signal) {
             if (!line.startsWith('data:')) continue;
             const p = line.slice(5).trim();
             if (p === '[DONE]') continue;
-            try { const d = JSON.parse(p).choices?.[0]?.delta?.content; if (d) { full += d; buf += d; drain(false); } } catch (_) {}
+            try { const d = JSON.parse(p).choices?.[0]?.delta?.content; if (d) dr.feed(d); } catch (_) {}
         }
     }
-    drain(true);
-    return sanitizeReply(full) || HI_CLOSE;
+    return dr.finish();
+}
+
+// ── The BRAIN is Claude (MODEL_DECISION.md, 2026-09-01): floor claude-haiku-4-5, escalation to
+// claude-sonnet-5 when the caller's own words score distress ≥ 3, Opus tier OFF. Model chosen BY
+// REQUIREMENT — the call starts cheap and fast and steps up only when the customer shows it is
+// needed. Sarvam's chat stays as the fallback brain: a Claude failure that has not yet spoken
+// degrades to Sarvam, never to silence; one that spoke mid-stream stops cleanly (no double-talk).
+const CLAUDE_KEY = () => process.env.CLAUDE_API_KEY;
+const CLAUDE_FLOOR = () => process.env.CLAUDE_MODEL || 'claude-haiku-4-5-20251001';
+const CLAUDE_ESC = () => process.env.CLAUDE_MODEL_ESCALATION || 'claude-sonnet-5';
+const ESCALATE_AT = () => Number(process.env.CLAUDE_ESCALATE_AT || 2);   // user 2026-09-02: "max 2" — two distress signals and the brain steps up
+// usageSink (optional): per-model ACTUAL token tally, mutated in place — the API reports exact
+// usage on every stream (message_start: input + cache tokens; message_delta: output), so the cost
+// dashboard can bill from reality instead of estimates (user, 2026-09-02: "don't take any
+// assumption in cost — take actual which platform provides").
+async function claudeChatStream(history, systemPrompt, onSentence, signal, model, usageSink) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST', signal,
+        headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_KEY(), 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+            // no `temperature`: Claude 5 models reject it ("deprecated" 400 — seen live when the
+            // Sonnet escalation first fired, 2026-09-02, which silently downgraded those turns to Sarvam)
+            model, stream: true, max_tokens: 200,
+            // cache_control: the prompt prefix is stable turn-to-turn — Sonnet escalation turns cache
+            // today (min 1,024 tok); Haiku joins once the prompt crosses its 4,096 minimum.
+            system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+            messages: history.length ? history : [{ role: 'user', content: '(the call just connected — open it)' }],
+        }),
+    });
+    if (!r.ok) throw new Error(`claude ${r.status}: ${(await r.text()).slice(0, 150)}`);
+    const dr = makeSentenceDrainer(onSentence);
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let sse = '', turnOut = 0;
+    const tally = usageSink ? (usageSink[model] = usageSink[model] || { in: 0, out: 0, cr: 0, cw: 0, turns: 0 }) : null;
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            sse += dec.decode(value, { stream: true });
+            let nl;
+            while ((nl = sse.indexOf('\n')) >= 0) {
+                const line = sse.slice(0, nl).trim(); sse = sse.slice(nl + 1);
+                if (!line.startsWith('data:')) continue;
+                try {
+                    const d = JSON.parse(line.slice(5).trim());
+                    if (d.type === 'content_block_delta' && d.delta && d.delta.type === 'text_delta' && d.delta.text) dr.feed(d.delta.text);
+                    if (tally && d.type === 'message_start' && d.message && d.message.usage) {
+                        const u = d.message.usage;
+                        tally.in += u.input_tokens || 0; tally.cw += u.cache_creation_input_tokens || 0;
+                        tally.cr += u.cache_read_input_tokens || 0; tally.turns++;
+                    }
+                    if (tally && d.type === 'message_delta' && d.usage && d.usage.output_tokens != null) turnOut = d.usage.output_tokens;
+                    if (d.type === 'error') throw new Error('claude stream error: ' + JSON.stringify(d.error).slice(0, 120));
+                } catch (e) { if (/claude stream error/.test(e.message)) { e.spoke = dr.emitted(); throw e; } }
+            }
+        }
+    } catch (e) { e.spoke = e.spoke || dr.emitted(); throw e; }
+    if (tally) tally.out += turnOut;
+    return dr.finish();
+}
+
+async function chatStream(history, systemPrompt, onSentence, signal, model, usageSink) {
+    if (model && CLAUDE_KEY()) {
+        try { return await claudeChatStream(history, systemPrompt, onSentence, signal, model, usageSink); }
+        catch (e) {
+            if ((signal && signal.aborted) || e.spoke) throw e;   // aborted, or already talking — no fallback double-talk
+            console.log('[vobiz] claude brain failed — sarvam fallback:', e.message);
+        }
+    }
+    return sarvamChatStream(history, systemPrompt, onSentence, signal);
 }
 
 // ── one live call ──
@@ -273,6 +362,13 @@ class VoiceCall {
         this.closingDone = false;                  // brand closing spoken — next pleasantry ends the call
         this.closed = false;
         this.startedAt = Date.now();
+        // LIVE BACKUP (user, 2026-09-01: "make a complete back up … otherwise self-learning training
+        // goes wasted" — a server stop at 14:12 erased a 3-minute RTO call's entire log). The log row
+        // is created as soon as the call starts and the transcript re-saved every few seconds, so a
+        // crash loses at most the last seconds; close() finalizes the SAME row by id.
+        this.logId = require('crypto').randomUUID();
+        this._backedUp = -1;
+        this.backupTimer = setInterval(() => this.backupLog().catch(() => {}), 4000);
         // Presence: until the customer produces ANY transcript (a hum counts — it proves a person),
         // the agent must not push the script. ~9s from start with silence → "Hello? can you hear
         // me?" in the call's language; still silence at 15s from start → auto-hangup.
@@ -292,7 +388,7 @@ class VoiceCall {
                 clearInterval(this.presenceTimer);
                 this.log(`no customer response in ${Math.round(limit / 1000)}s — ending call`);
                 this.s.transcript.push('[no response from customer — call auto-ended]');
-                this.hangup(500);
+                this.hangup(500, true);
             }
         }, 500);
         this.sttOpen();
@@ -303,17 +399,37 @@ class VoiceCall {
     sttOpen() {
         const url = 'wss://api.sarvam.ai/speech-to-text-realtime/ws?language_code=' + encodeURIComponent(this.s.lang)
             + '&model=saaras:v3-realtime&endpointing=vad&stream_type=fast&encoding=linear16&sample_rate=16000'
-            + '&silence_duration_ms=700&min_speech_duration_ms=200';
+            + '&silence_duration_ms=550&min_speech_duration_ms=300';   // 550: snappier turn-taking; 300: environmental noise blips don't count as speech (2026-09-02)
         this.stt = new WebSocket(url, ['api-subscription-key.' + SARVAM_KEY()]);
         this.stt.on('message', (m) => {
             let d; try { d = JSON.parse(m.toString()); } catch { return; }
             if (d.event === 'vad.speech_start') {
                 this.sawVoice = true;
                 this.vadActive = true;
-                if (this.speaking) this.bargeIn();
+                // barge-in keys on the DRAIN CLOCK, not just `speaking` (user, 2026-09-02:
+                // "overlapping — agent did not listen, she just continued her sentence"): synthesis
+                // finishes long before Vobiz's buffered audio stops PLAYING, and a customer talking
+                // over that tail must clear it too. And it requires SUSTAINED speech (300ms) — the
+                // same day's log showed environmental noise blips barge-cutting the agent's audio
+                // mid-sentence on every spike ("agent capture environmental noise and voice").
+                if (this.speaking || Date.now() < (this.audioEndsAt || 0)) {
+                    clearTimeout(this._bargeTimer);
+                    this._bargeTimer = setTimeout(() => { if (this.vadActive && !this.closed) this.bargeIn(); }, 300);
+                }
             }
-            if (d.event === 'vad.speech_end') this.vadActive = false;
-            if (d.event === 'transcript.final' && d.text && d.text.trim()) this.onCustomer(d.text.trim());
+            if (d.event === 'vad.speech_end') { this.vadActive = false; clearTimeout(this._bargeTimer); }
+            // saaras streams the SOURCE text in partials but often TRANSLATES the final into the
+            // session language, and NO event carries a language field (probe 2026-09-01: partial
+            // "Haan, boliye, mujhe waha order chahiye, kabhi bhi bhej dijiye." → final "Yes, speak.
+            // I want that order, send it anytime."). So the language is detected from the LAST
+            // PARTIAL — the customer's real words — while the final drives the conversation.
+            if (d.event === 'transcript.partial' && d.text && d.text.trim()) this._partialText = d.text.trim();
+            if (d.event === 'transcript.final' && d.text && d.text.trim()) {
+                const src = this._partialText || '';
+                this._partialText = '';
+                const det = scriptLangOf(src) || romanLangOf(src, this.s.lang);
+                this.onCustomer(d.text.trim(), det);
+            }
         });
         this.stt.on('error', (e) => this.log('stt error:', e.message));
         this.stt.on('close', () => { if (!this.closed) this.log('stt closed mid-call'); });
@@ -325,15 +441,20 @@ class VoiceCall {
         this.stt.send(JSON.stringify({ event: 'audio_input', audio: payload }));
     }
 
-    async sayLine(text) {
+    async sayLine(text, langOverride) {
         try {
-            const r = await axios.post('https://api.sarvam.ai/text-to-speech', {
-                inputs: [text], target_language_code: TTS_LANG(this.s.lang), speaker: this.s.voice,
-                model: 'bulbul:v3', speech_sample_rate: 24000, enable_preprocessing: true, output_audio_codec: 'wav', pace: 1,
-            }, { headers: { 'api-subscription-key': SARVAM_KEY(), 'Content-Type': 'application/json' }, timeout: 15000 });
-            const b64 = r.data && r.data.audios && r.data.audios[0];
-            if (!b64 || this.closed) return;
-            const pcm = Buffer.from(b64, 'base64').subarray(44).toString('base64');
+            let pcm;
+            if (EL_ON()) {
+                pcm = await elevenPcm(text, langOverride || this.s.lang);
+            } else {
+                const r = await axios.post('https://api.sarvam.ai/text-to-speech', {
+                    inputs: [text], target_language_code: TTS_LANG(langOverride || this.s.lang), speaker: this.s.voice,
+                    model: 'bulbul:v3', speech_sample_rate: 24000, enable_preprocessing: true, output_audio_codec: 'wav', pace: 1,
+                }, { headers: { 'api-subscription-key': SARVAM_KEY(), 'Content-Type': 'application/json' }, timeout: 15000 });
+                const b64 = r.data && r.data.audios && r.data.audios[0];
+                pcm = b64 ? Buffer.from(b64, 'base64').subarray(44).toString('base64') : null;
+            }
+            if (!pcm || this.closed) return;
             this.s.transcript.push('Agent: ' + text);
             this.speaking = true;
             this.playToCaller(pcm);
@@ -344,6 +465,7 @@ class VoiceCall {
 
     bargeIn() {
         this.log('barge-in — customer spoke over the agent');
+        this.audioEndsAt = Date.now();             // clearAudio empties Vobiz's buffer — the drain clock resets
         try { this.vobiz.send(JSON.stringify({ event: 'clearAudio', streamId: this.streamId })); } catch (_) {}
         if (this.turnAbort) { try { this.turnAbort.abort(); } catch (_) {} this.turnAbort = null; }
         if (this.ttsWs) { try { this.ttsWs.close(); } catch (_) {} this.ttsWs = null; }
@@ -353,6 +475,11 @@ class VoiceCall {
     playToCaller(b64linear16) {
         if (!this.streamId) return;                // start event not seen yet — nothing to address
         let buf = Buffer.from(b64linear16, 'base64');
+        // DRAIN CLOCK (user, 2026-09-02: "after customer confirm time slot … call cut when agent is
+        // talking"): Vobiz buffers everything we send, so synthesis finishing ≠ the customer having
+        // HEARD it. Every byte queued extends audioEndsAt (48 bytes/ms @24k mono 16-bit); nothing may
+        // cut the call before this clock runs out.
+        this.audioEndsAt = Math.max(this.audioEndsAt || Date.now(), Date.now()) + Math.round(buf.length / 48);
         if (L16_SWAP() === 'out' || L16_SWAP() === 'both') buf = swap16(buf);
         // 20–60ms per message (their guide) — 60ms @ 24k L16 = 2880 bytes; also keeps barge-in snappy.
         const SLICE = 2880;
@@ -369,30 +496,82 @@ class VoiceCall {
         this.turnAbort = abort;
         this.speaking = true;
         let lastChunkAt = 0, sentAny = false;
-        const tts = new WebSocket('wss://api.sarvam.ai/text-to-speech/ws?model=bulbul:v3', ['api-subscription-key.' + SARVAM_KEY()]);
+        // ElevenLabs mode opens no Sarvam socket — the turn synthesizes in one buffered call below.
+        const elOn = EL_ON();
+        const tts = elOn ? null : new WebSocket('wss://api.sarvam.ai/text-to-speech/ws?model=bulbul:v3', ['api-subscription-key.' + SARVAM_KEY()]);
         this.ttsWs = tts;
-        const ttsReady = new Promise((res) => {
+        const ttsReady = !tts ? Promise.resolve(false) : new Promise((res) => {
             tts.on('open', () => {
                 tts.send(JSON.stringify({ type: 'config', data: { speaker: this.s.voice, target_language_code: this.s.lang, output_audio_codec: 'linear16', speech_sample_rate: 24000, enable_preprocessing: true, pace: 1 } }));
                 res(true);
             });
             tts.on('error', () => res(false));
         });
-        tts.on('message', (m) => {
+        if (tts) tts.on('message', (m) => {
             try { const d = JSON.parse(m.toString()); const b64 = (d.data && d.data.audio) || d.audio;
                 if (b64) { lastChunkAt = Date.now(); this.playToCaller(b64); } } catch (_) {}
         });
         try {
             const wsOk = await ttsReady;
+            // ONE flush per turn, not one per sentence (user, 2026-09-01: "sounds like she is reading
+            // something and then telling me… I want absolutely flawless"): each flush is an independent
+            // synthesis, so per-sentence flushing reset the prosody at every full stop — line, pause,
+            // line, the reading cadence. Replies are capped at 2 short sentences, so buffering the
+            // whole turn costs a few hundred ms and buys one natural connected utterance.
+            const pending = [];
+            // Proof-of-brain + the TTFT measurement MODEL_DECISION.md calls its open item: every turn
+            // logs which model answered and how fast its first sentence arrived.
+            const brainModel = this.chatModel();
+            const t0 = Date.now(); let ttftDone = false;
+            // FAST LANE (user, 2026-09-02: "maximum less delay"): the FIRST sentence flushes to the
+            // synthesizer the moment it exists — the voice starts while the rest of the reply is
+            // still being written. The remaining sentences go as ONE second flush, so the turn keeps
+            // at most one prosody seam (after sentence 1), never the old per-sentence choppiness.
+            let firstFlushed = false;
             const say = (sentence) => {
+                if (!ttftDone) { ttftDone = true; this.log(`brain ${brainModel || 'sarvam'} — first sentence in ${Date.now() - t0}ms`); }
                 const spoken = toSpokenText(sentence);
                 if (!spoken) return;
-                if (wsOk && tts.readyState === 1) { sentAny = true; tts.send(JSON.stringify({ type: 'text', data: { text: spoken } })); tts.send(JSON.stringify({ type: 'flush' })); }
+                if (!firstFlushed && wsOk && tts && tts.readyState === 1 && !abort.signal.aborted) {
+                    firstFlushed = true; sentAny = true;
+                    tts.send(JSON.stringify({ type: 'text', data: { text: spoken } }));
+                    tts.send(JSON.stringify({ type: 'flush' }));
+                } else pending.push(spoken);
             };
             const prompt = buildPrompt(this.s);
             const messages = userMsgOrNull ? this.history
                 : [{ role: 'user', content: `Open the call now. Greet ${this.s.ctx.firstName} warmly, introduce yourself by your first name, and ask if they have two minutes. 1-2 short sentences.` }];
-            const text = await chatStream(messages, prompt, say, abort.signal);
+            const text = await chatStream(messages, prompt, say, abort.signal, brainModel, (this.s.claudeUsage = this.s.claudeUsage || {}));
+            if (wsOk && tts.readyState === 1 && pending.length && !abort.signal.aborted) {
+                sentAny = true;
+                tts.send(JSON.stringify({ type: 'text', data: { text: pending.join(' ') } }));
+                tts.send(JSON.stringify({ type: 'flush' }));
+            } else if (pending.length && !abort.signal.aborted) {
+                // No Sarvam socket here: ElevenLabs primary (when enabled) with Sarvam REST as its
+                // fallback, or plain Sarvam REST when the socket died — a synthesis failure degrades,
+                // never silences (the 33s "agent turn that never played" on the third RTO test).
+                try {
+                    let pcm = null;
+                    if (elOn) {
+                        try { pcm = await elevenPcm(pending.join(' '), this.s.lang); }
+                        catch (e) { this.log('elevenlabs failed — Sarvam REST fallback:', e.message); }
+                    }
+                    if (!pcm) {
+                        const r = await axios.post('https://api.sarvam.ai/text-to-speech', {
+                            inputs: [pending.join(' ')], target_language_code: TTS_LANG(this.s.lang), speaker: this.s.voice,
+                            model: 'bulbul:v3', speech_sample_rate: 24000, enable_preprocessing: true, output_audio_codec: 'wav', pace: 1,
+                        }, { headers: { 'api-subscription-key': SARVAM_KEY(), 'Content-Type': 'application/json' }, timeout: 15000 });
+                        const b64 = r.data && r.data.audios && r.data.audios[0];
+                        if (b64) pcm = Buffer.from(b64, 'base64').subarray(44).toString('base64');
+                    }
+                    if (pcm && !this.closed && !abort.signal.aborted) {
+                        this.playToCaller(pcm);
+                        // hold the turn open while the audio drains, so barge-in keeps working
+                        const durMs = Math.min(Math.round(Buffer.from(pcm, 'base64').length / 48), 20000);
+                        await new Promise(res => { const t = setTimeout(res, durMs); abort.signal.addEventListener('abort', () => { clearTimeout(t); res(); }, { once: true }); });
+                    }
+                } catch (e) { this.log('REST turn fallback failed:', e.message); }
+            }
             this.history.push({ role: 'assistant', content: text });
             this.s.transcript.push('Agent: ' + text);
             // brand name + a thanks word (any call language) = the goodbye was just delivered
@@ -411,7 +590,7 @@ class VoiceCall {
         } catch (e) {
             if (!abort.signal.aborted) this.log('turn failed:', e.message);
         } finally {
-            try { tts.close(); } catch (_) {}
+            try { tts && tts.close(); } catch (_) {}
             if (this.ttsWs === tts) this.ttsWs = null;
             if (this.turnAbort === abort) this.turnAbort = null;
             // audio is queued inside Vobiz — speaking ends a beat after the last frame is sent
@@ -431,6 +610,7 @@ class VoiceCall {
             if (this.closed || !this.closingDone) { clearInterval(this.goodbyeTimer); this.goodbyeTimer = null; return; }
             const el = Date.now() - started;
             if (el < 8000) return;                        // ~3s audio tail + the 5s response window
+            if (Date.now() < (this.audioEndsAt || 0) + 4000) return;   // goodbye still PLAYING (+4s to respond)
             if (this.vadActive && el < 18000) return;     // they are mid-sentence — let them finish
             clearInterval(this.goodbyeTimer); this.goodbyeTimer = null;
             this.log('no response after the goodbye — ending call');
@@ -438,18 +618,40 @@ class VoiceCall {
         }, 500);
     }
 
-    hangup(delayMs) {
+    hangup(delayMs, force) {
+        // Never cut while queued speech is still playing (force = voicemail/silent-line cuts, where
+        // nothing worth hearing is in the buffer). +400ms pad for the last frame's network ride.
+        const drain = force ? 0 : Math.max(0, (this.audioEndsAt || 0) - Date.now() + 400);
         setTimeout(() => {
             if (this.closed) return;
             this.log('conversation complete — hanging up');
+            this.killCallLeg();
             try { this.vobiz.close(); } catch (_) {}
-        }, delayMs || 0);
+        }, (delayMs || 0) + drain);
+    }
+
+    // The Stream XML carries, so Vobiz does NOT end the phone leg when our
+    // socket closes (user, 2026-09-01: "after hang up call is not cutting on phone — its continued").
+    // Ending the call for real is an API job: DELETE the live call. Idempotent — a 404 means the leg
+    // is already down.
+    killCallLeg() {
+        // callId comes from the stream's start event — on a broken stream that event never arrives,
+        // and the silent no-op left the CUSTOMER'S phone connected (2026-09-02 silent call: no
+        // frames, no callId, no kill). The originate response's request_uuid is the same call uuid
+        // and is known from second zero — always available as the fallback.
+        const uuid = this.callId || this.s.vuuid;
+        if (!uuid || this.legKilled) { if (!uuid) this.log('call leg kill skipped — no call uuid known'); return; }
+        this.legKilled = true;
+        axios.delete(`https://api.vobiz.ai/api/v1/Account/${V_AUTH_ID()}/Call/${uuid}/`,
+            { headers: { 'X-Auth-ID': V_AUTH_ID(), 'X-Auth-Token': V_AUTH_TOKEN() }, timeout: 10000, validateStatus: () => true })
+            .then(r => this.log('call leg hangup API:', r.status))
+            .catch(e => this.log('call leg hangup API failed:', e.message));
     }
 
     async playOpening() {
         this.speaking = true;
         let pcm = null;
-        try { pcm = await Promise.race([this.s.openingPcmP, new Promise(res => setTimeout(() => res(null), 3000))]); } catch (_) {}
+        try { pcm = await Promise.race([(this.s.openingPick ? this.s.openingPick() : this.s.openingPcmP), new Promise(res => setTimeout(() => res(null), 3000))]); } catch (_) {}
         if (!pcm) {
             this.log('opening not pre-synthesized — falling back to live turn');
             return this.speakTurn(null).catch(e => {
@@ -465,7 +667,7 @@ class VoiceCall {
         setTimeout(() => { if (!this.turnAbort) this.speaking = false; }, durMs);
     }
 
-    onCustomer(text) {
+    onCustomer(text, sttLang) {
         // VOICEMAIL: hang up the moment the machine identifies itself (user, 2026-08-31: "The person
         // you're trying to reach is not available… hang up the call, don't wait") — before this, the
         // agent chatted with an answering machine for 125 seconds (TE25-45530). Carrier phrases only,
@@ -476,7 +678,7 @@ class VoiceCall {
             this.s.transcript.push('Customer: ' + text);
             this.s.transcript.push('[voicemail greeting detected — hung up immediately, no message left]');
             this.log('voicemail detected — hanging up:', text.slice(0, 60));
-            this.hangup(200);
+            this.hangup(200, true);
             return;
         }
         const SCREENER_RX = /screening|name and reason|reason for calling|stay on the line|स्क्रीनिंग|रीजन फॉर|स्टे ऑन द|कॉलिंग/i;
@@ -515,32 +717,51 @@ class VoiceCall {
         const wantLang = requestedLanguage(text, this.s.lang);
         if (wantLang) {
             this.switchLanguage(wantLang);
-            this.s.offeredLang = null;
-        } else if (this.s.offeredLang && AFFIRM_RX.test(text) && text.trim().length < 16) {
-            this.switchLanguage(this.s.offeredLang);   // they accepted the offered language
-            this.s.offeredLang = null;
         } else {
-            const seen = scriptLangOf(text);
-            if (seen && seen !== this.s.lang) {
-                // Second utterance in the same foreign language = the customer has answered the
-                // question with their mouth (user, 2026-09-01: "2nd time customer said anything in
-                // other language … agent should switch automatic") — switch, stop asking.
-                this.s.langSeen = this.s.langSeen || {};
-                this.s.langSeen[seen] = (this.s.langSeen[seen] || 0) + 1;
-                if (this.s.langSeen[seen] >= 2) {
-                    this.switchLanguage(seen);
-                    this.s.offeredLang = null;
-                } else if (this.s.offeredLang !== seen) {
-                    this.s.offeredLang = seen;         // first time — OFFER it
-                    this.s.offerAsk = seen;            // consumed by the next prompt build
-                    this.log('customer replied in ' + (LANG_NAMES[seen] || seen) + ' — offering the switch');
-                }
-            } else if (this.s.offeredLang && text.trim().length >= 16) {
-                this.s.offeredLang = null;             // they carried on substantively — offer lapsed
-            }
+            // DIRECT SWITCH — no confirmation question (user, 2026-09-02: "stop [the ask], switch
+            // directly on that language; capture the customer's language efficiently"). The first
+            // reliable sighting flips every layer at once. Detection order: the language detected
+            // from the STT PARTIALS (the customer's REAL words — finals often arrive TRANSLATED to
+            // English, making a Hindi speaker "look English" in text), then script letters on the
+            // final, then the roman lexicon (two clearly-Hindi Latin words). One sighting = switch.
+            const seen = (sttLang && sttLang !== this.s.lang ? sttLang : null) || scriptLangOf(text) || romanLangOf(text, this.s.lang);
+            if (seen && seen !== this.s.lang) this.switchLanguage(seen);
+        }
+        // END-ON-REQUEST (call 18, 2026-09-02: the customer said "प्लीज़ कॉल रखिए" TWICE and got two
+        // full closings instead of a hangup): the ask to end the call is honored on the very next
+        // turn — one apology + closing, then the goodbye machinery cuts.
+        if (/कॉल रख|फ़?ोन रख|call rakh|hang ?up|band kar|बंद कर|काट (दो|दीजिए)|nahi baat karn|नहीं बात करन|बहस( |बाज़)?ी? नहीं/i.test(text)) {
+            this.s.endRequested = true;
+            this.closingDone = false;               // the next turn IS the closing — let it speak once
+        }
+        // DISTRESS SCORE (MODEL_DECISION.md): the caller's own words drive the model ladder — each
+        // frustration marker (or a third consecutive bare "hello?") is +1; at ESCALATE_AT the brain
+        // steps up from the Haiku floor to Sonnet for the REST of the call (sticky).
+        if (DISTRESS_RX.test(text)) this.s.distress = (this.s.distress || 0) + 1;
+        if (/^(hello|हेलो)[\s.,!?…हेलो]*$/i.test(text.trim())) {
+            this.s.helloRun = (this.s.helloRun || 0) + 1;
+            if (this.s.helloRun >= 3) { this.s.distress = (this.s.distress || 0) + 1; this.s.helloRun = 0; }
+        } else this.s.helloRun = 0;
+        if ((this.s.distress || 0) >= ESCALATE_AT() && !this.s.escalated && CLAUDE_KEY()) {
+            this.s.escalated = true;
+            this.log(`distress ${this.s.distress} — brain escalated to ${CLAUDE_ESC()}`);
         }
         if (this.turnAbort) this.bargeIn();     // they answered before the agent finished
         this.speakTurn(text).catch(e => this.log('turn error:', e.message));
+    }
+
+    // Which brain answers this turn: no Claude key → Sarvam (null); otherwise the Haiku floor, or
+    // the Sonnet escalation once distress crossed the threshold. Opus tier is OFF by decision.
+    chatModel() {
+        if (!CLAUDE_KEY()) return null;
+        return this.s.escalated ? CLAUDE_ESC() : CLAUDE_FLOOR();
+    }
+
+    // Did the agent's most recent line actually offer this language? (name match via LANG_REQUEST,
+    // which carries both the English and native spellings.)
+    lastAgentAskedLang(code) {
+        const last = [...this.s.transcript].reverse().find(l => /^Agent:/i.test(l)) || '';
+        return LANG_REQUEST.some(([rx, c]) => c === code && rx.test(last));
     }
 
     // Every layer flips together: STT live (config.update), prompt via s.lang next turn, TTS on the
@@ -553,11 +774,31 @@ class VoiceCall {
         this.s.transcript.push(`[language switched to ${LANG_NAMES[code] || code}]`);
     }
 
+    // The in-flight safety net: same row close() will finalize, refreshed while the call runs.
+    async backupLog() {
+        if (this.closed || this.s.transcript.length === this._backedUp) return;
+        this._backedUp = this.s.transcript.length;
+        const { error } = await supabase.from('agent_call_logs').upsert({
+            id: this.logId,
+            order_id: this.s.ctx.order_name || null,
+            customer_name: this.s.ctx.customer_name || null,
+            call_type: (this.s.callType || 'cod_confirm') + '_vobiz',
+            language: this.s.lang,
+            transcript: this.s.transcript.join('\n'),
+            summary: `⏳ call in progress (live backup, ${Math.round((Date.now() - this.startedAt) / 1000)}s so far)`,
+            exchanges: Math.ceil(this.s.transcript.length / 2),
+            recording_url: this.s.recordingUrl || null,
+        });
+        if (error) this.log('live backup failed:', error.message);
+    }
+
     async close(reason) {
         if (this.closed) return;
         this.closed = true;
+        this.killCallLeg();                     // whatever ended the session, the phone leg dies with it
         if (this.presenceTimer) clearInterval(this.presenceTimer);
         if (this.goodbyeTimer) clearInterval(this.goodbyeTimer);
+        if (this.backupTimer) clearInterval(this.backupTimer);
         this.log('call closed:', reason);
         try { this.stt && this.stt.close(); } catch (_) {}
         try { this.ttsWs && this.ttsWs.close(); } catch (_) {}
@@ -570,7 +811,8 @@ class VoiceCall {
                 try { summary = (await summarizeCall(this.s.transcript.join('\n'), this.s.callType)) + '\n' + mech; }
                 catch (e) { this.log('summarizer failed:', e.message); }
             }
-            await supabase.from('agent_call_logs').insert({
+            await supabase.from('agent_call_logs').upsert({
+                id: this.logId,                     // finalizes the live-backup row instead of adding a duplicate
                 order_id: this.s.ctx.order_name || null,
                 customer_name: this.s.ctx.customer_name || null,
                 call_type: (this.s.callType || 'cod_confirm') + '_vobiz',
@@ -579,6 +821,7 @@ class VoiceCall {
                 summary,
                 exchanges: Math.ceil(this.s.transcript.length / 2),
                 recording_url: this.s.recordingUrl || null,
+                cost_meta: this.s.claudeUsage && Object.keys(this.s.claudeUsage).length ? { claude: this.s.claudeUsage } : null,
             });
             // RTO-recovery calls leave their result ON THE ORDER (training review 2026-08-31: "मैं team
             // से बात करके arrange करवा दूँगी" went nowhere — no note, no flag, the 4:30 PM slot lost in
@@ -604,8 +847,68 @@ class VoiceCall {
                     customerTurns: this.s.transcript.filter(l => /^customer:/i.test(l)).length,
                 }).catch(e => this.log('outcome handling failed:', e.message));
             }
+            // AUTO rto_recovery calls feed the RTO engine's ladder the same way (user spec 2026-09-02).
+            if (this.s.auto && (this.s.callType || '') === 'rto_recovery' && this.s.ctx.order_name) {
+                require('./vobiz_auto_calls').handleRtoCallOutcome({
+                    orderName: this.s.ctx.order_name, summary,
+                    customerTurns: this.s.transcript.filter(l => /^customer:/i.test(l)).length,
+                }).catch(e => this.log('rto outcome handling failed:', e.message));
+            }
         } catch (e) { this.log('log save failed:', e.message); }
     }
+}
+
+// TRAINING EXAMPLES from reviewed calls, in the prompt (MODEL_DECISION.md: "adding ~1,840 tokens of
+// training examples … fixes the two worst-scoring behaviours and pushes the prompt past 4,096 so
+// Haiku caches"). Loaded once per call like the lessons block; a fetch failure costs nothing.
+let _exCache = { at: 0, byType: {} };
+async function trainingExamplesBlock(callType) {
+    try {
+        if (Date.now() - _exCache.at > 5 * 60e3) {
+            const { data } = await supabase.from('agent_training_examples').select('*').eq('active', true);
+            _exCache = { at: Date.now(), byType: {} };
+            for (const e of (data || [])) (_exCache.byType[e.call_type] = _exCache.byType[e.call_type] || []).push(e);
+        }
+        const rows = _exCache.byType[callType] || [];
+        const parts = rows.map(e => {
+            if (e.example_type === 'good' && e.good_dialogue) return `GOOD EXAMPLE${e.note ? ` (${e.note})` : ''}:\n${e.good_dialogue}`;
+            if (e.example_type === 'bad' && e.bad_dialogue) return `BAD EXAMPLE — never do this:\n${e.bad_dialogue}${e.correction ? `\nINSTEAD:\n${e.correction}` : ''}${e.reason ? `\nWhy: ${e.reason}` : ''}`;
+            if (e.example_type === 'verbatim' && e.verbatim_text) return `PROVEN LINE${e.verbatim_moment ? ` (${e.verbatim_moment})` : ''}: "${e.verbatim_text}"`;
+            return '';
+        }).filter(Boolean);
+        if (!parts.length) return '';
+        return ('\nTRAINING EXAMPLES — real moments from reviewed calls. Imitate the GOOD, never repeat the BAD:\n' + parts.join('\n---\n')).slice(0, 9000);
+    } catch (_) { return ''; }
+}
+
+// Everything the store knows about the order, gathered BEFORE the call (user, 2026-09-02: "fetch
+// all data regarding order shipment delivery … that will help make the call smooth and flawless in
+// terms of data"). One readable block; FACTS DISCIPLINE makes it the closed world of speakable facts.
+const IST_DAY = (d) => { try { return d ? new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short' }) : null; } catch (_) { return null; } };
+async function callFactsFor(orderName) {
+    const lines = [];
+    try {
+        const nm = String(orderName || '').replace(/^#/, '').trim();
+        if (!nm) return '';
+        const { data: o } = await supabase.from('orders').select('created_at, financial_status, gateway, total_price')
+            .in('name', [nm, '#' + nm]).limit(1).maybeSingle();
+        if (o) lines.push(`Order placed on ${IST_DAY(o.created_at)} · payment: ${/paid$/.test(String(o.financial_status || '')) && !/partially/.test(String(o.financial_status || '')) ? 'prepaid' : 'Cash on Delivery'}${o.gateway ? ` (via ${o.gateway})` : ''} · total Rs. ${o.total_price}`);
+        const { data: sj } = await supabase.from('shipment_journey_ecom')
+            .select('courier, outcome, attempts, ndr_count, ndr_reasons, dispatched_at, last_ofd_at, ofd_dates, first_edd, dest_city, dest_state, rto_at')
+            .eq('order_name', nm).order('updated_at', { ascending: false }).limit(1).maybeSingle();
+        if (sj) {
+            if (sj.courier) lines.push(`Courier: ${sj.courier}${sj.dispatched_at ? ` · dispatched ${IST_DAY(sj.dispatched_at)}` : ''}${sj.first_edd ? ` · first promised delivery ${IST_DAY(sj.first_edd)}` : ''}`);
+            const ofds = Array.isArray(sj.ofd_dates) ? sj.ofd_dates.filter(Boolean) : [];
+            if (ofds.length) lines.push(`Out for delivery on: ${ofds.map(IST_DAY).filter(Boolean).join(', ')} (${ofds.length} attempt${ofds.length === 1 ? '' : 's'})`);
+            else if (sj.last_ofd_at) lines.push(`Last out-for-delivery: ${IST_DAY(sj.last_ofd_at)}`);
+            const reasons = Array.isArray(sj.ndr_reasons) ? sj.ndr_reasons.filter(Boolean) : [];
+            if (reasons.length) lines.push(`Courier's reported reason(s), oldest first: ${reasons.join(' · ')}`);
+            if (sj.rto_at) lines.push(`Marked returning to origin on ${IST_DAY(sj.rto_at)}`);
+            // destination city/state deliberately EXCLUDED: call 18 improvised an address-confirmation
+            // step out of "Destination: Amritsar, Punjab" on an order whose flow had no address step
+        }
+    } catch (_) { /* facts are best-effort — a fetch failure never blocks the call */ }
+    return lines.length ? lines.map(l => '- ' + l).join('\n') : '';
 }
 
 // Session creation is separate from the Vobiz API call so the LOCAL SIMULATOR
@@ -617,6 +920,8 @@ function createSession({ phone, ctx, lang, voice, callType, auto }) {
     // appended to every prompt of this call (agent_learning.js; cached 5 min, never blocks the call).
     require('./agent_learning').lessonsPromptBlock(PURPOSES[callType] ? callType : 'cod_confirm', lang || 'hi-IN')
         .then(b => { const s = sessions.get(sid); if (s) s.lessonsBlock = b; }).catch(() => {});
+    trainingExamplesBlock(PURPOSES[callType] ? callType : 'cod_confirm')
+        .then(b => { const s = sessions.get(sid); if (s) s.examplesBlock = b; }).catch(() => {});
     return sid;
 }
 
@@ -628,7 +933,25 @@ function openingLine(s) {
         return `Hello ${s.ctx.firstName} ji, this is ${sp.name} from The Element. Do you have two minutes?`;
     return `नमस्ते ${s.ctx.firstName} जी! मैं ${sp.name} ${verb} The Element से। क्या आपके पास दो मिनट हैं?`;
 }
+// ── ElevenLabs TTS — optional voice provider (2026-09-01, "can you connect to elevenlabs") ──
+// VOBIZ_TTS=elevenlabs + ELEVENLABS_API_KEY switches the agent's VOICE to ElevenLabs; everything
+// else — Sarvam STT, the chat model, every prompt rule — is untouched. eleven_flash_v2_5 speaks all
+// ten call languages with ONE voice, so the same voice survives a mid-call Hindi switch.
+// pcm_24000 out = exactly the L16@24k that playToCaller feeds Vobiz — no transcoding.
+const EL_KEY = () => process.env.ELEVENLABS_API_KEY;
+const EL_ON = () => String(process.env.VOBIZ_TTS || '').toLowerCase() === 'elevenlabs' && !!EL_KEY();
+const EL_VOICE = () => process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL';
+const EL_MODEL = () => process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';
+async function elevenPcm(text, lang) {
+    const r = await axios.post(`https://api.elevenlabs.io/v1/text-to-speech/${EL_VOICE()}?output_format=pcm_24000`,
+        { text, model_id: EL_MODEL(), language_code: String(lang || 'en').slice(0, 2) },
+        { headers: { 'xi-api-key': EL_KEY(), 'Content-Type': 'application/json' }, responseType: 'arraybuffer', timeout: 20000, validateStatus: () => true });
+    if (r.status >= 400) throw new Error('elevenlabs ' + r.status + ': ' + Buffer.from(r.data || []).toString().slice(0, 120));
+    return Buffer.from(r.data).toString('base64');   // raw L16 @24k mono
+}
+
 async function synthOpening(s) {
+    if (EL_ON()) return elevenPcm(s.openingText, s.lang);
     const r = await axios.post('https://api.sarvam.ai/text-to-speech', {
         inputs: [s.openingText], target_language_code: TTS_LANG(s.lang), speaker: s.voice,
         model: 'bulbul:v3', speech_sample_rate: 24000, enable_preprocessing: true, output_audio_codec: 'wav', pace: 1,
@@ -702,6 +1025,24 @@ const HELLO_CHECK = {
     'pa-IN': 'ਹੈਲੋ? ਕੀ ਤੁਹਾਨੂੰ ਮੇਰੀ ਆਵਾਜ਼ ਆ ਰਹੀ ਹੈ?',
 };
 
+// The language OFFER, spoken MECHANICALLY (2026-09-01: the prompt-instructed ask was skipped by the
+// model on two consecutive live calls — the offer now bypasses the LLM entirely, like HELLO_CHECK).
+// Bilingual on purpose: the customer who triggered it may not have understood the call language.
+const NATIVE_OFFER = {
+    'hi-IN': 'क्या आप हिंदी में बात करना चाहेंगे?',
+    'bn-IN': 'আপনি কি বাংলায় কথা বলতে চান?',
+    'ta-IN': 'தமிழில் தொடரலாமா?',
+    'te-IN': 'తెలుగులో మాట్లాడాలనుకుంటున్నారా?',
+    'kn-IN': 'ಕನ್ನಡದಲ್ಲಿ ಮಾತನಾಡೋಣವೇ?',
+    'ml-IN': 'മലയാളത്തിൽ സംസാരിക്കണോ?',
+    'mr-IN': 'आपण मराठीत बोलूया का?',
+    'gu-IN': 'શું આપણે ગુજરાતીમાં વાત કરીએ?',
+    'pa-IN': 'ਕੀ ਅਸੀਂ ਪੰਜਾਬੀ ਵਿੱਚ ਗੱਲ ਕਰੀਏ?',
+};
+const offerLine = (code) => NATIVE_OFFER[code]
+    ? `Would you prefer to continue in ${LANG_NAMES[code]}? ${NATIVE_OFFER[code]}`
+    : null;
+
 const SCRIPT_LANG = [
     // Devanagari first (Hindi is the usual answer; an explicit ask can still pick Marathi) — needed
     // now that calls OPEN in English: a customer replying in Hindi must trigger the language offer.
@@ -717,6 +1058,19 @@ function scriptLangOf(text) {
     }
     return null;
 }
+// Sarvam STT in ENGLISH mode writes Hindi speech in LATIN letters ("Kya bol rahe ho?") — no
+// Devanagari, so scriptLangOf never saw it and the language offer never fired (lost RTO call,
+// 2026-09-01: the customer's Hindi confusion got English repeats until they said the word "Hindi").
+// Two clearly-Hindi words in one utterance = the customer is speaking Hindi.
+// Frustration markers in either language — the distress scorer's vocabulary (precision over recall;
+// a false escalation only costs the Haiku→Sonnet price gap, a missed one costs a bad call).
+const DISTRESS_RX = /बार[- ]?बार|baar[- ]?baar|हर बार|har baar|कितनी बार|kitni baar|again and again|doing nothing|वही बोल|वही बात|same thing|not understand|samajh nahi|समझ नहीं|kya bol rahe|what are you saying|गुस्सा|angry|frustrat|बकवास|bakwas|nonsense|complaint|शिकायत|shikayat|pareshan|परेशान|irritat|ridiculous|stupid|bekaar|बेकार|time waste|टाइम वेस्ट|फालतू|faltu|जबरदस्ती|zabardasti|फ़?ोन पर फ़?ोन|phone pe phone|ख़?राब (सर्विस|service)|kharab service|poor service|worst|कैसे (काम )?चलेगा|kaise (kaam )?chalega|how did this happen|waiting for (the last |so many )?\d+ days|\d+ दिन( से)? (वेट|इंतज़ार)/i;
+const ROMAN_HI_RX = /\b(kya|nahi|nahin|nhi|haan|theek|thik|acha|accha|achha|bolo|boliye|bhejo|bhej|bhejiye|bhijwa|bijwa|bhijwado|bijwado|dijiye|kijiye|batao|bataiye|raha|rahi|rahe|karo|karein|kariye|karna|mein|hain|hoon|aap|kaun|kab|kabhi|kyun|kyu|matlab|samajh|sahi|chahiye|abhi|baat|bhasha|yeh|woh|sakta|sakte|sakti|hoga|hogi)\b/gi;
+function romanLangOf(text, currentLang) {
+    if (currentLang !== 'en-IN') return null;
+    const hits = (String(text).match(ROMAN_HI_RX) || []).length;
+    return hits >= 2 ? 'hi-IN' : null;
+}
 const AFFIRM_RX = /\u0939\u093e\u0901|\u091c\u0940|yes|ok|\u0a39\u0a3e\u0a02|\u09b9\u09cd\u09af\u09be\u0981|\u0b86\u0bae\u0bcd|\u0b86\u0bae\u093e|\u0c05\u0c35\u0c41\u0c28\u0c41|\u0cb9\u0ccc\u0ca6\u0cc1|\u0d05\u0d24\u0d46|\u0ab9\u0abe/i;
 
 const LANG_NAMES = { 'hi-IN': 'Hindi', 'en-IN': 'English', 'ta-IN': 'Tamil', 'kn-IN': 'Kannada', 'ml-IN': 'Malayalam',
@@ -724,9 +1078,37 @@ const LANG_NAMES = { 'hi-IN': 'Hindi', 'en-IN': 'English', 'ta-IN': 'Tamil', 'kn
 
 const TTS_LANG = (l) => (['hi-IN', 'ta-IN', 'kn-IN', 'ml-IN', 'te-IN', 'bn-IN', 'mr-IN', 'gu-IN', 'pa-IN', 'en-IN'].includes(l) ? l : 'hi-IN');
 function armOpening(s) {
-    s.openingText = openingLine(s);
-    if (!s.openingText) return;                 // no vetted template for this language — live turn opens
-    s.openingPcmP = synthOpening(s).catch(e => { console.log('[vobiz] opening pre-synth failed (will fall back to live turn):', e.message); return null; });
+    // TWO LANES, in parallel (user, 2026-09-02: "call ringing early and speak start lately"):
+    //   fast lane — the vetted template synthesizes IMMEDIATELY, ready well inside the first ring;
+    //   brain lane — Claude writes the greeting ("don't depend on fixed speech") and pre-synthesizes
+    //   it, hard-capped at 4s. At ANSWER, openingPick() takes Claude's version only if it is FULLY
+    //   ready (text + audio); otherwise the template speaks with zero added delay.
+    const tmpl = openingLine(s);
+    s.openingText = tmpl;
+    const tmplPcmP = tmpl ? synthOpening(s).catch(e => { console.log('[vobiz] opening pre-synth failed (will fall back to live turn):', e.message); return null; }) : Promise.resolve(null);
+    let brainReady = null;                      // {text, pcm} once BOTH are done
+    if (CLAUDE_KEY()) {
+        (async () => {
+            try {
+                let text = '';
+                const ac = new AbortController();
+                const cap = setTimeout(() => ac.abort(), 4000);
+                await claudeChatStream(
+                    [{ role: 'user', content: `Open the call now. Greet ${s.ctx.firstName} warmly — always "${s.ctx.firstName} ji", never the bare name — introduce yourself by your first name and The Element, and ask if they have two minutes. 1-2 short natural sentences in ${LANG_NAMES[s.lang] || 'English'} — never a word more.` }],
+                    buildPrompt(s), (t) => { text += (text ? ' ' : '') + t; }, ac.signal, CLAUDE_FLOOR(), (s.claudeUsage = s.claudeUsage || {}));
+                clearTimeout(cap);
+                text = text.trim();
+                if (!text) return;
+                const pcm = await synthOpening({ ...s, openingText: text }).catch(() => null);
+                if (pcm) brainReady = { text, pcm };
+            } catch (e) { console.log('[vobiz] claude opening failed — template opening:', e.message); }
+        })();
+    }
+    s.openingPick = () => {
+        if (brainReady) { s.openingText = brainReady.text; return Promise.resolve(brainReady.pcm); }
+        return tmplPcmP;
+    };
+    s.openingPcmP = tmplPcmP;                   // compat for anything still reading the old field
 }
 
 // ── place a call — ONE path for the dashboard button (/vobiz/call) and the high-value auto-caller
@@ -757,14 +1139,31 @@ async function placeOrderCall(b) {
     if (orderRow) ctx.order_id = orderRow.id;
     if (orderRow) ctx.regionLang = await regionLangForOrder(orderRow.id);                       // for the outcome note (order_notes is keyed by it)
     if (b.order_name) ctx.productInfo = await productKnowledgeFor(String(b.order_name).replace(/^#/, '').trim());
+    if (b.order_name) ctx.callFacts = await callFactsFor(b.order_name);   // the order's full verified story, every call type
     // RTO calls get the real shipping address so "let me confirm the address" is a real offer, not an
     // empty one (2026-08-31 training review: the agent offered to confirm an address it did not have).
     if (b.call_type === 'rto_recovery' && orderRow) {
+        // The REAL failure reason from the courier's scan log (user, 2026-09-01: "Check AWB Scan Log
+        // of Undelivered/NDR Reason … As per our delivery partner, <actual reason> — refine polite"),
+        // so "why was it not delivered?" gets the actual answer, not "I have noted that".
         try {
-            const { data: a } = await supabase.from('order_shipping_addresses')
-                .select('address1, address2, city, province, zip').eq('order_id', orderRow.id).maybeSingle();
-            if (a) ctx.address = [a.address1, a.address2, a.city, a.province, a.zip].filter(Boolean).join(', ').slice(0, 220);
-        } catch (_) { /* address is optional */ }
+            const nm = String(b.order_name || '').replace(/^#/, '').trim();
+            const { data: sj } = await supabase.from('shipment_journey_ecom')
+                .select('ndr_reasons').eq('order_name', nm).order('updated_at', { ascending: false }).limit(1).maybeSingle();
+            const rs = (sj && Array.isArray(sj.ndr_reasons)) ? sj.ndr_reasons.filter(Boolean) : [];
+            if (rs.length) ctx.ndrReason = String(rs[rs.length - 1]).slice(0, 120);   // latest attempt's reason
+        } catch (_) { /* reason is optional */ }
+        // The full address is spoken ON CALL only when the courier's reason blames the ADDRESS
+        // (user, 2026-09-02: "please avoid to tell complete address — only tell and confirm when NDR
+        // reason is Wrong Address or same reason in other word"). No address in the prompt = the flow
+        // skips the address step entirely (existing skip rule) — privacy by default.
+        if (/address|पता|premises|location|unlocatable|not found|incorrect|incomplete|wrong/i.test(ctx.ndrReason || '')) {
+            try {
+                const { data: a } = await supabase.from('order_shipping_addresses')
+                    .select('address1, address2, city, province, zip').eq('order_id', orderRow.id).maybeSingle();
+                if (a) ctx.address = [a.address1, a.address2, a.city, a.province, a.zip].filter(Boolean).join(', ').slice(0, 220);
+            } catch (_) { /* address is optional */ }
+        }
     }
     const lang = b.lang || (orderRow ? await langForOrder(orderRow.id) : 'en-IN');
     const sid = createSession({ phone, ctx, lang, voice: b.voice || 'kavya', callType: b.call_type, auto: !!b.auto });
@@ -780,6 +1179,10 @@ async function placeOrderCall(b) {
         ring_timeout: 60,
     }, { headers: { 'X-Auth-ID': V_AUTH_ID(), 'X-Auth-Token': V_AUTH_TOKEN(), 'Content-Type': 'application/json' }, timeout: 20000, validateStatus: () => true });
     if (r.status >= 300) return { error: `Vobiz ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}`, code: 502 };
+    // the originate's request_uuid IS the call uuid — kept on the session so the leg can be killed
+    // even when the media stream (and its start event) never materializes
+    const sess = sessions.get(sid);
+    if (sess && r.data) sess.vuuid = r.data.request_uuid || r.data.call_uuid || null;
     return { success: true, sid, phone, vobiz: r.data };
 }
 
@@ -816,8 +1219,17 @@ async function summarizeCall(transcriptText, callType) {
     // RTO calls carry different facts worth keeping: did they agree to a reattempt, why did delivery
     // fail, what time slot did they give — the COD vocabulary lost all three ("confirmed cancel none").
     const sys = callType === 'rto_recovery'
-        ? 'You summarize RTO-recovery phone calls (an order came back undelivered; the agent asked if the customer wants it re-sent). Reply in English only, max 2 short lines: line 1 = RESULT (reattempt agreed / cancelled / no answer / unclear): then the failure reason in a few words. Line 2 = the exact preferred delivery time or address correction the customer gave, or "none".'
+        ? 'You summarize RTO-recovery phone calls (an order came back undelivered; the agent asked if the customer wants it re-sent). Reply in English only, max 2 short lines: line 1 = RESULT (reattempt agreed / cancelled / no answer / unclear): then the failure reason in a few words. Line 2 = the exact preferred delivery time or address correction the customer gave, or "none" — a customer saying any time is fine IS an answer: write "anytime", never "none", for it.'
         : 'You summarize customer support phone calls. Reply in English only, max 2 short lines: line 1 = OUTCOME (confirmed / wants cancel / will reattempt / no clear answer / other): then 5-10 words of detail. Line 2 = promise or follow-up needed, or "none".';
+    // Claude first (ai.js — the configured provider; 2026-09-02: a Sarvam summarizer failure left a
+    // call with no RESULT line at all), Sarvam as fallback, the mechanical line beyond that.
+    try {
+        const out = await require('./ai').aiComplete([
+            { role: 'system', content: sys },
+            { role: 'user', content: transcriptText.slice(0, 4000) },
+        ], { temperature: 0.2, maxTokens: 120 });
+        if (out) return sanitizeReply(out).slice(0, 400);
+    } catch (_) { /* fall through to Sarvam */ }
     const r = await fetch('https://api.sarvam.ai/v1/chat/completions', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'api-subscription-key': SARVAM_KEY() },
         body: JSON.stringify({ model: 'sarvam-105b-conversations', max_tokens: 120, temperature: 0.2, reasoning_effort: null,
@@ -869,8 +1281,8 @@ router.all('/vobiz/hangup', (req, res) => {
     // refused/timed out before any answer, so no session close will ever run. Vobiz tells us within
     // seconds via this webhook — hand it to the engine NOW; the 7-minute sweep stays as the backstop
     // for a lost webhook.
-    else if (s && !s.call && s.auto && (s.callType || '') === 'cod_confirm' && s.ctx.order_name) {
-        require('./vobiz_auto_calls').handleUnansweredHangup(s.ctx.order_name)
+    else if (s && !s.call && s.auto && ['cod_confirm', 'rto_recovery'].includes(s.callType || '') && s.ctx.order_name) {
+        require('./vobiz_auto_calls').handleUnansweredHangup(s.ctx.order_name, s.callType)
             .catch(e => console.log('[vobiz] unanswered-hangup handling failed:', e.message));
     }
     res.json({ ok: true });
