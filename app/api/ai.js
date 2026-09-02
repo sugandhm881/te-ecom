@@ -28,12 +28,12 @@ function httpReason(status) {
     return `AI provider error (HTTP ${status})`;
 }
 
-async function aiComplete(messages, { temperature = 0.5, maxTokens = 900 } = {}) {
+async function aiComplete(messages, { temperature = 0.5, maxTokens = 900, source = 'ai_generic' } = {}) {
     if (!isConfigured()) { _lastError = 'AI is not configured'; return null; }
     _lastError = null;
     try {
         return isGemini() ? await geminiComplete(messages, temperature, maxTokens)
-             : isAnthropic() ? await anthropicComplete(messages, temperature, maxTokens)
+             : isAnthropic() ? await anthropicComplete(messages, temperature, maxTokens, source)
              : await openaiComplete(messages, temperature, maxTokens);
     } catch (e) {
         _lastError = /timeout/i.test(e.message) ? 'AI request timed out — retry' : ('AI request failed: ' + e.message);
@@ -95,7 +95,7 @@ async function geminiComplete(messages, temperature, maxTokens) {
 
 // Native Anthropic Messages API. OpenAI-style messages → system string + user/assistant turns.
 // 429/529 (Anthropic's "overloaded") retries once on AI_MODEL_FALLBACK, mirroring the Gemini path.
-async function anthropicComplete(messages, temperature, maxTokens) {
+async function anthropicComplete(messages, temperature, maxTokens, source) {
     const base = (config.AI_API_URL.match(/^https?:\/\/[^/]+/) || ['https://api.anthropic.com'])[0];
     const system = messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
     const turns = messages.filter(m => m.role !== 'system')
@@ -116,6 +116,9 @@ async function anthropicComplete(messages, temperature, maxTokens) {
         }
     }
     if (r.status >= 400) { _lastError = httpReason(r.status === 529 ? 503 : r.status); console.error('[AI] Anthropic HTTP', r.status, JSON.stringify(r.data).slice(0, 200)); return null; }
+    // every Anthropic call this system makes lands in the ledger — that is what lets
+    // the AI Calling Statement reconcile against the Anthropic console (2026-09-02)
+    try { require('./claude_usage').logClaudeUsage(source || 'ai_generic', (r.data && r.data.model) || config.AI_MODEL, r.data && r.data.usage, null); } catch (_) {}
     const blocks = r.data && r.data.content;
     const txt = Array.isArray(blocks) ? blocks.map(b => b.text || '').join('') : '';
     const out = (txt || '').trim() || null;

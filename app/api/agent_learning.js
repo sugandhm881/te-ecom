@@ -76,7 +76,7 @@ function normaliseReview(raw) {
 const transientAi = m => /rate-limited|overloaded|timed out/i.test(String(m || ''));
 async function reviewCall(call) {
     for (let attempt = 0; ; attempt++) {
-        const txt = await aiComplete(reviewPrompt(call), { temperature: 0.2, maxTokens: 1200 });
+        const txt = await aiComplete(reviewPrompt(call), { temperature: 0.2, maxTokens: 1200, source: 'agent_learning' });
         if (txt) {
             const raw = parseJson(txt);
             if (!raw) throw new Error('AI reply was not JSON');

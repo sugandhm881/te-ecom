@@ -1182,6 +1182,19 @@ function check(name, got, want) {
             const cc = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_costs.js'), 'utf8');
             const ap3 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
             const ix3 = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+            // 2026-09-02: the statement showed ~half of what Anthropic billed — it only counted
+            // tokens spent INSIDE a call. Every Claude call now writes to claude_usage_ecom, and
+            // the stale price table (Sonnet 5 at $3/$15, Opus at $15/$75) was corrected.
+            check('claude usage ledger: every Anthropic call logged (brain, opening, summarizer, learning, audits); statement adds a platform line; list prices correct',
+                [fs.existsSync(path.join(ROOT, 'app/api/claude_usage.js')),
+                 /\[\/sonnet-5\/, \{ in: 2, out: 10 \}\]/.test(cc) && /\[\/opus\/, \{ in: 5, out: 25 \}\]/.test(cc),
+                 /from\('claude_usage_ecom'\)/.test(cc), /platform_breakdown/.test(cc),
+                 (() => { const b = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    return /logClaudeUsage\('call_brain'/.test(b) && /source: 'summarizer'/.test(b); })(),
+                 /source: 'agent_learning'/.test(fs.readFileSync(path.join(ROOT, 'app/api/agent_learning.js'), 'utf8')),
+                 /logClaudeUsage\('call_insights'/.test(fs.readFileSync(path.join(ROOT, 'app/api/ai_call_insights.js'), 'utf8')),
+                 /Claude — platform/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8'))],
+                [true, true, true, true, true, true, true, true]);
             check('ai-call costs: ACTUALS-first (Vobiz CDR cost in ₹, Claude tokens × list price via cost_meta, Sarvam measured×rate); fixed ₹708 amortized; wired',
                 [/vobizActuals/.test(cc) && /claudeCostINR/.test(cc) && /cost_meta/.test(cc) && /COST_VOBIZ_CURRENCY/.test(cc),
                  /amount: 708/.test(cc), /\(\\d\+\)s call to/.test(cc),

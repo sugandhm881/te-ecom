@@ -8026,7 +8026,10 @@ async function sacLoad(silent){
       row('👂 Sarvam STT (ears)', _sacInr(c.stt), 'measured minutes')+
       row('🗣 Sarvam TTS (voice)', _sacInr(c.tts), 'measured characters')+
       row('🧠 Claude brain', _sacInr(c.brain), escapeHtml(src.brain||''))+
+      row('⚙️ Claude — platform', _sacInr(c.platform||0), 'summaries, agent learning, audits')+
+      ((d.platform_breakdown&&Object.keys(d.platform_breakdown).length)?`<div class="pl-4 mt-1">${Object.entries(d.platform_breakdown).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div class="flex items-center justify-between text-[11px] text-slate-400 py-0.5"><span>${escapeHtml(k.replace(/_/g,' '))}</span><span class="tabular-nums">${_sacInr(v)}</span></div>`).join('')}</div>`:'')+
       `<div class="text-[11px] text-slate-400 mt-1.5">${escapeHtml(src.sarvam||'')}</div>`+
+      `<div class="text-[11px] text-slate-400 mt-1">${escapeHtml(src.platform||'')}</div>`+
       `<div class="flex items-center justify-between pt-2 text-sm font-bold"><span>Variable total</span><span class="tabular-nums text-indigo-700">${_sacInr(t.variable)}</span></div>`;
     document.getElementById('sac-fixed').innerHTML =
       (d.fixed||[]).map(f=>row(f.name, _sacInr(f.in_range), `${f.note||''} · ${_sacInr(f.amount)}/month`)).join('')+

@@ -20,10 +20,14 @@ const { supabase } = require('../supabase');
 
 const USD_INR = () => Number(process.env.COST_USD_INR || 88);
 // Anthropic published list prices, USD per MILLION tokens (input / output).
+// Verified against Anthropic's published prices 2026-09-02. The previous table carried a stale
+// prior (Sonnet 5 at $3/$15, Opus at $15/$75) which mispriced every escalated turn.
 const CLAUDE_PRICES = [
     [/haiku-4-5/, { in: 1, out: 5 }],
-    [/sonnet-5|sonnet-4/, { in: 3, out: 15 }],
-    [/opus/, { in: 15, out: 75 }],
+    [/sonnet-5/, { in: 2, out: 10 }],
+    [/sonnet-4-6/, { in: 3, out: 15 }],
+    [/fable-5|mythos-5/, { in: 10, out: 50 }],
+    [/opus/, { in: 5, out: 25 }],
 ];
 // CALIBRATED against the user's own Sarvam usage export (02-Sep-2026, ₹75.20 total day):
 //   · TTS ₹3.00/1k chars — EXACT match (22,084 chars billed ₹66.25 vs our measured ~21k+openings)
@@ -97,16 +101,30 @@ router.get('/support/ai-call-costs', async (req, res) => {
         const fromIso = new Date(`${from}T00:00:00+05:30`).toISOString();
         const toIso = new Date(`${to}T23:59:59.999+05:30`).toISOString();
 
-        const [{ data: rows, error }, vob] = await Promise.all([
+        const [{ data: rows, error }, vob, { data: ledger }] = await Promise.all([
             supabase.from('agent_call_logs')
                 .select('id, order_id, call_type, language, called_at, exchanges, summary, transcript, cost_meta')
                 .gte('called_at', fromIso).lte('called_at', toIso)
                 .order('called_at', { ascending: false }).limit(1500),
             vobizActuals(new Date(fromIso).getTime(), new Date(toIso).getTime()),
+            // EVERY Anthropic call this system made in the window (claude_usage_ecom) — the call
+            // brain plus the work that is not attributable to one call: summaries, agent-learning
+            // reviews, the Call Insights audit. Without this the statement showed only ~half of
+            // what the Anthropic console billed (user, 2026-09-02).
+            supabase.from('claude_usage_ecom').select('source, model, tokens_in, tokens_out, cache_read, cache_write')
+                .gte('at', fromIso).lte('at', toIso).limit(20000),
         ]);
         if (error) throw new Error('call log read failed: ' + error.message);
+        const platform = {};
+        let platformInr = 0, brainLedgerInr = 0;
+        for (const u of (ledger || [])) {
+            const inr = claudeCostINR({ [u.model]: { in: u.tokens_in, out: u.tokens_out, cr: u.cache_read, cw: u.cache_write } });
+            if (u.source === 'call_brain' || u.source === 'call_opening') { brainLedgerInr += inr; continue; }
+            platform[u.source] = r2((platform[u.source] || 0) + inr);
+            platformInr += inr;
+        }
 
-        const comp = { telephony: 0, stt: 0, tts: 0, brain: 0 };
+        const comp = { telephony: 0, stt: 0, tts: 0, brain: 0, platform: 0 };
         const byType = {};
         let brainActualCalls = 0, telActualCalls = 0;
         const calls = (rows || []).map(c => {
@@ -147,6 +165,10 @@ router.get('/support/ai-call-costs', async (req, res) => {
         });
 
         for (const k of Object.keys(comp)) comp[k] = r2(comp[k]);
+        // the ledger is the fuller truth for the brain (it also covers calls logged before
+        // per-call token capture existed); platform work is money the old statement never showed
+        if (brainLedgerInr > comp.brain) comp.brain = r2(brainLedgerInr);
+        comp.platform = r2(platformInr);
         // The Vobiz component row shows the PLATFORM total for the range (covers unanswered dials
         // our logs never see) — the more complete of the two numbers.
         const telephonyPlatformTotal = vob.ok ? vob.totalInr : null;
@@ -166,10 +188,14 @@ router.get('/support/ai-call-costs', async (req, res) => {
                 brain: `actual tokens × Anthropic list price for ${brainActualCalls}/${calls.length} calls (older calls estimated @ ₹${CLAUDE_EST_PER_TURN}/turn)`,
                 sarvam: `measured usage × Sarvam's billing (TTS ₹${SARVAM.tts_per_1k}/1k chars — exact match to their export; STT ₹${SARVAM.stt_per_min}/call-min — calibrated to their processed-audio billing, 02-Sep export)`,
                 usd_inr: USD_INR(),
+                platform: (ledger || []).length
+                    ? `actual tokens from ${(ledger || []).length} logged Anthropic calls (summaries, agent learning, audits) — reconciles with console.anthropic.com`
+                    : 'no ledger rows yet in this range — restart the server so new Claude calls are logged',
             },
             calls,
             by_type: byType,
             components: comp,
+            platform_breakdown: platform,
             fixed,
             totals: {
                 calls: calls.length, connected,

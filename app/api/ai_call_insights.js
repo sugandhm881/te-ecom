@@ -146,6 +146,7 @@ Exactly 5 in "improve" and 5 in "good". No markdown, no text outside the JSON.` 
             }),
         });
         const d = await r.json();
+        try { require('./claude_usage').logClaudeUsage('call_insights', d.model || model, d.usage, null); } catch (_) {}
         // Take the TEXT blocks, never content[0] — Claude 5 returns a thinking block first, and
         // reading index 0 silently yielded "" (the Run-audit button appeared to do nothing).
         const text = ((d.content || []).filter(b => b && b.type === 'text').map(b => b.text || '').join('')).trim();

@@ -23,7 +23,8 @@
 //     WhatsApp confirm still fires first at 3 min. 48 h is the age seal)
 //   · the order is still COD-pending, not cancelled, not fulfilled
 //   · the customer has NOT already replied to the WhatsApp confirmation (any reply = they spoke)
-//   · IST clock is inside the calling window (10:00–19:59) — nobody gets a 2 AM robot call
+//   · (NO clock window since 2026-09-02 — user: "for COD confirmation call there is no time
+//     limit for calling"; the customer ordered minutes ago. VOBIZ_COD_WINDOW=true restores it)
 // Outcome lands in agent_call_logs like every bridge call (call_type cod_confirm_vobiz), so the
 // transcripts feed the same self-learning loop and dashboard.
 //
@@ -210,8 +211,14 @@ async function sweepUnanswered(purpose = PURPOSE) {
 async function highValueCallTick(opts = {}) {
     const { placeOrderCall, vobizConfigured } = require('./vobiz_bridge');
     if (!vobizConfigured()) return { skip: 'Vobiz not configured' };
-    const h = istHour();
-    if (!opts.testOrder && (h < WINDOW.from || h >= WINDOW.to)) return { skip: `outside calling window (${WINDOW.from}:00–${WINDOW.to}:00 IST)` };
+    // NO CALLING WINDOW for COD confirmation (user, 2026-09-02: "for COD confirmation call there is
+    // no time limit for calling") — the customer placed the order minutes ago and the hold is
+    // blocking dispatch, so a 5-minute callback at any hour is expected, not intrusive.
+    // RTO recovery keeps its 10:00–19:59 window; set VOBIZ_COD_WINDOW=true to restore this one.
+    if (String(process.env.VOBIZ_COD_WINDOW || '') === 'true') {
+        const h = istHour();
+        if (!opts.testOrder && (h < WINDOW.from || h >= WINDOW.to)) return { skip: `outside calling window (${WINDOW.from}:00–${WINDOW.to}:00 IST)` };
+    }
 
     let targets;
     if (opts.testOrder) {

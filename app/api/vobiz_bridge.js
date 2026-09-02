@@ -309,7 +309,7 @@ async function claudeChatStream(history, systemPrompt, onSentence, signal, model
     const dr = makeSentenceDrainer(onSentence);
     const reader = r.body.getReader();
     const dec = new TextDecoder();
-    let sse = '', turnOut = 0;
+    let sse = '', turnOut = 0, lastIn = 0, lastCr = 0, lastCw = 0;
     const tally = usageSink ? (usageSink[model] = usageSink[model] || { in: 0, out: 0, cr: 0, cw: 0, turns: 0 }) : null;
     try {
         for (;;) {
@@ -325,8 +325,8 @@ async function claudeChatStream(history, systemPrompt, onSentence, signal, model
                     if (d.type === 'content_block_delta' && d.delta && d.delta.type === 'text_delta' && d.delta.text) dr.feed(d.delta.text);
                     if (tally && d.type === 'message_start' && d.message && d.message.usage) {
                         const u = d.message.usage;
-                        tally.in += u.input_tokens || 0; tally.cw += u.cache_creation_input_tokens || 0;
-                        tally.cr += u.cache_read_input_tokens || 0; tally.turns++;
+                        lastIn = u.input_tokens || 0; lastCw = u.cache_creation_input_tokens || 0; lastCr = u.cache_read_input_tokens || 0;
+                        tally.in += lastIn; tally.cw += lastCw; tally.cr += lastCr; tally.turns++;
                     }
                     if (tally && d.type === 'message_delta' && d.usage && d.usage.output_tokens != null) turnOut = d.usage.output_tokens;
                     if (d.type === 'error') throw new Error('claude stream error: ' + JSON.stringify(d.error).slice(0, 120));
@@ -335,6 +335,10 @@ async function claudeChatStream(history, systemPrompt, onSentence, signal, model
         }
     } catch (e) { e.spoke = e.spoke || dr.emitted(); throw e; }
     if (tally) tally.out += turnOut;
+    // …and into the cross-system ledger, so the cost statement can reconcile with
+    // Anthropic's own console instead of seeing only in-call tokens (2026-09-02).
+    if (tally) require('./claude_usage').logClaudeUsage('call_brain', model,
+        { in: lastIn, out: turnOut, cr: lastCr, cw: lastCw }, null);
     return dr.finish();
 }
 
@@ -1244,7 +1248,7 @@ async function summarizeCall(transcriptText, callType) {
         const out = await require('./ai').aiComplete([
             { role: 'system', content: sys },
             { role: 'user', content: transcriptText.slice(0, 4000) },
-        ], { temperature: 0.2, maxTokens: 120 });
+        ], { temperature: 0.2, maxTokens: 120, source: 'summarizer' });
         if (out) return sanitizeReply(out).slice(0, 400);
     } catch (_) { /* fall through to Sarvam */ }
     const r = await fetch('https://api.sarvam.ai/v1/chat/completions', {
