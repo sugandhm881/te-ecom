@@ -1080,6 +1080,10 @@
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
                         <span class="ml-3 text-sm font-medium">Agent Learning</span>
                     </a>
+                    <a href="#" id="nav-support-call-insights" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Call Insights</span>
+                    </a>
                     <a href="#" id="nav-support-ai-costs" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 8h6m-5 4h4m-7 8h8a2 2 0 002-2V6a2 2 0 00-2-2H7a2 2 0 00-2 2v12a2 2 0 002 2zm3-16v2m0 12v2"/></svg>
                         <span class="ml-3 text-sm font-medium">AI Calling Statement</span>
@@ -2144,6 +2148,28 @@
                 <a href="/static/voice-agent.html" target="_blank" class="px-3 py-2 rounded-lg text-sm font-medium text-slate-600 border border-slate-200 hover:bg-slate-50 inline-flex items-center gap-2 whitespace-nowrap">Open full screen ↗</a>
             </header>
             <iframe src="/static/voice-agent.html?v=2026-08-31-ele" allow="microphone; autoplay" title="Voice Agent" style="width:100%;height:calc(100vh - 92px);border:0;display:block;background:#F7F6F3"></iframe>
+        </div>
+
+        <div id="support-call-insights-view" class="view-hidden">
+            <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div><h1 class="text-xl font-bold text-slate-800">Call Insights</h1>
+                    <p class="text-sm text-slate-400 mt-0.5">What the transcripts actually say — counted behaviour on the left, an evidence-led AI audit on the right</p></div>
+                <div class="flex items-center gap-2 flex-wrap"><div id="sci-range"></div>
+                    <button id="sci-run" class="filter-btn-primary">Run AI audit</button></div>
+            </header>
+            <div class="p-8 space-y-6">
+                <div id="sci-kpis" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4"></div>
+                <div class="grid lg:grid-cols-3 gap-6">
+                    <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">Rule compliance <span class="text-xs font-normal text-slate-400">(counted, not judged)</span></h3><div id="sci-behaviour"></div></div>
+                    <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">Outcomes</h3><div id="sci-outcomes"></div>
+                        <h3 class="font-semibold text-slate-700 mb-3 mt-5">Languages</h3><div id="sci-langs"></div></div>
+                    <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">⚠ Worst behaviour</h3><div id="sci-worst" class="text-sm text-slate-600"></div></div>
+                </div>
+                <div class="grid lg:grid-cols-2 gap-6">
+                    <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">🔧 Top 5 to improve</h3><div id="sci-improve" class="space-y-3"></div></div>
+                    <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">✅ Top 5 done well</h3><div id="sci-good" class="space-y-3"></div></div>
+                </div>
+            </div>
         </div>
 
         <div id="support-ai-costs-view" class="view-hidden">
@@ -3884,7 +3910,7 @@
      ONLY thing that makes a browser re-fetch. Forgetting it means the change ships and nobody sees it:
      on 2026-08-13 a whole session of Last-Mile + Purchase Order work was invisible for exactly this
      reason, and it looks identical to "the fix didn't work". -->
-<script src="/static/app.js?v=2026-09-02-und-chip"></script>
+<script src="/static/app.js?v=2026-09-02-insights"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

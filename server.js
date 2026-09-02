@@ -193,6 +193,7 @@ const _VIEW_PERMS = [
     // Customer Support console — any support view permission unlocks its API group.
     [/^\/support\/agent-learning/i, ['support-agent-learning', 'support-voice']],   // self-learning dashboard (router re-checks)
     [/^\/support\/ai-call-costs/i, ['support-ai-costs', 'support-agent-learning', 'support-voice']],   // AI calling cost statement
+    [/^\/support\/call-insights/i, ['support-agent-learning', 'support-voice']],                       // Call Insights audit
     [/^\/voice-lessons/i, ['support-voice', 'support-agent-learning']],             // lessons block for the browser agent
     [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist', 'customer-profile']],
     // Customer Profile page (replaces Blacklist Numbers) — same audience. Issuing store credit is gated
@@ -342,6 +343,7 @@ app.use('/api', vobizBridge.router);
 app.use('/api', require('./app/api/vobiz_auto_calls').router);   // high-value COD confirmation auto-caller (test trigger)
 app.use('/api', require('./app/api/ai_call_report').router);     // daily AI calling report → Teams (manual trigger/preview)
 app.use('/api', require('./app/api/ai_call_costs').router);      // AI Calling Statement — per-call cost breakdown dashboard
+app.use('/api', require('./app/api/ai_call_insights').router);   // Call Insights — hard behaviour metrics + AI audit of transcripts
 app.use('/api', require('./app/api/user_activity').router);   // activity logging (POST /activity — any signed-in user)
 app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
 app.use('/api', require('./app/api/inventory').router);       // Inventory Analytics (daily snapshot dashboard + Teams report)

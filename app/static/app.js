@@ -1256,6 +1256,11 @@ function navigate(view) {
             activeLinkElement = document.getElementById('nav-support-voice');
             activeViewElement = document.getElementById('support-voice-view');
             break;   // self-contained iframe (/static/voice-agent.html) — no init needed
+        case 'support-call-insights':
+            activeLinkElement = document.getElementById('nav-support-call-insights');
+            activeViewElement = document.getElementById('support-call-insights-view');
+            if (typeof sciInit === 'function') sciInit();
+            break;
         case 'support-ai-costs':
             activeLinkElement = document.getElementById('nav-support-ai-costs');
             activeViewElement = document.getElementById('support-ai-costs-view');
@@ -6635,7 +6640,7 @@ const NAV_HREF = {
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon', 'nav-kwikship-recon': 'kwikship-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics', 'nav-zone-mapping': 'zone-mapping',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
-    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning', 'nav-support-ai-costs': 'support-ai-costs',
+    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning', 'nav-support-ai-costs': 'support-ai-costs', 'nav-support-call-insights': 'support-call-insights',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
     'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions',
     'nav-finance-entry': 'finance-entry', 'nav-finance-register': 'finance-register', 'nav-finance-books': 'finance-books'
@@ -7845,6 +7850,107 @@ function salRenderRange(){
 const SAL_CAT_LABEL = { opening: 'Opening', screening: 'Call screening', confirmation: 'Confirmation', language: 'Language', tone: 'Tone', objection: 'Objections', closing: 'Closing', other: 'Other' };
 const SAL_OUT_LABEL = { confirmed: 'Confirmed', cancelled: 'Cancelled', reattempt: 'Re-attempt', no_answer: 'No answer', unclear: 'Unclear', other: 'Other' };
 const SAL_OUT_COLOR = { confirmed: '#10b981', cancelled: '#f43f5e', reattempt: '#f59e0b', no_answer: '#94a3b8', unclear: '#a78bfa', other: '#cbd5e1' };
+// ── Call Insights (2026-09-02): counted rule-compliance on the left, an evidence-led AI audit of
+// the real transcripts on the right. The counters are deterministic (a rising number IS a
+// regression); the audit costs a Claude call, so it is cached and re-run by the user's click.
+let _sci = { wired:false, rangeSel:'7',
+  range: (() => { try { const r=JSON.parse(localStorage.getItem('sci.dateRange')); if(r&&r.from&&r.to) return r; } catch(_){}
+    const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-7); return {from:_ymd(f),to:_ymd(d)}; })() };
+try { const r=JSON.parse(localStorage.getItem('sci.dateRange')); if(r&&r.sel) _sci.rangeSel=r.sel; } catch(_){}
+function sciRenderRange(){
+  const el=document.getElementById('sci-range'); if(!el) return;
+  el.innerHTML=`<div class="flex items-center gap-2 flex-wrap">
+    <select class="filter-select sci-preset">
+      <option value="custom" ${_sci.rangeSel==='custom'?'selected':''}>Custom</option>
+      <option value="0" ${_sci.rangeSel==='0'?'selected':''}>Today</option>
+      <option value="7" ${_sci.rangeSel==='7'?'selected':''}>Last 7 days</option>
+      <option value="30" ${_sci.rangeSel==='30'?'selected':''}>Last 30 days</option>
+    </select>
+    <span class="sci-custom items-center gap-2 ${_sci.rangeSel==='custom'?'flex':'hidden'}">
+      <input type="date" class="filter-input sci-from" value="${_sci.range.from}"><span class="text-slate-400">→</span>
+      <input type="date" class="filter-input sci-to" value="${_sci.range.to}">
+      <button class="filter-btn sci-apply">Apply</button></span></div>`;
+  const save=()=>localStorage.setItem('sci.dateRange',JSON.stringify({..._sci.range,sel:_sci.rangeSel}));
+  const custom=el.querySelector('.sci-custom');
+  el.querySelector('.sci-preset').addEventListener('change',e=>{
+    const v=e.target.value;
+    if(v==='custom'){ _sci.rangeSel='custom'; custom.classList.remove('hidden'); custom.classList.add('flex'); return; }
+    custom.classList.add('hidden'); custom.classList.remove('flex');
+    const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-(+v));
+    _sci.range={from:_ymd(f),to:_ymd(d)}; _sci.rangeSel=v; save();
+    el.querySelector('.sci-from').value=_sci.range.from; el.querySelector('.sci-to').value=_sci.range.to;
+    sciLoad();
+  });
+  el.querySelector('.sci-apply').addEventListener('click',()=>{
+    const f=el.querySelector('.sci-from').value, t=el.querySelector('.sci-to').value;
+    if(!f||!t) return showNotification('Pick both dates',true);
+    if(f>t) return showNotification('The From date is after the To date',true);
+    _sci.range={from:f,to:t}; _sci.rangeSel='custom'; save(); sciLoad();
+  });
+}
+function sciInit(){
+  if(!_sci.wired){ _sci.wired=true; sciRenderRange();
+    document.getElementById('sci-run')?.addEventListener('click', sciRun); }
+  sciLoad();
+}
+async function sciRun(){
+  const b=document.getElementById('sci-run'); const orig=b.textContent;
+  b.disabled=true; b.textContent='⏳ Reading transcripts…';
+  try{
+    const r=await supFetch('/api/support/call-insights/run',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({from:_sci.range.from,to:_sci.range.to})});
+    if(!r.success) throw new Error(r.error||'audit failed');
+    showNotification(`Audited ${r.calls_analysed} real conversations`);
+    sciLoad();
+  }catch(e){ showNotification(e.message,true); }
+  finally{ b.disabled=false; b.textContent=orig; }
+}
+async function sciLoad(){
+  const k=document.getElementById('sci-kpis'); if(k) k.innerHTML='<div class="col-span-full">'+brandLoader('Reading the calls…')+'</div>';
+  try{
+    const d=await supFetch(`/api/support/call-insights?from=${_sci.range.from}&to=${_sci.range.to}`);
+    const m=d.metrics;
+    const tile=(l,v,s,c)=>`<div class="card p-4"><p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${l}</p><p class="text-xl font-bold ${c||'text-slate-800'} mt-1">${v}</p>${s?`<p class="text-[11px] text-slate-400 mt-0.5">${s}</p>`:''}</div>`;
+    k.innerHTML = tile('Calls with transcripts', m.calls, `${d.range.from} → ${d.range.to}`)
+      + tile('Answered', m.connected, m.answer_rate+'% of dials logged','text-emerald-700')
+      + tile('Avg length', m.avg_seconds+'s', 'connected calls')
+      + tile('Avg agent turns', m.avg_agent_turns, 'lower is tighter')
+      + tile('Reattempts won', d.outcomes.reattempt||0, 'customer said yes','text-emerald-700')
+      + tile('Orders called 3+×', m.repeat_called_orders, 'candidates for a human', (m.repeat_called_orders?'text-amber-700':''));
+    // rule compliance — each row is a rule the agent must follow; % of calls that BROKE it
+    const tot=d.behaviour.total||1;
+    const bar=(label,n,good,tip)=>{ const pct=Math.round(n/tot*100);
+      const col=good?(pct>=70?'bg-emerald-500':pct>=40?'bg-amber-400':'bg-rose-400'):(pct<=5?'bg-emerald-500':pct<=20?'bg-amber-400':'bg-rose-400');
+      return `<div class="mb-2.5" title="${escapeHtml(tip||'')}"><div class="flex items-center justify-between text-sm"><span class="text-slate-600">${label}</span><span class="font-semibold tabular-nums text-slate-700">${n} <span class="text-[11px] text-slate-400">(${pct}%)</span></span></div>
+        <div class="h-1.5 rounded-full bg-slate-100 mt-1 overflow-hidden"><div class="h-full rounded-full ${col}" style="width:${Math.min(100,pct)}%"></div></div></div>`; };
+    document.getElementById('sci-behaviour').innerHTML =
+      bar('Introduced herself twice', d.behaviour.double_intro, false, 'Rule: introduce exactly once per call')
+      + bar('Hello-storm at pickup', d.behaviour.hello_storm, false, 'Customer said hello 3+ times — audio/latency at answer')
+      + bar('Asked "want it?" 3+ times', d.behaviour.wantit_overasked, false, 'Rule: at most twice per call')
+      + bar('One-sided (customer silent)', d.behaviour.one_sided, false, 'Connected but the customer never spoke')
+      + bar('Reached the brand closing', d.behaviour.reached_closing, true, 'Call ended on the closing line — higher is better')
+      + bar('Switched language mid-call', d.behaviour.lang_switched, true, 'Customer spoke another language and the agent followed');
+    const rows=o=>Object.entries(o||{}).sort((a,b)=>b[1]-a[1]).map(([k2,v])=>`<div class="flex items-center justify-between py-1 text-sm border-b border-slate-50"><span class="text-slate-600">${escapeHtml(k2.replace(/_/g,' '))}</span><span class="font-semibold tabular-nums">${v}</span></div>`).join('')||'<p class="text-sm text-slate-400">—</p>';
+    document.getElementById('sci-outcomes').innerHTML=rows(d.outcomes);
+    document.getElementById('sci-langs').innerHTML=rows(d.languages);
+    // AI audit
+    const a=d.audit;
+    const when=a?new Date(a.created_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):null;
+    const stamp=a?`<p class="text-[11px] text-slate-400 mt-3">audited ${a.calls_analysed} conversations · ${when} · ${escapeHtml(a.model||'')}</p>`:'';
+    if(!a){ ['sci-worst','sci-improve','sci-good'].forEach(id=>document.getElementById(id).innerHTML='<p class="text-sm text-slate-400">No audit yet for this range — press <b>Run AI audit</b>.</p>'); return; }
+    document.getElementById('sci-worst').innerHTML = a.worst
+      ? `<div class="rounded-lg bg-rose-50 border border-rose-100 p-3"><p class="font-semibold text-rose-800">${escapeHtml(a.worst.title||'')}</p><p class="text-sm text-rose-700 mt-1">${escapeHtml(a.worst.detail||'')}</p></div>${stamp}`
+      : `<pre class="text-xs whitespace-pre-wrap text-slate-500">${escapeHtml(String(a.raw||'').slice(0,1200))}</pre>`;
+    const card=(x,i,tone)=>`<div class="rounded-lg border ${tone==='good'?'border-emerald-100 bg-emerald-50/40':'border-amber-100 bg-amber-50/40'} p-3">
+      <div class="flex items-start gap-2"><span class="w-5 h-5 rounded-full ${tone==='good'?'bg-emerald-600':'bg-amber-500'} text-white text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">${i+1}</span>
+      <div class="min-w-0"><p class="font-semibold text-slate-800 text-sm">${escapeHtml(x.title||'')}</p>
+        ${x.evidence?`<p class="text-xs text-slate-500 mt-1 italic">“${escapeHtml(x.evidence)}”</p>`:''}
+        ${x.fix?`<p class="text-xs text-slate-700 mt-1"><b>Fix:</b> ${escapeHtml(x.fix)}</p>`:''}</div></div></div>`;
+    document.getElementById('sci-improve').innerHTML = (a.improve||[]).map((x,i)=>card(x,i,'improve')).join('')||'<p class="text-sm text-slate-400">—</p>';
+    document.getElementById('sci-good').innerHTML = (a.good||[]).map((x,i)=>card(x,i,'good')).join('')||'<p class="text-sm text-slate-400">—</p>';
+  }catch(e){ if(k) k.innerHTML=`<div class="text-rose-500 text-sm col-span-full">${escapeHtml(e.message)}</div>`; }
+}
+
 // ── AI Calling Statement (2026-09-02): the honest per-call cost sheet — telephony + Sarvam voice +
 // Claude brain per call, fixed bills amortized, every rate visible so a wrong estimate can be seen.
 let _sac = { wired: false,
@@ -8126,7 +8232,7 @@ const PERM_GROUPS = [
   ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon'],['gokwik-pg-recon','GoKwik PG Recon'],['kwikship-recon','KwikShip Freight Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
-  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)'],['support-agent-learning','Agent Learning (self-learning voice agent)'],['support-ai-costs','AI Calling Statement (cost per call)']]],
+  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)'],['support-agent-learning','Agent Learning (self-learning voice agent)'],['support-call-insights','Call Insights (transcript audit)'],['support-ai-costs','AI Calling Statement (cost per call)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
   ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)'],['purchase-orders','Purchase Order (EasyEcom PO book)'],['grn','GRN (EasyEcom goods receiving)'],['po-approvals','PO Approvals (release drafted POs to EasyEcom)']]],
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],

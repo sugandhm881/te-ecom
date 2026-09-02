@@ -1158,12 +1158,13 @@ function check(name, got, want) {
              /eq\('outcome', 'ndr_pending'\)/.test(hv),
              /const RTO_RETRY_DELAY_MIN = \{ 1: 60 \}/.test(hv),
              /Date\.now\(\) - 5 \* 60e3/.test(hv),
+             /VOBIZ_RTO_LOOKBACK_H \|\| 6/.test(hv) && /VOBIZ_RTO_MIN_NDR_AT/.test(hv),   // new NDRs only (rev.4)
              /2 \* rtoNdrNo\(row\)/.test(hv), /fresh ladder armed/.test(hv), /prev_outcome_ndr/.test(hv),
              /handleRtoCallOutcome/.test(hv) && /handleRtoCallOutcome/.test(vb),
              /\['cod_confirm', 'rto_recovery'\]\.includes\(s\.callType/.test(vb),
              /rto_attempts/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8')),
              /supAiAttemptsCard\(d\.rto_attempts,'RTO recovery dials',2\*/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8'))],
-            [true, true, true, true, true, true, true, true, true, true, true, true, true]);
+            [true, true, true, true, true, true, true, true, true, true, true, true, true, true]);
     }
     {
         const rep = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_report.js'), 'utf8');

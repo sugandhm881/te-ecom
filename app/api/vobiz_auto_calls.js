@@ -433,9 +433,16 @@ async function rtoCallTick(opts = {}) {
         targets = [String(opts.testOrder).replace(/^#/, '').trim()];
     } else {
         // An order "goes to NDR" = its shipment journey shows outcome 'ndr_pending' with an NDR on
-        // record. 5-minute floor after the update lands in our DB (user rev.2, 2026-09-02); 48h
-        // ceiling so a backfill sweep can never robo-dial ancient history. One ladder per order.
-        const from = new Date(Date.now() - 48 * 3600e3).toISOString();
+        // record. 5-minute floor after the update lands in our DB (user rev.2, 2026-09-02).
+        // LOOKBACK is deliberately SHORT (user rev.4, same evening: "only call new NDR received, no
+        // old ones") — a fresh NDR is dialed within minutes, so a long window buys nothing and only
+        // risks robo-dialing a backlog. VOBIZ_RTO_LOOKBACK_H overrides; VOBIZ_RTO_MIN_NDR_AT (ISO)
+        // is a hard floor: nothing whose NDR predates that moment is ever a candidate.
+        const lookbackH = Number(process.env.VOBIZ_RTO_LOOKBACK_H || 6);
+        let fromMs = Date.now() - lookbackH * 3600e3;
+        const floor = Date.parse(process.env.VOBIZ_RTO_MIN_NDR_AT || '');
+        if (!Number.isNaN(floor)) fromMs = Math.max(fromMs, floor);
+        const from = new Date(fromMs).toISOString();
         const to = new Date(Date.now() - 5 * 60e3).toISOString();
         const { data: rows, error } = await supabase.from('shipment_journey_ecom')
             .select('order_name, ndr_count, updated_at').eq('outcome', 'ndr_pending').gte('ndr_count', 1)
