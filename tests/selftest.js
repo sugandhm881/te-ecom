@@ -892,6 +892,22 @@ function check(name, got, want) {
                 [true, true, true]);
             // Malayalam call, 2026-09-02: the agent asked to confirm a HALLUCINATED phone number
             // ("9876543210 ആണോ?"). Facts discipline is now a hard prompt rule.
+            // Found by the Call Insights audit (2026-09-02): a missing customer name fell back to
+            // the literal 'ji', and the template appended another — "Hello ji ji, this is Kavya".
+            check('voice unnamed customer: no placeholder name — greeting drops the name entirely, prompt says the name is unknown',
+                [!/customer_name \|\| 'ji'/.test(vb2),
+                 /firstName \? ' ' \+ s\.ctx\.firstName \+ ' ji' : ''/.test(vb2),
+                 /The customer's name is NOT known/.test(vb2),
+                 (() => { const m = vb2.match(/function openingLine\(s\)[\s\S]*?\n\}/); if (!m) return false;
+                    const SPEAKERS = { kavya: { name: 'Kavya', gender: 'female' } };
+                    const fn = eval('(' + m[0].replace('function openingLine', 'function') + ')');
+                    const out = fn({ lang: 'en-IN', voice: 'kavya', ctx: { firstName: null } });
+                    return /^Hello, this is Kavya/.test(out) && !/ji ji/.test(out); })()],
+                [true, true, true, true]);
+            check('voice cancel path 2026-09-02: benefit then ONE polite "are you sure you want to cancel?", never a second ask',
+                [/Are you sure you would like to cancel your order\?/.test(vb2),
+                 /Ask this exactly ONCE — a second ask is pressure/.test(vb2)],
+                [true, true]);
             check('voice intro once (first live-day review, 2026-09-02): re-delivered news lines never repeat the self-introduction',
                 [/YOU INTRODUCE YOURSELF EXACTLY ONCE PER CALL/.test(vb2)],
                 [true]);
