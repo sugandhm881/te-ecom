@@ -722,8 +722,9 @@ function check(name, got, want) {
             const sc2 = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
             const ap2 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
             // 2026-09-02 (user): the confirmation ask is GONE — one reliable sighting switches directly.
-            check('voice lang: every call OPENS in English; the FIRST reliable sighting of another language switches DIRECTLY, no confirmation question',
-                [/return 'en-IN';\s+\/\/ English for all/.test(vb2), /\[\/\[\\u0900-\\u097F\]\/, 'hi-IN'\]/.test(vb2),
+            // 2026-09-02: Hindi-belt states open in HINDI, everywhere else English (was English-for-all).
+            check('voice lang: Hindi-belt states open in Hindi, others in English; the FIRST reliable sighting of another language switches DIRECTLY, no confirmation question',
+                [/HINDI_BELT_RX\.test\(String\(addr\.province/.test(vb2) && /return 'en-IN';\s+\/\/ everywhere else opens in English/.test(vb2), /\[\/\[\\u0900-\\u097F\]\/, 'hi-IN'\]/.test(vb2),
                  /understand ONLY ENGLISH/.test(vb2), /DIRECT SWITCH — no confirmation question/.test(vb2),
                  /if \(seen && seen !== this\.s\.lang\) this\.switchLanguage\(seen\)/.test(vb2),
                  !/this\.s\.offerAsk = seen/.test(vb2)],
@@ -891,6 +892,16 @@ function check(name, got, want) {
                 [true, true, true]);
             // Malayalam call, 2026-09-02: the agent asked to confirm a HALLUCINATED phone number
             // ("9876543210 ആണോ?"). Facts discipline is now a hard prompt rule.
+            check('voice intro once (first live-day review, 2026-09-02): re-delivered news lines never repeat the self-introduction',
+                [/YOU INTRODUCE YOURSELF EXACTLY ONCE PER CALL/.test(vb2)],
+                [true]);
+            // First live day's misclassification: a summarizer refusal containing "cancellation" got
+            // a 10s hello-only call marked CANCELLED. Three layers now guard it.
+            check('rto outcome hardening: only RESULT-shaped summaries decide; hello-only turns are not engagement; tiny transcripts get a fixed no-answer summary',
+                [/const shaped = \/\^\\s\*\(RESULT\|OUTCOME\)\\b\/i\.test\(line\)/.test(fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8')),
+                 /never use the words cancel or confirm in that case/.test(vb2),
+                 /bare greetings are not engagement/.test(vb2)],
+                [true, true, true]);
             check('voice facts discipline: only prompt-given facts may be spoken; phone numbers never stated or confirmed',
                 [/FACTS DISCIPLINE: the ONLY customer facts/.test(vb2),
                  /NEVER state, invent or ask to confirm a phone number/.test(vb2)],

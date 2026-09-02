@@ -543,10 +543,14 @@ async function handleRtoCallOutcome({ orderName, summary, customerTurns }) {
     const name = String(orderName || '').replace(/^#/, '').trim();
     if (!name) return;
     const line = String(summary || '').split('\n')[0] || '';
+    // Only a RESULT/OUTCOME-shaped summary line may set a real outcome — a summarizer glitch that
+    // ASKS for the transcript ("…about re-delivery or cancellation") must never read as a decision
+    // (first live day: a 10s hello-only call got marked CANCELLED exactly this way).
+    const shaped = /^\s*(RESULT|OUTCOME)\b/i.test(line);
     let outcome = 'unclear', note = 'customer talked but outcome unclear';
-    if (!customerTurns || /voice ?mail|answering machine/i.test(line)) { outcome = 'no_answer'; note = 'call not answered'; }
-    else if (/reattempt agreed|will reattempt|agreed/i.test(line)) { outcome = 'reattempt'; note = 'customer agreed to the reattempt'; }
-    else if (/cancel/i.test(line)) { outcome = 'cancelled'; note = 'customer wants to cancel'; }
+    if (!customerTurns || /voice ?mail|answering machine|no answer/i.test(line)) { outcome = 'no_answer'; note = 'call not answered / never engaged'; }
+    else if (shaped && /reattempt agreed|will reattempt|agreed/i.test(line)) { outcome = 'reattempt'; note = 'customer agreed to the reattempt'; }
+    else if (shaped && /cancel/i.test(line)) { outcome = 'cancelled'; note = 'customer wants to cancel'; }
     if (outcome === 'no_answer') {
         const { data: row } = await supabase.from('vobiz_auto_calls_ecom')
             .select('order_name, attempts, last_attempt_at, detail, attempt_log')
