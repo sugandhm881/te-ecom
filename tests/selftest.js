@@ -917,6 +917,33 @@ function check(name, got, want) {
                 [/r\.rto_call = \{ status: a\.status/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8')),
                  /function supRtoCallChip/.test(ap2), /_supTab==='und'&&r\.rto_call/.test(ap2)],
                 [true, true, true]);
+            // TE25-46065 (2026-09-02): the call ended ON the want-it question — the only customer
+            // words answered "do you have two minutes?" — and the summary still said "reattempt
+            // agreed". The TRANSCRIPT now overrules the summary, deterministically.
+            {
+                const hv2 = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8');
+                const m = hv2.match(/const ASK_RX = (\/.*\/i);/);
+                const fnSrc = hv2.match(/function answeredTheAsk[\s\S]*?\n\}/);
+                let behaves = false;
+                const m2 = hv2.match(/const HEARD_RX = (\/[^\n]*\/i);/);
+                const m3 = hv2.match(/const HELLO_CHECK_RX = (\/[^\n]*\/i);/);
+                if (m && m2 && m3 && fnSrc) {
+                    global.ASK_RX = eval(m[1]); global.HEARD_RX = eval(m2[1]); global.HELLO_CHECK_RX = eval(m3[1]);
+                    const answeredTheAsk = eval('(' + fnSrc[0].replace('function answeredTheAsk', 'function') + ')');
+                    const endedOnAsk = 'Agent: क्या आपके पास दो मिनट हैं?\nCustomer: हाँ जी बताइए।\nAgent: आपका order deliver नहीं हो पाया — क्या आप इसे अभी भी receive करना चाहेंगे?';
+                    const realYes = 'Agent: Would you still like to receive it?\nCustomer: Yes, I want it.';
+                    // the audio-check ambiguity: the "haan ji" answered "can you hear me?", proven
+                    // by the customer's own next line (TE25-45776, 2026-09-02)
+                    const heardCheck = 'Agent: हेलो? क्या आपको मेरी आवाज़ आ रही है?\nAgent: आपका order deliver नहीं हो पाया — क्या आप इसे अभी भी receive करना चाहेंगे?\nCustomer: हाँ जी।\nCustomer: हाँ मैम, आ रही है, आ रही है।';
+                    behaves = answeredTheAsk(endedOnAsk) === false && answeredTheAsk(realYes) === true
+                        && answeredTheAsk(heardCheck) === false && answeredTheAsk('Agent: Hello?') === null;
+                }
+                check('rto outcome: the TRANSCRIPT overrules the summary — a call that ends ON the want-it question is a no-answer, never "reattempt agreed"',
+                    [/function answeredTheAsk/.test(hv2), /answeredTheAsk\(transcript\) === false/.test(hv2),
+                     /transcript: this\.s\.transcript\.join\('\\n'\)/.test(vb2),
+                     /can settle that question/.test(vb2) && /never "reattempt agreed"/.test(vb2), behaves],
+                    [true, true, true, true, true]);
+            }
             check('rto outcome hardening: only RESULT-shaped summaries decide; hello-only turns are not engagement; tiny transcripts get a fixed no-answer summary',
                 [/const shaped = \/\^\\s\*\(RESULT\|OUTCOME\)\\b\/i\.test\(line\)/.test(fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8')),
                  /never use the words cancel or confirm in that case/.test(vb2),

@@ -379,7 +379,10 @@ class VoiceCall {
         this.presenceTimer = setInterval(() => {
             if (this.closed || this.presence) { clearInterval(this.presenceTimer); return; }
             const el = Date.now() - this.startedAt;
-            if (!this.helloDone && el >= 9000 && !this.speaking && !this.screenerSeen) {
+            // …and NOT while the customer is already speaking (sawVoice): a slow STT final let the
+            // hello-check fire over a customer who had just answered, and their late "haan ji" then
+            // read as agreement to the order question (TE25-46030-class bug, 2026-09-02).
+            if (!this.helloDone && el >= 9000 && !this.speaking && !this.screenerSeen && !this.sawVoice) {
                 this.helloDone = true;
                 this.sayLine(HELLO_CHECK[this.s.lang] || HELLO_CHECK['hi-IN']).catch(() => {});
             }
@@ -856,6 +859,7 @@ class VoiceCall {
                     orderName: this.s.ctx.order_name, summary,
                     customerTurns: this.s.transcript.filter(l => /^customer:/i.test(l)
                         && !/^customer:\s*(hello|hi|हेलो|हैलो|haan|हाँ|ji|जी)[\s.,!?।]*$/i.test(l.trim())).length,
+                    transcript: this.s.transcript.join('\n'),   // the engine verifies the ask was actually answered
                 }).catch(e => this.log('rto outcome handling failed:', e.message));
             }
         } catch (e) { this.log('log save failed:', e.message); }
@@ -1232,7 +1236,7 @@ async function summarizeCall(transcriptText, callType) {
     // RTO calls carry different facts worth keeping: did they agree to a reattempt, why did delivery
     // fail, what time slot did they give — the COD vocabulary lost all three ("confirmed cancel none").
     const sys = callType === 'rto_recovery'
-        ? 'You summarize RTO-recovery phone calls (an order came back undelivered; the agent asked if the customer wants it re-sent). Reply in English only, max 2 short lines: line 1 = RESULT (reattempt agreed / cancelled / no answer / unclear): then the failure reason in a few words. Line 2 = the exact preferred delivery time or address correction the customer gave, or "none" — a customer saying any time is fine IS an answer: write "anytime", never "none", for it. If the transcript is too short or the customer only said hello, output exactly "RESULT: no answer: customer never engaged. none" — NEVER ask for more transcript, never explain yourself, never use the words cancel or confirm in that case.'
+        ? 'You summarize RTO-recovery phone calls (an order came back undelivered; the agent asked if the customer wants it re-sent). Reply in English only, max 2 short lines: line 1 = RESULT (reattempt agreed / cancelled / no answer / unclear): then the failure reason in a few words. Line 2 = the exact preferred delivery time or address correction the customer gave, or "none" — a customer saying any time is fine IS an answer: write "anytime", never "none", for it. If the transcript is too short or the customer only said hello, output exactly "RESULT: no answer: customer never engaged. none" — NEVER ask for more transcript, never explain yourself, never use the words cancel or confirm in that case. CRITICAL: only the customer\'s words AFTER the agent asked "would you still like to receive it?" can settle that question — a "haan/yes" spoken earlier (answering "do you have two minutes?" or a greeting) is NOT agreement, and if the call ends on the agent\'s question with no reply after it, the RESULT is "no answer", never "reattempt agreed". Never infer, assume or invent a customer decision that is not literally in the transcript.'
         : 'You summarize customer support phone calls. Reply in English only, max 2 short lines: line 1 = OUTCOME (confirmed / wants cancel / will reattempt / no clear answer / other): then 5-10 words of detail. Line 2 = promise or follow-up needed, or "none".';
     // Claude first (ai.js — the configured provider; 2026-09-02: a Sarvam summarizer failure left a
     // call with no RESULT line at all), Sarvam as fallback, the mechanical line beyond that.

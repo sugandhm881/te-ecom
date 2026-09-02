@@ -377,9 +377,9 @@ async function handleCodCallOutcome({ orderName, summary, customerTurns }) {
     if (outcome === 'no_answer') {
         // Busy / picked up and dropped — the retry ladder owns this, not the outcome record.
         const { data: row } = await supabase.from('vobiz_auto_calls_ecom')
-            .select('order_name, attempts, last_attempt_at, detail, attempt_log')
+            .select('order_name, status, attempts, last_attempt_at, detail, attempt_log')
             .eq('order_name', name).eq('purpose', PURPOSE).maybeSingle();
-        if (row) await scheduleRetryOrExhaust(row, note);
+        if (row && !['skipped', 'exhausted'].includes(row.status)) await scheduleRetryOrExhaust(row, note);
         return;
     }
     const detail = { outcome, outcome_note: note, summary: String(summary || '').slice(0, 400), at: new Date().toISOString() };
@@ -546,7 +546,33 @@ async function rtoCallTick(opts = {}) {
 
 // Outcome for AUTO rto_recovery calls, from the bridge's close(): answered calls record the result
 // (reattempt / cancelled / unclear) on the turnstile; unanswered ones arm the 5/10-minute ladder.
-async function handleRtoCallOutcome({ orderName, summary, customerTurns }) {
+// Did the customer actually ANSWER the want-it question? Deterministic, because the summarizer
+// cannot be trusted here: TE25-46065 (2026-09-02) ended ON the question — the only customer words
+// were "हाँ जी बताइए" answering "do you have two minutes?" — and the model still wrote
+// "reattempt agreed: customer confirmed interest". Returns null when the question never got asked.
+const ASK_RX = /(still like to receive|receive करना चाहेंगे|could not be delivered|deliver नहीं हो पाया|send (it|the .*) again|भेज (दूँ|देने|दें))/i;
+// An AUDIO-CHECK answer is not an order answer: when the hello-check ("can you hear me?") is the
+// agent line just before the ask, a following "haan ji" may be answering THAT — and the customer
+// often proves it in their next breath ("haan maam, aa rahi hai"). Such a call is ambiguous, never
+// an agreement (TE25-45776, 2026-09-02).
+const HEARD_RX = /आ रही है|आवाज़?|सुनाई|can hear|hear you|audible/i;
+const HELLO_CHECK_RX = /क्या आपको मेरी आवाज़|can you hear me|सुनाई दे रही/i;
+function answeredTheAsk(transcript) {
+    const lines = String(transcript || '').split('\n');
+    let lastAsk = -1;
+    lines.forEach((l, i) => { if (/^agent:/i.test(l) && ASK_RX.test(l)) lastAsk = i; });
+    if (lastAsk < 0) return null;
+    const after = lines.slice(lastAsk + 1);
+    const replies = after.filter(l => /^customer:/i.test(l) && l.replace(/^customer:\s*/i, '').trim().length > 0);
+    if (!replies.length) return false;
+    // the ask followed a hello-check AND the customer's own words after it are about hearing →
+    // they answered the audio check, not the order
+    const helloCheckJustBefore = lines.slice(0, lastAsk).reverse().find(l => /^agent:/i.test(l));
+    if (helloCheckJustBefore && HELLO_CHECK_RX.test(helloCheckJustBefore) && replies.some(l => HEARD_RX.test(l))) return false;
+    return true;
+}
+
+async function handleRtoCallOutcome({ orderName, summary, customerTurns, transcript }) {
     const name = String(orderName || '').replace(/^#/, '').trim();
     if (!name) return;
     const line = String(summary || '').split('\n')[0] || '';
@@ -558,11 +584,20 @@ async function handleRtoCallOutcome({ orderName, summary, customerTurns }) {
     if (!customerTurns || /voice ?mail|answering machine|no answer/i.test(line)) { outcome = 'no_answer'; note = 'call not answered / never engaged'; }
     else if (shaped && /reattempt agreed|will reattempt|agreed/i.test(line)) { outcome = 'reattempt'; note = 'customer agreed to the reattempt'; }
     else if (shaped && /cancel/i.test(line)) { outcome = 'cancelled'; note = 'customer wants to cancel'; }
+    // THE TRANSCRIPT OVERRULES THE SUMMARY: no customer word after the question means no decision
+    // was given, whatever the model wrote. Such a call is a no-answer and earns its retry.
+    if (['reattempt', 'cancelled'].includes(outcome) && answeredTheAsk(transcript) === false) {
+        outcome = 'no_answer';
+        note = 'call ended on the question — the customer never answered it';
+    }
     if (outcome === 'no_answer') {
         const { data: row } = await supabase.from('vobiz_auto_calls_ecom')
-            .select('order_name, attempts, last_attempt_at, detail, attempt_log')
+            .select('order_name, status, attempts, last_attempt_at, detail, attempt_log')
             .eq('order_name', name).eq('purpose', RTO_PURPOSE).maybeSingle();
-        if (row) await scheduleRetryOrExhaust(row, note, RTO_PURPOSE);
+        // A SETTLED ladder never re-arms (2026-09-02: the user stopped the backlog, but calls that
+        // were already in flight completed as no-answer and armed fresh retries on sealed rows —
+        // the queue kept regenerating itself).
+        if (row && !['skipped', 'exhausted'].includes(row.status)) await scheduleRetryOrExhaust(row, note, RTO_PURPOSE);
         return;
     }
     const { data: cur } = await supabase.from('vobiz_auto_calls_ecom').select('attempt_log, detail')
