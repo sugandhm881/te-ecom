@@ -5042,6 +5042,18 @@ function supAiCallChip(r){ const a=r.ai_call; if(!a) return '';
   if(a.status==='retry') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500" title="AI call not answered — will retry automatically (attempt ${(a.attempts||1)+1} of 3)">📞 Retrying ${a.attempts||1}/3</span>`;
   if(a.status==='placed'||a.status==='calling') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500" title="AI confirmation call placed — outcome pending">📞 AI called</span>`;
   return ''; }
+// RTO recovery call chip for the Undelivered tab (user, 2026-09-02: "give called kind of thing —
+// not need to open order"): the ladder's state readable straight off the row.
+function supRtoCallChip(r){ const a=r.rto_call; if(!a) return '';
+  const t=x=>x?new Date(x).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):'';
+  if(a.outcome==='reattempt') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700" title="AI RTO call: customer agreed to the reattempt">📞✅ Reattempt agreed</span>`;
+  if(a.outcome==='cancelled') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-100 text-rose-700" title="AI RTO call: ${escapeHtml(a.note||'customer wants to cancel')}">📞❌ Wants cancel</span>`;
+  if(a.outcome==='unclear') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700" title="AI RTO call: ${escapeHtml(a.note||'talked, outcome unclear')} — decide manually">📞😕 Unclear on call</span>`;
+  if(a.status==='exhausted'||a.outcome==='no_answer') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-violet-100 text-violet-700" title="AI RTO call: no answer — ladder done, no more auto calls">📞🔇 No answer</span>`;
+  if(a.status==='retry') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500" title="AI RTO call not answered — 2nd call ~${t(a.next_at)}">📞 Retry ${t(a.next_at)}</span>`;
+  if(a.status==='placed'||a.status==='calling') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500" title="AI RTO call placed — outcome pending">📞 AI called</span>`;
+  if(a.status==='gated') return `<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-400" title="Queued — the engine will dial on its next tick">📞 Queued</span>`;
+  return ''; }
 // Row tint for the same signal: denied = red wash, not-confirmed = amber wash (repeat tab only).
 function supAiRowTint(r){ const a=r.ai_call||{}; const o=a.outcome;
   return o==='denied'?'bg-rose-50':o==='unclear'?'bg-amber-50':(o==='no_answer'||a.status==='exhausted')?'bg-violet-50':''; }
@@ -5339,6 +5351,7 @@ function supQueueTable(){
           ${r.msg91_confirmed?`<span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-50 text-sky-700" title="Customer confirmed via MSG91">✓ Confirmed</span>`:''}
         </div>
         ${_supTab==='repeat'&&((r.reasons&&r.reasons.length)||r.ai_call)?`<div class="flex items-center gap-1 flex-wrap mt-1">${r.reasons&&r.reasons.length?supReasonChips(r):''}${supAiCallChip(r)}</div>`:''}
+        ${_supTab==='und'&&r.rto_call?`<div class="flex items-center gap-1 flex-wrap mt-1">${supRtoCallChip(r)}</div>`:''}
       </td>
       ${showBucket?`<td class="${TD}">${showPlat?supStatusChip(r):supBadge(r.bucket)}</td>`:''}
       ${showPay?`<td class="${TD}">${supPayChip(r)}</td>`:''}

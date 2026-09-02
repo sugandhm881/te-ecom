@@ -716,7 +716,7 @@ router.get('/support/queue', async (req, res) => {
         // no journey row), so the lookup would cost a query and return nothing but nulls.
         if (isUndPanel && rows.length) {
             const normNames = [...new Set(rows.map(r => String(r.order_name || '').replace('#', '').trim()).filter(Boolean))];
-            const [plat, raised, escMarks] = await Promise.all([
+            const [plat, raised, escMarks, rtoCallRows] = await Promise.all([
                 platformByOrder(rows),
                 raisedByOrder(rows.map(r => r.order_name)),
                 // Automated escalations — a sheet push or a critical email. Distinct from the manual
@@ -724,7 +724,19 @@ router.get('/support/queue', async (req, res) => {
                 // which the Escalated column shows with date AND time (user, 2026-08-19).
                 chunkedIn('order_marks_ecom', 'order_name, mark_type, updated_at, created_at', 'order_name', normNames,
                     q => q.in('mark_type', ['sheet_escalated', 'critical_mail_sent'])),
+                // RTO auto-call state ON THE ROW (user, 2026-09-02: "on undelivered page give called
+                // kind of thing — not need to open order") — the chip renders without the modal.
+                chunkedIn('vobiz_auto_calls_ecom', 'order_name, status, attempts, detail, next_attempt_at', 'order_name', normNames,
+                    q => q.eq('purpose', 'rto_recovery')),
             ]);
+            const rtoBy = {}; (rtoCallRows || []).forEach(a => { rtoBy[String(a.order_name).replace('#', '').trim()] = a; });
+            rows.forEach(r => {
+                const a = rtoBy[String(r.order_name || '').replace('#', '').trim()];
+                if (a) r.rto_call = { status: a.status, attempts: a.attempts || 1,
+                    outcome: (a.detail && a.detail.outcome) || null,
+                    note: (a.detail && (a.detail.outcome_note || a.detail.why)) || null,
+                    next_at: a.next_attempt_at || null };
+            });
             const escBy = {};
             (escMarks || []).forEach(m => {
                 const k = String(m.order_name).replace('#', '').trim();

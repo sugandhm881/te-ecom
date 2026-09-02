@@ -897,6 +897,10 @@ function check(name, got, want) {
                 [true]);
             // First live day's misclassification: a summarizer refusal containing "cancellation" got
             // a 10s hello-only call marked CANCELLED. Three layers now guard it.
+            check('undelivered tab: RTO call state chips on the ROW (no modal needed) — server attaches rto_call, client renders supRtoCallChip',
+                [/r\.rto_call = \{ status: a\.status/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8')),
+                 /function supRtoCallChip/.test(ap2), /_supTab==='und'&&r\.rto_call/.test(ap2)],
+                [true, true, true]);
             check('rto outcome hardening: only RESULT-shaped summaries decide; hello-only turns are not engagement; tiny transcripts get a fixed no-answer summary',
                 [/const shaped = \/\^\\s\*\(RESULT\|OUTCOME\)\\b\/i\.test\(line\)/.test(fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8')),
                  /never use the words cancel or confirm in that case/.test(vb2),
