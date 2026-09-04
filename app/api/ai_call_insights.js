@@ -129,28 +129,52 @@ router.post('/support/call-insights/run', async (req, res) => {
         const context = `PERIOD TOTALS: ${calls.length} calls logged, ${calls.filter(c => durOf(c) > 0).length} connected, outcome mix ${JSON.stringify(mix)}.
 THE AGENT'S STANDING RULES (a breach is a real finding): introduce herself once per call; ask "do you still want it?" at most twice; never ask for a delivery time (the courier team schedules); answer "when will it arrive" with the courier-team assurance, never a date; give the courier's recorded NDR reason with attempt dates when asked; confirm the address ONLY when an address is provided in her prompt; acknowledge trouble in the customer's own language before continuing; never invent facts, never promise refunds; end with the brand closing.`;
         const model = process.env.CALL_INSIGHTS_MODEL || 'claude-sonnet-5';
-        const r = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
-            body: JSON.stringify({
-                // Sonnet 5 thinks before it writes and the thinking is billed against max_tokens —
-                // at 2,200 the whole budget went to thinking and the reply came back EMPTY (the
-                // Run-audit button did nothing). 9,000 leaves plenty of room for the JSON.
-                model, max_tokens: 9000,
-                system: 'You audit outbound AI phone calls for an Indian D2C skincare brand. Call types: rto_recovery (order came back undelivered — does the customer still want it) and cod_confirm (verify a COD order before dispatch). Be blunt, specific and evidence-led; never pad with praise. Reply ONLY with JSON.',
-                messages: [{ role: 'user', content: context + '\n\n' + blob + `\n\nAudit ALL the calls above. Judge against the standing rules AND against what actually WON reattempts versus what lost them. Prefer findings you can tie to an outcome or a rule breach; say how many calls show each pattern. Reply with ONLY this JSON:
+        const SYSTEM = 'You audit outbound AI phone calls for an Indian D2C skincare brand. Call types: rto_recovery (order came back undelivered — does the customer still want it) and cod_confirm (verify a COD order before dispatch). Be blunt, specific and evidence-led; never pad with praise. Reply ONLY with JSON.';
+        const ASK = context + '\n\n' + blob + `\n\nAudit ALL the calls above. Judge against the standing rules AND against what actually WON reattempts versus what lost them. Prefer findings you can tie to an outcome or a rule breach; say how many calls show each pattern. Reply with ONLY this JSON:
 {"improve":[{"title":"the problem in <=9 words","evidence":"a real quote plus how many calls show it","fix":"one concrete change to the agent's rules or flow"}],
  "worst":{"title":"the single most damaging behaviour","detail":"what it costs, with evidence and how often"},
  "good":[{"title":"what genuinely works, <=9 words","evidence":"a real quote or the outcome it produced"}]}
-Exactly 5 in "improve" and 5 in "good". No markdown, no text outside the JSON.` }],
-            }),
-        });
-        const d = await r.json();
-        try { require('./claude_usage').logClaudeUsage('call_insights', d.model || model, d.usage, null); } catch (_) {}
-        // Take the TEXT blocks, never content[0] — Claude 5 returns a thinking block first, and
-        // reading index 0 silently yielded "" (the Run-audit button appeared to do nothing).
-        const text = ((d.content || []).filter(b => b && b.type === 'text').map(b => b.text || '').join('')).trim();
-        if (!text) return res.status(502).json({ success: false, error: 'audit model returned nothing: ' + JSON.stringify(d).slice(0, 160) });
+Exactly 5 in "improve" and 5 in "good". No markdown, no text outside the JSON.`;
+
+        // THE AUDIT RUNS ON CLAUDE CODE, NOT THE PAID API (user, 2026-09-04). This is the biggest
+        // prompt the system sends — up to 60 whole transcripts — and nothing about it is
+        // latency-critical, so it belongs on the Max subscription. The live call brain stays on the
+        // API and is untouched.
+        // If the CLI is unavailable this FAILS rather than quietly falling back to the billed API:
+        // a free path that heals itself by spending money is the same bug as never having moved.
+        let text = '';
+        const allowApi = String(process.env.CALL_INSIGHTS_ALLOW_API || '') === 'true';
+        try {
+            text = await require('./claude_code').askClaudeCode(ASK, { system: SYSTEM, model });
+            console.log(`[CallInsights] audit ran on Claude Code (${model}) — no API tokens billed`);
+        } catch (e) {
+            if (!allowApi) {
+                return res.status(503).json({
+                    success: false,
+                    error: 'Claude Code could not run the audit: ' + e.message
+                        + '. Install Claude Code on this machine and log in with the Max account, or set CLAUDE_CLI to its full path. '
+                        + 'Set CALL_INSIGHTS_ALLOW_API=true to bill this to the API instead.',
+                });
+            }
+            console.log('[CallInsights] Claude Code unavailable (' + e.message + ') — CALL_INSIGHTS_ALLOW_API is on, billing the API');
+            const r = await fetch('https://api.anthropic.com/v1/messages', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+                body: JSON.stringify({
+                    // Sonnet 5 thinks before it writes and the thinking is billed against max_tokens —
+                    // at 2,200 the whole budget went to thinking and the reply came back EMPTY (the
+                    // Run-audit button did nothing). 9,000 leaves plenty of room for the JSON.
+                    model, max_tokens: 9000, system: SYSTEM,
+                    messages: [{ role: 'user', content: ASK }],
+                }),
+            });
+            const d = await r.json();
+            try { require('./claude_usage').logClaudeUsage('call_insights', d.model || model, d.usage, null); } catch (_) {}
+            // Take the TEXT blocks, never content[0] — Claude 5 returns a thinking block first, and
+            // reading index 0 silently yielded "" (the Run-audit button appeared to do nothing).
+            text = ((d.content || []).filter(b => b && b.type === 'text').map(b => b.text || '').join('')).trim();
+            if (!text) return res.status(502).json({ success: false, error: 'audit model returned nothing: ' + JSON.stringify(d).slice(0, 160) });
+        }
         let parsed = null;
         try { parsed = JSON.parse(text.replace(/^```(json)?|```$/gm, '').trim()); } catch (_) { /* keep raw */ }
 

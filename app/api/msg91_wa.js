@@ -85,6 +85,14 @@ async function resolveOrderFields(orderName) {
     const product = !li.length ? 'your order'
         : li.length === 1 ? `${li[0].title}${Number(li[0].quantity) > 1 ? ` x${li[0].quantity}` : ''}`
         : `${li[0].title}${Number(li[0].quantity) > 1 ? ` x${li[0].quantity}` : ''} + ${li.length - 1} more`;
+    // SPOKEN: every title, because "+1 more" is a WhatsApp abbreviation and a phone call cannot say it.
+    // On 2026-09-04 the agent told a customer "आपका Acne Relief Face Wash और एक और प्रोडक्ट का order" —
+    // a faithful reading of "+ 1 more", since that string was all she had. The rule telling her to name
+    // products properly could never have been followed: the second name was never in the prompt.
+    // `product` above is unchanged, so the WhatsApp templates that rely on the short form are untouched.
+    const productsSpoken = !li.length ? 'your order'
+        : li.slice(0, 4).map(i => `${i.title}${Number(i.quantity) > 1 ? ` x${i.quantity}` : ''}`).join(', ')
+          + (li.length > 4 ? ` and ${li.length - 4} more` : '');
     const firstName = String((addr && (addr.first_name || String(addr.name || '').split(' ')[0])) || '').trim();
     // orders.phone is often empty — the number customers actually give lives on the shipping address
     // (TE25-44254 proved it: orders.phone null, address phone real). Address wins, orders is fallback.
@@ -94,6 +102,7 @@ async function resolveOrderFields(orderName) {
         fields: {
             customer_name: firstName || 'there',
             product,
+            products_spoken: productsSpoken,   // every title — for the phone agent, which cannot say "+1 more"
             order_name: clean,
             amount: String(Math.round(Number(o.total_price) || 0)),
             phone: last10(bestPhone),

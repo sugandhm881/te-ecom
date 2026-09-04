@@ -884,6 +884,11 @@ Defined in `.env` (git-ignored — **never commit**) and, since 2026-08-27, **se
 | Tally nightly batch | `TALLY_BATCH_CRON_ENABLED` (master switch for all four crons), `TALLY_BATCH_REQUIRE_APPROVAL` (default true; false pushes at 23:50 with no human in the loop), `TALLY_BATCH_TTL_HOURS` (24), `TALLY_NOTIFY_EMPTY` (post a card on quiet nights), `TEAMS_WEBHOOK_FINANCE` (outbound Workflow URL), `TEAMS_CHANNEL_FINANCE` (channel id the listener watches for yes/no — **only admins should be members, it is the approval boundary**)
 | RapidShyp sync | `RS_TIMEOUT_MS` (default 25000 — per-AWB tracking call), `RS_ABORT_AFTER` (default 6 — consecutive AWB failures that mean "RapidShyp is down", ends the run early) |
 | Warehouse Ops report | `WH_REPORT_CRON` (default `30 8-20/2 * * *` — every 2h, 08:30–20:30 IST), `WH_STUCK_HOURS` (default `48` — the Ready-for-Pickup age that triggers the 🚨 stuck block), `RS_CACHE_TTL_HOURS` (default 12 — how stale a RapidShyp cache row may be before the sync refreshes it) |
+| Voice agent — telephony | `VOBIZ_AUTH_ID`, `VOBIZ_AUTH_TOKEN`, `VOBIZ_FROM_NUMBER`, `VOBIZ_PUBLIC_BASE`, `VOBIZ_WEBHOOK_TOKEN`, `VOBIZ_L16_SWAP` (`in`\|`out`\|`both` — endianness, `none` normally), `VOBIZ_RECORD`, `VOBIZ_CALL_ALLOWLIST` (unset = every customer), `SARVAM_API_KEY` |
+| Voice agent — ears (2026-09-04) | All four have **code defaults equal to the tested values**, so the VPS needs no `.env` entry: `VOBIZ_VAD_THRESHOLD` (0.75 — Sarvam's own default is 0.3, tuned for a whisper, and shipping on it let the room into the call), `VOBIZ_MIN_SPEECH_MS` (500), `VOBIZ_STT_SILENCE_MS` (400 — how long a silence ends a turn), `VOBIZ_MIN_PEAK` (**3000** — the loudness floor below which an utterance is background, not the caller; every final logs its peak so this is re-tuned from a log line, never guessed), `VOBIZ_BARGE_MS` (1200 — sustained voice needed to interrupt her) |
+| Voice agent — brain & persona | `CLAUDE_API_KEY`, `CLAUDE_MODEL` (haiku floor), `CLAUDE_ESCALATE_AT`, `CLAUDE_CACHE_TTL` (`1h` — on the 5-minute default nearly every call was a cache miss), `VOBIZ_AGENT_VOICE` (pins her name independently of the engine), `VOBIZ_INBOUND_LANG`, `VOBIZ_INBOUND_VOICE`, `VOBIZ_INBOUND_TEST_ORDER`, `VOBIZ_TTS` (`elevenlabs` to switch engines), `VOBIZ_TTS_CACHE` / `VOBIZ_TTS_CACHE_DIR` (fixed lines synthesized once; the key is tagged per ENGINE so one engine can never replay another's audio) |
+| Voice agent — gates (never set on live) | `VOBIZ_RTO_ENABLED` (arms the RTO **fleet sweep** — the cron that dials every pending NDR), `VOBIZ_RTO_ENABLED_TEST` (satisfies the gate only **together with a named order**, so it can never arm the sweep), `VOBIZ_LOCAL_TEST_TRIGGER` (dev box only — absent ⇒ `POST /api/vobiz/local-test-call` returns **404**, so the route does not exist on the VPS) |
+| Call audit on the Max plan (2026-09-04) | `CLAUDE_CODE_OAUTH_TOKEN` (one-year token from `claude setup-token`; the CLI cannot browser-login on a headless VPS), `CLAUDE_CLI` (absolute path — pm2 does not inherit a login shell's PATH; `/root/.local/bin/claude`), `CLAUDE_CLI_TIMEOUT_MS` (300000), `CALL_INSIGHTS_MODEL`, `CALL_INSIGHTS_ALLOW_API` (**unset**: the audit fails loudly rather than silently falling back to the billed API) |
 | Misc | `PICKUP_PINCODE`, `AUTO_REVIEW_CRON`, `CACHE_DIR`, `GOOGLE_CREDENTIALS` |
 
 ---
@@ -1006,6 +1011,134 @@ Design approved by the user (artifact preview) then built: `app/api/ai_call_repo
 
 ` forces line breaks inside cells — a single `
 ` renders as a space). Two columns stay word-wrappable on a phone and read as a proper bordered grid on desktop. Day window is true IST midnight-to-midnight. Manual: `POST /api/vobiz/ai-call-report` (`support-voice`/`support-queue`) — `?preview=1` returns the payload without posting, `?day=1` reports yesterday. Verified on the live test day (1 called → confirmed → ₹1,947 released).
+
+### The agent stops answering the room, and finishes her own sentences (2026-09-04)
+
+A full day of live test calls on TE25-44254, both flows. Every bad call traced to **two** faults, and
+both are now fixed at their source rather than tuned around. The user's verdict on the way in: *"every
+call she broke some rule … i am tired every call one thing is fixed and new problem created."*
+
+**(1) SHE WAS ANSWERING THE ROOM.** Sarvam transcribes whatever it hears, and a song playing across the
+room came back as `जो कृष्णा की देवी है, वो हमारे शिव में छिल्ला है।` — a customer turn she then had to
+reply to, which is why those calls read as unhinged (user: *"it received outside noise instead of my
+voice"*, *"You listen that which I am not saying"*). **No VAD setting could fix it**, and three were
+tried (0.3 → 0.6 → 0.75, `min_speech` 300 → 500): VAD only decides whether there is SOUND, and the
+sound really was there. The signal that separates a caller from a room is **how loud the audio was** —
+they speak into the handset, the room is metres away — and the raw L16 frames were passing through
+`feedCaller` all along, unmeasured. Now every utterance carries the peak of its own audio and anything
+under `VOBIZ_MIN_PEAK` never reaches the brain or the transcript. **Calibrated from live calls, not
+guessed:** the caller measured **8,930 / 12,171 / 15,620 / 26,201 / 32,149**, three phantom `हेलो।`
+measured **167 / 77 / 312** — a 29× gap, so the floor sits at **3,000** (3× below the quietest real
+word, 10× above the loudest phantom). Every final logs `heard (peak N)` or `ignored — background, not
+the caller (peak N < floor)`, so the floor can be re-tuned from a log line without a deploy.
+
+**(2) SHE WAS CUT OFF MID-WORD.** `bargeIn()` sent `clearAudio`, which empties Vobiz's whole buffer —
+so an interruption chopped her mid-syllable. **That is the transcript-vs-recording gap** that had been
+misread all week as a synthesis bug: the sentence was generated and logged in full while the customer
+heard half of it. Three changes, from the user's *"when agent explain any info she must finish her
+sentence info, intro and other important thing"*: (a) a barge-in now stops her **continuing** — brain
+and voice socket stop — while whatever is already on the wire plays out, so she yields at the end of a
+sentence like a person; (b) **text can no longer trigger** a barge-in, only stand one down. Raising the
+instant-cut bar 3 → 8 letters changed nothing because this STT does not emit fragments, it emits whole
+invented sentences (`Sophisticated need launch question`, `Suppose the loan is available`); only
+sustained voice cuts now, which noise cannot fake. (c) the barge is armed by the **drain clock alone**,
+not `this.speaking` — that flag turns true when a turn *starts*, so barging in while she was still
+thinking aborted the turn before a word played and the customer heard pure silence, asking `क्यों तुम
+स्टॉप कर रहे हो?`. Backchannels (`hmm`, `हाँ`, `जी`) and **carry-on phrases** (`tell me`, `बोलिए`,
+`बताइए`, *"I'm listening"*) explicitly stand the barge down — being asked to continue is the opposite
+of an interruption.
+
+**THE RULES BECAME A REGISTRY — `app/api/agent_rules.js` (new).** The prompt had grown into **eight
+paragraph blocks holding 52 hard directives, one block 1,885 characters long**, and the calls showed
+exactly what that produces: never the same rule twice, a different one slipping every call. That is not
+a missing rule, it is a list the model cannot hold. Every rule is now **one imperative line with an
+id** — 80 of them, each carrying `sev` (critical/high/normal), `when` (which call state it applies in)
+and `src` (the paragraph it came from, so the conversion is auditable line by line). `renderRules()`
+emits only what this turn's state needs (**55 of 80** on an ordinary turn — address rules only when an
+address exists, product rules only on a product question, screening rules only for a phone robot) and
+repeats the **critical** ones as a closing hard-limits block, because a model follows the last thing it
+read most reliably. **Adding a rule is one entry**, and four selftests keep the list from collapsing
+back into prose: unique ids, one sentence under 20 words, every critical rule present in the tail,
+every placeholder resolved. Thirty-two existing assertions were re-pointed from prose greps to **rule
+ids**, which survive rewording — the prose greps broke the moment the paragraphs were split, which is
+precisely why they were the wrong thing to pin. **Two rules lost real force in the conversion and had
+to be restored**, both caught on the next call: the forbidden feminine forms had been compressed to a
+general instruction (the specificity WAS the rule), and the just-switched-language block lost its
+prominence when folded into position 7 of 55.
+
+**RULES THE MODEL COULD NOT BE TRUSTED TO KEEP, now enforced in code** — each one had been written in
+the prompt for days and broken anyway: the **validation opener** (`आप बिल्कुल सही कह रहे हैं`) is capped
+at once per call and trimmed from any later sentence, keeping that sentence's content — it had fired
+twice in one call, the second time agreeing emphatically with room noise; **delivery slots** (`कौनसा
+time सही रहेगा — सुबह या शाम?`) are cut before synthesis, because once the audio is out the promise is
+made, and the clause is trimmed rather than the whole sentence dropped so the courier assurance in the
+first half survives; **feminine forms for the customer** (`रहेंगी` → `रहेंगे`) are corrected in any
+sentence containing आप, scoped so her own correct `मैं कर रही हूँ` is untouched; the **doubled हूँ**
+(`मैं Kavya हूँ … बोल रही हूँ`) loses its bare first verb; and **`order रखा था`** becomes `किया था` —
+"placed" translated word for word, which reads as *kept* an order and made one customer stop the call
+twice to ask what it meant. ⚠️ Note for future guards: `\b` is an **ASCII** word boundary and never
+fires next to a Devanagari letter, so `/\bसमय\b/` matches nothing — this was written wrong twice in one
+evening and is now commented at both sites.
+
+**THE TRANSCRIPT IS NOW WHAT SHE SAID**, not what the model wrote. It used to be the raw turn text, so
+a sentence a guard had dropped still appeared word for word — which twice made a working guard look
+broken and a chopped sentence look whole. Blocked lines are kept but marked `[not spoken — blocked by
+rule]`, because the audit and the self-learning loop read this transcript and studying unspoken words
+teaches the wrong lesson.
+
+**THE NO-RESPONSE TIMEOUT COUNTED FROM CONNECT.** Her own 6–8 second greeting ate half the 15-second
+budget, so a customer who simply listened had about **seven seconds** to react before being hung up on
+and logged as "never engaged" (user: *"what is this call cut in just 15 second"*). The countdown now
+starts when her audio stops; the three budgets (screener 60s, heard-a-voice 30s, else 15s) are
+unchanged and finally mean what they say.
+
+**LANGUAGE MIRRORS THE CALLER INSTEAD OF BEING COMMANDED** (user: *"langugae switch is inconsistent"*,
+then *"for witch lang don't make hard rule"*). Two faults: it fired on **three** transliterated words —
+`व्हाट इज द ऑर्डर?` from a Hinglish speaker who never asked for English flipped the whole call — and
+when it did fire she ignored it for three turns anyway. Detection now needs a **complete sentence**
+(≥5 words, mostly English markers, Hindi veto intact), which is what the user asked for originally;
+`devEnglishLangOf()` catches English written in Devanagari, since Sarvam transliterates rather than
+returning Latin and `scriptLangOf` therefore called it Hindi forever. And the instruction is a
+**reminder to answer in the language they just used**, not an order — the hard version made her rigid
+and did not work; the soft version landed on the very next turn. An explicit *"speak in English"* still
+switches instantly through `requestedLanguage()`.
+
+**THE PHONE AGENT GETS EVERY PRODUCT NAME.** `resolveOrderFields` returns `"… + 1 more"`, a WhatsApp
+abbreviation a call cannot speak — she said `Acne Relief Face Wash और एक और प्रोडक्ट`, a faithful
+reading of the only string she had. **No rule could have fixed that**; the second name was never in the
+prompt. New field `products_spoken` carries every title for the voice path while `product` keeps the
+short form the templates depend on.
+
+**THE AUDIT RUNS ON THE MAX PLAN, THE CALL BRAIN DOES NOT** (user: *"for call kind of anyalsis use
+calude code max plan and only for brain use clause api"*). New `app/api/claude_code.js` shells out to
+the Claude Code CLI: prompt over **stdin**, never argv (60 transcripts blow Windows' ~32k command line
+and would silently truncate the period), tool-free from the temp directory so it cannot read this repo,
+`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` **stripped from the child environment** — Claude Code ranks
+an API key above the subscription token and with `-p` uses it whenever present, so a stray key would
+send every audit back to the paid API with nothing in the logs to show it. If the CLI is unavailable
+the audit **fails loudly**; `CALL_INSIGHTS_ALLOW_API=true` restores billing as a deliberate choice. A
+free path that heals itself by spending money is the same bug as never having moved. **VPS setup:**
+Claude Code 2.1.260 installed at `/root/.local/bin/claude`, authenticated with a one-year token from
+`claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`), `CLAUDE_CLI` pinned since pm2 does not inherit a
+login shell's PATH.
+
+**Also:** the prompt cache TTL is **1 hour** (`extended-cache-ttl-2025-04-11`) — on the default five
+minutes almost every call was a cache MISS, re-reading the whole system prompt before the first token,
+paid in milliseconds on the customer's first question; **reply-gap instrumentation** now splits the
+gap the customer feels into `endpoint + think + voice`, which turned "the reply is slow" into a
+measurement (endpoint ~300ms · think 1.0–1.7s · voice ~240ms, total 1.6–2.2s) and showed the remaining
+levers all cost call quality, so latency was deliberately left alone; the **cancelled-order gate** gains
+an exemption for a forced single-order test dial only (`opts.testOrder`), never for a fleet tick; and
+**`POST /api/vobiz/local-test-call`** is a dev-box-only trigger behind four gates — `VOBIZ_LOCAL_TEST_TRIGGER`
+(absent ⇒ 404, so the route does not exist on the VPS), a real loopback socket, **no forwarding header**
+(behind a reverse proxy every VPS request looks like 127.0.0.1, so this is the gate that actually
+matters), and `VOBIZ_RTO_ENABLED_TEST` — dialling exactly one named order, never a bulk tick.
+
+**Tuned values live in the CODE defaults**, not the VPS `.env`, so live behaves exactly as tested with
+no server-side edit: VAD threshold **0.75**, min speech **500ms**, endpoint **400ms**, noise floor
+**3,000**. Selftests **497 passing**. Last verified call before deploy: a clean COD confirm — one `हूँ`,
+both products named, `रहेंगे`, English adopted on the turn after a full English sentence, zero
+barge-ins, zero guard corrections, `CONFIRMED → shopify released` in 56 seconds.
 
 ### COD confirmation calls lose the clock window (2026-09-02)
 User: "for COD confirmation call there is no time limit for calling." `highValueCallTick` no longer checks the 10:00–19:59 IST window — a held COD order is dialed 5 minutes after placement whatever the hour, because the customer ordered minutes ago and the hold is blocking dispatch. RTO recovery KEEPS its window (an NDR customer did not just interact with us). `VOBIZ_COD_WINDOW=true` restores the old behaviour without a code change.

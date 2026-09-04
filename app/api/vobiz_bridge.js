@@ -30,6 +30,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const { supabase } = require('../supabase');
+const { renderRules } = require('./agent_rules');   // the rule registry — see agent_rules.js
 const config = require('../../config');
 const { resolveOrderFields, allowlistBlocksFor } = require('./msg91_wa');
 const allowlistBlocks = allowlistBlocksFor('VOBIZ_CALL_ALLOWLIST');   // calls keep a test list even though messages are open
@@ -40,6 +41,87 @@ const V_AUTH_TOKEN = () => String(process.env.VOBIZ_AUTH_TOKEN || '').trim();
 const V_FROM = () => String(process.env.VOBIZ_FROM_NUMBER || '').replace(/\D/g, '');
 const V_BASE = () => String(process.env.VOBIZ_PUBLIC_BASE || '').trim().replace(/\/$/, '');
 const V_TOKEN = () => String(process.env.VOBIZ_WEBHOOK_TOKEN || '').trim();
+// How long sustained SOUND may run before it is treated as an interruption on its own. Only the
+// fallback: a transcript partial normally decides far sooner, in either direction. Deliberately
+// well past the length of a "hmm" or a "haan" — 300ms used to be the whole test and every filler
+// beat it (user, 2026-09-04).
+const BARGE_MS = () => Number(process.env.VOBIZ_BARGE_MS || 1200);
+// Turn-taking and noise rejection, all tunable without a deploy because the right values are found
+// on real calls, not at a desk. threshold is the one that decides whether a sound is speech at all;
+// 0.3 (Sarvam's default, and what we shipped by accident) let the room into the conversation.
+// The "you are absolutely right" opener, in the wordings she actually produces. Matched at the START
+// of a sentence only — the same phrase later in a sentence is ordinary speech, not the tic.
+// A short lead-in is allowed before it, because she almost always addresses the customer first
+// ("जी Sugandh ji, आप बिल्कुल सही कह रहे हैं") — but only up to a comma and only within one clause,
+// so the same words later in a real sentence are left alone.
+const VALIDATION_RX = /^\s*(?:[^।.?!]{0,40}?,\s*)?आप\s+(?:बिल्कुल\s+)?(?:सही|ठीक)\s+कह\s+रह[ेी]\s+ह[ैंै]+\s*[,।.]?\s*/;
+// SHE MUST NEVER ASK THE CUSTOMER TO PICK A DELIVERY TIME. The prompt has forbidden it for days,
+// and on 2026-09-04 she did it twice in one call anyway — "आपके लिए कौनसा time सही रहेगा — सुबह या
+// शाम?" — because the customer kept pressing for an expected time and offering a slot feels helpful.
+// It is not: the courier schedules delivery, so any slot she agrees to is a promise the company has
+// not made. A rule the model can forget is not a guarantee, so the sentence is dropped here.
+// Matches only QUESTIONS about timing put TO the customer; "क्या आपके पास दो मिनट हैं?" (asking for
+// their two minutes, which is required) has no time-word and is untouched.
+// NOTE ON \b: it is an ASCII word boundary and does NOT fire between a space and a Devanagari
+// letter, so \bसमय\b never matches anything. Latin words keep their boundaries; Devanagari ones
+// must go without. Getting this wrong silently let "आपको कौनसा समय सही रहेगा?" through.
+// "कब घर पर रहेंगे?" is the same request with the time-word removed — she rephrased around the first
+// version of this pattern on the very next call (2026-09-04). Asking WHEN THEY WILL BE AVAILABLE is
+// asking for a slot regardless of the noun used, so availability phrasings are matched on their own.
+const SLOT_RX = /(?:(?:सुबह|शाम|दोपहर|morning|afternoon|evening)\s*(?:या|or)\s*(?:सुबह|शाम|दोपहर|morning|afternoon|evening))|(?:(?:कौन\s*सा|कौनसा|क्या|कब)[^।?]{0,60}(?:\btime\b|टाइम|समय|वक्त)[^।?]{0,60}\?)|(?:what time[^.?]{0,60}\?)|(?:(?:सुबह|शाम|दोपहर)\s*का\s*(?:\btime\b|टाइम|समय)[^।?]{0,60}\?)|(?:कब[^।?]{0,40}(?:घर|available|फ़?्री|उपलब्ध)[^।?]{0,40}\?)|(?:when[^.?]{0,40}(?:be (?:at )?home|available|free)[^.?]{0,40}\?)|(?:(?:आप|you)[^।?]{0,40}(?:कब तक|कब)\s*(?:घर|home)[^।?]{0,30}\?)/i;
+const CACHE_TTL = () => process.env.CLAUDE_CACHE_TTL || '1h';
+// FEMININE FORMS ADDRESSED TO THE CUSTOMER. "क्या आप delivery के लिए available रहेंगी?" calls the
+// customer a woman; the respectful plural is रहेंगे. The correction is mechanical — these four forms
+// are simply wrong after आप — so it is done here rather than hoped for.
+// Scoped deliberately: only when आप appears in the sentence, so her OWN first-person forms
+// ("मैं कर रही हूँ", correct for a female agent) and a genuine third-party feminine are untouched.
+const FEM_FORMS = [['रहेंगी', 'रहेंगे'], ['होंगी', 'होंगे'], ['चाहेंगी', 'चाहेंगे'], ['करेंगी', 'करेंगे'],
+    ['सकेंगी', 'सकेंगे'], ['पाएंगी', 'पाएंगे'], ['चाहती हैं', 'चाहते हैं']];
+// "मैं Kavya हूँ The Element से बोल रही हूँ" — हूँ twice in one breath, heard on a live COD call
+// (user, 2026-09-04: "Hoon using two ntime in intro"). Both halves are correct Hindi on their own,
+// so the fix is to drop the FIRST bare हूँ and keep the verb that closes the sentence, which leaves
+// "मैं Kavya The Element से बोल रही हूँ" — natural, and what she says on her good calls anyway.
+// Only a BARE हूँ is removed: "रही हूँ" and "रहा हूँ" are the compound forms and must survive.
+function fixDoubleHoon(line) {
+    const hits = (line.match(/हूँ|हूं/g) || []).length;
+    if (hits < 2) return line;
+    return line.replace(/(?<!रह[ीा]\s)(हूँ|हूं)\s+/, '').replace(/\s{2,}/g, ' ').trim();
+}
+// "आपने जो order रखा था" — "placed" translated word by word. In Hindi रखना is to KEEP, so the
+// sentence says the customer kept an order somewhere. On 2026-09-04 the customer stopped the call
+// twice to ask what it meant ("रखा था मतलब क्या होता है?", then "What is rakha tha?"). The natural
+// verb is किया था. Only rewritten NEAR an order word, so an unrelated "रखा था" is left alone.
+function fixOrderVerb(line) {
+    if (!/रखा\s*था/.test(line)) return line;
+    if (!/order|ऑर्डर|आर्डर/i.test(line)) return line;
+    return line.replace(/रखा\s*था/g, 'किया था').replace(/रखी\s*थी/g, 'की थी');
+}
+function fixCustomerForms(line) {
+    // No \b here: it is an ASCII word boundary and never fires next to a Devanagari letter, so
+    // /\bआप\b/ matches nothing at all. Same trap as SLOT_RX above — worth stating twice.
+    if (!/आप/.test(line)) return line;
+    let out = line;
+    for (const [bad, good] of FEM_FORMS) out = out.split(bad).join(good);
+    return out;
+}
+// The floor a real voice clears, on a 0..32767 scale. Deliberately LOW to start: every final
+// logs its peak, so the right value comes from real calls instead of a guess, and a customer on a
+// weak line must never be silenced by this. Raise it only once the logs show where speech sits.
+const MIN_PEAK = () => Number(process.env.VOBIZ_MIN_PEAK || 3000);
+const VAD_THRESHOLD = () => Number(process.env.VOBIZ_VAD_THRESHOLD || 0.75);
+const STT_SILENCE_MS = () => Number(process.env.VOBIZ_STT_SILENCE_MS || 400);   // 550: snappier turn-taking
+const MIN_SPEECH_MS = () => Number(process.env.VOBIZ_MIN_SPEECH_MS || 500);     // a blip is not a turn
+// The sounds a listener makes to show they are still there. Said OVER the agent these mean "go on",
+// never "stop" — the opposite of what a barge-in assumes. Hindi and English, bare only: a customer
+// who says "haan boliye" or "haan lekin" is starting a sentence and DOES interrupt, so the anchors
+// matter. Kept separate from the filler regex further down, which drops junk from a FINISHED turn
+// rather than deciding whether she keeps talking.
+const BACKCHANNEL_RX = /^[\s]*(ह(म्?म|ूँ|ुं)|म्म+|उम+|आं*|ज़?ी|जी|हाँ|हां|हा|अच्छा|ओके|ठीक|ओह|hm+m*|um+|uh+|mm+|ah+|oh+|ok(ay)?|ya+h?|yea?h?|yep|yes|right|hello|haan|haa|ji|achha|theek)[\s।,.!?]*$/i;
+// ASKING HER TO CONTINUE IS NOT AN INTERRUPTION — it is the opposite, and cutting her off for it is
+// perverse. "I'm listening, tell me, tell me complete your sentence" stopped her mid-sentence on a
+// live call (user, 2026-09-04). Matched anywhere in the utterance, not just as the whole of it,
+// because these arrive wrapped in filler: "haan ji boliye na".
+const CONTINUE_RX = /\b(tell me|go on|carry on|keep going|i am listening|i'?m listening|please continue|go ahead|speak)\b|बोलिए|बोलो|बताइए|बताओ|कहिए|जारी रख|boliye|bataiye|bolo|batao|kahiye/i;
 const L16_SWAP = () => String(process.env.VOBIZ_L16_SWAP || 'none').trim();
 const vobizConfigured = () => !!(V_AUTH_ID() && V_AUTH_TOKEN() && V_FROM() && V_BASE() && V_TOKEN() && SARVAM_KEY());
 
@@ -151,39 +233,40 @@ function buildPrompt(s) {
     const langName = LANG_NAMES[s.lang] || 'Hindi';
     const forms = sp.gender === 'male' ? 'कर रहा हूँ / बोल रहा हूँ' : 'कर रही हूँ / बोल रही हूँ';
     const purpose = PURPOSES[s.callType] || PURPOSES.cod_confirm;
-    const offer = s.offerAsk
-        ? `\nLANGUAGE OFFER: the customer's last reply appears to be in ${LANG_NAMES[s.offerAsk] || s.offerAsk}. In THIS reply, ask ONE short polite question — in both ${langName} and ${LANG_NAMES[s.offerAsk] || s.offerAsk} — whether they would prefer to continue in ${LANG_NAMES[s.offerAsk] || s.offerAsk}. Nothing else in this turn: do NOT act on what they just said — no confirming, no cancelling, no reason-asking, no closing.`
-        : '';
+    // THE RULES COME FROM THE REGISTRY (agent_rules.js), not from paragraphs in this file. They had
+    // grown into eight blocks holding 52 directives, one block 1,885 characters long, and the calls
+    // showed exactly what that produces: a different rule slipping every call, never the same one
+    // twice. One rule per line, only the ones this turn's state calls for, criticals repeated last.
+    // Adding a rule is one entry there — there is nowhere here to write a paragraph again.
+    const offerLangName = s.offerAsk ? (LANG_NAMES[s.offerAsk] || s.offerAsk) : '';
+    const rules = renderRules(s, {
+        lang: langName,
+        offerLang: offerLangName,
+        agent: sp.name,
+        forms,
+        closing: langName === 'Hindi' ? HI_CLOSE : 'Thank you for choosing The Element. Have a great day.',
+    });
+    // offerAsk is ONE-SHOT: the question is asked on this turn only, so it is cleared as soon as the
+    // prompt is built. The instructions it used to carry are now the lang-offer registry rules.
     if (s.offerAsk) s.offerAsk = null;
-    const override = s.langSwitched
-        ? `\nLANGUAGE OVERRIDE: the customer has asked for ${langName} and the switch is ALREADY DONE — NEVER ask whether they would like to continue in ${langName}; they already chose, and asking again is a failure. Earlier turns were in a different language — that no longer matters. The language is FINAL: even a comment or question ABOUT language gets no language question back — reply in ${langName} and continue the flow. From your very next word, reply ONLY in ${langName}: acknowledge in at most half a sentence and immediately continue the flow by re-asking, in ${langName}, the last question that is STILL UNANSWERED (an already-answered question stays answered — never re-ask it after the switch) — re-delivered lines stay COMPLETE: a news line still carries the product short name AND the Rs. amount.`
-        : '';
     const kb = s.ctx.productInfo
         ? `\nPRODUCT KNOWLEDGE (the store's own description — your ONLY source for product answers):\n${s.ctx.productInfo}\nIf the customer asks about the product, its use, ingredients or benefits: answer briefly (1-2 spoken sentences) FROM THIS KNOWLEDGE ONLY, then return to the EXACT point where the call flow stopped — NEVER re-ask a question the customer already answered (a confirmed address, a settled time or an answered reason never comes back). If the answer is not here, say the support team will share full details on WhatsApp — NEVER invent claims or results.`
         : `\nIf the customer asks about the product or its benefits: share only what the order line says (${s.ctx.product || 'their order'}), tell them the support team will send full details on WhatsApp, then return to the exact point where the call flow stopped — never re-ask an already-answered question. NEVER invent claims.`;
-    return `You are ${sp.name}, a ${sp.gender} skincare consultant and customer-care agent for The Element, an Ayurvedic skincare brand — confident, professional, knowledgeable and reassuring, always gentle and respectful — ${purpose.intro}
+    // A JUST-SWITCHED LANGUAGE GETS THE TOP OF THE PROMPT, NOT A LINE IN A LIST.
+    // On 2026-09-04 the detector caught the switch correctly and the transcript recorded it — and she
+    // still answered in Hindi for two more turns, until the customer said "I'm asking you in English,
+    // but you are replying me in Hindi". The instruction was present, at position seven of fifty-five,
+    // and it lost to a conversation history that was entirely Hindi. Momentum beats a buried rule, so
+    // this goes FIRST, where nothing competes with it, as well as in the hard limits at the end.
+    const switchBanner = s.langSwitched
+        ? `The customer has moved to ${langName}. Answer in the language they are speaking — earlier turns were in another language and no longer set the tone.\n\n`
+        : '';
+    return `${switchBanner}You are ${sp.name}, a ${sp.gender} skincare consultant and customer-care agent for The Element, an Ayurvedic skincare brand — confident, professional, knowledgeable and reassuring, always gentle and respectful — ${purpose.intro}
 Order: ${s.ctx.product || 'their order'} for Rs.${s.ctx.amount || ''}. ${s.ctx.firstName ? `Customer first name: ${s.ctx.firstName}.` : `The customer's name is NOT known — greet them politely WITHOUT a name ("Hello, this is …"), never guess one, never say a placeholder like "ji ji", and never ask what their name is.`}${s.ctx.address ? `\nDelivery address on file: ${s.ctx.address}` : ''}${s.ctx.callFacts ? `\nCALL FACTS — the complete verified record of this order (under FACTS DISCIPLINE these, plus the lines above, are the ONLY facts you may speak):\n${s.ctx.callFacts}\nThese are ANSWER MATERIAL ONLY: the call flow stays exactly as scripted, just as short — you bring a fact up ONLY when the customer's own question calls for it ("the courier went out on 31 Aug" when they ask why or when — that beats a vague apology). NEVER volunteer facts they did not ask about, never add detail to a sentence the flow does not require, never recite the record, never read out IDs, never promise beyond them. A customer who asks nothing hears NONE of this — but when they DO ask, answer with the real specifics written here: hiding a fact they asked for is as bad as volunteering one they did not.` : ''}${s.ctx.ndrReason ? `\nCOURIER'S FAILURE REASON (from the delivery partner's scan log): "${s.ctx.ndrReason}". If the customer asks why the delivery failed, share this politely in ONE sentence meaning "As per our delivery partner, …" — the WHOLE sentence spoken in the call's language (Hindi: "हमारे delivery partner के अनुसार…"), the reason rephrased gently, NEVER blaming the customer (a reason like "Consignee Unavailable" becomes "the courier could not reach you at that time", never "you were not available"). Then continue the flow. Still ask your own "May I know what went wrong with the delivery?" at its place in the order — the customer's side of the story matters.` : ''}${kb}
-${purpose.objectives}${override}${offer}
-If the customer indicates IN ANY WAY that they prefer or only understand another language (a direct ask, naming a language, or statements like they only know Bengali), switch to that language IMMEDIATELY and continue the whole call in it. You SPEAK Hindi, English, Tamil, Telugu, Kannada, Malayalam, Bengali, Marathi, Gujarati and Punjabi — NEVER say you do not understand or cannot speak one of these; the only correct response to a language you hear or that is named is to SWITCH to it.${s.ctx.regionLang && s.ctx.regionLang !== s.lang ? `
-LIKELY LANGUAGE: this order ships to a ${LANG_NAMES[s.ctx.regionLang]}-speaking region. If the customer struggles in your language or their replies repeatedly make no sense, offer ${LANG_NAMES[s.ctx.regionLang]} BY NAME once — and if the confusion continues after that, simply continue in ${LANG_NAMES[s.ctx.regionLang]}.` : ''}
-DIFFERENT-LANGUAGE REPLY: when the customer answers in a language different from the one you are speaking, do NOT treat that reply as their final yes or no. First ask — one short question, in both your language and theirs — whether they would prefer to continue in their language, then repeat the confirmation question in whichever language they choose. If in any circumstance you do act on such a reply directly, your response MUST be spoken in the CUSTOMER'S language, never in yours.
-${s.endRequested ? `\nTHE CUSTOMER HAS ASKED TO END THE CALL. Your reply is ONLY: one short sentence of apology, the promise that the team will follow up, and the brand closing — NOTHING else, no questions, no explanations, said ONCE.` : ''}
-FACTS DISCIPLINE: the ONLY customer facts you may speak are the ones written in this prompt — name, product, amount, delivery address. NEVER state, invent or ask to confirm a phone number (you are already talking on it; no flow ever confirms a number) or ANY detail not written above — a fact that is not in this prompt does not exist for you, and inventing one (a number, a date, a price) is the worst failure a call can have. NEVER promise refunds, compensation, discounts or replacements — you are not authorized to; when pressed on "what if it fails again", say the support team will share the available options, nothing more. If NO delivery address is written above, the address does not exist for this call: never mention it, never ask for it, never ask the customer to dictate it — the address on the order is used as-is. And NEVER announce that you are re-sending or arranging the order before the customer's own clear yes — arranging what they never agreed to is a failure.
-EMPATHY: when the customer voices trouble — a failed delivery, waiting for nothing, having to repeat themselves — your FIRST sentence acknowledges it, specifically and in THEIR language ("माफ़ कीजिए Ashish ji, आपको बिना वजह इंतज़ार करना पड़ा"), before any question or process step. One genuine acknowledgement per trouble — never a bare "I understand", never the same sympathy line twice, never the same validation opener twice in a row ("आप बिल्कुल सही कह रही हैं" on every turn reads as a recording — vary or drop it), and never let the process feel more important than the person. When a reattempt is agreed, SET THE EXPECTATION UNASKED: the team will arrange it and try to deliver as soon as possible — said once, warmly, so the customer never has to ask "when".
-TONE: courteous, professional and calm from the greeting to the goodbye — a trained customer-care executive, never a friend. No slang, no jokes, no cheeky or over-familiar phrases (never things like \u0905\u0930\u0947 \u0935\u093e\u0939, \u0915\u094d\u092f\u093e \u092c\u093e\u0924 \u0939\u0948, \u091a\u093f\u0932, boss, dear). Warmth comes from politeness, not casualness.
-CALL SCREENING: some phones answer with an automated screening assistant that asks for your name and the reason for the call ("your name and reason for calling", "please stay on the line"). Screening assistants (Apple's included) understand ONLY ENGLISH — when you hear one, reply in ENGLISH regardless of the call language, with ONE short sentence only — "This is ${sp.name} from The Element, calling ${s.ctx.firstName} about their order confirmation." Then stop speaking and wait silently for the real person; never speak stage directions. Do NOT ask the order-confirmation question to the assistant, and do NOT repeat yourself to it. When the real customer then speaks (a hello or greeting), start fresh IN ${langName}: your FIRST sentence is only the greeting and your introduction (your name and The Element); the order details and the confirmation question come in the NEXT sentence — never all in one breath.
-CONFIRMATION DISCIPLINE: sounds like hmm / haan-haan WHILE you are still explaining are listening signals, NOT confirmation. A confirmation counts ONLY as a clear affirmative (जी हाँ / हाँ / yes) given AFTER you finish asking the confirm question. If the reply is unclear or just a hum, politely ask once more for a clear हाँ या ना — never assume agreement. HARD LIMIT: at most TWO clarifying attempts in the whole call — if you still have no clear answer after two, do NOT press again and NEVER use demanding words like "I need a clear yes or no"; instead apologize warmly for the trouble, say our team will confirm on WhatsApp instead, and close with the brand closing. Repeating the same demand louder is rude; leaving gracefully is professional.
-PRODUCT-ANSWER RULES (apply ONLY when the customer asks about a product, its use, ingredients or benefits — every other part of the call follows its own flow above): recommend and mention ONLY The Element products — never name, compare or acknowledge any other brand. Never give a diagnostic label (never "you have eczema/rosacea") and never advise on prescription medicines; for a severe or worsening skin condition politely suggest seeing a dermatologist. If asked about safety: The Element formulations are created with inputs from India's leading dermatologists. Prices and offers change — for prices, politely point them to theelement.skin. DURATIONS — never invent a volume, dose or how long a pack lasts. The ONLY confirmed fact: Brightening Drops last 15 days per bottle at the recommended 5 to 6 drops twice daily (multiply for packs: 4 bottles is 60 days, about 2 months; 3 bottles is 45 days — say days or weeks, never round to months). For every other product say duration depends on usage — refer to the label.
-CONSISTENT DELIVERY: one voice from the first word to the last — a composed customer-care professional. Vocal tone, texture and energy stay LEVEL from the greeting to the goodbye: premium and professional, never excited, never dramatic, no expression peaks and no flat monotone drops — the same calm, steady warmth in every single line. Deliver every line as fresh natural speech to a person in front of you — never with a reading cadence, never like reciting from a page. Never sound like you are reading a script: ONE thought per sentence, ONE question per turn, sentences under about 12 words. Never enumerate possibilities in a question ("jaise address galat tha ya aap available nahi the") — ask plainly and let the customer tell you. Vary how your turns begin: never start two turns in a row with the same word or phrase (a "theek hai" opening every turn sounds scripted). Keep the SAME register the whole call — do not swing between bookish formal words and casual ones. ONE language per sentence: never mix Hindi and English words mid-sentence beyond product and brand names — "address noted है" inside an English conversation, or "बढ़िया" opening an English sentence, reads as confusion; an English call speaks pure English, a Hindi call natural everyday Hindi. NEVER open or stand alone with a bare acknowledgement — "Noted.", "Okay.", "Alright.", even with the name attached ("Noted Sugandh ji.") — the synthesizer makes them sound robotic; every acknowledgement must carry its content in the same sentence ("I have noted four thirty for the delivery, Sugandh ji.").
-SPOKEN DELIVERY RULES (your words go DIRECTLY to a voice synthesizer):
-- Respond ONLY in ${langName} (if the customer asks for another supported language, switching is REQUIRED, never refused). Max 2 short sentences per turn. Only speakable words: no emoji, symbols, dashes, brackets, quotes or lists.
-- NEVER read out a full order ID. Amounts stay in digits. Every sentence carries its own SUBJECT.
-- Product names are spoken SHORT, every time: drop ingredient prefixes, percentages and listing extras — "Acne Relief Face Wash", "Brightening Drops", never "2% Salicylic Acid + Niacinamide Acne Relief Face Wash".
-- NEVER ask for a delivery time or enumerate slots like morning, afternoon or evening — the courier team schedules delivery. A "when will it arrive?" question gets the courier-team assurance, in the language the customer asked in — a Hindi question NEVER gets an English answer.
-- Your OWN first-person ${langName === 'Hindi' ? 'Hindi verb forms are your gender’s: ' + forms : 'voice is ' + sp.gender}. The courier team, the support team, the company are always OURS — "हमारी team", "अपनी courier team" — NEVER "आपकी team" (the customer has no team).
-- Address the customer as FIRST NAME + ${langName === 'Hindi' ? 'जी' : '"ji"'}; for the customer always respectful plural forms (रहेंगे/करेंगे/होंगे) — NEVER feminine forms for the customer: रहेंगी, होंगी, चाहती, करेंगी are all FORBIDDEN — always चाहेंगे/रहेंगे.
-- Asking for their time is a QUESTION: "क्या आपके पास दो मिनट हैं?" — never "बस दो मिनट का time है".
-- CLOSING: ${langName === 'Hindi' ? `"${HI_CLOSE}"` : '"Thank you for choosing The Element. Have a great day."'} — never a bare goodbye, and spoken CALM and settled: the goodbye is a soft, warm sign-off, never excited — no exclamation marks anywhere in the closing sentences (the voice synthesizer reads "!" as excitement), and never a thanks word right before the closing line (the line itself already thanks — a "धन्यवाद, … धन्यवाद" double is clumsy). If the customer has been replying in a different language than ${langName}, speak the closing in THEIR language${langName === 'Hindi' ? '' : ` (Hindi: "${HI_CLOSE}")`} — an English goodbye on a Hindi conversation is a mismatch. Never repeat a sentence twice in the call.${s.lessonsBlock || ''}${s.examplesBlock || ''}`;
+${purpose.objectives}
+${rules.body}
+${s.lessonsBlock || ''}${s.examplesBlock || ''}
+${rules.tail}`;
 }
 
 function sanitizeReply(t) {
@@ -294,14 +377,22 @@ const ESCALATE_AT = () => Number(process.env.CLAUDE_ESCALATE_AT || 2);   // user
 async function claudeChatStream(history, systemPrompt, onSentence, signal, model, usageSink) {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST', signal,
-        headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_KEY(), 'anthropic-version': '2023-06-01' },
+        // The 1-hour cache TTL is a LATENCY change first and a cost change second. On the default
+        // 5-minute window every call that starts more than five minutes after the last one is a cache
+        // MISS, so the whole system prompt is re-read before a single token comes back — paid in
+        // milliseconds on the customer's first question, every call, all day. An hour spans the real
+        // gap between calls (user, 2026-09-04: "delay reply of agent is still issue").
+        headers: {
+            'Content-Type': 'application/json', 'x-api-key': CLAUDE_KEY(), 'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'extended-cache-ttl-2025-04-11',
+        },
         body: JSON.stringify({
             // no `temperature`: Claude 5 models reject it ("deprecated" 400 — seen live when the
             // Sonnet escalation first fired, 2026-09-02, which silently downgraded those turns to Sarvam)
             model, stream: true, max_tokens: 200,
             // cache_control: the prompt prefix is stable turn-to-turn — Sonnet escalation turns cache
             // today (min 1,024 tok); Haiku joins once the prompt crosses its 4,096 minimum.
-            system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+            system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: CACHE_TTL() } }],
             messages: history.length ? history : [{ role: 'user', content: '(the call just connected — open it)' }],
         }),
     });
@@ -365,6 +456,12 @@ class VoiceCall {
         this.streamId = null;                      // from the start event — REQUIRED on every send
         this.closingDone = false;                  // brand closing spoken — next pleasantry ends the call
         this.closed = false;
+        // The opening turns — her introduction, then the order information — play to the end even if
+        // the customer makes a sound over them (see bargeIn). Two turns exactly: turn 1 introduces
+        // her and asks for two minutes, turn 2 delivers the news. Cleared in agentTurnDone() once the
+        // second one has been spoken, after which every turn is interruptible as normal.
+        this.introPhase = true;
+        this._agentTurns = 0;
         this.startedAt = Date.now();
         // LIVE BACKUP (user, 2026-09-01: "make a complete back up … otherwise self-learning training
         // goes wasted" — a server stop at 14:12 erased a 3-minute RTO call's entire log). The log row
@@ -382,7 +479,13 @@ class VoiceCall {
         this.screenerSeen = false;                 // a screening robot answered; human still pending
         this.presenceTimer = setInterval(() => {
             if (this.closed || this.presence) { clearInterval(this.presenceTimer); return; }
-            const el = Date.now() - this.startedAt;
+            // THE SILENCE CLOCK STARTS WHEN SHE STOPS TALKING, NOT WHEN THE CALL CONNECTS.
+            // It used to run from startedAt, so her own 6-8 second opening ate half the budget and
+            // the customer had about seven seconds to react before being hung up on — which is
+            // exactly what happened on 2026-09-04 ("what is this call cut in just 15 second").
+            // Silence only means anything once there is silence to measure.
+            const since = Math.max(this.startedAt, this.audioEndsAt || 0);
+            const el = Date.now() - since;
             // …and NOT while the customer is already speaking (sawVoice): a slow STT final let the
             // hello-check fire over a customer who had just answered, and their late "haan ji" then
             // read as agreement to the order question (TE25-46030-class bug, 2026-09-02).
@@ -406,35 +509,108 @@ class VoiceCall {
     sttOpen() {
         const url = 'wss://api.sarvam.ai/speech-to-text-realtime/ws?language_code=' + encodeURIComponent(this.s.lang)
             + '&model=saaras:v3-realtime&endpointing=vad&stream_type=fast&encoding=linear16&sample_rate=16000'
-            + '&silence_duration_ms=550&min_speech_duration_ms=300';   // 550: snappier turn-taking; 300: environmental noise blips don't count as speech (2026-09-02)
+            // `threshold` is VAD SENSITIVITY (0..1) and we had never set it, so every call ran on
+            // Sarvam's default of 0.3 — tuned to catch a whisper. On a real call that meant a TV, a
+            // fan or street noise cleared the bar, opened a turn, and was invented into plausible
+            // Hindi: "सुधा तागी", "कौन देखा कि जब आप बताइए" (user, 2026-09-04: "outside evroment
+            // noise cuper and added in transcript very bad"). The agent then answered the ROOM.
+            // There is no confidence score in the response — Sarvam does not return one — so garbage
+            // cannot be filtered after the fact. It has to be refused at the microphone.
+            + `&threshold=${VAD_THRESHOLD()}&silence_duration_ms=${STT_SILENCE_MS()}&min_speech_duration_ms=${MIN_SPEECH_MS()}`;
         this.stt = new WebSocket(url, ['api-subscription-key.' + SARVAM_KEY()]);
         this.stt.on('message', (m) => {
             let d; try { d = JSON.parse(m.toString()); } catch { return; }
             if (d.event === 'vad.speech_start') {
                 this.sawVoice = true;
                 this.vadActive = true;
+                this._uttPeak = 0;   // this utterance is measured on its own audio
                 // barge-in keys on the DRAIN CLOCK, not just `speaking` (user, 2026-09-02:
                 // "overlapping — agent did not listen, she just continued her sentence"): synthesis
                 // finishes long before Vobiz's buffered audio stops PLAYING, and a customer talking
                 // over that tail must clear it too. And it requires SUSTAINED speech (300ms) — the
                 // same day's log showed environmental noise blips barge-cutting the agent's audio
                 // mid-sentence on every spike ("agent capture environmental noise and voice").
-                if (this.speaking || Date.now() < (this.audioEndsAt || 0)) {
+                // ONLY WHILE SHE IS AUDIBLE. `this.speaking` turns true the moment a turn STARTS —
+                // while she is still thinking and nothing has been said yet. Barging in then aborts
+                // the turn before a single word plays, so the customer hears pure silence and asks
+                // "क्यों तुम स्टॉप कर रहे हो?" (2026-09-04: "agent silent is many time and long
+                // silent"). There is nothing to interrupt until there is audio, so the drain clock
+                // alone arms it: her words are on the line, and talking over them means something.
+                if (Date.now() < (this.audioEndsAt || 0)) {
+                    // TWO-STAGE BARGE-IN (user, 2026-09-04: "hmm, hello, envroment noise is overlap and
+                    // agent stop … transcript received complete but voice record is too short").
+                    // Stage one used to BE the whole thing: 300ms of VAD energy cut her audio. But VAD
+                    // hears SOUND, not SPEECH — a "hmm", a cough, a TV, the customer's own "hello?" all
+                    // clear that bar. clearAudio then wipes Vobiz's buffer, so the sentence was fully
+                    // generated and logged while the caller heard only the first half of it. That gap
+                    // between transcript and recording is this bug, every time.
+                    // Evidence of SPEECH now decides, and the wait is long enough to outlast a filler:
+                    //   fast path — a transcript partial that is NOT backchannel cuts IMMEDIATELY, so a
+                    //               real interruption is quicker than it used to be (see transcript.partial);
+                    //   fallback  — sustained voice for BARGE_MS, in case the STT emits no partial at all.
+                    this._bargePending = true;
                     clearTimeout(this._bargeTimer);
-                    this._bargeTimer = setTimeout(() => { if (this.vadActive && !this.closed) this.bargeIn(); }, 300);
+                    this._bargeTimer = setTimeout(() => {
+                        if (this.vadActive && this._bargePending && !this.closed) this.bargeIn();
+                    }, BARGE_MS());
                 }
             }
-            if (d.event === 'vad.speech_end') { this.vadActive = false; clearTimeout(this._bargeTimer); }
+            // The moment the customer's silence actually begins. Everything after this is the gap they
+            // experience, and until now only the brain leg was measured — so "the reply is slow" could
+            // not be split into endpoint wait, thinking, or synthesis. See the reply-gap log below.
+            if (d.event === 'vad.speech_end') { this._speechEndAt = Date.now(); this.vadActive = false; this._bargePending = false; clearTimeout(this._bargeTimer);}
             // saaras streams the SOURCE text in partials but often TRANSLATES the final into the
             // session language, and NO event carries a language field (probe 2026-09-01: partial
             // "Haan, boliye, mujhe waha order chahiye, kabhi bhi bhej dijiye." → final "Yes, speak.
             // I want that order, send it anytime."). So the language is detected from the LAST
             // PARTIAL — the customer's real words — while the final drives the conversation.
-            if (d.event === 'transcript.partial' && d.text && d.text.trim()) this._partialText = d.text.trim();
+            if (d.event === 'transcript.partial' && d.text && d.text.trim()) {
+                this._partialText = d.text.trim();
+                // The partial is the FIRST moment we know whether that sound was words. Real words over
+                // the agent = cut now, without waiting out BARGE_MS. Backchannel = stand the barge down
+                // and let her finish the sentence she is already halfway through.
+                // TEXT CAN ONLY STAND THE BARGE DOWN — IT CAN NO LONGER TRIGGER ONE.
+                // The instant-cut path used to fire whenever a partial looked substantial. I raised
+                // its bar from three letters to eight and it made no difference, because this STT
+                // does not produce fragments: it invents whole sentences out of line noise —
+                // "Sophisticated need launch question", "Suppose the loan is available",
+                // "और मेरा फायदा था।" — and each one cleared any length bar and killed her
+                // mid-sentence. Eleven times in one call, while the customer was saying
+                // "मैंने कुछ भी नहीं बोला है अभी तक" — I haven't said anything yet (2026-09-04).
+                // Text is precisely the unreliable signal here, so only SUSTAINED VOICE cuts now
+                // (the BARGE_MS timer above), which a hallucination cannot fake. A real interruption
+                // still stops her, a beat later instead of instantly — and that beat is the whole
+                // difference between an agent who listens and one who flinches at noise.
+                if (this._bargePending
+                    && (BACKCHANNEL_RX.test(this._partialText) || CONTINUE_RX.test(this._partialText))) {
+                    this._bargePending = false; clearTimeout(this._bargeTimer);
+                    this.log('backchannel while speaking — not a barge-in:', this._partialText.slice(0, 24));
+                }
+            }
             if (d.event === 'transcript.final' && d.text && d.text.trim()) {
+                // THE QUIET-LINE GATE. Words that came out of audio this faint were not spoken by a
+                // person — they are the STT filling silence with plausible sentences. Dropping them
+                // here stops the agent answering the room, which is the single most damaging thing
+                // it has done all day. The peak is LOGGED on every final so the floor can be tuned
+                // from real calls rather than guessed at; VOBIZ_MIN_PEAK moves it without a deploy.
+                const peak = this._uttPeak || 0;
+                this._uttPeak = 0;
+                if (peak && peak < MIN_PEAK()) {
+                    // Not "too quiet to be speech" — it usually IS speech, just not the caller's.
+                    // The STT happily transcribes a song playing in the room ("जो कृष्णा की देवी है",
+                    // 2026-09-04) and a television, and the agent then answers the room. What
+                    // separates the customer from the background is that they are speaking INTO the
+                    // handset: near-field, and far louder than anything across the room.
+                    this.log(`ignored — background, not the caller (peak ${peak} < ${MIN_PEAK()}): ${d.text.trim().slice(0, 40)}`);
+                    this._partialText = '';
+                    return;
+                }
+                this.log(`heard (peak ${peak}): ${d.text.trim().slice(0, 40)}`);
                 const src = this._partialText || '';
                 this._partialText = '';
-                const det = scriptLangOf(src) || romanLangOf(src, this.s.lang);
+                // devEnglishLangOf runs FIRST: transliterated English is still Devanagari, so
+                // scriptLangOf would claim it as Hindi and the switch would never fire.
+                const det = devEnglishLangOf(src, this.s.lang) || scriptLangOf(src) || romanLangOf(src, this.s.lang);
                 this.onCustomer(d.text.trim(), det);
             }
         });
@@ -445,6 +621,21 @@ class VoiceCall {
         if (!this.stt || this.stt.readyState !== 1) return;
         let payload = b64;
         if (L16_SWAP() === 'in' || L16_SWAP() === 'both') payload = swap16(Buffer.from(b64, 'base64')).toString('base64');
+        // HOW LOUD THE CALLER ACTUALLY WAS. The STT invents whole sentences out of line noise —
+        // "जो कृष्णा की देवी है, वो हमारे शिव में छिल्ला है।" while the customer was saying nothing
+        // ("You listen that which I am not saying", 2026-09-04) — and no amount of VAD tuning stops
+        // it, because VAD only decides whether there is SOUND. The one signal that separates a
+        // person speaking from a hallucination is the energy of the audio those words came from,
+        // and the raw frames are right here. Peak per utterance, reset when speech starts.
+        try {
+            const buf = Buffer.from(b64, 'base64');
+            let peak = 0;
+            for (let i = 0; i + 1 < buf.length; i += 2) {          // L16 little-endian
+                const v = Math.abs(buf.readInt16LE(i));
+                if (v > peak) peak = v;
+            }
+            if (peak > (this._uttPeak || 0)) this._uttPeak = peak;
+        } catch (_) {}
         this.stt.send(JSON.stringify({ event: 'audio_input', audio: payload }));
     }
 
@@ -470,10 +661,40 @@ class VoiceCall {
         } catch (e) { this.log('sayLine failed:', e.message); }
     }
 
+    // One agent turn has been spoken. Turn 1 is the introduction, turn 2 is the order news — the two
+    // that must land whole. The flag drops only after the SECOND has finished draining, not the
+    // moment the text was produced, because Vobiz is still playing audio long after synthesis ends.
+    // Fixed lines (the hello-check) deliberately do not count: they are protected while introPhase
+    // holds but must not consume the budget meant for the intro and the news.
+    agentTurnDone() {
+        this._agentTurns = (this._agentTurns || 0) + 1;
+        if (this.introPhase && this._agentTurns >= 2) {
+            const left = Math.max(0, (this.audioEndsAt || 0) - Date.now());
+            setTimeout(() => { this.introPhase = false; }, left + 200);
+            this.log('introduction complete — normal turn-taking resumes');
+        }
+    }
+
     bargeIn() {
-        this.log('barge-in — customer spoke over the agent');
-        this.audioEndsAt = Date.now();             // clearAudio empties Vobiz's buffer — the drain clock resets
-        try { this.vobiz.send(JSON.stringify({ event: 'clearAudio', streamId: this.streamId })); } catch (_) {}
+        // SHE FINISHES THE INTRODUCTION AND THE INFORMATION (user, 2026-09-04: "when agent is say
+        // anything info and intro make she will fini even customer said anything on that time").
+        // Those two turns are the ones that MUST land whole — the customer cannot answer a question
+        // they never heard the end of, and half a greeting is what makes them say "hello?", which
+        // used to cut her again. Protection lasts only while her audio is still draining, and only
+        // for the opening turns, so ordinary conversation keeps full barge-in.
+        if (this.introPhase && Date.now() < (this.audioEndsAt || 0)) {
+            this.log('interrupted during the introduction — finishing the line first');
+            return;
+        }
+        // SHE FINISHES THE SENTENCE SHE IS SPEAKING (user, 2026-09-04: "when agent explain any info
+        // she must finish her sentence info, intro and other important thing").
+        // This used to send clearAudio, which empties Vobiz's whole buffer — cutting her off
+        // mid-WORD. That is the gap between transcript and recording that has dogged every call:
+        // the sentence was generated and logged in full, and the customer heard half of it.
+        // Now a barge-in stops her CONTINUING — the brain stops writing, the voice socket stops
+        // producing — but whatever is already on its way to the customer plays out. She yields the
+        // floor the way a person does: at the end of the sentence, not in the middle of a word.
+        this.log('barge-in — customer spoke over the agent (finishing the current sentence first)');
         if (this.turnAbort) { try { this.turnAbort.abort(); } catch (_) {} this.turnAbort = null; }
         if (this.ttsWs) { try { this.ttsWs.close(); } catch (_) {} this.ttsWs = null; }
         this.speaking = false;
@@ -481,6 +702,19 @@ class VoiceCall {
 
     playToCaller(b64linear16) {
         if (!this.streamId) return;                // start event not seen yet — nothing to address
+        // THE GAP THE CUSTOMER ACTUALLY FEELS, split into its parts. Only the brain leg was ever
+        // logged, so "the reply is slow" could not be attributed: is it the STT waiting out the
+        // silence, Claude thinking, or the voice synthesizing? Printed once per turn, on the FIRST
+        // audio of that turn — after this, the customer is hearing her.
+        if (this._speechEndAt) {
+            const total = Date.now() - this._speechEndAt;
+            const endpoint = this._brainStartAt ? this._brainStartAt - this._speechEndAt : null;
+            const think = this._firstSentenceAt && this._brainStartAt ? this._firstSentenceAt - this._brainStartAt : null;
+            const voice = this._firstSentenceAt ? Date.now() - this._firstSentenceAt : null;
+            this.log(`reply gap ${total}ms = endpoint ${endpoint === null ? '?' : endpoint + 'ms'}`
+                + ` + think ${think === null ? '?' : think + 'ms'} + voice ${voice === null ? '?' : voice + 'ms'}`);
+            this._speechEndAt = 0;
+        }
         let buf = Buffer.from(b64linear16, 'base64');
         // DRAIN CLOCK (user, 2026-09-02: "after customer confirm time slot … call cut when agent is
         // talking"): Vobiz buffers everything we send, so synthesis finishing ≠ the customer having
@@ -530,15 +764,59 @@ class VoiceCall {
             // logs which model answered and how fast its first sentence arrived.
             const brainModel = this.chatModel();
             const t0 = Date.now(); let ttftDone = false;
+        this._brainStartAt = t0;   // the endpoint wait ends here — see the reply-gap log in playToCaller
             // FAST LANE (user, 2026-09-02: "maximum less delay"): the FIRST sentence flushes to the
             // synthesizer the moment it exists — the voice starts while the rest of the reply is
             // still being written. The remaining sentences go as ONE second flush, so the turn keeps
             // at most one prosody seam (after sentence 1), never the old per-sentence choppiness.
             let firstFlushed = false;
             const say = (sentence) => {
-                if (!ttftDone) { ttftDone = true; this.log(`brain ${brainModel || 'sarvam'} — first sentence in ${Date.now() - t0}ms`); }
-                const spoken = toSpokenText(sentence);
+                if (!ttftDone) { ttftDone = true; this._firstSentenceAt = Date.now(); this.log(`brain ${brainModel || 'sarvam'} — first sentence in ${Date.now() - t0}ms`); }
+                let spoken = toSpokenText(sentence);
                 if (!spoken) return;
+                {   // the customer is never addressed in feminine forms, and हूँ is never doubled
+                    const fixed = fixOrderVerb(fixCustomerForms(fixDoubleHoon(spoken)));
+                    if (fixed !== spoken) { this.log('feminine form corrected for the customer:', spoken.slice(0, 44)); spoken = fixed; }
+                }
+                // No slot may be offered or requested — see SLOT_RX. Dropped BEFORE the synthesizer,
+                // because once the audio is out the promise has been made.
+                if (SLOT_RX.test(spoken)) {
+                    // TRIM, don't discard. The first live firing killed "हम जल्द से जल्द delivery करवाने
+                    // की कोशिश करेंगे — क्या आप बताइएगा कि कौनसा time…" ENTIRELY, and the courier
+                    // assurance in the first half is exactly what the customer needed to hear. Cut the
+                    // offending clause and speak the rest; only drop the line when nothing useful is left.
+                    // Cutting mid-sentence leaves the connector that introduced the clause behind —
+                    // "…करवा सकते हैं। क्या" — so trailing conjunctions and question words go too, or
+                    // she reads out a dangling fragment.
+                    const kept = spoken.replace(SLOT_RX, '')
+                        .replace(/[\s—–,-]*(?:क्या|और|कि|तो|अब|but|and|so|now)\s*$/i, '')
+                        .replace(/[\s—–,-]+$/, '').trim();
+                    this.log('delivery-time question dropped (the courier team schedules):', spoken.slice(0, 48));
+                    (this._droppedThisTurn = this._droppedThisTurn || []).push(spoken);
+                    if (kept.length < 12) return;                       // the whole sentence was the ask
+                    spoken = /[।.?!]$/.test(kept) ? kept : kept + '।';
+                }
+                // WHAT SHE ACTUALLY SAID, not what the model wrote. The transcript used to be the raw
+                // model output, so a sentence this function dropped still appeared there word for word
+                // — twice on 2026-09-04 that made a working guard look broken and a chopped sentence
+                // look whole. Audits and the self-learning loop read this transcript; studying words
+                // the customer never heard teaches the wrong lesson.
+                (this._spokenThisTurn = this._spokenThisTurn || []).push(spoken);
+                // VALIDATION OPENER, ONCE PER CALL. The prompt already says not to repeat it, but a
+                // rule the model can forget is not a guarantee, and on 2026-09-04 it opened two turns
+                // in the same call — the second time in reply to "सुधा तागी", which was room noise.
+                // Agreeing emphatically with something the customer never said is worse than saying
+                // nothing, so this is enforced here rather than asked for. The first one is spoken
+                // (it is genuine empathy); any later one is trimmed and the sentence keeps its
+                // actual content. Done BEFORE the synthesizer, because after that the audio is gone.
+                if (VALIDATION_RX.test(spoken)) {
+                    if (this._validationUsed) {
+                        const rest = spoken.replace(VALIDATION_RX, '').replace(/^[\s,।.-]+/, '').trim();
+                        this.log('validation opener already used this call — trimmed');
+                        if (rest.length < 6) return;      // the whole sentence was the opener
+                        spoken = rest.charAt(0).toUpperCase() === rest.charAt(0) ? rest : rest;
+                    } else this._validationUsed = true;
+                }
                 if (!firstFlushed && wsOk && tts && tts.readyState === 1 && !abort.signal.aborted) {
                     firstFlushed = true; sentAny = true;
                     tts.send(JSON.stringify({ type: 'text', data: { text: spoken } }));
@@ -546,8 +824,21 @@ class VoiceCall {
                 } else pending.push(spoken);
             };
             const prompt = buildPrompt(this.s);
-            const messages = userMsgOrNull ? this.history
+            let messages = userMsgOrNull ? this.history
                 : [{ role: 'user', content: `Open the call now. ${this.s.ctx.firstName ? `Greet ${this.s.ctx.firstName} warmly` : `Greet them warmly WITHOUT a name (it is unknown — never invent one)`}, introduce yourself by your first name, and ask if they have two minutes. 1-2 short sentences.` }];
+            // LANGUAGE IS MIRRORED, NOT COMMANDED (user, 2026-09-04: "for witch lang don't make hard
+            // rule"). An earlier version forced the answer's language onto the last user turn; that
+            // made her obey but it also made her rigid — a customer who drops one English word into
+            // Hindi does not want the rest of the call in English, and a mechanical flip reads worse
+            // than simply answering the way they spoke. So the reminder is soft and only appears
+            // AFTER a switch has genuinely been established, leaving her free to follow the customer.
+            if (this.s.langSwitched && messages.length) {
+                const last = messages[messages.length - 1];
+                if (last && last.role === 'user') {
+                    messages = messages.slice(0, -1).concat([{ role: 'user',
+                        content: `${last.content}\n\n[Reply in the language they just used.]` }]);
+                }
+            }
             const text = await chatStream(messages, prompt, say, abort.signal, brainModel, (this.s.claudeUsage = this.s.claudeUsage || {}));
             if (wsOk && tts.readyState === 1 && pending.length && !abort.signal.aborted) {
                 sentAny = true;
@@ -580,7 +871,15 @@ class VoiceCall {
                 } catch (e) { this.log('REST turn fallback failed:', e.message); }
             }
             this.history.push({ role: 'assistant', content: text });
-            this.s.transcript.push('Agent: ' + text);
+            // The TRANSCRIPT is what the customer HEARD; `text` is what the model wrote, and the two
+            // differ whenever a guard above dropped or trimmed a sentence. Anything dropped is noted
+            // on its own line so a rule breach is still visible to an audit — the model attempting it
+            // is worth knowing about — while never being mistaken for something that was said aloud.
+            const spokenTurn = (this._spokenThisTurn || []).join(' ').trim();
+            this.s.transcript.push('Agent: ' + (spokenTurn || text));
+            for (const d of (this._droppedThisTurn || [])) this.s.transcript.push('[not spoken — blocked by rule] ' + d);
+            this._spokenThisTurn = []; this._droppedThisTurn = [];
+            this.agentTurnDone();
             // brand name + a thanks word (any call language) = the goodbye was just delivered
             if (/The Element/i.test(text) && THANKS_RX.test(text)) this.closingDone = true;
             // identical reply twice in a row = the model is looping — treat as the close
@@ -668,6 +967,7 @@ class VoiceCall {
         }
         this.history.push({ role: 'assistant', content: this.s.openingText });
         this.s.transcript.push('Agent: ' + this.s.openingText);
+        this.agentTurnDone();
         this.playToCaller(pcm);
         this.log('opening played from pre-synth' + (this.s.tAnswer ? ` (+${Date.now() - this.s.tAnswer}ms after answer webhook)` : ''));
         const durMs = Math.round(Buffer.from(pcm, 'base64').length / 48) + 500;   // bytes / (24000*2) → ms
@@ -731,7 +1031,9 @@ class VoiceCall {
             // from the STT PARTIALS (the customer's REAL words — finals often arrive TRANSLATED to
             // English, making a Hindi speaker "look English" in text), then script letters on the
             // final, then the roman lexicon (two clearly-Hindi Latin words). One sighting = switch.
-            const seen = (sttLang && sttLang !== this.s.lang ? sttLang : null) || scriptLangOf(text) || romanLangOf(text, this.s.lang);
+            // Same ordering as above: Devanagari-written English must be caught before the script check
+        // decides "these are Devanagari letters, therefore Hindi".
+        const seen = (sttLang && sttLang !== this.s.lang ? sttLang : null) || devEnglishLangOf(text, this.s.lang) || scriptLangOf(text) || romanLangOf(text, this.s.lang);
             if (seen && seen !== this.s.lang) this.switchLanguage(seen);
         }
         // END-ON-REQUEST (call 18, 2026-09-02: the customer said "प्लीज़ कॉल रखिए" TWICE and got two
@@ -1092,6 +1394,35 @@ function romanLangOf(text, currentLang) {
     const hits = (String(text).match(ROMAN_HI_RX) || []).length;
     return hits >= 2 ? 'hi-IN' : null;
 }
+// THE MIRROR CASE, and the one that was missing (user, 2026-09-04: "why she not switch language when
+// customer clear speaking english"). In HINDI mode Sarvam does not return English as English — it
+// TRANSLITERATES it into Devanagari: "OK but I want my expected time" arrives as "ओके, बट आई वांट
+// फ्रॉम माय एक्सपेक्टेड टाइम". scriptLangOf then counts Devanagari letters, concludes Hindi, and the
+// switch never fires no matter how plainly the customer speaks English.
+// Detection keys on FUNCTION words, never on nouns: ऑर्डर, डिलीवरी and टाइम are ordinary Hindi
+// speech, but a Hindi speaker does not say द, इज, व्हिच or आई. And a Hindi VETO carries the other
+// half — "हाँ मेरी बात है जी, बट क्यों नहीं हो पाया?" is Hindi with one English word in it, not a
+// language switch, so English markers must clearly outweigh the Hindi ones.
+const DEV_EN_RX = /(?<=^|\s)(द|इज|आई|यू|योर|यॉर|माय|मी|वी|आर|वाज़?|बी|बीन|हैव|हैज़?|विल|वुड|कैन|कुड|शुड|नॉट|डोंट|बट|एंड|ऑर|व्हाट|व्हेन|व्हेयर|व्हिच|व्हाई|हाउ|फॉर|फ्रॉम|विद|दिस|दैट|देयर|जस्ट|ओनली|प्लीज़?|थैंक्स?|ओके|यस|गुड|आस्किंग|आस्क|टेल|नीड|वांट|गेट|गिव|सेंड|नाउ|एक्सपेक्टेड|एस्टिमेटेड)(?=\s|$|[,.।?!])/g;
+const DEV_HI_RX = /(?<=^|\s)(है|हैं|हूँ|हूं|था|थे|थी|नहीं|नही|को|से|का|की|के|में|पर|और|कि|तो|ना|हाँ|हां|मैं|आप|हम|यह|वह|ये|वो|क्या|क्यों|कब|कहाँ|कैसे|रहा|रही|रहे|करो|कीजिए|दीजिए|चाहिए|मिल|हो|गया|गयी|मेरी|मेरा|बात|जी)(?=\s|$|[,.।?!])/g;
+function devEnglishLangOf(text, currentLang) {
+    if (currentLang === 'en-IN') return null;                 // already there
+    const t = String(text || '');
+    if (!/[ऀ-ॿ]/.test(t)) return null;              // not Devanagari — scriptLangOf's job
+    const en = (t.match(DEV_EN_RX) || []).length;
+    const hi = (t.match(DEV_HI_RX) || []).length;
+    // A COMPLETE SENTENCE, which is what the user asked for on 2026-09-03: "if customer said a
+    // complete sentence in english or other language switch the language". Counting markers alone
+    // was the inconsistency (2026-09-04: "langugae switch is inconsistent") — "व्हाट इज द ऑर्डर?" is
+    // three English words tossed into a Hindi call by a Hinglish speaker who never wanted English,
+    // and it flipped the whole conversation. Indian customers mix English constantly; a human agent
+    // would not switch for it either.
+    // So the test is a SENTENCE, not a word count: at least five words, mostly English markers, and
+    // the Hindi veto still applies so "हाँ, बट क्यों नहीं हो पाया?" stays Hindi. An EXPLICIT ask
+    // ("speak in English") goes through requestedLanguage() and still switches on the spot.
+    const words = t.trim().split(/\s+/).filter(Boolean).length;
+    return (words >= 5 && en >= 3 && en > hi * 2) ? 'en-IN' : null;
+}
 const AFFIRM_RX = /\u0939\u093e\u0901|\u091c\u0940|yes|ok|\u0a39\u0a3e\u0a02|\u09b9\u09cd\u09af\u09be\u0981|\u0b86\u0bae\u0bcd|\u0b86\u0bae\u093e|\u0c05\u0c35\u0c41\u0c28\u0c41|\u0cb9\u0ccc\u0ca6\u0cc1|\u0d05\u0d24\u0d46|\u0ab9\u0abe/i;
 
 const LANG_NAMES = { 'hi-IN': 'Hindi', 'en-IN': 'English', 'ta-IN': 'Tamil', 'kn-IN': 'Kannada', 'ml-IN': 'Malayalam',
@@ -1140,7 +1471,13 @@ async function placeOrderCall(b) {
     // RTO recovery is UNDER TEST (user, 2026-09-01: "don't do any mess on live") — it dials only
     // where VOBIZ_RTO_ENABLED=true is set (the dev .env). On live the flag is absent, so even a
     // direct API call cannot place an RTO call until the user flips it there deliberately.
-    if (b.call_type === 'rto_recovery' && String(process.env.VOBIZ_RTO_ENABLED || '') !== 'true')
+    // The SECOND gate on the same journey (the first is in rtoCallTick). It stays, and it keeps the
+    // same meaning: on live, VOBIZ_RTO_ENABLED is absent and no RTO call can be placed by any route.
+    // The single exception is a forced test dial, which must carry BOTH b.test — set only by
+    // rtoCallTick for an explicitly named order — AND VOBIZ_RTO_ENABLED_TEST in this machine's env.
+    // A request body alone can never satisfy it, because live never sets that variable.
+    if (b.call_type === 'rto_recovery' && String(process.env.VOBIZ_RTO_ENABLED || '') !== 'true'
+        && !(b.test === true && String(process.env.VOBIZ_RTO_ENABLED_TEST || '') === 'true'))
         return { error: 'RTO recovery calls are disabled here (still under test) — set VOBIZ_RTO_ENABLED=true to enable', code: 403 };
     let ctx = { customer_name: b.customer_name || '', product: b.product || '', amount: b.amount || '', order_name: b.order_name || '' };
     let orderRow = null, orderPhone = '';
@@ -1148,7 +1485,7 @@ async function placeOrderCall(b) {
         try { const { order, fields } = await resolveOrderFields(b.order_name);
             orderRow = order;
             orderPhone = fields.phone || '';
-            ctx = { customer_name: fields.customer_name, product: fields.product, amount: fields.amount, order_name: fields.order_name }; } catch (_) {}
+            ctx = { customer_name: fields.customer_name, product: fields.products_spoken || fields.product, amount: fields.amount, order_name: fields.order_name }; } catch (_) {}
     }
     const phone = String(b.phone || orderPhone || '').replace(/\D/g, '').slice(-10);
     if (!/^[6-9]\d{9}$/.test(phone)) return { error: b.order_name ? `no usable phone on ${b.order_name}` : 'valid 10-digit phone required', code: 400 };
@@ -1282,7 +1619,7 @@ router.all('/vobiz/answer', async (req, res) => {
         let ctx = { customer_name: '', product: '', amount: '', order_name: pinnedOrder };
         if (pinnedOrder) {
             try { const { fields } = await resolveOrderFields(pinnedOrder);
-                ctx = { customer_name: fields.customer_name, product: fields.product, amount: fields.amount, order_name: fields.order_name }; }
+                ctx = { customer_name: fields.customer_name, product: fields.products_spoken || fields.product, amount: fields.amount, order_name: fields.order_name }; }
             catch (e) { console.log('[vobiz] inbound order lookup failed:', e.message); }
         }
         ctx.firstName = String(ctx.customer_name || '').trim().split(/\s+/)[0] || null;   // null = name unknown; never a placeholder (the 'Hello ji ji' bug, audit 2026-09-02)

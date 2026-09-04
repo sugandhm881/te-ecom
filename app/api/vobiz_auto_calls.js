@@ -431,7 +431,14 @@ const RTO_PURPOSE = 'rto_recovery';
 async function rtoCallTick(opts = {}) {
     const { placeOrderCall, vobizConfigured } = require('./vobiz_bridge');
     if (!vobizConfigured()) return { skip: 'Vobiz not configured' };
-    if (String(process.env.VOBIZ_RTO_ENABLED || '') !== 'true') return { skip: 'RTO calling disabled (VOBIZ_RTO_ENABLED)' };
+    // TWO GATES, NOT ONE (user, 2026-09-03: "for test order we can temp chnage this
+    // VOBIZ_RTO_ENABLED_TEST=true"). VOBIZ_RTO_ENABLED arms the FLEET SWEEP — the cron that walks
+    // every pending NDR and dials real customers. Turning that on merely to place one test call is
+    // how a dev box robo-dials the live order book two minutes later. So a forced single-order dial
+    // (opts.testOrder) has its own flag, and the sweep stays dark unless the fleet flag is set.
+    const fleetArmed = String(process.env.VOBIZ_RTO_ENABLED || '') === 'true';
+    const testArmed = String(process.env.VOBIZ_RTO_ENABLED_TEST || '') === 'true';
+    if (!fleetArmed && !(opts.testOrder && testArmed)) return { skip: 'RTO calling disabled (VOBIZ_RTO_ENABLED)' };
     const h = istHour();
     if (!opts.testOrder && (h < WINDOW.from || h >= WINDOW.to)) return { skip: `outside calling window (${WINDOW.from}:00–${WINDOW.to}:00 IST)` };
 
@@ -514,7 +521,11 @@ async function rtoCallTick(opts = {}) {
         // still worth the call? cancelled orders and journeys that moved on are sealed, never dialed
         const { data: ord } = await supabase.from('orders').select('cancelled_at')
             .or(`name.eq.${name},name.eq.#${name}`).order('created_at', { ascending: false }).limit(1).maybeSingle();
-        if (ord && ord.cancelled_at) { await seal(name, 'skipped', { why: 'order cancelled' }, null, RTO_PURPOSE); results.push({ order: name, skip: 'order cancelled' }); continue; }
+        // A FORCED single-order test dial (opts.testOrder) may target a cancelled order — the test
+        // number belongs to us, not to a customer, and the order it rides on is usually long dead.
+        // An ordinary tick has opts.testOrder null and still seals every cancelled order untouched,
+        // so there is no path from here to robo-dialling a customer who already cancelled.
+        if (ord && ord.cancelled_at && !opts.testOrder) { await seal(name, 'skipped', { why: 'order cancelled' }, null, RTO_PURPOSE); results.push({ order: name, skip: 'order cancelled' }); continue; }
         if (!opts.testOrder) {
             const { data: j } = await supabase.from('shipment_journey_ecom').select('outcome')
                 .eq('order_name', name).order('updated_at', { ascending: false }).limit(1).maybeSingle();
@@ -525,7 +536,10 @@ async function rtoCallTick(opts = {}) {
         const claimedLog = await claim(name, row, attemptNo, RTO_PURPOSE);
         if (!claimedLog) { results.push({ order: name, skip: 'claimed by another tick' }); continue; }
         let r;
-        try { r = await placeOrderCall({ order_name: name, call_type: 'rto_recovery', auto: true }); }
+        // `test` travels with the call so the second gate in placeOrderCall can tell a forced
+        // single-order dial from the fleet sweep. It is set ONLY for the named test order, and it is
+        // inert unless VOBIZ_RTO_ENABLED_TEST is also set in this machine's env — which live never has.
+        try { r = await placeOrderCall({ order_name: name, call_type: 'rto_recovery', auto: true, test: !!opts.testOrder }); }
         catch (e) { r = { error: e.message }; }
         const ndrStamp = { ...((row && row.detail) || {}), ndr_no: t.ndr || rtoNdrNo(row) };
         if (r.gated) {
@@ -622,6 +636,55 @@ async function handleRtoCallOutcome({ orderName, summary, customerTurns, transcr
 router.post('/vobiz/rto-call-tick', async (req, res) => {
     try {
         const r = await rtoCallTick({ testOrder: (req.body || {}).order_name || null });
+        res.json({ success: true, ...r });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// LOCAL TEST TRIGGER — the ONE unauthenticated way to dial, and it exists only so that a test call
+// from the dev machine does not need a hand-minted admin token. Dialling is permission-gated on
+// purpose ("manual AI Call Button make permission based"), so this route is built to be ABSENT
+// rather than merely guarded anywhere that is not the dev box.
+//
+// WHY LOOPBACK ALONE WOULD BE A HOLE: on the VPS the app sits behind a reverse proxy, so EVERY
+// request already arrives from 127.0.0.1 — a localhost check would have protected nothing there.
+// Four gates:
+//   1. an env flag this machine sets and the servers never do; without it the route 404s, so there
+//      is no surface to probe at all;
+//   2. the socket must really be loopback;
+//   3. no forwarding header may be present — a proxied request always carries one, and that is what
+//      actually separates "I am local" from "a proxy made me look local";
+//   4. the RTO test flag must be on.
+// And it dials exactly ONE named order: there is no bulk path through here, ever.
+router.post('/vobiz/local-test-call', async (req, res) => {
+    if (String(process.env.VOBIZ_LOCAL_TEST_TRIGGER || '') !== 'true') return res.status(404).end();
+    const ip = String((req.socket && req.socket.remoteAddress) || '');
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) {
+        console.log('[RTOCall] local test trigger refused — not loopback (' + (ip || 'unknown') + ')');
+        return res.status(403).json({ success: false, error: 'local only' });
+    }
+    if (req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.headers['forwarded']) {
+        console.log('[RTOCall] local test trigger refused — request was proxied');
+        return res.status(403).json({ success: false, error: 'local only' });
+    }
+    if (String(process.env.VOBIZ_RTO_ENABLED_TEST || '') !== 'true') {
+        return res.status(403).json({ success: false, error: 'VOBIZ_RTO_ENABLED_TEST is not on' });
+    }
+    const name = String((req.body || {}).order_name || '').trim();
+    if (!name) return res.status(400).json({ success: false, error: 'order_name is required — this trigger never runs a bulk tick' });
+    const callType = String((req.body || {}).call_type || 'rto_recovery').trim();
+    try {
+        // COD CONFIRMATION goes straight to placeOrderCall. Its own tick (highValueCallTick) only
+        // selects orders sitting in the hold ledger for the high-value rule, which a test order will
+        // never satisfy — so for a test dial the flow is chosen directly. The allowlist inside
+        // placeOrderCall still applies, and cod_confirm was never behind the RTO kill-switch.
+        if (callType === 'cod_confirm') {
+            console.log('[CODCall] local test trigger: dialling ' + name);
+            const { placeOrderCall } = require('./vobiz_bridge');
+            const r = await placeOrderCall({ order_name: name, call_type: 'cod_confirm', auto: true, test: true });
+            return res.json({ success: !r.error, ...r });
+        }
+        console.log('[RTOCall] local test trigger: dialling ' + name);
+        const r = await rtoCallTick({ testOrder: name });
         res.json({ success: true, ...r });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });

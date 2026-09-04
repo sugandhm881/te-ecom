@@ -719,19 +719,26 @@ function check(name, got, want) {
         const sv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
         {
             const vb2 = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+        // Rules live in the registry now, so tests pin the RULE ID rather than a sentence of
+        // prose. An id survives rewording; a grep for prose breaks the moment anyone improves a
+        // line, which is exactly what happened to thirteen tests when the paragraphs were split.
+        const { RULES: REG } = require(path.join(ROOT, 'app/api/agent_rules.js'));
+        const REG_IDS = new Set(REG.map(r => r.id));
+        const hasRule = (id) => { if (!REG_IDS.has(id)) throw new Error('selftest references a rule id that does not exist: ' + id); return true; };
+        const RXof = (src, name) => { const m = src.match(new RegExp("const " + name + " = (/.*/i);")); return eval(m[1]); };
             const sc2 = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
             const ap2 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
             // 2026-09-02 (user): the confirmation ask is GONE — one reliable sighting switches directly.
             // 2026-09-02: Hindi-belt states open in HINDI, everywhere else English (was English-for-all).
             check('voice lang: Hindi-belt states open in Hindi, others in English; the FIRST reliable sighting of another language switches DIRECTLY, no confirmation question',
                 [/HINDI_BELT_RX\.test\(String\(addr\.province/.test(vb2) && /return 'en-IN';\s+\/\/ everywhere else opens in English/.test(vb2), /\[\/\[\\u0900-\\u097F\]\/, 'hi-IN'\]/.test(vb2),
-                 /understand ONLY ENGLISH/.test(vb2), /DIRECT SWITCH — no confirmation question/.test(vb2),
+                 hasRule('screener-english'), /DIRECT SWITCH — no confirmation question/.test(vb2),
                  /if \(seen && seen !== this\.s\.lang\) this\.switchLanguage\(seen\)/.test(vb2),
                  !/this\.s\.offerAsk = seen/.test(vb2)],
                 [true, true, true, true, true, true]);
             check('voice product-answer rules (Ele behavior, PRODUCT QUESTIONS ONLY, own names kept): brand-only, no diagnosis, prices → theelement.skin, drops 15 days/bottle; the call flow itself unchanged',
-                [/PRODUCT-ANSWER RULES \(apply ONLY when the customer asks about a product/.test(vb2),
-                 /Brightening Drops last 15 days per bottle/.test(vb2),
+                [hasRule('product-only-ours'),
+                 hasRule('product-drops-duration'),
                  /I have noted that <their reason, briefly>\. Thank you for your time\./.test(vb2),
                  /You are \$\{sp\.name\}/.test(vb2)],
                 [true, true, true, true]);
@@ -744,10 +751,10 @@ function check(name, got, want) {
                 [true, true, true, true, true, true, true]);
             check('voice kannada lesson 2026-09-01: name-only switch, no refusals, two clarifying attempts max, SECOND foreign utterance auto-switches, region hints the likely language',
                 [/const short = String\(text\)\.trim\(\)\.split/.test(vb2),
-                 /NEVER say you do not understand or cannot speak/.test(vb2),
-                 /at most TWO clarifying attempts/.test(vb2),
+                 hasRule('lang-never-refuse'),
+                 hasRule('confirm-two-attempts'),
                  /One sighting = switch/.test(vb2),
-                 /regionLangForOrder/.test(vb2), /LIKELY LANGUAGE/.test(vb2)],
+                 /regionLangForOrder/.test(vb2), hasRule('lang-region-offer')],
                 [true, true, true, true, true, true]);
             check('ai-call permission: placing a manual AI call needs support-ai-call (server-enforced), button hides without it, catalog lists it',
                 [fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8').includes("'support-ai-call'"),
@@ -759,9 +766,9 @@ function check(name, got, want) {
                  /00000000-0000-4000-8000-00000000a1ca/.test(vb2)],
                 [true, true, true]);
             check('voice rto training 2026-09-01: consistent one-register delivery, news-then-ask pacing, real address in RTO context, RTO summary vocabulary, outcome note on the order',
-                [/CONSISTENT DELIVERY: one voice from the first word to the last/.test(vb2),
+                [hasRule('level-tone'),
                  /May I know what went wrong with the delivery\?/.test(vb2),
-                 /NEVER open or stand alone with a bare acknowledgement/.test(vb2),
+                 hasRule('no-bare-ack'),
                  /NEVER REPEAT A COMPLETED STEP/.test(vb2),
                  /there is NO address step AT ALL/.test(vb2),
                  /order_shipping_addresses/.test(vb2),
@@ -783,6 +790,128 @@ function check(name, got, want) {
                  /infOpenProfileByHandle/.test(ap2), /infDiscoverModal\(r\.result\)/.test(ap2),
                  /influencer-by-handle/.test(fs.readFileSync(path.join(ROOT, 'app/api/influencer_crm.js'), 'utf8'))],
                 [true, true, true, true, true]);
+            {
+                // THE TEST FLAG MUST NEVER ARM THE FLEET SWEEP. VOBIZ_RTO_ENABLED gates the cron that
+                // walks every pending NDR and dials real customers; VOBIZ_RTO_ENABLED_TEST exists only
+                // so ONE named order can be dialled from a dev box. If the second flag ever satisfies
+                // the gate on its own, a laptop starts robo-dialling the live order book two minutes
+                // after boot — so the conjunction with opts.testOrder is pinned exactly.
+                const ac2 = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8');
+                check('rto gates: the test flag dials only a NAMED order and can never arm the fleet sweep',
+                    [ac2.includes('if (!fleetArmed && !(opts.testOrder && testArmed))'),
+                     ac2.includes("const fleetArmed = String(process.env.VOBIZ_RTO_ENABLED || '') === 'true'"),
+                     ac2.includes("const testArmed = String(process.env.VOBIZ_RTO_ENABLED_TEST || '') === 'true'")],
+                    [true, true, true]);
+                // There are TWO gates on the RTO journey and both must keep the same exception. The
+                // second one lives in placeOrderCall and is reachable from the browser route too, so it
+                // requires the env flag AS WELL AS the `test` marker — a crafted request body must never
+                // be enough, and on live the variable is simply absent.
+                check('rto gates: the second gate in placeOrderCall needs BOTH the env flag and the test marker',
+                    [/b\.test === true && String\(process\.env\.VOBIZ_RTO_ENABLED_TEST \|\| ''\) === 'true'/.test(vb2),
+                     ac2.includes("call_type: 'rto_recovery', auto: true, test: !!opts.testOrder")],
+                    [true, true]);
+                // A cancelled order is never dialled by an ordinary tick — only by a forced test dial.
+                check('rto call: cancelled orders are sealed on every ordinary tick; only a forced test dial passes',
+                    [ac2.includes('ord && ord.cancelled_at && !opts.testOrder'), ac2.includes('ord && ord.cancelled_at)')],
+                    [true, false]);
+                // The local trigger is unauthenticated, so all four of its gates are pinned: losing the
+                // env flag exposes it on the VPS, losing the forwarding-header check lets a reverse
+                // proxy make the whole internet look like 127.0.0.1.
+                const sj2 = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+                // A JUST-SWITCHED LANGUAGE MUST LEAD THE PROMPT. The detector worked and the switch was
+                // recorded, and she still answered in Hindi for two more turns until the customer said
+                // "I'm asking you in English, but you are replying me in Hindi" (2026-09-04). The
+                // instruction was there — buried at position seven of fifty-five, losing to an all-Hindi
+                // history. Primacy AND recency, or momentum wins again.
+                check('language switch leads the prompt, not a line in the middle of a list',
+                    [/const switchBanner = s\.langSwitched/.test(vb2),
+                     // Softened on the user's instruction ("for witch lang don't make hard rule"): the
+                     // banner still leads the prompt, but it points her at the customer's language
+                     // rather than commanding one, so a Hinglish speaker is not forced into English.
+                     /The customer has moved to \$\{langName\}/.test(vb2),
+                     /return `\$\{switchBanner\}You are \$\{sp\.name\}/.test(vb2),
+                     // and still repeated at the end, because reply-language is critical
+                     REG.some(r => r.id === 'reply-language' && r.sev === 'critical')],
+                    [true, true, true, true]);
+                // AND IT MUST LAND ON THE NEXT WORD. The banner alone was not enough: the switch was
+                // detected, logged, and then ignored for three turns while she carried on in Hindi,
+                // on three separate calls. A directive on the LAST USER TURN is what a model will not
+                // read past. Appended to a copy — this.history keeps the customer's real words.
+                check('after a switch she is reminded to mirror the customer, not commanded into one language',
+                    [/if \(this\.s\.langSwitched && messages\.length\)/.test(vb2),
+                     /Reply in the language they just used/.test(vb2),
+                     /messages = messages\.slice\(0, -1\)\.concat/.test(vb2),
+                     /let messages = userMsgOrNull \? this\.history/.test(vb2)],
+                    [true, true, true, true]);
+                {
+                    // THE CUSTOMER IS NEVER ADDRESSED AS A WOMAN. The prose named the forbidden forms;
+                    // the registry compressed that to "never use feminine forms" and the very next call
+                    // said "क्या आप delivery के लिए available रहेंगी?". The specificity WAS the rule, so
+                    // it is back — and the substitution is mechanical, so it is enforced in code too.
+                    // Scoped to sentences containing आप, or her own correct "मैं कर रही हूँ" would break.
+                    const FEM = eval(vb2.match(/const FEM_FORMS = (\[[\s\S]*?\]);/)[1]);
+                    const fix = (l) => { if (!/आप/.test(l)) return l; let o = l; for (const [b, g] of FEM) o = o.split(b).join(g); return o; };
+                    const pairs = [
+                        ['क्या आप delivery के लिए available रहेंगी?', 'क्या आप delivery के लिए available रहेंगे?'],
+                        ['क्या आप इसे receive करना चाहेंगी?', 'क्या आप इसे receive करना चाहेंगे?'],
+                        ['आप घर पर होंगी तो courier आ जाएगा।', 'आप घर पर होंगे तो courier आ जाएगा।'],
+                        // her own voice is female and must survive untouched
+                        ['मैं Kavya बोल रही हूँ The Element से।', 'मैं Kavya बोल रही हूँ The Element से।'],
+                        ['हमारी team दुबारा delivery arrange कर देगी।', 'हमारी team दुबारा delivery arrange कर देगी।'],
+                    ];
+                    // "order रखा था" is "placed an order" translated word for word, and रखना is to KEEP
+                    // — so the sentence tells the customer they kept an order somewhere. On 2026-09-04
+                    // they stopped the call twice to ask what it meant. Rewritten only NEAR an order
+                    // word, so an ordinary "रखा था" about anything else survives.
+                    const ovBody = vb2.match(/function fixOrderVerb\(line\) \{[\s\S]*?\n\}/)[0];
+                    const ov = eval('(' + ovBody.replace('function fixOrderVerb', 'function') + ')');
+                    check('an order is किया था, never रखा था',
+                        [ov('आपने जो order रखा था, क्या आप उसे deliver करवाना चाहेंगे?'),
+                         ov('आपने 23 अगस्त को ऑर्डर रखा था।'),
+                         ov('मैंने वो सामान अलमारी में रखा था।')],
+                        ['आपने जो order किया था, क्या आप उसे deliver करवाना चाहेंगे?',
+                         'आपने 23 अगस्त को ऑर्डर किया था।',
+                         'मैंने वो सामान अलमारी में रखा था।']);
+                    // "मैं Kavya हूँ The Element से बोल रही हूँ" — the verb twice in one breath, heard
+                    // live. Dropping the BARE हूँ leaves natural Hindi; the compound "रही हूँ" that ends
+                    // the sentence must survive, or her own voice breaks.
+                    const hoonBody = vb2.match(/function fixDoubleHoon\(line\) \{[\s\S]*?\n\}/)[0];
+                    const dh = eval('(' + hoonBody.replace('function fixDoubleHoon', 'function') + ')');
+                    check('intro says हूँ once, never twice',
+                        [dh('नमस्ते Sugandh ji, मैं Kavya हूँ The Element से बोल रही हूँ।'),
+                         dh('मैं Kavya बोल रही हूँ The Element से।'),
+                         dh('जी मैं समझ रही हूँ आपकी परेशानी।')],
+                        ['नमस्ते Sugandh ji, मैं Kavya The Element से बोल रही हूँ।',
+                         'मैं Kavya बोल रही हूँ The Element से।',
+                         'जी मैं समझ रही हूँ आपकी परेशानी।']);
+                    check('customer is never addressed in feminine forms, and her own voice is untouched',
+                        [pairs.filter(([i, w]) => fix(i) !== w).map(([i]) => i.slice(0, 30)).join(' | '),
+                         /feminine form corrected for the customer/.test(vb2),
+                         // the rule must also still SAY the forbidden words — the general version failed
+                         REG.some(r => r.id === 'customer-plural-forms' && /रहेंगी/.test(r.text))],
+                        ['', true, true]);
+                }
+                // "+1 more" is a WhatsApp abbreviation and a phone call cannot speak it. On 2026-09-04 she
+                // said "Acne Relief Face Wash और एक और प्रोडक्ट" — a faithful reading of the only string
+                // she was given. No rule could fix that; the second product's name was never in the
+                // prompt. The voice path now gets every title, while `product` keeps the short form the
+                // WhatsApp templates depend on.
+                const wa = fs.readFileSync(path.join(ROOT, 'app/api/msg91_wa.js'), 'utf8');
+                check('spoken products: the phone agent gets every title, WhatsApp keeps the short form',
+                    [/products_spoken: productsSpoken/.test(wa),
+                     /const productsSpoken = !li\.length/.test(wa),
+                     /product: fields\.products_spoken \|\| fields\.product,/.test(vb2),
+                     // the short form must still exist for the templates that use it
+                     /\+ \$\{li\.length - 1\} more/.test(wa)],
+                    [true, true, true, true]);
+                check('local test trigger: unauthenticated, but 404s off the dev box and refuses anything proxied',
+                    [/VOBIZ_LOCAL_TEST_TRIGGER \|\| ''\) !== 'true'\) return res\.status\(404\)/.test(ac2),
+                     ac2.includes("'::ffff:127.0.0.1'"),
+                     ac2.includes("req.headers['x-forwarded-for']") && ac2.includes("req.headers['x-real-ip']"),
+                     ac2.includes('order_name is required — this trigger never runs a bulk tick'),
+                     /local-test-call/.test(sj2)],
+                    [true, true, true, true, true]);
+            }
             check('voice rto kill-switch: rto_recovery dials ONLY where VOBIZ_RTO_ENABLED=true — live stays untouched while testing',
                 [/VOBIZ_RTO_ENABLED/.test(vb2), /disabled here \(still under test\)/.test(vb2)],
                 [true, true]);
@@ -805,10 +934,13 @@ function check(name, got, want) {
             // the per-sentence TTS flush (prosody reset at every full stop = "reading" cadence) became
             // one flush per turn, with a REST fallback so a dead TTS socket can no longer mute a turn.
             check('voice lang+prosody 2026-09-01: language detected from STT PARTIALS (source words — finals arrive translated); one TTS flush per turn; REST fallback on dead socket',
+                // Both detector chains gained devEnglishLangOf in FRONT on 2026-09-04 — Devanagari-written
+                // English has to be caught before scriptLangOf calls it Hindi. The rest of each chain,
+                // and the partial-not-final rule this test exists for, are unchanged.
                 [/this\._partialText = d\.text\.trim\(\)/.test(vb2),
-                 /const det = scriptLangOf\(src\) \|\| romanLangOf\(src, this\.s\.lang\)/.test(vb2),
+                 /const det = devEnglishLangOf\(src, this\.s\.lang\) \|\| scriptLangOf\(src\) \|\| romanLangOf\(src, this\.s\.lang\)/.test(vb2),
                  /onCustomer\(text, sttLang\)/.test(vb2),
-                 /\(sttLang && sttLang !== this\.s\.lang \? sttLang : null\) \|\| scriptLangOf\(text\)/.test(vb2),
+                 /\(sttLang && sttLang !== this\.s\.lang \? sttLang : null\) \|\| devEnglishLangOf\(text, this\.s\.lang\) \|\| scriptLangOf\(text\)/.test(vb2),
                  /pending\.join\(' '\)/.test(vb2),
                  // fast lane (2026-09-02): exactly TWO flushes — first sentence immediately, the rest as one
                  (vb2.match(/type: 'flush'/g) || []).length === 2,
@@ -822,7 +954,14 @@ function check(name, got, want) {
                  /CLAUDE_ESCALATE_AT \|\| 2/.test(vb2),
                  /const DISTRESS_RX = /.test(vb2),
                  /brain escalated to/.test(vb2),
-                 /cache_control: \{ type: 'ephemeral' \}/.test(vb2),
+                 // The cache now carries an explicit TTL. On the default 5-minute window every call
+                 // starting more than five minutes after the last one was a cache MISS, so the whole
+                 // system prompt was re-read before the first token — latency the customer paid on
+                 // their first question, every call. An hour spans the real gap between calls, and the
+                 // beta header must ride along or the ttl field is silently ignored.
+                 /cache_control: \{ type: 'ephemeral', ttl: CACHE_TTL\(\) \}/.test(vb2)
+                    && /'anthropic-beta': 'extended-cache-ttl-2025-04-11'/.test(vb2)
+                    && /CLAUDE_CACHE_TTL \|\| '1h'/.test(vb2),
                  /e\.spoke\) throw e/.test(vb2),
                  /claude brain failed — sarvam fallback:/.test(vb2),
                  /chatStream\(messages, prompt, say, abort\.signal, brainModel, \(this\.s\.claudeUsage/.test(vb2),
@@ -878,17 +1017,17 @@ function check(name, got, want) {
             // courier team schedules it; "kab tak aayega?" gets the courier-team assurance, spoken
             // in the language the customer asked in (a Hindi question never gets an English answer).
             check('voice speech 2026-09-02: short product names; NO time question ever; kab-tak-aayega → courier-team assurance in the asker\'s language; closing matches the conversation language',
-                [/spoken "Acne Relief Face Wash"/.test(vb2), /never "2% Salicylic Acid \+ Niacinamide Acne Relief Face Wash"/.test(vb2),
-                 /NEVER ask for a preferred delivery time/.test(vb2),
+                [hasRule('product-short-name'), hasRule('product-short-name'),
+                 hasRule('no-delivery-slot'),
                  /raise कर देंगे और जल्द से जल्द delivery करवाने की कोशिश करेंगे/.test(vb2),
-                 /NEVER answer a Hindi question in English/.test(vb2),
-                 /NEVER ask for a delivery time or enumerate slots/.test(vb2),
-                 /An English goodbye on a Hindi conversation is a mismatch/i.test(vb2)],
+                 hasRule('arrival-assurance'),
+                 hasRule('no-delivery-slot'),
+                 hasRule('closing-their-language')],
                 [true, true, true, true, true, true, true]);
             check('voice empathy 2026-09-02: trouble acknowledged FIRST in their language; expectation set unasked; one language per sentence',
-                [/EMPATHY: when the customer voices trouble/.test(vb2),
-                 /SET THE EXPECTATION UNASKED/.test(vb2),
-                 /ONE language per sentence/.test(vb2)],
+                [hasRule('empathy-first'),
+                 hasRule('empathy-set-expectation'),
+                 hasRule('one-language-per-sentence')],
                 [true, true, true]);
             // Malayalam call, 2026-09-02: the agent asked to confirm a HALLUCINATED phone number
             // ("9876543210 ആണോ?"). Facts discipline is now a hard prompt rule.
@@ -950,8 +1089,8 @@ function check(name, got, want) {
                  /bare greetings are not engagement/.test(vb2)],
                 [true, true, true]);
             check('voice facts discipline: only prompt-given facts may be spoken; phone numbers never stated or confirmed',
-                [/FACTS DISCIPLINE: the ONLY customer facts/.test(vb2),
-                 /NEVER state, invent or ask to confirm a phone number/.test(vb2)],
+                [hasRule('facts-only-written'),
+                 hasRule('facts-no-phone')],
                 [true, true]);
             // Angry-call review 2026-09-02: "बार-बार" (hyphen), "जबरदस्ती", "again and again" all
             // dodged the distress net; and a Sarvam summarizer failure left a call with no RESULT line.
@@ -979,33 +1118,303 @@ function check(name, got, want) {
             // beat the buried ban) — the address step is now CONDITIONAL inside the strict order
             // itself; and want-it rewordings now count toward the twice-per-call cap.
             check('voice latency 2026-09-02: first-sentence fast lane + 550ms VAD endpointing',
-                [/let firstFlushed = false/.test(vb2), /silence_duration_ms=550/.test(vb2),
+                // The endpointing values moved out of the URL literal and into env-tunable helpers on
+                // 2026-09-04, so the right values could be found on real calls without a deploy. The
+                // 550ms default is unchanged — pin the default, not the literal query string.
+                [/let firstFlushed = false/.test(vb2), /VOBIZ_STT_SILENCE_MS \|\| 400/.test(vb2),
                  /firstFlushed = true; sentAny = true/.test(vb2)],
                 [true, true, true]);
             // The escalation's first live firing (2026-09-02) hit "temperature is deprecated" on
             // claude-sonnet-5 — those turns silently ran on Sarvam. No temperature in Claude calls;
             // noise blips (min_speech 300ms + 300ms sustained barge-in) can't chop the agent.
             check('voice noise+sonnet 2026-09-02: no temperature in Claude bodies; 300ms min-speech; sustained barge-in',
-                [/no `temperature`: Claude 5 models reject it/.test(vb2) && /model, stream: true, max_tokens: 200,\n/.test(vb2), /min_speech_duration_ms=300/.test(vb2),
+                // min-speech rose 300 -> 400 on 2026-09-04 and became env-tunable, in the same change
+                // that finally set the VAD threshold: a blip must not be a turn. Pin the new floor.
+                [/no `temperature`: Claude 5 models reject it/.test(vb2) && /model, stream: true, max_tokens: 200,\n/.test(vb2), /VOBIZ_MIN_SPEECH_MS \|\| 500/.test(vb2),
                  /_bargeTimer/.test(vb2), !/temperature, \.\.\.\(system/.test(fs.readFileSync(path.join(ROOT, 'app/api/ai.js'), 'utf8'))],
                 [true, true, true, true]);
+            // TWO-STAGE BARGE-IN (user, 2026-09-04: "hmm, hello, envroment noise is overlap and agent
+            // stop … transcript received complete but voice record is too short"). VAD hears SOUND, so
+            // 300ms of energy alone used to wipe Vobiz's buffer mid-sentence: the text was generated and
+            // logged in full while the caller heard half of it. The gap between transcript and recording
+            // WAS this bug. A partial now decides — backchannel stands the barge down, real words cut
+            // immediately — with sustained sound as a slow fallback. If stage two is ever lost, every
+            // "hmm" starts chopping her again.
+            check('barge-in stage 2: a partial decides — backchannel lets her finish, real words cut instantly',
+                [/const BACKCHANNEL_RX/.test(vb2), /this\._bargePending = true;/.test(vb2),
+                 /backchannel while speaking — not a barge-in/.test(vb2),
+                 /if \(this\.vadActive && this\._bargePending && !this\.closed\) this\.bargeIn\(\);/.test(vb2),
+                 /BARGE_MS\(\)/.test(vb2)],
+                [true, true, true, true, true]);
+            {
+                {
+                    // ONLY SUSTAINED VOICE CUTS HER OFF. Text no longer triggers a barge-in at all —
+                    // it can only stand one down. This STT invents whole sentences from line noise
+                    // ("Sophisticated need launch question", "Suppose the loan is available"), and
+                    // raising the length bar from three letters to eight changed nothing because the
+                    // hallucinations are full sentences. Eleven barge-ins in one call while the
+                    // customer was saying "मैंने कुछ भी नहीं बोला है अभी तक" (2026-09-04). Voice held
+                    // for BARGE_MS is the one signal a hallucination cannot fake.
+                    const BC = RXof(vb2, "BACKCHANNEL_RX");
+                    const CO = RXof(vb2, "CONTINUE_RX");
+                    // Every utterance now either stands the barge down, or waits for sustained voice.
+                    const standsDown = (t) => BC.test(t) || CO.test(t);
+                    const shouldStandDown = ['hmm', 'हाँ', 'जी बोलिए', 'ok',
+                        'I am listening, tell me, tell me complete your sentence.'];
+                    const shouldNot = ['मुझे नहीं चाहिए, cancel कर दीजिए', 'But which order, I dont remember.',
+                        'Sophisticated need launch question.', 'Suppose the loan is available'];
+                    check('barge-in: only sustained voice cuts her off — invented text never does',
+                        [shouldStandDown.filter(t => !standsDown(t)).join(' | '),
+                         shouldNot.filter(t => standsDown(t)).join(' | '),
+                         // the text-triggered cut is gone entirely
+                         !vb2.includes('length >= 8) {'),
+                         vb2.includes('if (this.vadActive && this._bargePending && !this.closed) this.bargeIn();')],
+                        ['', '', true, true]);
+                    // And when a barge-in DOES happen she finishes the sentence already leaving her
+                    // mouth: clearAudio wiped Vobiz's buffer mid-WORD, which is the whole reason the
+                    // recording never matched the transcript (user: "she must finish her sentence").
+                    check('barge-in never cuts her mid-word — the buffered sentence still plays',
+                        [!/event: 'clearAudio'/.test(vb2),
+                         /finishing the current sentence first/.test(vb2)],
+                        [true, true]);
+                }
+                const RX = eval(vb2.match(/const BACKCHANNEL_RX = (\/.*\/i);/)[1]);
+                const letFinish = ['hmm', 'हम्म', 'haan', 'हाँ', 'ok', 'yes', 'ya', 'जी', 'अच्छा', 'hello', 'ठीक'];
+                const mustCut = ['हाँ बोलिए', 'रुकिए', 'मुझे नहीं चाहिए', 'haan lekin', 'no i dont want', 'cancel कर दो', 'ok but when'];
+                check('barge-in stage 2: fillers let her finish, real sentences still cut her off',
+                    [letFinish.filter(t => !RX.test(t)).join(','), mustCut.filter(t => RX.test(t)).join(',')],
+                    ['', '']);
+            }
+            {
+                // THE LANGUAGE SWITCH WAS ONE-DIRECTIONAL (user, 2026-09-04: "why she not switch
+                // language when customer clear speaking english"). romanLangOf covered Hindi typed in
+                // Latin during an English call; nothing covered the mirror, which is the case that
+                // actually happens: in Hindi mode Sarvam TRANSLITERATES English into Devanagari, so
+                // "OK but I want my expected time" arrives as "ओके, बट आई वांट फ्रॉम माय एक्सपेक्टेड टाइम"
+                // and the script check calls it Hindi. Detection must therefore run BEFORE scriptLangOf.
+                check('language switch: Devanagari-written English is detected, and checked before the script test',
+                    [/function devEnglishLangOf/.test(vb2),
+                     /devEnglishLangOf\(src, this\.s\.lang\) \|\| scriptLangOf\(src\)/.test(vb2),
+                     /devEnglishLangOf\(text, this\.s\.lang\) \|\| scriptLangOf\(text\)/.test(vb2)],
+                    [true, true, true]);
+                // Exercised on the REAL lines from call 827a4a27, both directions. The Hindi veto is the
+                // half that matters most: one English word inside a Hindi sentence is not a switch, and
+                // flipping the call to English there would strand a Hindi-speaking customer.
+                const EN = eval(vb2.match(/const DEV_EN_RX = (\/.*\/g);/)[1]);
+                const HI = eval(vb2.match(/const DEV_HI_RX = (\/.*\/g);/)[1]);
+                // A COMPLETE SENTENCE, not a word count. Counting markers alone made the switch
+                // inconsistent (user, 2026-09-04): "व्हाट इज द ऑर्डर?" is three English words tossed
+                // into a Hindi call by a Hinglish speaker, and it flipped the whole conversation.
+                // Five words, mostly English, Hindi veto intact — the two short Hinglish phrases that
+                // caused the complaint are the cases that must NOT switch.
+                const det = (t) => { const en = (t.match(EN) || []).length, hi = (t.match(HI) || []).length;
+                    const w = t.trim().split(/\s+/).filter(Boolean).length;
+                    return (w >= 5 && en >= 3 && en > hi * 2) ? 'en-IN' : null; };
+                const cases = [
+                    ['ओके, बट आई वांट फ्रॉम माय एक्सपेक्टेड टाइम।', 'en-IN'],
+                    ['आई विल नॉट जस्ट आस्किंग फॉर द व्हाट इज द टाइम व्हिच आई रिसीव', 'en-IN'],
+                    ['ये टायर ओनली रिसीव बट व्हाट इज द एस्टिमेटेड टायर व्हिच आर रि', 'en-IN'],
+                    ['आई जस्ट वांट टू नो वेरी क्लियर।', 'en-IN'],
+                    // short Hinglish must NOT flip the call — these are the ones that did
+                    ['व्हाट इज द ऑर्डर?', null],
+                    ['यस, टेल मी।', null],
+                    ['हाँ मेरी बात है जी, बट क्यों नहीं हो पाया?', null],
+                    ['मैं आपको exact reason कह रहा हूँ कि ऑर्डर नहीं मिल रहा है।', null],
+                    ['आज मैं बोल रहा हूँ कि व्हाट इज द एक्सपर्ट से तो मेन में टू य', null],
+                    ['हाँ हाँ रही है तो ये है।', null],
+                ];
+                check('language switch: real transliterated-English lines switch, Hindi-with-loanwords does not',
+                    [cases.filter(([t, want]) => det(t) !== want).map(([t]) => t.slice(0, 24)).join(' | ')], ['']);
+            }
+            {
+                // SHE MUST NEVER ASK THE CUSTOMER TO PICK A DELIVERY SLOT. The prompt has forbidden it
+                // for days and she did it twice in one call anyway (2026-09-04) — "आपके लिए कौनसा time
+                // सही रहेगा — सुबह या शाम?" — because the customer kept pressing about timing and
+                // offering a slot feels helpful. It is not: the courier schedules delivery, so a slot
+                // she agrees to is a promise the company never made. Third rule this week that needed
+                // enforcing in code rather than asking, so the sentence is dropped before synthesis.
+                const RX = eval(vb2.match(/const SLOT_RX = (\/.*\/i);/)[1]);
+                // Every slot question she has ACTUALLY produced on a live call, including "कब घर पर
+                // रहेंगे?" — she rephrased around the first version of this pattern on the very next
+                // call by dropping the time-word. Asking when they will be available IS asking for a
+                // slot, whatever noun it uses.
+                const mustDrop = ['आपके लिए कौनसा time सही रहेगा — सुबह या शाम?', 'क्या सुबह का time ठीक रहेगा आपके लिए?',
+                    'क्या मैं जान सकती हूँ आपको कौनसा समय सही रहेगा?', 'What time works for you?', 'Would morning or evening suit you?',
+                    'क्या आप बताइएगा कि आप कब घर पर रहेंगे?', 'When will you be at home?'];
+                // The two-minute question is REQUIRED and contains no time word; the rest are ordinary
+                // lines. Over-blocking here would silence the call, so both directions are pinned.
+                const mustKeep = ['क्या आपके पास दो मिनट हैं?', 'क्या आप इसे अभी भी receive करना चाहेंगे?',
+                    'हमारी team दुबारा delivery arrange कर देगी।', 'माफ़ कीजिए, आपकी आवाज़ ठीक से नहीं आई — दोबारा बताइएगा?',
+                    'हमारी team आपसे contact करके delivery का समय confirm कर लेगी।'];
+                check('no delivery slot: timing questions are dropped before synthesis, normal lines untouched',
+                    [mustDrop.filter(t => !RX.test(t)).join(' | '), mustKeep.filter(t => RX.test(t)).join(' | '),
+                     /delivery-time question dropped \(the courier team schedules\)/.test(vb2)],
+                    ['', '', true]);
+                // THE TRANSCRIPT MUST BE WHAT SHE SAID, NOT WHAT THE MODEL WROTE. It used to be the raw
+                // model output, so a sentence a guard had dropped still appeared word for word — which
+                // twice made a working guard look broken and a chopped sentence look whole. The audit
+                // and the self-learning loop read this transcript; studying unspoken words teaches the
+                // wrong lesson. Dropped lines are kept, but clearly marked as never spoken.
+                check('transcript fidelity: it records the spoken turn, and marks blocked lines as not spoken',
+                    [/const spokenTurn = \(this\._spokenThisTurn \|\| \[\]\)\.join\(' '\)\.trim\(\)/.test(vb2),
+                     /this\.s\.transcript\.push\('Agent: ' \+ \(spokenTurn \|\| text\)\)/.test(vb2),
+                     /\[not spoken — blocked by rule\]/.test(vb2),
+                     /this\._spokenThisTurn = \[\]; this\._droppedThisTurn = \[\];/.test(vb2)],
+                    [true, true, true, true]);
+            }
+            {
+                // THE REGISTRY'S DISCIPLINE, ENFORCED. The rules had grown into eight paragraph blocks
+                // holding 52 directives, and the calls showed the result: a different rule slipping
+                // every call, never the same one twice. Splitting them fixed that — these checks are
+                // what stop them growing back. Every one of them failing means the next rule was added
+                // the old way (user, 2026-09-04: "new rule addtion will be same optimise").
+                const { RULES: RG, renderRules: RR } = require(path.join(ROOT, 'app/api/agent_rules.js'));
+                const ids = RG.map(r => r.id);
+                check('rule registry: every rule is one short imperative with a unique id',
+                    [RG.filter(r => !r.id || !r.text || !r.sev || !r.when).map(r => r.id || '(no id)').join(','),
+                     ids.length - new Set(ids).size,
+                     // one line, not a paragraph — the whole point of the restructure
+                     RG.filter(r => r.text.split(/\s+/).length > 20).map(r => r.id).join(','),
+                     RG.filter(r => !['critical', 'high', 'normal'].includes(r.sev)).map(r => r.id).join(',')],
+                    ['', 0, '', '']);
+                // Criticals repeat at the end because a model follows the last thing it read most
+                // reliably. If the tail ever stops carrying them, that recency win is silently gone.
+                const rendered = RR({ ctx: {}, lang: 'hi-IN' }, { lang: 'Hindi', closing: 'X', agent: 'Kavya', forms: 'F' });
+                const crit = RG.filter(r => r.sev === 'critical' && r.when === 'always');
+                check('rule registry: critical rules repeat in the closing hard-limits block',
+                    [crit.every(r => rendered.tail.includes(r.text.replace(/\{lang\}/g, 'Hindi').replace(/\{closing\}/g, 'X'))),
+                     rendered.tail.startsWith('\nHARD LIMITS')],
+                    [true, true]);
+                // Placeholders must all resolve, or a rule reaches the model reading "{lang}".
+                check('rule registry: every placeholder resolves at render time',
+                    [(rendered.body + rendered.tail).match(/\{[a-z]+\}/gi) || []], [[]]);
+                // Only what this turn needs is rendered. If `when` collapses to always-everything, the
+                // prompt goes back to carrying address rules on addressless calls and product rules on
+                // calls where nobody asked about a product.
+                const wide = RR({ ctx: { address: 'x' }, lang: 'hi-IN', screenerSeen: true, productAsked: true });
+                check('rule registry: only the rules this turn needs are rendered',
+                    [rendered.count < wide.count, rendered.count > 40], [true, true]);
+            }
+            // NOISE MUST NOT BECOME A CUSTOMER TURN (user, 2026-09-04: "outside evroment noise cuper
+            // and added in transcript very bad"). Sarvam's `threshold` is VAD sensitivity and we had
+            // never set it, so every call ran at its 0.3 default — tuned for a whisper. A TV or a fan
+            // cleared that bar, opened a turn, and was invented into real-looking Hindi ("सुधा तागी"),
+            // which the agent then answered. There is NO confidence score in the response, so this
+            // cannot be filtered afterwards; if the parameter goes missing the room is back in the call.
+            // THE SILENCE CLOCK MEASURES SILENCE, NOT THE CALL. It ran from startedAt, so her own
+            // 6-8 second opening consumed half the 15-second budget and the customer had roughly
+            // seven seconds to react before being hung up on (user, 2026-09-04: "what is this call
+            // cut in just 15 second"). A customer who simply listens to the greeting must never be
+            // treated as absent, so the countdown starts when her audio stops.
+            check('the no-response timeout counts silence after she stops speaking, not from connect',
+                [/const since = Math\.max\(this\.startedAt, this\.audioEndsAt \|\| 0\);/.test(vb2),
+                 /const el = Date\.now\(\) - since;/.test(vb2),
+                 !/const el = Date\.now\(\) - this\.startedAt;/.test(vb2),
+                 // the three budgets themselves are unchanged: screener 60s, heard-a-voice 30s, else 15s
+                 /this\.screenerSeen \? 60000 : this\.sawVoice \? 30000 : 15000/.test(vb2)],
+                [true, true, true, true]);
+            // THE QUIET-LINE GATE. VAD tuning could never fix this: VAD decides whether there is
+            // SOUND, and the STT then invents whole sentences from that sound — "जो कृष्णा की देवी है,
+            // वो हमारे शिव में छिल्ला है।" while the customer said nothing at all (2026-09-04: "it
+            // received outside noise instead of my voice"). The one signal that separates a person
+            // from a hallucination is how loud the audio was, and the raw frames are in feedCaller.
+            // Every final logs its peak so the floor is calibrated from real calls, not guessed.
+            check('stt noise: an utterance is judged on how loud its audio actually was, not just VAD',
+                [/const MIN_PEAK = \(\) => Number\(process\.env\.VOBIZ_MIN_PEAK \|\| 3000\)/.test(vb2),
+                 /if \(peak > \(this\._uttPeak \|\| 0\)\) this\._uttPeak = peak;/.test(vb2),
+                 /background, not the caller/.test(vb2),
+                 // measured per utterance — one loud moment must not vouch for a later quiet one
+                 /this\._uttPeak = 0;   \/\/ this utterance is measured on its own audio/.test(vb2),
+                 // and the peak is logged on EVERY final, or the floor can never be calibrated
+                 /this\.log\(`heard \(peak \$\{peak\}\)/.test(vb2)],
+                [true, true, true, true, true]);
+            check('stt noise: VAD sensitivity is set explicitly and never left on the whisper-level default',
+                [/threshold=\$\{VAD_THRESHOLD\(\)\}/.test(vb2),
+                 /VOBIZ_VAD_THRESHOLD \|\| 0\.75/.test(vb2),
+                 /VOBIZ_MIN_SPEECH_MS \|\| 500/.test(vb2)],
+                [true, true, true]);
+            // And she must never AGREE with what she could not understand: emphatic validation of a
+            // sentence the customer never said is worse than silence. Rule in the prompt, cap in code.
+            check('unclear input: she asks for a repeat instead of validating, and the opener is capped in code',
+                [hasRule('noise-is-not-speech'), hasRule('noise-never-validate'),
+                 /const VALIDATION_RX/.test(vb2), /this\._validationUsed/.test(vb2),
+                 /validation opener already used this call — trimmed/.test(vb2)],
+                [true, true, true, true, true]);
+            {
+                // Exercised, not just grepped — the trim must remove the tic and KEEP the sentence's
+                // real content, including when she addresses the customer by name first.
+                const RX = eval(vb2.match(/const VALIDATION_RX = (\/.*\/);/)[1]);
+                const trim = (t) => t.replace(RX, '').replace(/^[\s,।.-]+/, '').trim();
+                check('unclear input: the validation trim keeps the sentence it was attached to',
+                    [RX.test('आप बिल्कुल सही कह रहे हैं। क्या आप इसे receive करना चाहेंगे?'),
+                     RX.test('जी Sugandh ji, आप बिल्कुल सही कह रहे हैं।'),
+                     RX.test('क्या आप इसे अभी भी receive करना चाहेंगे?'),
+                     trim('आप बिल्कुल सही कह रहे हैं। क्या आप इसे receive करना चाहेंगे?')],
+                    [true, true, false, 'क्या आप इसे receive करना चाहेंगे?']);
+            }
+            // SHE FINISHES THE INTRO AND THE NEWS (same report: "make she will fini even customer said
+            // anything on that time"). Half a greeting is what makes a customer say "hello?" — which
+            // then cut her again. Protection is bounded: only the first two turns, only while her audio
+            // is still draining, so ordinary conversation keeps full barge-in.
+            check('intro protection: the opening two turns play to the end, then normal barge-in resumes',
+                [/if \(this\.introPhase && Date\.now\(\) < \(this\.audioEndsAt \|\| 0\)\)/.test(vb2),
+                 /interrupted during the introduction — finishing the line first/.test(vb2),
+                 /agentTurnDone\(\)/.test(vb2), /this\._agentTurns >= 2/.test(vb2),
+                 /introduction complete — normal turn-taking resumes/.test(vb2)],
+                [true, true, true, true, true]);
+            // agentTurnDone must be called on BOTH real agent turns — the pre-synthesized opening and
+            // the streamed reply — or introPhase never clears and she becomes uninterruptible all call.
+            check('intro protection: both agent turn paths count, so the flag always clears',
+                [(vb2.match(/this\.agentTurnDone\(\);/g) || []).length], [2]);
+            {
+                // THE AUDIT RUNS ON THE MAX PLAN, THE CALL BRAIN DOES NOT (user, 2026-09-04: "for call
+                // kind of anyalsis use calude code max plan and only for brain use clause api").
+                // Two halves, and both matter: the audit must reach Claude Code, and it must NOT heal
+                // itself by quietly billing the API — that failure mode is invisible until the invoice.
+                // The live bridge must keep its own API path, because a phone call cannot wait on a CLI.
+                const ci = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_insights.js'), 'utf8');
+                const cc = fs.readFileSync(path.join(ROOT, 'app/api/claude_code.js'), 'utf8');
+                check('call audit: runs on Claude Code, and refuses to bill the API unless explicitly allowed',
+                    [/require\('\.\/claude_code'\)\.askClaudeCode\(ASK/.test(ci),
+                     /CALL_INSIGHTS_ALLOW_API/.test(ci),
+                     /if \(!allowApi\) \{/.test(ci),
+                     ci.indexOf('askClaudeCode') < ci.indexOf('api.anthropic.com')],
+                    [true, true, true, true]);
+                // The prompt is tens of kilobytes of transcripts; argv would truncate it on Windows at
+                // ~32k and the audit would silently analyse only part of the period.
+                check('call audit: the prompt goes over stdin, and the CLI runs tool-free outside the repo',
+                    [/p\.stdin\.write\(prompt\)/.test(cc), /cwd: os\.tmpdir\(\)/.test(cc), /shell: true/.test(cc)],
+                    [true, true, true]);
+                // Claude Code ranks ANTHROPIC_API_KEY ABOVE the subscription token, and with -p it uses
+                // the key whenever it is present. A stray key in the host environment would therefore
+                // send every audit back to the paid API with nothing in the logs to show it. Both spawn
+                // sites must run with those variables stripped, or "runs on the Max plan" is not true.
+                check('call audit: the API key is stripped from the CLI environment, so the Max plan is really used',
+                    [/delete env\.ANTHROPIC_API_KEY;/.test(cc), /delete env\.ANTHROPIC_AUTH_TOKEN;/.test(cc),
+                     (cc.match(/env: childEnv\(\)/g) || []).length],
+                    [true, true, 2]);
+                // The live call brain must NOT have been moved to the CLI along with the audit.
+                check('call brain stays on the API — a phone call cannot wait for a CLI to start',
+                    [/api\.anthropic\.com/.test(vb2), /claude_code/.test(vb2)],
+                    [true, false]);
+            }
             check('voice call-20 rules: address step exists ONLY when an address is written; want-it cap counts any wording',
                 [/the address step EXISTS ONLY IF a delivery address is written above/.test(vb2),
                  /NO address question of ANY kind, ever/.test(vb2),
                  /in ANY wording \("receive करना चाहेंगे\?", "दुबारा भेज देने दें\?"/.test(vb2)],
                 [true, true, true]);
             check('voice call-19 rules: no unauthorized promises; addressless call never mentions an address; no arranging before a yes; want-it asked at most twice; validation openers vary',
-                [/NEVER promise refunds, compensation, discounts or replacements/.test(vb2),
-                 /the address does not exist for this call/.test(vb2),
-                 /NEVER announce that you are re-sending or arranging the order before the customer/.test(vb2),
+                [hasRule('facts-no-promises'),
+                 hasRule('address-absent'),
+                 hasRule('facts-no-action-before-yes'),
                  /ASKED AT MOST TWICE IN THE WHOLE CALL/.test(vb2),
-                 /never the same validation opener twice in a row/.test(vb2)],
+                 hasRule('empathy-no-repeat')],
                 [true, true, true, true, true]);
             check('voice call-18 fixes: pressed-again goes DEEPER with facts (never "not recorded" when one exists); no invented address step; end-on-request honored mechanically; no speculation; no fabricated confirmations',
                 [/go DEEPER using COURIER’S FAILURE REASON and CALL FACTS/.test(vb2),
                  /is LYING and forbidden/.test(vb2),
                  /never build one from a city or destination/.test(vb2),
-                 /THE CUSTOMER HAS ASKED TO END THE CALL/.test(vb2),
+                 hasRule('end-requested'),
                  /this\.s\.endRequested = true/.test(vb2),
                  /NEVER speculate about what the customer was doing/.test(vb2),
                  /NEVER claim the customer confirmed something they did not/.test(vb2),
@@ -1019,16 +1428,22 @@ function check(name, got, want) {
                  /ANSWER MATERIAL ONLY/.test(vb2), /A customer who asks nothing hears NONE of this/.test(vb2)],
                 [true, true, true, true, true, true]);
             check('voice overlap+privacy: barge-in keys on the drain clock; address enters the prompt only on address-type NDR reasons',
-                [/this\._bargeTimer = setTimeout\(\(\) => \{ if \(this\.vadActive && !this\.closed\) this\.bargeIn\(\); \}, 300\)/.test(vb2),
+                // The drain clock is now the ONLY thing that arms a barge-in. `this.speaking` used to
+                // be part of it, but that turns true when a turn STARTS — while she is still thinking
+                // and has said nothing. Barging in then aborted the turn before a word played and the
+                // customer heard silence, asking "क्यों तुम स्टॉप कर रहे हो?" (2026-09-04). There is
+                // nothing to interrupt until there is audio on the line.
+                [/if \(Date\.now\(\) < \(this\.audioEndsAt \|\| 0\)\) \{/.test(vb2)
+                    && !/if \(this\.speaking \|\| Date\.now\(\) </.test(vb2),
                  /premises\|location\|unlocatable\|not found\|incorrect\|incomplete\|wrong/.test(vb2),
                  /privacy by default/.test(vb2)],
                 [true, true, true]);
-            check('voice drain clock: queued audio extends audioEndsAt; hangup and goodbye-cut wait for it; barge-in resets it; voicemail/silent cuts stay instant (force)',
+            check('voice drain clock: queued audio extends audioEndsAt; hangup and goodbye-cut wait for it; barge-in lets the sentence finish; voicemail/silent cuts stay instant (force)',
                 [/this\.audioEndsAt = Math\.max\(this\.audioEndsAt \|\| Date\.now\(\), Date\.now\(\)\) \+ Math\.round\(buf\.length \/ 48\)/.test(vb2),
                  /hangup\(delayMs, force\)/.test(vb2),
                  /const drain = force \? 0 : Math\.max\(0, \(this\.audioEndsAt \|\| 0\) - Date\.now\(\) \+ 400\)/.test(vb2),
                  /goodbye still PLAYING/.test(vb2),
-                 /this\.audioEndsAt = Date\.now\(\);\s*\/\/ clearAudio empties/.test(vb2) || /clearAudio empties Vobiz's buffer/.test(vb2),
+                 /this\.audioEndsAt = Date\.now\(\);\s*\/\/ clearAudio empties/.test(vb2) || /finishing the current sentence first/.test(vb2),
                  /this\.hangup\(200, true\)/.test(vb2), /this\.hangup\(500, true\)/.test(vb2)],
                 [true, true, true, true, true, true, true]);
             check('voice lang direct-switch 2026-09-02: the offer machinery is out of the flow; roman lexicon covers kabhi/bhej/dijiye',
@@ -1047,7 +1462,7 @@ function check(name, got, want) {
             // mid-Hindi-call. All four are prompt rules now.
             check('voice rto call-12 rules: want-it settled by any yes; pressed-again reason varies; language is FINAL after switch; courier line in the call language',
                 [/SETTLED BY ANY CLEAR YES/.test(vb2), /press AGAIN for the failure reason/.test(vb2),
-                 /gets no language question back/.test(vb2), /हमारे delivery partner के अनुसार/.test(vb2)],
+                 hasRule('lang-final'), /हमारे delivery partner के अनुसार/.test(vb2)],
                 [true, true, true, true]);
             {
                 // ai.js speaks Claude too (2026-09-01, Gemini free-tier 429s): api.anthropic.com in
@@ -1067,12 +1482,14 @@ function check(name, got, want) {
                         && !rx.test('haan main busy hoon abhi') && !rx.test('yes I placed the order'); })()],
                 [true, true, true]);
             check('voice tone: no exclamation ever reaches the synthesizer (reads as excitement) — closing is calm, sanitize strips "!"',
-                [/s = s\.replace\(\/!\+\/g, '\.'\)/.test(vb2), /Have a great day\."/.test(vb2),
-                 /spoken CALM and settled/.test(vb2)],
+                // The English closing line moved into the registry as the {closing} value, so it is no
+                // longer a literal in the prompt prose — search both.
+                [/s = s\.replace\(\/!\+\/g, '\.'\)/.test(vb2), /Have a great day\./.test(vb2 + REG.map(r => r.text).join('\n')),
+                 hasRule('closing-calm')],
                 [true, true, true]);
             check('voice call polish 2026-08-31: denial asks the reason once; other-language replies are never a direct outcome; recordings not capped at 60s',
-                [/May I know the reason please\?/.test(vb2), /DIFFERENT-LANGUAGE REPLY/.test(vb2),
-                 /no confirming, no cancelling, no reason-asking, no closing/.test(vb2),
+                [/May I know the reason please\?/.test(vb2), hasRule('lang-reply-not-final'),
+                 hasRule('lang-offer-only'),
                  /time_limit: 3600/.test(vb2)],
                 [true, true, true, true]);
             check('voice lang: translate offered whenever the transcript CONTAINS Indic text (an English call can end in Punjabi)',
@@ -1095,14 +1512,14 @@ function check(name, got, want) {
                 [true, true, true, true, true, false]);
             check('voice lang: romanized Hindi heard in English mode counts toward the offer/auto-switch; switched call never re-asks; detours resume where the flow stopped',
                 [/romanLangOf\(text, this\.s\.lang\)/.test(vb2), /ROMAN_HI_RX/.test(vb2),
-                 /the switch is ALREADY DONE/.test(vb2),
+                 hasRule('lang-never-reask'),
                  /return to the EXACT point where the call flow stopped/.test(vb2),
                  /even a "nothing" or a brush-off, settles it FOREVER/.test(vb2),
                  /deliver the WHOLE news line again/.test(vb2),
                  /WITHOUT re-reading the address/.test(vb2)],
                 [true, true, true, true, true, true, true]);
             check('voice tone 2026-09-01: level premium delivery — no expression peaks, no reading cadence',
-                [/energy stay LEVEL/.test(vb2), /never with a reading cadence/.test(vb2)],
+                [hasRule('level-tone'), hasRule('fresh-speech')],
                 [true, true]);
             // Recording download names (user, 2026-09-01): AWB_OrderID_VOC.mp3, no AWB → OrderID_VOC.mp3.
             {

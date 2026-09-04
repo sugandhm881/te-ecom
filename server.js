@@ -145,7 +145,12 @@ const { tokenRequired: _apiAuth, requirePermission } = require('./app/auth');
 // Microsoft's published signing keys and requires audience == our App ID before acting on anything.
 // ONLY the messaging endpoint is public — `/bot/health` reports configuration and stays behind our
 // own JWT. A blanket /bot/ exemption would have published that diagnostic to the internet.
-const PUBLIC_API = [/^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/, /^\/tally\/bridge\//, /^\/bot\/messages$/, /^\/vobiz\/(answer|hangup)$/];
+// /vobiz/local-test-call is exempt from the JWT, NOT from authorisation: it enforces its own four
+// gates in vobiz_auto_calls.js (an env flag this box sets and no server does — without which it 404s;
+// a real loopback socket; no forwarding header, since a proxy makes every VPS request look local; and
+// VOBIZ_RTO_ENABLED_TEST). It dials one named order and can never run a bulk tick. The permission-
+// gated /vobiz/rto-call-tick is untouched and remains the only way to dial from a browser.
+const PUBLIC_API = [/^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/, /^\/tally\/bridge\//, /^\/bot\/messages$/, /^\/vobiz\/(answer|hangup)$/, /^\/vobiz\/local-test-call$/];
 app.use('/api', (req, res, next) => {
     if (req.method === 'OPTIONS') return next();
     if (PUBLIC_API.some(rx => rx.test(req.path))) return next();
