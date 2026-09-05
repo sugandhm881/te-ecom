@@ -312,6 +312,22 @@ async function highValueCallTick(opts = {}) {
         let r;
         try { r = await placeOrderCall({ order_name: name, call_type: PURPOSE, auto: true }); }
         catch (e) { r = { error: e.message }; }
+        // A COLLISION IS NOT A FAILURE (user, 2026-09-05: "avoid overlapping"). claim() has already
+        // stamped this row 'calling' and appended an attempt, so marking it 'failed' would burn a real
+        // retry on a call we deliberately did not place. Put the row back exactly as it was and the
+        // next tick dials it normally — the customer is simply called a few minutes later, by
+        // whichever agent is not already on the phone with them.
+        if (r.busy) {
+            if (row) await supabase.from('vobiz_auto_calls_ecom')
+                .update({ status: row.status, attempts: row.attempts, last_attempt_at: row.last_attempt_at,
+                    next_attempt_at: row.next_attempt_at, attempt_log: row.attempt_log })
+                .eq('order_name', name).eq('purpose', PURPOSE);
+            else await supabase.from('vobiz_auto_calls_ecom')          // the row this tick itself created
+                .delete().eq('order_name', name).eq('purpose', PURPOSE).eq('status', 'calling').eq('attempts', 1);
+            console.log(`[Call] ${name}: deferred — ${r.error}`);
+            results.push({ order: name, deferred: r.error });
+            continue;
+        }
         if (r.gated) {
             gated++;
             await supabase.from('vobiz_auto_calls_ecom').update({ status: 'gated', detail: { gate: r.error }, phone: r.phone || null })
@@ -542,6 +558,22 @@ async function rtoCallTick(opts = {}) {
         try { r = await placeOrderCall({ order_name: name, call_type: 'rto_recovery', auto: true, test: !!opts.testOrder }); }
         catch (e) { r = { error: e.message }; }
         const ndrStamp = { ...((row && row.detail) || {}), ndr_no: t.ndr || rtoNdrNo(row) };
+        // A COLLISION IS NOT A FAILURE (user, 2026-09-05: "avoid overlapping"). claim() has already
+        // stamped this row 'calling' and appended an attempt, so marking it 'failed' would burn a real
+        // retry on a call we deliberately did not place. Put the row back exactly as it was and the
+        // next tick dials it normally — the customer is simply called a few minutes later, by
+        // whichever agent is not already on the phone with them.
+        if (r.busy) {
+            if (row) await supabase.from('vobiz_auto_calls_ecom')
+                .update({ status: row.status, attempts: row.attempts, last_attempt_at: row.last_attempt_at,
+                    next_attempt_at: row.next_attempt_at, attempt_log: row.attempt_log })
+                .eq('order_name', name).eq('purpose', RTO_PURPOSE);
+            else await supabase.from('vobiz_auto_calls_ecom')          // the row this tick itself created
+                .delete().eq('order_name', name).eq('purpose', RTO_PURPOSE).eq('status', 'calling').eq('attempts', 1);
+            console.log(`[Call] ${name}: deferred — ${r.error}`);
+            results.push({ order: name, deferred: r.error });
+            continue;
+        }
         if (r.gated) {
             gated++;
             await supabase.from('vobiz_auto_calls_ecom').update({ status: 'gated', detail: { ...ndrStamp, gate: r.error }, phone: r.phone || null })

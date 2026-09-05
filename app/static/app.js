@@ -4937,29 +4937,68 @@ function supAge(iso){ if(!iso) return '—'; const h=(Date.now()-new Date(iso).g
 async function supFetch(url, opts){ const r=await fetch(url,{...(opts||{}),headers:{'Content-Type':'application/json',...getAuthHeaders(),...((opts||{}).headers||{})}}); const d=await r.json().catch(()=>({})); if(!r.ok||d.success===false) throw new Error(d.error||d.message||('HTTP '+r.status)); return d; }
 
 // Shared date range (persisted) + a tiny picker rendered into each page header.
-let _supRange = (()=>{ try{ const s=JSON.parse(localStorage.getItem('support.dateRange')||'null'); if(s&&s.from&&s.to) return s; }catch(_){}
-  const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-14); return { from:_ymd(f), to:_ymd(d) }; })();
-function supRangeQS(){ return `from=${_supRange.from}&to=${_supRange.to}`; }
-function supRenderRange(containerId, onChange){
+// ── Support date ranges — ONE PER PANEL (user, 2026-09-05: "for Hold Order, Undelivered, and Status
+// Changes date filter should work separtly"). There used to be a single `_supRange` and a single
+// localStorage key behind every panel, so narrowing Undelivered to today silently narrowed Hold
+// Orders too, and going back re-ran a query nobody had asked to change. Each panel now keeps its own
+// range under its own key, and the queue's three tabs count as three panels because that is how they
+// are used — the same order sits in each for different reasons.
+const SUP_RANGE_DEFAULT_DAYS = 14;
+const _supRanges = {};
+function _supRangeKey(scope){ return 'support.dateRange.' + (scope || 'default'); }
+function supRangeFor(scope){
+  if (_supRanges[scope]) return _supRanges[scope];
+  try { const s = JSON.parse(localStorage.getItem(_supRangeKey(scope)) || 'null');
+        if (s && s.from && s.to) return (_supRanges[scope] = s); } catch (_) {}
+  // Falls back to the OLD shared key once, so nobody's saved range is lost on the day this ships.
+  try { const s = JSON.parse(localStorage.getItem('support.dateRange') || 'null');
+        if (s && s.from && s.to) return (_supRanges[scope] = s); } catch (_) {}
+  const d = new Date(), f = new Date(d.getFullYear(), d.getMonth(), d.getDate() - SUP_RANGE_DEFAULT_DAYS);
+  return (_supRanges[scope] = { from: _ymd(f), to: _ymd(d) });
+}
+// Kept for the panels that read the range without owning a picker; `_supRange` stays a live alias of
+// whichever panel rendered last so no existing caller had to change.
+let _supRange = supRangeFor('default');
+function supRangeQS(scope){ const r = scope ? supRangeFor(scope) : _supRange; return `from=${r.from}&to=${r.to}`; }
+// Presets are OFFSETS in days from today, except the two that name a single day or a short window.
+// "Yesterday" is a one-day window, not "since yesterday" — that distinction is the whole point of it.
+const SUP_PRESETS = [
+  ['0', 'Today', 0, 0], ['y', 'Yesterday', 1, 1], ['3', 'Last 3 days', 2, 0],
+  ['7', 'Last 7 days', 6, 0], ['14', 'Last 14 days', 13, 0], ['30', 'Last 30 days', 29, 0],
+];
+function supRenderRange(containerId, onChange, scope){
   const el=document.getElementById(containerId); if(!el) return;
+  scope = scope || 'default';
+  const r = supRangeFor(scope);
+  const save=()=>{ _supRanges[scope]=r; _supRange=r; localStorage.setItem(_supRangeKey(scope), JSON.stringify(r)); };
+  _supRange = r;
   el.innerHTML=`<div class="flex items-center gap-2 flex-wrap">
-    <select class="filter-select sup-preset"><option value="">Presets</option><option value="0">Today</option><option value="7">Last 7 days</option><option value="14">Last 14 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select>
-    <input type="date" class="filter-input sup-from" value="${_supRange.from}"><span class="text-slate-400">→</span>
-    <input type="date" class="filter-input sup-to" value="${_supRange.to}">
+    <select class="filter-select sup-preset"><option value="">Presets</option>${
+      SUP_PRESETS.map(([v,label])=>`<option value="${v}">${label}</option>`).join('')}</select>
+    <input type="date" class="filter-input sup-from" value="${r.from}"><span class="text-slate-400">→</span>
+    <input type="date" class="filter-input sup-to" value="${r.to}">
     <button class="filter-btn sup-apply">Apply</button></div>`;
-  el.querySelector('.sup-preset').addEventListener('change',e=>{ const n=e.target.value; if(n==='') return;
-    const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-(+n)); _supRange={from:_ymd(f),to:_ymd(d)};
-    localStorage.setItem('support.dateRange',JSON.stringify(_supRange)); onChange(); });
-  el.querySelector('.sup-apply').addEventListener('click',()=>{ _supRange={from:el.querySelector('.sup-from').value,to:el.querySelector('.sup-to').value};
-    localStorage.setItem('support.dateRange',JSON.stringify(_supRange)); onChange(); });
+  el.querySelector('.sup-preset').addEventListener('change',e=>{ const v=e.target.value; if(v==='') return;
+    const p=SUP_PRESETS.find(x=>x[0]===v); if(!p) return;
+    const d=new Date();
+    const from=new Date(d.getFullYear(),d.getMonth(),d.getDate()-p[2]);
+    const to=new Date(d.getFullYear(),d.getMonth(),d.getDate()-p[3]);
+    r.from=_ymd(from); r.to=_ymd(to);
+    el.querySelector('.sup-from').value=r.from; el.querySelector('.sup-to').value=r.to;
+    save(); onChange(); });
+  el.querySelector('.sup-apply').addEventListener('click',()=>{
+    const f=el.querySelector('.sup-from').value, t=el.querySelector('.sup-to').value;
+    if(!f||!t) return showNotification('Pick both dates',true);
+    if(f>t) return showNotification('The From date is after the To date',true);
+    r.from=f; r.to=t; save(); onChange(); });
 }
 
 // ── Support Dashboard ──────────────────────────────────────────────────────
 async function supDashInit(){
-  supRenderRange('sup-range-dash', supDashInit);
+  supRenderRange('sup-range-dash', supDashInit, 'dash');
   const k=document.getElementById('sup-kpis'); if(k) k.innerHTML='<div class="col-span-full">'+brandLoader()+'</div>';
   try{
-    const d=await supFetch('/api/support/summary?'+supRangeQS());
+    const d=await supFetch('/api/support/summary?'+supRangeQS('dash'));
     const tile=(label,val,sub)=>`<div class="card p-5"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">${label}</p><p class="text-2xl font-bold text-slate-800 mt-1">${val}</p>${sub?`<p class="text-[11px] text-slate-400 mt-0.5">${sub}</p>`:''}</div>`;
     k.innerHTML = tile('Total orders', d.kpis.totalOrders,'selected range')+tile('Calls today', d.kpis.callsToday,'today')+
       tile('Delivered today', d.kpis.deliveredToday,'today')+tile('Pending (undelivered)', d.kpis.pendingUndelivered,'selected range')+
@@ -4979,12 +5018,19 @@ async function supDashInit(){
 // ── Call Queue ─────────────────────────────────────────────────────────────
 let _supTab='und', _supQueueRows=[], _supCapped=false, _supTotal=0, _supQueueWired=false, _supSort=null;   // _supSort={k,d} set by clicking a column header
 function supQueueInit(){
-  supRenderRange('sup-range-queue', supLoadQueue);
+  supRenderRange('sup-range-queue', supLoadQueue, 'queue.'+_supTab);
   if(!_supQueueWired){ _supQueueWired=true;
-    document.querySelectorAll('.sup-tab').forEach(b=>b.addEventListener('click',()=>{ _supTab=b.dataset.tab; supTabPaint(); supLoadQueue(); }));
-    ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay','sup-f-platform','sup-f-raised','sup-f-status'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
+    // Each tab carries its own range, so the picker is re-rendered on every switch — Undelivered
+    // narrowed to today must not silently narrow Hold Orders.
+    document.querySelectorAll('.sup-tab').forEach(b=>b.addEventListener('click',()=>{ _supTab=b.dataset.tab; supTabPaint();
+      supRenderRange('sup-range-queue', supLoadQueue, 'queue.'+_supTab); supLoadQueue(); }));
+    ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay','sup-f-platform','sup-f-raised','sup-f-status','sup-f-calltype','sup-f-calldate','sup-f-callfrom','sup-f-callto'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
     document.getElementById('sup-f-notesearch')?.addEventListener('input', debounce(supQueueTable,250));
-    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay','sup-f-platform','sup-f-raised','sup-f-status'].forEach((id,i)=>{ const el=document.getElementById(id); if(el) el.value=['all','any','all','all','all','all','all'][i]; }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
+    // Defaults live WITH their control, not in a parallel array — the array had seven entries for
+    // eleven inputs, so every filter added since silently reset to undefined and only behaved by
+    // luck (an empty string happening to read as 'all' downstream).
+    const SUP_FILTER_DEFAULTS={'sup-f-notes':'all','sup-f-age':'any','sup-f-hold':'all','sup-f-pay':'all','sup-f-platform':'all','sup-f-raised':'all','sup-f-status':'all','sup-f-calltype':'all','sup-f-calldate':'all','sup-f-callfrom':'','sup-f-callto':''};
+    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ Object.entries(SUP_FILTER_DEFAULTS).forEach(([id,v])=>{ const el=document.getElementById(id); if(el) el.value=v; }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
     document.getElementById('sup-refresh')?.addEventListener('click', supRefreshTracking);
   }
   supTabPaint(); supLoadQueue();
@@ -4996,7 +5042,7 @@ function supSyncInfo(lock){ const el=document.getElementById('sup-sync-info'); i
   const res=lock.last_result||{}; el.textContent = lock.is_running?'Sync running…':(lock.last_finished_at?`Last sync ${new Date(lock.last_finished_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}${res.updated!=null?` · ${res.updated} updated`:''}`:''); }
 async function supLoadQueue(quiet){
   const c=document.getElementById('sup-queue-table'); if(c && !quiet) c.innerHTML=brandLoader('Loading queue…');
-  try{ _eeHoldAt=0; const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS()); await eeHoldRefresh(); _supQueueRows=d.rows||[]; _supCapped=!!d.capped; _supTotal=d.total||0; supSyncInfo(d.lock); supQueueTable(); }
+  try{ _eeHoldAt=0; const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS('queue.'+_supTab)); await eeHoldRefresh(); _supQueueRows=d.rows||[]; _supCapped=!!d.capped; _supTotal=d.total||0; supSyncInfo(d.lock); supQueueTable(); }
   catch(e){ if(c && !quiet) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }   // quiet poll error → keep showing current data
 }
 // Real-time-ish: quietly re-fetch the queue every 30s WHILE the support view is visible, so agents see
@@ -5106,14 +5152,186 @@ function supStatusChip(r){
             : /out for delivery/.test(l)                        ? 'bg-emerald-100 text-emerald-700'
             : /delay/.test(l)                                   ? 'bg-amber-100 text-amber-700'
             :                                                     'bg-slate-100 text-slate-600';
-  return `<span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold ${cls} whitespace-nowrap" title="${escapeHtml(raw)}">${escapeHtml(t)}</span>`;
+  // HOW MANY TIMES THE COURIER HAS TRIED (user, 2026-09-05: "show attempt count in status along with
+  // delivery status. Like OFD Completed 1, OFD Completed 2 … it should show on any status").
+  // `attempts` is the courier's own delivery-attempt count from the journey, so the number rides the
+  // status whatever that status happens to be — a second attempt is worth seeing on an Out-for-delivery
+  // row just as much as on an Undelivered one. Hidden at 0 and 1: "attempt 1" is simply the norm and
+  // a badge on every row would carry no information.
+  const n = Number(r.delivery_attempts || 0);
+  const att = n > 1
+    ? `<span class="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-[1.1rem] px-1 rounded-full bg-white/70 text-[10px] font-bold tabular-nums" title="Courier delivery attempt ${n}">${n}</span>`
+    : '';
+  return `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${cls} whitespace-nowrap" title="${escapeHtml(raw)}${n>1?` · attempt ${n}`:''}">${escapeHtml(t)}${att}</span>`;
+}
+// ── Call attempts on the row (user, 2026-09-05) ──────────────────────────────────────────────
+// The date/time of the LAST attempt, with an ℹ️ that opens every call this order ever received —
+// the AI ones from the call log, and the carrier's own per-dial record (ring seconds, hangup cause)
+// from the turnstile, which exists for dials that never produced a transcript at all.
+const SUP_CALL_KIND={ auto_ai:'Auto AI', manual_ai:'Manual AI', manual:'Manual' };
+// ── Manual call — a human agent, bridged through Vobiz (user, 2026-09-05) ────────────────────
+// Click-to-call, not a softphone: Vobiz rings the AGENT's own handset and only bridges the customer
+// once the agent answers. That ordering is the safety property — if nobody picks up here, the
+// customer's phone never rings at all.
+// The number is remembered per browser because an agent's handset does not change between calls, and
+// re-typing it on every dial is exactly the friction that makes people avoid the button.
+function supManualCallDialer(orderName){
+  document.getElementById('sup-dialer')?.remove();
+  const wrap=document.createElement('div'); wrap.id='sup-dialer';
+  // INLINE z-index, not a Tailwind class: z-[86] was never emitted into the compiled CSS, so it
+  // resolved to no z-index at all and this dialog opened UNDERNEATH the order-detail modal. The same
+  // trap is documented on supTrackOpen above — arbitrary z-[..] values only work if they were built.
+  wrap.className='fixed inset-0 flex items-center justify-center bg-slate-900/50 backdrop-blur-[2px] p-4';
+  wrap.style.zIndex='96';
+  // IT DOES NOT ASK FOR YOUR NUMBER (user, 2026-09-05: "why he asking for number enter manually").
+  // Every dashboard user already has a mobile on their profile and the server falls back to it, so
+  // the normal path is one click. The field only appears when the server says it has no number for
+  // you, or when you deliberately choose a different phone — being asked to retype your own mobile
+  // before every call is exactly the friction that stops people using the button.
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm">
+    <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+      <h3 class="font-semibold text-slate-800">📞 Manual call</h3>
+      <button class="text-slate-400 hover:text-slate-600 text-xl leading-none sup-d-x">&times;</button></div>
+    <div class="px-6 py-5 space-y-3">
+      <p class="text-sm text-slate-600">Calling about <span class="font-semibold">${escapeHtml(orderName)}</span>.</p>
+      <p class="text-[13px] text-slate-500">Your phone rings first. Answer it and you will be connected to the customer.</p>
+      <div class="sup-d-phonewrap hidden">
+        <label class="block text-xs font-semibold text-slate-500">Ring this number instead
+          <input class="filter-input w-full mt-1 sup-d-phone" type="tel" inputmode="numeric" placeholder="10-digit mobile"></label>
+      </div>
+      <div class="sup-d-state text-sm"></div>
+      <button class="filter-btn-primary w-full sup-d-go">Call now</button>
+      <button class="sup-d-other w-full text-[12px] text-slate-400 hover:text-slate-600">Use a different phone</button>
+    </div></div>`;
+  document.body.appendChild(wrap);
+  const close=()=>wrap.remove();
+  wrap.querySelector('.sup-d-x').addEventListener('click',close);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  const go=wrap.querySelector('.sup-d-go'), st=wrap.querySelector('.sup-d-state');
+  const pwrap=wrap.querySelector('.sup-d-phonewrap'), pin=wrap.querySelector('.sup-d-phone');
+  const other=wrap.querySelector('.sup-d-other');
+  const showField=(msg)=>{ pwrap.classList.remove('hidden'); other.classList.add('hidden');
+    pin.value=localStorage.getItem('support.agentPhone')||''; pin.focus();
+    if(msg) st.innerHTML=`<div class="rounded-lg bg-amber-50 border border-amber-100 p-2.5 text-amber-800 text-[13px]">${escapeHtml(msg)}</div>`; };
+  other.addEventListener('click',()=>showField(''));
+  go.addEventListener('click', async ()=>{
+    const typed=(pin.value||'').replace(/\D/g,'').slice(-10);
+    if(typed) localStorage.setItem('support.agentPhone', typed);
+    go.disabled=true; go.textContent='⏳ Ringing your phone…';
+    st.innerHTML='<span class="text-slate-500">Placing the call…</span>';
+    try{
+      const d=await supFetch('/api/vobiz/manual-call',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({order_name:orderName, agent_phone:typed||undefined})});
+      if(!d.success) throw new Error(d.error||'call failed');
+      go.textContent='Calling…'; other.classList.add('hidden');
+      showNotification('Ringing your phone — answer to connect');
+      // LIVE STATE, not a frozen "Calling…" (user, 2026-09-05: "call cut but showing calling").
+      // The server knows when the agent picked up and when either side hung up; without polling it
+      // the dialog claimed a call was still running long after it ended.
+      const paint=(state,secs)=>{
+        const mmss=`${String(Math.floor(secs/60)).padStart(2,'0')}:${String(secs%60).padStart(2,'0')}`;
+        if(state==='ringing') st.innerHTML=`<div class="rounded-lg bg-amber-50 border border-amber-100 p-2.5 text-amber-800 text-[13px]">
+          📲 Your phone (${escapeHtml(d.agent)}) is ringing.<br>Answer it to be connected to ${escapeHtml(d.customer)}.</div>`;
+        else if(state==='talking') st.innerHTML=`<div class="rounded-lg bg-emerald-50 border border-emerald-100 p-2.5 text-emerald-800 text-[13px]">
+          🟢 Connected to ${escapeHtml(d.customer)} · <span class="tabular-nums font-semibold">${mmss}</span></div>`;
+        else st.innerHTML=`<div class="rounded-lg bg-slate-100 border border-slate-200 p-2.5 text-slate-700 text-[13px]">
+          Call ended${secs?` · lasted <span class="tabular-nums font-semibold">${mmss}</span>`:' — not connected'}.</div>`;
+      };
+      paint('ringing',0);
+      let ticks=0;
+      const poll=setInterval(async ()=>{
+        ticks++;
+        try{
+          const st2=await supFetch('/api/vobiz/manual-call/'+encodeURIComponent(d.id));
+          paint(st2.state==='unknown'?'ended':st2.state, st2.seconds||0);
+          if(st2.state==='ended'||st2.state==='unknown'){
+            clearInterval(poll); go.textContent='Call again'; go.disabled=false; other.classList.remove('hidden');
+            // the row's Called column and ℹ️ history are now a call behind
+            if(typeof supLoadQueue==='function' && currentView==='support-queue') supLoadQueue(true);
+          }
+        }catch(_){ /* a blip must not freeze the dialog on a stale state */ }
+        if(ticks>150){ clearInterval(poll); }        // 5 minutes is longer than any of these calls
+      },2000);
+    }catch(e){
+      go.disabled=false; go.textContent='Call now';
+      // The one error worth handling specially: no number on file. Reveal the field rather than
+      // leaving the user to guess what to do about it.
+      if(/phone number is needed|own phone/i.test(e.message)) showField('No mobile saved on your profile — enter the phone to ring.');
+      else st.innerHTML=`<div class="rounded-lg bg-rose-50 border border-rose-100 p-2.5 text-rose-700 text-[13px]">${escapeHtml(e.message)}</div>`;
+    }
+  });
+}
+
+// The call-date filter — a SECOND range, on when we rang, applied on top of the header range rather
+// than instead of it (user, 2026-09-05: "add call log date filter along with current date filter and
+// it should work simultaneously"). The header range decides which parcels are in the queue at all;
+// this one narrows those to the ones called in a given window. A row with no call in the window drops
+// out, including one never called — "called yesterday" cannot honestly include a row we never rang.
+function supCallDateWindow(){
+  const sel=document.getElementById('sup-f-calldate')?.value||'all';
+  const custom=document.getElementById('sup-f-calldate-custom');
+  if(custom) custom.className = sel==='custom' ? 'flex items-center gap-1' : 'hidden items-center gap-1';
+  if(sel==='all') return null;
+  if(sel==='custom'){
+    const f=document.getElementById('sup-f-callfrom')?.value, t=document.getElementById('sup-f-callto')?.value;
+    return (f&&t)?{from:f,to:t}:null;          // an incomplete custom range filters nothing, never everything
+  }
+  const d=new Date();
+  if(sel==='y'){ const y=new Date(d.getFullYear(),d.getMonth(),d.getDate()-1); return {from:_ymd(y),to:_ymd(y)}; }
+  const back=Math.max(0,(+sel)-1);
+  return { from:_ymd(new Date(d.getFullYear(),d.getMonth(),d.getDate()-back)), to:_ymd(d) };
+}
+// Compared as LOCAL calendar days, the same way the dates in the picker are read — an ISO timestamp
+// sliced to 10 chars would be UTC and would put an evening IST call on the previous day.
+function supCalledInWindow(r, w){
+  const a=r.call_attempts; if(!a) return false;
+  const days=[...(a.log||[]).map(c=>c.at), a.last_at].filter(Boolean).map(t=>_ymd(new Date(t)));
+  return days.some(d=>d>=w.from && d<=w.to);
+}
+function supCallCell(r){
+  const a=r.call_attempts;
+  if(!a||!a.last_at) return '<span class="text-slate-300">—</span>';
+  const kinds=(a.kinds||[]).map(k=>SUP_CALL_KIND[k]||k).join(' · ');
+  return `<div class="whitespace-nowrap"><span class="tabular-nums text-slate-600">${supDT(a.last_at)}</span>
+    <button class="sup-callinfo ml-1 align-middle text-indigo-500 hover:text-indigo-700" data-oid="${escapeHtml(r.order_id)}" title="Every call on this order">ℹ️</button>
+    ${kinds?`<div class="text-[10px] text-slate-400">${escapeHtml(kinds)}${a.count>1?` · ${a.count} calls`:''}</div>`:''}</div>`;
+}
+function supCallLogHtml(r){
+  const a=r.call_attempts||{};
+  const rows=(a.log||[]).map(c=>{
+    const tone=/reattempt|confirmed/i.test(c.outcome)?'text-emerald-700':/cancel/i.test(c.outcome)?'text-rose-600':'text-slate-600';
+    return `<div class="py-1.5 border-b border-slate-100 last:border-0">
+      <div class="flex items-center gap-2 flex-wrap text-[11px]">
+        <span class="tabular-nums text-slate-500">${supDT(c.at)}</span>
+        <span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">${escapeHtml(SUP_CALL_KIND[c.kind]||c.kind)}</span>
+        <span class="text-slate-400">${escapeHtml(c.type||'')}</span>
+        ${c.seconds?`<span class="tabular-nums text-slate-400">${c.seconds}s</span>`:''}
+        ${c.by?`<span class="text-slate-400">by ${escapeHtml(supPrettyUser(c.by))}</span>`:''}
+      </div>
+      <div class="text-[12px] ${tone} mt-0.5">${escapeHtml(c.outcome||'—')}</div></div>`;
+  }).join('');
+  // The carrier's view of the same order: dials that rang and were never answered leave no transcript,
+  // so without this the log would silently omit them and look like fewer attempts than really happened.
+  const dial=(a.dial||[]).map(d=>{
+    const att=(d.log||[]).map(x=>`<div class="flex gap-2 text-[11px] text-slate-500 py-0.5">
+        <span class="w-8 text-slate-400">#${x.n||'?'}</span><span class="w-28 tabular-nums">${x.at?supDT(x.at):''}</span>
+        <span class="w-24">${escapeHtml(x.result||'')}</span><span class="w-14 text-right tabular-nums">${x.ring_s!=null?x.ring_s+'s':''}</span>
+        <span>${escapeHtml(x.cause||'')}</span></div>`).join('')||'<p class="text-[11px] text-slate-400">no carrier record</p>';
+    return `<div class="mt-2"><p class="text-[10px] uppercase tracking-wide text-slate-400">${escapeHtml(d.purpose||'')} · ${escapeHtml(d.status||'')}${d.attempts?` · ${d.attempts} attempt${d.attempts>1?'s':''}`:''}</p>${att}
+      ${d.next_at?`<p class="text-[11px] text-amber-700 mt-0.5">retry ${supDT(d.next_at)}</p>`:''}</div>`;
+  }).join('');
+  return `<div class="text-left"><p class="font-semibold text-slate-700 mb-1">Calls on ${escapeHtml(r.order_name||r.order_id)}</p>
+    ${rows||'<p class="text-[12px] text-slate-400">No AI call reached this order.</p>'}${dial}</div>`;
 }
 // "Raised to the courier" — was only ever a free-text note ("raised", "raised with VOC"), so it could
 // not be filtered, sorted or counted. Now a stored mark with its own date.
-const SUP_RAISE_LABEL={ raised:'Raised', raised_voc:'Raised · VOC' };
+const SUP_RAISE_LABEL={ raised:'Raised', raised_voc:'Raised · VOC', customer_rto:'Customer RTO' };
 function supRaisedCell(r){
   if(!r.raised_kind) return '<span class="text-slate-300">—</span>';
-  const cls = r.raised_kind==='raised_voc' ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700';
+  // Amber for customer_rto: it is not an escalation we are chasing, it is the customer closing the
+  // order themselves, and the queue should read that difference at a glance.
+  const cls = r.raised_kind==='customer_rto' ? 'bg-amber-100 text-amber-800'
+    : r.raised_kind==='raised_voc' ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700';
   const by = r.raised_by ? ' by '+supPrettyUser(r.raised_by) : '';
   return `<span class="inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold ${cls} whitespace-nowrap" title="Raised${escapeHtml(by)} on ${r.raised_at?new Date(r.raised_at).toLocaleString():''}">${SUP_RAISE_LABEL[r.raised_kind]||'Raised'}</span>
     <div class="text-[10px] text-slate-400 mt-0.5 tabular-nums">${r.raised_at?_dmy(r.raised_at):''}</div>`;
@@ -5126,6 +5344,7 @@ function supRaiseOptions(k){
   return `<option value="" ${k?'':'selected'}>${k?'Change…':'Raise ▾'}</option>
       <option value="raised" ${k==='raised'?'selected':''}>Raised</option>
       <option value="raised_voc" ${k==='raised_voc'?'selected':''}>Raised with VOC</option>
+      <option value="customer_rto" ${k==='customer_rto'?'selected':''}>Customer Requested RTO</option>
       ${k?'<option value="__clear">Clear</option>':''}`;
 }
 function supRaiseControl(r){
@@ -5256,8 +5475,17 @@ function supQueueTable(){
   const raisedSel=document.getElementById('sup-f-raised');
   if(raisedSel){ raisedSel.style.display=platOn?'':'none'; if(!platOn) raisedSel.value='all'; }
   const fR=platOn?(raisedSel?.value||'all'):'all';
-  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fH!=='all'||fP!=='all'||fL!=='all'||fR!=='all'||fS!=='all'||_supSort)?'':'none';
+  // Call type filters on every tab: a COD confirmation on Hold Orders is as real as an RTO dial on
+  // Undelivered, so this one is not hidden with the shipped-only filters above.
+  const fC=document.getElementById('sup-f-calltype')?.value||'all';
+  const fCD=supCallDateWindow();
+  const clear=document.getElementById('sup-f-clear'); if(clear) clear.style.display=(fN!=='all'||fQ||fA!=='any'||fH!=='all'||fP!=='all'||fL!=='all'||fR!=='all'||fC!=='all'||!!fCD||fS!=='all'||_supSort)?'':'none';
   let list=_supQueueRows.slice();
+  if(fCD) list=list.filter(r=>supCalledInWindow(r,fCD));
+  if(fC!=='all') list=list.filter(r=>{ const a=r.call_attempts;
+    if(fC==='none') return !a||!a.last_at;
+    if(fC==='any')  return !!(a&&a.last_at);
+    return !!(a&&(a.kinds||[]).includes(fC)); });
   if(fN==='with') list=list.filter(r=>r.note_count>0);
   if(fN==='none') list=list.filter(r=>!r.note_count);
   // One box, every identifier an agent actually has to hand: order no, AWB, phone, email, name, note.
@@ -5318,6 +5546,9 @@ function supQueueTable(){
     ...(showBucket?[showPlat?{h:'Status',k:'tracking_status',d:1}:{h:'Bucket',k:'bucket',d:1}]:[]),
     ...(showPay?[{h:'Payment',k:'payment',d:1}]:[]),{h:'Age',k:'created_at',d:1},{h:'Courier',k:'courier',d:1},
     ...(showScan?[{h:'Last scan',k:'last_scan_at',d:-1}]:[]),
+    // Called — on BOTH panels, because a COD confirmation on Hold Orders is as worth seeing as an
+    // RTO dial on Undelivered. Sorts on the last attempt, so never-called rows gather at one end.
+    {h:'Called',k:'call_last_at',d:-1},
     ...(showPlat?[{h:'Raised',k:'raised_at',d:-1}]:[]),
     ...(_supTab==='und'?[{h:'Escalated',k:'escalated_at',d:-1}]:[]),{h:'Actions',k:null}];
   const thHtml=COLS.map(col=>{ if(!col.k) return `<th class="${TH}">${col.h}</th>`;
@@ -5363,6 +5594,7 @@ function supQueueTable(){
       <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
       <td class="${TD}"><div class="flex items-center gap-1.5 flex-wrap">${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}${showPlat?supPlatformTag(r.platform):''}</div>${r.awb_number?`<div class="text-[10px] mt-0.5">${supAwbLink(r.awb_number,r.order_name,r.courier)}</div>`:''}</td>
       ${showScan?`<td class="${TD} whitespace-nowrap">${r.last_scan_at?`<span class="text-slate-500" title="Latest AWB scan by courier: ${new Date(r.last_scan_at).toLocaleString()}">🛰 ${supRelTime(r.last_scan_at)}</span>`:'<span class="text-slate-300">—</span>'}</td>`:''}
+      <td class="${TD}">${supCallCell(r)}</td>
       ${showPlat?`<td class="${TD} whitespace-nowrap sup-raised-cell">${supRaisedCell(r)}</td>`:''}
       ${_supTab==='und'?`<td class="${TD} whitespace-nowrap">${r.escalated_at?`<button class="sup-esc-view text-left" data-awb="${escapeHtml(r.awb_number||'')}" data-kinds="${escapeHtml(r.escalated_kind||'')}" title="View the escalation and any responses">
           <div class="flex items-center gap-1">${String(r.escalated_kind||'').includes('sheet')?'📋':''}${String(r.escalated_kind||'').includes('mail')?'✉️':''}<span class="text-[11px] font-semibold text-indigo-600 hover:underline">view</span></div>
@@ -5401,6 +5633,10 @@ function supQueueTable(){
   c.querySelectorAll('.sup-row').forEach(row=>row.addEventListener('click',e=>{
     if(e.target.closest('.csel, select, button, a, input, label')) return;
     supOrderModal(row.dataset.oid);
+  }));
+  c.querySelectorAll('.sup-callinfo').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation();
+    const row=_supQueueRows.find(x=>String(x.order_id)===String(b.dataset.oid));
+    if(row) supCallLogModal(row);
   }));
   c.querySelectorAll('.sup-note-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supNotesModal(b.dataset.oid,b.dataset.oname); }));
   c.querySelectorAll('.sup-hold-btn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); supDoHold(b.dataset.oid,b.dataset.oname,b); }));
@@ -5643,6 +5879,26 @@ function supConfirm({ title = 'Are you sure?', message = '', confirmLabel = 'Con
 }
 const SUP_ICON_EDIT='<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>';
 const SUP_ICON_TRASH='<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>';
+// Every call on one order, opened from the ℹ️ in the Called column (user, 2026-09-05: "call
+// attempted log should [be] on i button … all call log should [be] visible in that i button").
+// z-[85] for the same reason the notes dialog uses it: the order-detail modal underneath is
+// re-created at z-80 and an equal z would let it cover this one.
+function supCallLogModal(row){
+  document.getElementById('sup-calllog-modal')?.remove();
+  const wrap=document.createElement('div'); wrap.id='sup-calllog-modal';
+  wrap.className='fixed inset-0 flex items-center justify-center bg-slate-900/50 backdrop-blur-[2px] p-4';
+  wrap.style.zIndex='96';   // inline, for the reason above
+  wrap.innerHTML=`<div class="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[85vh] flex flex-col">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+      <h3 class="font-semibold text-slate-800">📞 Call history</h3>
+      <button class="text-slate-400 hover:text-slate-600 text-xl leading-none sup-cl-x">&times;</button></div>
+    <div class="px-6 py-4 overflow-y-auto text-sm">${supCallLogHtml(row)}</div></div>`;
+  document.body.appendChild(wrap);
+  const close=()=>wrap.remove();
+  wrap.querySelector('.sup-cl-x').addEventListener('click',close);
+  wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
+  document.addEventListener('keydown',function esc(e){ if(e.key==='Escape'){ close(); document.removeEventListener('keydown',esc);} });
+}
 async function supNotesModal(orderId, orderName){
   document.getElementById('sup-notes-modal')?.remove();
   const wrap=document.createElement('div'); wrap.id='sup-notes-modal';
@@ -5850,7 +6106,9 @@ async function supOrderModal(orderId){
       <div class="grid md:grid-cols-2 gap-6 mt-5">
         <div class="card p-4"><div class="flex items-center justify-between mb-2"><p id="supd-calls-count" class="text-xs font-bold text-slate-500 uppercase tracking-wide">Call history (${(d.calls||[]).length+(d.ai_calls||[]).length} answered${d.ai_attempts&&d.ai_attempts.attempts?` · ${d.ai_attempts.attempts} AI dial${d.ai_attempts.attempts===1?'':'s'}`:''})</p></div>
           <div id="supd-calls-list" class="space-y-2 max-h-52 overflow-auto">${supAiAttemptsCard(d.ai_attempts)}${supAiAttemptsCard(d.rto_attempts,'RTO recovery dials',2*((d.rto_attempts&&d.rto_attempts.detail&&d.rto_attempts.detail.ndr_no)||1))}${(!(d.calls||[]).length&&!(d.ai_calls||[]).length&&d.ai_attempts&&d.ai_attempts.attempts)?'<p class="text-[11px] text-slate-400">Dialed but not answered yet — a transcript and recording appear only when a call connects.</p>':''}${(d.ai_calls||[]).map((ac,i)=>`<div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-2.5 text-xs">
-            <div class="flex items-center gap-2 flex-wrap"><span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">\u{1F916} AI call</span>
+            <div class="flex items-center gap-2 flex-wrap">${(ac.call_type||"")==="manual_human"
+                ? '<span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 font-semibold">\u{1F4DE} Manual call</span>'
+                : '<span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">\u{1F916} AI call</span>'}
               <span class="text-slate-400">${escapeHtml((ac.call_type||'').replace('_vobiz','').replace(/_/g,' '))} · ${escapeHtml(ac.language||'')} · ${ac.called_at?new Date(ac.called_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span></div>
             ${ac.summary?`<p class="text-slate-700 mt-1 whitespace-pre-wrap">${escapeHtml(ac.summary)}</p>`:''}
             <div class="flex items-center gap-2 mt-1.5">
@@ -6030,7 +6288,14 @@ function supAiCallMount(o){
   const map=(currentView==='support-queue' && SUP_AI_CALL_BY_TAB[_supTab]) || SUP_AI_CALL_BY_TAB.repeat;
   if(!o.order_name) return;
   if(!canAiCall()){ host.innerHTML=''; return; }
+  // The manual button lives beside the AI one, both inside the order popup: placing a call is a
+  // deliberate act taken with the order open in front of you, not a click while scanning a list.
+  const manualBtn = o.order_name
+    ? `<button id="supd-mancall-btn" class="px-4 py-2 rounded-lg text-sm font-semibold border border-slate-300 text-slate-700 hover:bg-slate-50" title="Call the customer yourself — your phone rings first">📞 Manual call</button>`
+    : '';
   host.innerHTML=`<button id="supd-aicall-btn" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700" title="The AI agent calls the customer to ${escapeHtml(map.label)}">🤖 AI Call</button>`;
+  host.insertAdjacentHTML('beforeend', manualBtn);
+  document.getElementById('supd-mancall-btn')?.addEventListener('click',()=>supManualCallDialer(o.order_name));
   document.getElementById('supd-aicall-btn').addEventListener('click',()=>{
     supConfirm({
       title:`AI agent will call the customer`, icon:'🤖', tone:'go', confirmLabel:'Place the call',
@@ -6116,7 +6381,7 @@ async function supWaChatModal(orderName){
 // ── Support Orders (search page) ─// ── Support Orders (search page) ─// ── Support Orders (search page) ───────────────────────────────────────────
 let _supoFilters={page:1}, _supoWired=false, _supoSummary=null;
 function supOrdersInit(){
-  supRenderRange('sup-range-orders', ()=>{ _supoFilters.page=1; supOrdersLoad(); });
+  supRenderRange('sup-range-orders', ()=>{ _supoFilters.page=1; supOrdersLoad(); }, 'orders');
   if(!_supoWired){ _supoWired=true;
     const bsel=document.getElementById('supo-bucket'); SUP_BUCKETS.forEach(([id,l])=>{ const o=document.createElement('option'); o.value=id; o.textContent=l; bsel.appendChild(o); });
     document.getElementById('supo-q').addEventListener('input', debounce(()=>{ _supoFilters.q=document.getElementById('supo-q').value.trim(); _supoFilters.page=1; supOrdersLoad(); },350));
@@ -6132,7 +6397,7 @@ function supOrdersInit(){
   supOrdersLoad(); supOrdersBuckets();
 }
 async function supOrdersBuckets(){
-  try{ const d=await supFetch('/api/support/summary?'+supRangeQS()); _supoSummary=d;
+  try{ const d=await supFetch('/api/support/summary?'+supRangeQS('orders')); _supoSummary=d;
     document.getElementById('sup-orders-buckets').innerHTML=SUP_BUCKETS.map(([id,label,tone])=>
       `<button class="supo-bt card px-3 py-2 text-left hover:ring-2 ${SUP_TONE[tone][1]} ${_supoFilters.bucket===id?'ring-2 '+SUP_TONE[tone][1]:''}" data-b="${id}">
         <span class="text-[10px] font-semibold text-slate-400 uppercase block truncate">${label}</span>
@@ -6173,11 +6438,11 @@ async function supOrdersLoad(){
 
 // ── Call Logs ──────────────────────────────────────────────────────────────
 let _supCallsFilter=null;
-function supCallsInit(){ supRenderRange('sup-range-calls', supCallsLoad); _supCallsFilter=null; supCallsLoad(); }
+function supCallsInit(){ supRenderRange('sup-range-calls', supCallsLoad, 'calls'); _supCallsFilter=null; supCallsLoad(); }
 async function supCallsLoad(){
   const c=document.getElementById('sup-calls-table'); if(c) c.innerHTML=brandLoader();
   try{
-    const d=await supFetch('/api/support/calls?'+supRangeQS());
+    const d=await supFetch('/api/support/calls?'+supRangeQS('calls'));
     document.getElementById('sup-calls-title').textContent=d.isAdmin?'All Calls':'My Calls';
     const byStatus={}; d.calls.forEach(cl=>{ const k=cl.tracking_status||'—'; byStatus[k]=(byStatus[k]||0)+1; });
     const stats=document.getElementById('sup-calls-stats');
@@ -7948,8 +8213,149 @@ async function sciLoad(){
         ${x.fix?`<p class="text-xs text-slate-700 mt-1"><b>Fix:</b> ${escapeHtml(x.fix)}</p>`:''}</div></div></div>`;
     document.getElementById('sci-improve').innerHTML = (a.improve||[]).map((x,i)=>card(x,i,'improve')).join('')||'<p class="text-sm text-slate-400">—</p>';
     document.getElementById('sci-good').innerHTML = (a.good||[]).map((x,i)=>card(x,i,'good')).join('')||'<p class="text-sm text-slate-400">—</p>';
+    _sci.calls = d.calls || [];
+    sciWireCalls();
+    sciRenderCalls(true);
   }catch(e){ if(k) k.innerHTML=`<div class="text-rose-500 text-sm col-span-full">${escapeHtml(e.message)}</div>`; }
 }
+
+// ── EVERY CALL, IN FULL (user, 2026-09-05: "i want full detail of call and every log each and
+// every"). The cards above are the summary; this is the evidence under them. One row per call,
+// expanding to the whole transcript as chat bubbles, the recording, the carrier's dial history and
+// what the brain cost. The rule chips come from the SAME per-call flags the compliance bars are
+// summed from, so clicking through a bar always lands on exactly those calls.
+_sci.calls = []; _sci.shown = 0;
+const SCI_PAGE = 40;
+const SCI_RULES = [
+  ['double_intro', 'Introduced twice'], ['hello_storm', 'Hello-storm'],
+  ['wantit_overasked', 'Asked "want it?" 3+×'], ['one_sided', 'Customer never spoke'],
+];
+function sciFiltered(){
+  const q = (document.getElementById('sci-calls-q')?.value || '').trim().toLowerCase();
+  const f = document.getElementById('sci-calls-filter')?.value || '';
+  return _sci.calls.filter(c => {
+    if (f === 'broke' && !SCI_RULES.some(([k]) => c.flags[k])) return false;
+    else if (f && ['double_intro','hello_storm','wantit_overasked','one_sided','lang_switched','blocked_line'].includes(f) && !c.flags[f]) return false;
+    else if (f && ['reattempt','confirmed','cancelled','no_answer'].includes(f) && c.outcome !== f) return false;
+    if (!q) return true;
+    return (c.order_id||'').toLowerCase().includes(q) || (c.transcript||'').toLowerCase().includes(q)
+        || (c.summary||'').toLowerCase().includes(q) || (c.customer_name||'').toLowerCase().includes(q);
+  });
+}
+function sciCallRow(c, i){
+  const t = new Date(c.called_at);
+  const when = t.toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit', hour12:false });
+  const broke = SCI_RULES.filter(([k]) => c.flags[k]);
+  const chips = broke.map(([,label]) => `<span class="inline-block px-1.5 py-0.5 rounded bg-rose-50 text-rose-700 text-[10px] mr-1">${label}</span>`).join('')
+    + (c.flags.lang_switched ? '<span class="inline-block px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 text-[10px] mr-1">lang switch</span>' : '')
+    + (c.flags.blocked_line ? '<span class="inline-block px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10px] mr-1">line blocked</span>' : '')
+    + (!broke.length && c.flags.reached_closing ? '<span class="inline-block px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 text-[10px]">clean</span>' : '');
+  const tone = { reattempt:'text-emerald-700', confirmed:'text-emerald-700', cancelled:'text-rose-600', no_answer:'text-slate-400' }[c.outcome] || 'text-slate-600';
+  return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer sci-row" data-i="${i}">
+    <td class="px-5 py-2.5 whitespace-nowrap text-slate-500">${when}</td>
+    <td class="px-3 py-2.5 font-medium text-slate-700">${escapeHtml(c.order_id||'—')}${c.customer_name?`<span class="block text-[11px] text-slate-400">${escapeHtml(c.customer_name)}</span>`:''}</td>
+    <td class="px-3 py-2.5 text-slate-500">${escapeHtml(c.call_type||'')}</td>
+    <td class="px-3 py-2.5 text-slate-500">${escapeHtml((c.language||'').replace('-IN',''))}</td>
+    <td class="px-3 py-2.5 text-right tabular-nums text-slate-600">${c.seconds||0}</td>
+    <td class="px-3 py-2.5 text-right tabular-nums text-slate-500">${c.flags.agent_turns}/${c.flags.customer_turns}</td>
+    <td class="px-3 py-2.5 font-medium ${tone}">${escapeHtml(c.outcome)}</td>
+    <td class="px-3 py-2.5">${chips||'<span class="text-slate-300">—</span>'}</td>
+    <td class="px-3 py-2.5 text-right tabular-nums text-slate-500">${c.claude?('₹'+c.claude.inr.toFixed(2)):'—'}</td></tr>
+  <tr class="sci-detail hidden" data-d="${i}"><td colspan="9" class="px-5 py-4 bg-slate-50/70"></td></tr>`;
+}
+function sciCallDetail(c){
+  // the transcript as it happened, agent right / customer left, with blocked lines called out
+  const bubbles = String(c.transcript||'').split('\n').filter(l=>l.trim()).map(l => {
+    const blocked = /^\[not spoken — blocked by rule\]/.test(l);
+    const meta = /^\[/.test(l);
+    if (blocked) return `<div class="my-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded px-2 py-1">🚫 ${escapeHtml(l.replace(/^\[not spoken — blocked by rule\]\s*/,''))} <span class="text-amber-500">— written, never spoken</span></div>`;
+    if (meta) return `<div class="my-1 text-[11px] text-indigo-600 text-center">${escapeHtml(l)}</div>`;
+    const isAgent = /^agent:/i.test(l);
+    const body = escapeHtml(l.replace(/^(agent|customer):\s*/i,''));
+    return `<div class="flex ${isAgent?'justify-end':'justify-start'} my-1">
+      <div class="max-w-[80%] rounded-2xl px-3 py-1.5 text-[13px] ${isAgent?'bg-indigo-600 text-white rounded-br-sm':'bg-white border border-slate-200 text-slate-700 rounded-bl-sm'}">${body}</div></div>`;
+  }).join('');
+  const d = c.dial;
+  const attempts = d && Array.isArray(d.log) && d.log.length
+    ? d.log.map(a=>`<div class="flex gap-2 text-[11px] text-slate-600 py-0.5"><span class="text-slate-400 w-10">#${a.n||'?'}</span>
+        <span class="w-32">${a.at?new Date(a.at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false}):''}</span>
+        <span class="w-24">${escapeHtml(a.result||'')}</span><span class="w-16 text-right tabular-nums">${a.ring_s!=null?a.ring_s+'s ring':''}</span>
+        <span class="text-slate-400">${escapeHtml(a.cause||'')}${a.hangup_by?' · by '+escapeHtml(a.hangup_by):''}</span></div>`).join('')
+    : '<p class="text-[11px] text-slate-400">No carrier dial log for this order.</p>';
+  const kv = (k,v)=>`<div class="flex justify-between gap-3 py-0.5 text-[12px]"><span class="text-slate-400">${k}</span><span class="text-slate-700 text-right">${v}</span></div>`;
+  return `<div class="grid lg:grid-cols-3 gap-5">
+    <div class="lg:col-span-2">
+      <p class="text-[11px] uppercase tracking-wide text-slate-400 mb-2">Transcript — what the customer heard</p>
+      <div class="rounded-lg bg-slate-100/60 p-3 max-h-[26rem] overflow-y-auto">${bubbles||'<p class="text-sm text-slate-400">No transcript.</p>'}</div>
+      ${c.recording_url?`<button class="filter-btn mt-3 sci-play" data-id="${escapeHtml(c.id)}">▶ Play recording</button><div class="sci-audio mt-2"></div>`:'<p class="text-[11px] text-slate-400 mt-2">No recording stored for this call.</p>'}
+    </div>
+    <div class="space-y-4">
+      <div><p class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">Outcome</p>
+        <p class="text-[13px] text-slate-700">${escapeHtml(c.summary||'—').split('\n').join('<br>')}</p></div>
+      <div><p class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">This call</p>
+        ${kv('Started', new Date(c.called_at).toLocaleString('en-IN',{dateStyle:'medium',timeStyle:'short'}))}
+        ${kv('Talk time', (c.seconds||0)+'s')}
+        ${kv('Turns', c.flags.agent_turns+' agent · '+c.flags.customer_turns+' customer')}
+        ${kv('Language', escapeHtml(c.language||'—'))}
+        ${kv('Reached closing', c.flags.reached_closing?'yes':'no')}
+        ${c.claude?kv('Brain cost','₹'+c.claude.inr.toFixed(2)+' · '+c.claude.tokens.toLocaleString()+' tokens'):kv('Brain cost','no ledger on this call')}
+      </div>
+      <div><p class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">Dial history${d&&d.status?` · <span class="text-slate-500">${escapeHtml(d.status)}</span>`:''}</p>
+        ${attempts}
+        ${d&&d.note?`<p class="text-[11px] text-slate-500 mt-1">${escapeHtml(d.note)}</p>`:''}
+        ${d&&d.next_attempt_at?`<p class="text-[11px] text-amber-700 mt-1">retry ${new Date(d.next_attempt_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false})}</p>`:''}</div>
+    </div></div>`;
+}
+function sciRenderCalls(reset){
+  const body=document.getElementById('sci-calls-body'); if(!body) return;
+  const list=sciFiltered();
+  if(reset) _sci.shown=0;
+  _sci.shown=Math.min(Math.max(_sci.shown||0, SCI_PAGE), list.length);
+  _sci.view=list;
+  body.innerHTML=list.slice(0,_sci.shown).map((c,i)=>sciCallRow(c,i)).join('')
+    || '<tr><td colspan="9" class="px-5 py-8 text-center text-slate-400 text-sm">No calls match this filter.</td></tr>';
+  document.getElementById('sci-calls-count').textContent=` — ${list.length} of ${_sci.calls.length}`;
+  const more=document.getElementById('sci-calls-more');
+  more.innerHTML = _sci.shown<list.length
+    ? `<button class="filter-btn" id="sci-more-btn">Show ${Math.min(SCI_PAGE,list.length-_sci.shown)} more (${list.length-_sci.shown} left)</button>` : '';
+  document.getElementById('sci-more-btn')?.addEventListener('click',()=>{ _sci.shown+=SCI_PAGE; sciRenderCalls(false); });
+  body.querySelectorAll('.sci-row').forEach(tr=>tr.addEventListener('click',()=>{
+    const i=+tr.dataset.i, det=body.querySelector(`.sci-detail[data-d="${i}"]`);
+    if(!det) return;
+    const open=!det.classList.contains('hidden');
+    if(open){ det.classList.add('hidden'); return; }
+    det.querySelector('td').innerHTML=sciCallDetail(_sci.view[i]);
+    det.classList.remove('hidden');
+    // the recording needs the bearer token, so <audio src> cannot fetch it — same blob trick the
+    // order modal uses.
+    det.querySelector('.sci-play')?.addEventListener('click', async (ev)=>{
+      const btn=ev.currentTarget, host=det.querySelector('.sci-audio');
+      btn.disabled=true; btn.textContent='⏳ Loading…';
+      try{
+        const r=await fetch(`/api/vobiz/recording?u=${encodeURIComponent(_sci.view[i].recording_url||'')}`,{headers:{Authorization:'Bearer '+localStorage.getItem('authToken')}});
+        if(!r.ok) throw new Error('recording unavailable ('+r.status+')');
+        const url=URL.createObjectURL(await r.blob());
+        host.innerHTML=`<audio controls autoplay class="w-full" src="${url}"></audio>`; btn.remove();
+      }catch(e){ btn.disabled=false; btn.textContent='▶ Play recording'; showNotification(e.message,true); }
+    });
+  }));
+}
+function sciWireCalls(){
+  if(_sci.callsWired) return; _sci.callsWired=true;
+  document.getElementById('sci-calls-q')?.addEventListener('input', ()=>sciRenderCalls(true));
+  document.getElementById('sci-calls-filter')?.addEventListener('change', ()=>sciRenderCalls(true));
+  document.getElementById('sci-calls-csv')?.addEventListener('click', ()=>{
+    const rows=[['When','Order','Customer','Type','Language','Seconds','AgentTurns','CustomerTurns','Outcome','RulesBroken','BrainINR','Summary']];
+    for(const c of sciFiltered()) rows.push([new Date(c.called_at).toISOString(), c.order_id||'', c.customer_name||'',
+      c.call_type||'', c.language||'', c.seconds||0, c.flags.agent_turns, c.flags.customer_turns, c.outcome,
+      SCI_RULES.filter(([k])=>c.flags[k]).map(([,l])=>l).join('; '), c.claude?c.claude.inr:'', String(c.summary||'').split('\n')[0]]);
+    const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+    a.download=`call-insights-${_sci.range.from}_${_sci.range.to}.csv`; a.click();
+  });
+}
+
 
 // ── AI Calling Statement (2026-09-02): the honest per-call cost sheet — telephony + Sarvam voice +
 // Claude brain per call, fixed bills amortized, every rate visible so a wrong estimate can be seen.

@@ -30,6 +30,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const { supabase } = require('../supabase');
+const callRegistry = require('./call_registry');   // one number = one call, AI or human
 const { renderRules } = require('./agent_rules');   // the rule registry — see agent_rules.js
 const config = require('../../config');
 const { resolveOrderFields, allowlistBlocksFor } = require('./msg91_wa');
@@ -1108,6 +1109,7 @@ class VoiceCall {
         if (this.presenceTimer) clearInterval(this.presenceTimer);
         if (this.goodbyeTimer) clearInterval(this.goodbyeTimer);
         if (this.backupTimer) clearInterval(this.backupTimer);
+        callRegistry.release(this.s.phone);     // the number is free the instant the call ends
         this.log('call closed:', reason);
         try { this.stt && this.stt.close(); } catch (_) {}
         try { this.ttsWs && this.ttsWs.close(); } catch (_) {}
@@ -1524,7 +1526,17 @@ async function placeOrderCall(b) {
         }
     }
     const lang = b.lang || (orderRow ? await langForOrder(orderRow.id) : 'en-IN');
+    // NEVER DIAL A NUMBER THAT IS ALREADY ON A CALL (user, 2026-09-05: "avoid overlapping").
+    // Claimed BEFORE the session is created so a refused call leaves nothing behind to clean up.
+    // `busy` is deliberately NOT an error: the caller rolls the turnstile back and the next tick
+    // dials this order normally. A retry must never be burned on a collision we caused.
+    const held = callRegistry.holder(phone);
+    if (held) return { busy: true, code: 409, phone,
+        error: held.who === 'manual'
+            ? `a human agent is on a call with this customer right now (${held.label || 'manual call'})`
+            : `the AI agent is already on a call with this customer (${held.label || 'in progress'})` };
     const sid = createSession({ phone, ctx, lang, voice: b.voice || 'kavya', callType: b.call_type, auto: !!b.auto });
+    callRegistry.claim(phone, 'ai', `${b.call_type || 'cod_confirm'} ${ctx.order_name || ''}`.trim());
     armOpening(sessions.get(sid));            // synthesize the greeting while the phone rings
     const answerUrl = `${V_BASE()}/api/vobiz/answer?token=${V_TOKEN()}&sid=${sid}`;
     const r = await axios.post(`https://api.vobiz.ai/api/v1/Account/${V_AUTH_ID()}/Call/`, {
@@ -1536,7 +1548,8 @@ async function placeOrderCall(b) {
         // every log and nobody is hung up on mid-ring. A carrier busy/refusal still ends it early.
         ring_timeout: 60,
     }, { headers: { 'X-Auth-ID': V_AUTH_ID(), 'X-Auth-Token': V_AUTH_TOKEN(), 'Content-Type': 'application/json' }, timeout: 20000, validateStatus: () => true });
-    if (r.status >= 300) return { error: `Vobiz ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}`, code: 502 };
+    if (r.status >= 300) { callRegistry.release(phone); sessions.delete(sid);   // the call never happened — free the number
+        return { error: `Vobiz ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}`, code: 502 }; }
     // the originate's request_uuid IS the call uuid — kept on the session so the leg can be killed
     // even when the media stream (and its start event) never materializes
     const sess = sessions.get(sid);
@@ -1634,6 +1647,7 @@ router.all('/vobiz/answer', async (req, res) => {
 });
 router.all('/vobiz/hangup', (req, res) => {
     const s = sessions.get((req.query || {}).sid);
+    if (s) callRegistry.release(s.phone);
     if (s && s.call) s.call.close('hangup webhook');
     // NEVER-CONNECTED hangup (user, 2026-09-01: "why wait 7 minutes — do it instantly"): the carrier
     // refused/timed out before any answer, so no session close will ever run. Vobiz tells us within

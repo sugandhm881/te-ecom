@@ -1140,6 +1140,107 @@ no server-side edit: VAD threshold **0.75**, min speech **500ms**, endpoint **40
 both products named, `रहेंगे`, English adopted on the turn after a full English sentence, zero
 barge-ins, zero guard corrections, `CONFIRMED → shopify released` in 56 seconds.
 
+### Undelivered / Hold panels: the call state moves onto the row (2026-09-05)
+
+Six things the user asked for in one batch, so a parcel's calling history can be read without opening
+anything.
+
+**1. "Customer Requested RTO"** joins Raised / Raised VOC in the Undelivered raise-reason dropdown
+(`RAISE_KINDS` gains `customer_rto` in `support_console.js`).
+
+**2. Call attempt date and time on every row**, on both the Undelivered and Hold panels, with a
+**call-type filter** — Auto AI Call / Manual AI Call / Manual Call. The type is read from the log's own
+summary line, which is why the manual dialler writes the exact string `manual human call by <email>`.
+
+**3. Date presets reworked**: 90 days dropped, **Yesterday** and **Last 3 days** added — and Hold,
+Undelivered and Status Changes each keep their **own** date filter (`supRangeFor(scope)`), because one
+shared range meant answering three different questions with one answer.
+
+**4. A ℹ️ button opens the full call log** for that order — every attempt, its outcome, its recording.
+
+**5. Attempt count rides the status chip** — *OFD Completed 1*, *OFD Completed 2* — from
+`delivery_attempts`, so a second failed attempt is visible without opening the order.
+
+**6. A call-log date filter that works ALONGSIDE the panel's own date filter**, not instead of it:
+"orders from last week whose calls happened yesterday" is a question the two filters answer together.
+
+**The Undelivered date filter was answering the wrong question.** "Last 3 days" showed an empty queue
+while 132 parcels had failed delivery in that window, because it filtered on the **order's** date — and
+an order placed three weeks ago can go undelivered this morning. It is now a **union**: orders whose
+own date matches, OR whose `last_scan_at` in the shipment journey matches. The first fix still returned
+zero, for a second reason worth recording: `order_buckets` stores names as `#TE25-…` while the journey
+stores `TE25-…`, so the lookup now carries **both spellings**.
+
+### Call Insights: every call, in full (2026-09-05)
+
+User: *"on call insight i want full detail of call and every log each and every."* `ai_call_insights.js`
+now returns a per-call payload — transcript, summary, language, exchanges, recording, Claude cost, and
+the **dial history** behind each attempt — instead of aggregate counts alone. `flagsFor(c)` became the
+single source of truth for rule compliance so the dashboard's count and the AI audit's count can never
+disagree, and `loadCalls` pages the query, because **Supabase caps a read at 1000 rows** and a silent
+truncation would have shown a clean scorecard built from a fraction of the calls.
+
+### Manual calls: recorded, badged honestly, and one number = one call (2026-09-05)
+
+**A human agent can now dial a customer from the dashboard**, and the two callers — robot and human —
+can no longer ring the same person at the same moment.
+
+**Click-to-call, agent leg first** (`app/api/vobiz_manual_call.js`). The dashboard's **📞 Manual call**
+button rings the AGENT's own handset; only when they answer does the answer webhook return
+`<Dial callerId><Number>customer</Number></Dial>` and bridge the legs. Ringing the agent first is the
+safety property, not a convenience: if nobody picks up, the customer's phone never rings at all.
+Both parties are on ordinary handsets — no browser audio, no WebRTC. `VOBIZ_MANUAL_FROM_NUMBER` gives
+manual calls their own caller ID when a second number is bought; absent, it falls back to
+`VOBIZ_FROM_NUMBER` and the feature works on day one.
+
+**Recording.** Fired the instant the bridge forms, via the live Record API
+(`POST /Call/{uuid}/Record/`, `file_format: mp3`, `time_limit: 3600`) — never the XML `<Record>` verb,
+which on the AI path captured only one leg AND slowed stream setup, and here would sit in front of the
+`<Dial>` the customer is waiting on. **The 3600 is load-bearing**: the API's own default is 60s, which
+silently truncated every AI recording at 00:59 until it was found. The returned url is stored on the
+pending record and written into the `agent_call_logs` row, so ▶ Play works exactly as it does for an
+AI call. The uuid is the originate's `request_uuid` — which, as `killCallLeg` already documents, *is*
+the call uuid and is known from second zero.
+
+**The history badge no longer calls a human an AI.** A `manual_human` row renders **📞 Manual call**;
+only a real AI call gets 🤖. A false record of who spoke to the customer is not a cosmetic bug.
+
+**The dialog follows the call to its end.** It sat on "Calling…" long after both parties hung up,
+because nothing ever asked the server what the bridge was doing. `GET /api/vobiz/manual-call/:id`
+reports `ringing → talking → ended` plus seconds, and the pending record is no longer deleted on
+hangup so the poll has something to read. Verified live: *"Call ended · lasted 00:38."*
+
+**ONE NUMBER = ONE CALL** (`app/api/call_registry.js`, new). Until now the AI caller (`sessions` in
+`vobiz_bridge`) and the manual dialler (`pending` in `vobiz_manual_call`) were blind to each other, so
+nothing stopped the robot dialling a customer at the same second a human did. A shared in-memory
+registry keyed by **the 10-digit number** — not the order, because one person can have two orders and
+ringing them twice is the same rudeness either way — is claimed before every dial and released when
+the call ends.
+
+- **The AI claims in `placeOrderCall`**, the single door COD, RTO and the dashboard's AI-call button all
+  pass through, and releases in all three places a call can end: a failed originate, the session close,
+  and the hangup webhook (a call that never connects has no session close to run).
+- **A manual call claims TWO numbers as a set** — the customer and the agent's own handset — all or
+  nothing, because half a claim would leave the agent's phone locked for ten minutes after a refusal
+  nobody saw.
+- **A collision DEFERS, it does not fail.** By the time a call is placed the turnstile has already
+  stamped the row `calling` and appended an attempt; marking it `failed` would burn a real retry on a
+  call we deliberately chose not to place. The row is restored to its pre-claim state (or deleted, if
+  this tick created it) and the next tick dials normally — logged as `[Call] <order>: deferred — …`.
+- **Every claim expires after 10 minutes**, unconditionally. Without that ceiling one lost hangup
+  webhook would block a customer from ever being called again — a silent, permanent failure far worse
+  than the double-dial it prevents.
+- **NOT a global lock.** Different customers still dial in parallel exactly as before. An empirical
+  sweep of 30 days of `agent_call_logs` — 570 connected calls, 213 of them overlapping another call,
+  **peak 3 live at once** — settles the related question the user asked: a caller ID is a number
+  *presented*, not a physical line, so one Vobiz number already carries concurrent outbound calls.
+  A second number buys caller-ID separation and inbound handling, never capacity.
+
+Refusals name who holds the line ("the AI agent is on a call with this customer right now", "your own
+phone is already on a call"), because *call failed* tells the person at the dashboard nothing they can
+act on. Selftests **514 passing**; the registry pin runs the module for real rather than grepping it,
+asserting that a refused two-number claim leaves nothing behind.
+
 ### COD confirmation calls lose the clock window (2026-09-02)
 User: "for COD confirmation call there is no time limit for calling." `highValueCallTick` no longer checks the 10:00–19:59 IST window — a held COD order is dialed 5 minutes after placement whatever the hour, because the customer ordered minutes ago and the hold is blocking dispatch. RTO recovery KEEPS its window (an NDR customer did not just interact with us). `VOBIZ_COD_WINDOW=true` restores the old behaviour without a code change.
 

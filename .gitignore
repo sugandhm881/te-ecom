@@ -1,5 +1,7 @@
 node_modules/
 .env
+# Hand-made .env backups taken before a risky edit. Plaintext secrets — never in git.
+.env.bak*
 # Encrypted secrets vault + master key. The vault is ciphertext, but it is per-environment and
 # never belongs in git; the key must never be near the repo at all.
 .env.vault

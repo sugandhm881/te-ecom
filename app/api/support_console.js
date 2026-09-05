@@ -160,16 +160,22 @@ async function scanTimesByOrder(orderIds) {
 async function overlayJourneyScans(rows, scans) {
     const awbs = [...new Set(rows.map(r => String(r.awb_number || '').trim()).filter(Boolean))];
     if (!awbs.length) return scans;
-    const jr = await chunkedIn('shipment_journey_ecom', 'awb, last_scan_at', 'awb', awbs);
-    const byAwb = {}; jr.forEach(j => { if (j.last_scan_at) byAwb[j.awb] = j.last_scan_at; });
+    // `attempts` rides along on the same read (user, 2026-09-05: "show attempt count in status") —
+    // it is the courier's own delivery-attempt counter, so "OFD Completed 2" means the courier tried
+    // twice, not that we called twice. One extra column on a query already being made.
+    const jr = await chunkedIn('shipment_journey_ecom', 'awb, last_scan_at, attempts', 'awb', awbs);
+    const byAwb = {}, attByAwb = {};
+    jr.forEach(j => { if (j.last_scan_at) byAwb[j.awb] = j.last_scan_at; if (j.attempts != null) attByAwb[j.awb] = j.attempts; });
     // ⚠️ AUTHORITATIVE — NOT "whichever is newer". `last_scan_at` is the newest entry in the actual scan
     // log; everything else is an estimate. Taking the later of the two looked safe but is precisely
     // wrong for a STALLED parcel: TE25-40300's last real scan was 07 Aug 18:23, while its tracking row
     // had been rewritten by a sync 10 hours ago — so max chose the sync and reported activity that never
     // happened. A shipment sitting still must LOOK like it is sitting still; that is the whole signal.
     rows.forEach(r => {
-        const t = byAwb[String(r.awb_number || '').trim()];
+        const awb = String(r.awb_number || '').trim();
+        const t = byAwb[awb];
         if (t) scans[r.order_id] = t;
+        if (attByAwb[awb] != null) r.delivery_attempts = attByAwb[awb];
     });
     return scans;
 }
@@ -203,7 +209,12 @@ async function namesByOrder(orderIds) {
 // Stored as an `order_marks_ecom` mark: one per order (the table is unique on order_name+mark_type),
 // `note` holds WHICH kind, `created_at` is the raised date. Re-raising with the other kind updates in
 // place rather than stacking marks — an order is either raised or not, not raised twice.
-const RAISE_KINDS = { raised: 'Raised', raised_voc: 'Raised with VOC' };
+// `customer_rto` (2026-09-05) is not a courier escalation like the other two — it records that the
+// CUSTOMER asked for the parcel to go back. It shares this mark because it answers the same question
+// the queue asks of a row ("has someone dealt with this, and how?"), and because an order is still
+// only ever in one of these states: you do not raise with VOC an order the customer has told you to
+// return.
+const RAISE_KINDS = { raised: 'Raised', raised_voc: 'Raised with VOC', customer_rto: 'Customer Requested RTO' };
 async function raisedByOrder(names) {
     const uniq = [...new Set((names || []).map(n => String(n || '').replace('#', '').trim()).filter(Boolean))];
     if (!uniq.length) return {};
@@ -530,14 +541,15 @@ router.post('/support/shopify-unhold', async (req, res) => {
 // (COD fee/advance) + release the hold + log the reason & who. DESTRUCTIVE — cancels the real customer
 // order. Gated by the dedicated `support-cancel-order` capability (admins pass via '*').
 // ── POST /support/raise — mark an order raised with the courier (or clear it) ────────────────────
-// { orderName, kind: 'raised' | 'raised_voc' | null }. Anyone who can work the queue can record this;
+// { orderName, kind: 'raised' | 'raised_voc' | 'customer_rto' | null }. Anyone who can work the queue records this;
 // it is a note about our own action, not a change to the order.
 router.post('/support/raise', async (req, res) => {
     try {
         const name = String((req.body && req.body.orderName) || '').replace('#', '').trim();
         const kind = (req.body && req.body.kind) || null;
         if (!name) return res.status(400).json({ success: false, error: 'orderName is required.' });
-        if (kind && !RAISE_KINDS[kind]) return res.status(400).json({ success: false, error: 'kind must be raised or raised_voc.' });
+        // Named from the map, so adding a kind can never leave the error message lying about what is allowed.
+        if (kind && !RAISE_KINDS[kind]) return res.status(400).json({ success: false, error: 'kind must be one of: ' + Object.keys(RAISE_KINDS).join(', ') });
         if (!kind) {   // clear — raised by mistake
             await supabase.from('order_marks_ecom').delete().eq('order_name', name).eq('mark_type', 'courier_raised');
             return res.json({ success: true, raised: null });
@@ -574,11 +586,43 @@ router.get('/support/queue', async (req, res) => {
 
         if (tab === 'und') {
             // Paginated — .limit(2000) silently capped at 1000 (server max), dropping the newest rows.
-            rows = await fetchPaged((f, t) => supabase.from('order_buckets').select(SEL)
-                .in('bucket', UNDELIVERED_BUCKETS).gte('created_at', fromISO).lte('created_at', toISO)
-                .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true })
-                .order('order_id', { ascending: true })
-                .range(f, t));
+            // THE DATE MEANS "WHEN IT WENT UNDELIVERED", NOT "WHEN IT WAS ORDERED" (user, 2026-09-05:
+            // "how this possible last 3 days show que is clear"). Filtering this tab on the ORDER date
+            // asked the wrong question: a parcel fails delivery a median of 8 days after it is bought,
+            // so "Last 3 days" matched 3 orders while 132 parcels had actually gone undelivered in that
+            // window. Hold Orders keeps the order date, which is right for it — those are fresh orders
+            // waiting on confirmation.
+            // A UNION, deliberately, not a swap: rows are taken if EITHER the courier scanned them in
+            // range or the order was placed in range. The second half is what keeps a shipment with no
+            // journey row at all — DocPharma orders often have none — from silently vanishing from the
+            // queue the day this shipped.
+            const scanNames = await fetchPaged((f, t) => supabase.from('shipment_journey_ecom')
+                .select('order_name').gte('last_scan_at', fromISO).lte('last_scan_at', toISO)
+                .order('order_name', { ascending: true }).range(f, t));
+            const byScan = [...new Set((scanNames || []).map(j => String(j.order_name || '').replace('#', '').trim()).filter(Boolean))];
+            const [orderedRows, scannedRows] = await Promise.all([
+                fetchPaged((f, t) => supabase.from('order_buckets').select(SEL)
+                    .in('bucket', UNDELIVERED_BUCKETS).gte('created_at', fromISO).lte('created_at', toISO)
+                    .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true })
+                    .order('order_id', { ascending: true })
+                    .range(f, t)),
+                // BOTH SPELLINGS. `order_buckets.order_name` carries the '#' ("#TE25-44160") and
+                // `shipment_journey_ecom.order_name` does not ("TE25-44160") — matching on one form
+                // silently returns nothing, which is exactly how this first went out returning zero.
+                byScan.length
+                    ? chunkedIn('order_buckets', SEL, 'order_name', byScan.flatMap(n => [n, '#' + n]),
+                        q => q.in('bucket', UNDELIVERED_BUCKETS))
+                    : Promise.resolve([]),
+            ]);
+            // De-duped on order_id, then ordered exactly as before: confirmed customers first, oldest next.
+            const seen = new Set();
+            rows = [...orderedRows, ...scannedRows].filter(r => {
+                const k = String(r.order_id);
+                if (seen.has(k)) return false;
+                seen.add(k); return true;
+            }).sort((x, y) => (Number(!!y.msg91_confirmed) - Number(!!x.msg91_confirmed))
+                || String(x.created_at || '').localeCompare(String(y.created_at || ''))
+                || String(x.order_id).localeCompare(String(y.order_id)));
             // ⚠️ REMEMBER FIRST, FILTER SECOND. Every order this query saw undelivered goes on record
             // BEFORE the terminal filter below removes any of them — a parcel that has just been delivered
             // or returned is exactly the one the Status-changed tab exists to show. This upsert used to sit
@@ -716,7 +760,7 @@ router.get('/support/queue', async (req, res) => {
         // no journey row), so the lookup would cost a query and return nothing but nulls.
         if (isUndPanel && rows.length) {
             const normNames = [...new Set(rows.map(r => String(r.order_name || '').replace('#', '').trim()).filter(Boolean))];
-            const [plat, raised, escMarks, rtoCallRows] = await Promise.all([
+            const [plat, raised, escMarks] = await Promise.all([
                 platformByOrder(rows),
                 raisedByOrder(rows.map(r => r.order_name)),
                 // Automated escalations — a sheet push or a critical email. Distinct from the manual
@@ -726,17 +770,7 @@ router.get('/support/queue', async (req, res) => {
                     q => q.in('mark_type', ['sheet_escalated', 'critical_mail_sent'])),
                 // RTO auto-call state ON THE ROW (user, 2026-09-02: "on undelivered page give called
                 // kind of thing — not need to open order") — the chip renders without the modal.
-                chunkedIn('vobiz_auto_calls_ecom', 'order_name, status, attempts, detail, next_attempt_at', 'order_name', normNames,
-                    q => q.eq('purpose', 'rto_recovery')),
             ]);
-            const rtoBy = {}; (rtoCallRows || []).forEach(a => { rtoBy[String(a.order_name).replace('#', '').trim()] = a; });
-            rows.forEach(r => {
-                const a = rtoBy[String(r.order_name || '').replace('#', '').trim()];
-                if (a) r.rto_call = { status: a.status, attempts: a.attempts || 1,
-                    outcome: (a.detail && a.detail.outcome) || null,
-                    note: (a.detail && (a.detail.outcome_note || a.detail.why)) || null,
-                    next_at: a.next_attempt_at || null };
-            });
             const escBy = {};
             (escMarks || []).forEach(m => {
                 const k = String(m.order_name).replace('#', '').trim();
@@ -749,12 +783,78 @@ router.get('/support/queue', async (req, res) => {
                 r.platform = plat[r.order_id] || null;
                 const key = String(r.order_name || '').replace('#', '').trim();
                 const rz = raised[key];
-                r.raised_kind = rz ? rz.kind : null;      // 'raised' | 'raised_voc'
+                r.raised_kind = rz ? rz.kind : null;      // 'raised' | 'raised_voc' | 'customer_rto'
                 r.raised_at = rz ? rz.at : null;          // sortable/filterable date
                 r.raised_by = rz ? rz.by : null;
                 const esc = escBy[key];
                 r.escalated_kind = esc ? [...esc.kinds].sort().join('+') : null;   // 'mail' | 'sheet' | 'mail+sheet'
                 r.escalated_at = esc ? esc.at : null;
+            });
+        }
+
+        // CALL ATTEMPTS ON EVERY PANEL (user, 2026-09-05: "call attempt date and time should show on
+        // undelivered and hold order panel"). Deliberately OUTSIDE the shipped-panels block above:
+        // Hold Orders is the `repeat` tab, whose orders are pre-dispatch and therefore skipped there,
+        // yet it is exactly where COD confirmation calls land. Two reads, chunked, for any tab.
+        if (rows.length) {
+            const callNames = [...new Set(rows.map(r => String(r.order_name || '').replace('#', '').trim()).filter(Boolean))];
+            const [rtoCallRows, callLogRows] = await Promise.all([
+                chunkedIn('vobiz_auto_calls_ecom', 'order_name, purpose, status, attempts, detail, next_attempt_at, last_attempt_at, attempt_log', 'order_name', callNames),
+                // A manual AI call from the order modal never writes a turnstile row, so the only
+                // record it leaves is here — the ℹ️ log would be missing half the calls without it.
+                chunkedIn('agent_call_logs', 'order_id, call_type, called_at, summary, exchanges, recording_url', 'order_id', callNames),
+            ]);
+            // The turnstile now carries both purposes, so key it by order AND purpose. The existing
+            // rto_call chip keeps reading the rto_recovery row exactly as before.
+            const turnBy = {};
+            (rtoCallRows || []).forEach(a => {
+                const k = String(a.order_name).replace('#', '').trim();
+                (turnBy[k] = turnBy[k] || {})[a.purpose || 'rto_recovery'] = a;
+            });
+            // Every call that ever reached this order, newest first. `kind` is what the queue filters
+            // on: the auto engine writes "· auto engine" into its own summary, a manual dial from the
+            // order modal writes "· manual call by <email>", and a human dialling from their handset
+            // (not built yet) will be tagged the same way rather than guessed at.
+            const callsBy = {};
+            (callLogRows || []).forEach(c => {
+                const k = String(c.order_id || '').replace('#', '').trim();
+                const s = String(c.summary || '');
+                const kind = /manual call by/i.test(s) ? 'manual_ai' : /manual human/i.test(s) ? 'manual' : 'auto_ai';
+                (callsBy[k] = callsBy[k] || []).push({
+                    at: c.called_at, kind,
+                    type: String(c.call_type || '').replace('_vobiz', ''),
+                    seconds: Number((s.match(/(\d+)s call to/) || [])[1] || 0),
+                    outcome: (s.split('\n')[0] || '').slice(0, 120),
+                    by: (s.match(/manual call by ([^\s·]+)/i) || [])[1] || null,
+                    exchanges: c.exchanges || 0,
+                    recording_url: c.recording_url || null,
+                });
+            });
+            Object.values(callsBy).forEach(list => list.sort((a, b) => String(b.at).localeCompare(String(a.at))));
+            rows.forEach(r => {
+                const k = String(r.order_name || '').replace('#', '').trim();
+                const a = (turnBy[k] || {}).rto_recovery;
+                if (a) r.rto_call = { status: a.status, attempts: a.attempts || 1,
+                    outcome: (a.detail && a.detail.outcome) || null,
+                    note: (a.detail && (a.detail.outcome_note || a.detail.why)) || null,
+                    next_at: a.next_attempt_at || null };
+                // WHEN WE LAST TRIED, on both panels — the column the user asked for. The carrier's
+                // per-dial facts (ring seconds, hangup cause) live in the turnstile's attempt_log and
+                // ride along for the ℹ️ popover; the call log carries the ones the turnstile never saw.
+                const logs = callsBy[k] || [];
+                const turns = Object.values(turnBy[k] || {});
+                const lastTurnAt = turns.map(t => t.last_attempt_at).filter(Boolean).sort().pop() || null;
+                const lastAt = [logs[0] && logs[0].at, lastTurnAt].filter(Boolean).sort().pop() || null;
+                r.call_last_at = lastAt;    // its own column, so the table can sort on it
+                if (lastAt || logs.length) {
+                    r.call_attempts = {
+                        last_at: lastAt, count: logs.length,
+                        kinds: [...new Set(logs.map(l => l.kind))],
+                        log: logs.slice(0, 25),
+                        dial: turns.map(t => ({ purpose: t.purpose, status: t.status, attempts: t.attempts,
+                            next_at: t.next_attempt_at || null, log: Array.isArray(t.attempt_log) ? t.attempt_log : [] })),
+                    };
+                }
             });
         }
         // Payment type (COD vs Prepaid) — `order_buckets` carries no payment column, so read

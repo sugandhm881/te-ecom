@@ -150,7 +150,10 @@ const { tokenRequired: _apiAuth, requirePermission } = require('./app/auth');
 // a real loopback socket; no forwarding header, since a proxy makes every VPS request look local; and
 // VOBIZ_RTO_ENABLED_TEST). It dials one named order and can never run a bulk tick. The permission-
 // gated /vobiz/rto-call-tick is untouched and remains the only way to dial from a browser.
-const PUBLIC_API = [/^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/, /^\/tally\/bridge\//, /^\/bot\/messages$/, /^\/vobiz\/(answer|hangup)$/, /^\/vobiz\/local-test-call$/];
+// /vobiz/manual-(answer|hangup) are called BY Vobiz mid-call and cannot carry our JWT. The webhook
+// token is what makes them act, and an unknown or expired bridge id returns <Hangup/> rather than
+// dialling anyone — the customer's phone only ever rings for a bridge this server itself created.
+const PUBLIC_API = [/^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/, /^\/tally\/bridge\//, /^\/bot\/messages$/, /^\/vobiz\/(answer|hangup)$/, /^\/vobiz\/local-test-call$/, /^\/vobiz\/manual-(answer|hangup)$/];
 app.use('/api', (req, res, next) => {
     if (req.method === 'OPTIONS') return next();
     if (PUBLIC_API.some(rx => rx.test(req.path))) return next();
@@ -210,7 +213,7 @@ const _VIEW_PERMS = [
     [/^\/voice-(config|order-lookup|order-list)/i, 'support-voice'],   // Voice Agent tool endpoints — permitted users / admins only
     // Placing a REAL outbound AI call is its own right (user, 2026-09-01: "manual AI Call Button
     // make permission based") — support-queue alone no longer dials; admins always pass.
-    [/^\/vobiz\/(call|high-value-call-tick|rto-call-tick)$/i, 'support-ai-call'],
+    [/^\/vobiz\/(call|high-value-call-tick|rto-call-tick|manual-call)$/i, 'support-ai-call'],
     [/^\/vobiz\/(recording|ai-call-report)$/i, ['support-voice', 'support-queue', 'support-ai-call']],   // playback + report stay broad
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],
@@ -346,6 +349,7 @@ app.use('/api', require('./app/api/agent_learning').router);   // voice-agent se
 const vobizBridge = require('./app/api/vobiz_bridge');    // real phone calls: Vobiz telephony ⇄ Sarvam voice agent
 app.use('/api', vobizBridge.router);
 app.use('/api', require('./app/api/vobiz_auto_calls').router);   // high-value COD confirmation auto-caller (test trigger)
+app.use('/api', require('./app/api/vobiz_manual_call').router);   // human click-to-call: rings the agent, then bridges the customer
 app.use('/api', require('./app/api/ai_call_report').router);     // daily AI calling report → Teams (manual trigger/preview)
 app.use('/api', require('./app/api/ai_call_costs').router);      // AI Calling Statement — per-call cost breakdown dashboard
 app.use('/api', require('./app/api/ai_call_insights').router);   // Call Insights — hard behaviour metrics + AI audit of transcripts

@@ -1367,6 +1367,198 @@ function check(name, got, want) {
             check('intro protection: both agent turn paths count, so the flag always clears',
                 [(vb2.match(/this\.agentTurnDone\(\);/g) || []).length], [2]);
             {
+                {
+                    // EVERY CALL IN FULL (user, 2026-09-05: "i want full detail of call and every log
+                    // each and every"). The page used to return aggregates only — it could say five
+                    // calls broke a rule but never WHICH five. The compliance bars and the detail rows
+                    // are now summed from one `flagsFor()`, so they can never disagree; if a second
+                    // implementation ever appears, a bar and its own evidence list drift apart.
+                    const ci2 = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_insights.js'), 'utf8');
+                    check('call insights: per-call rows and the compliance bars share one flag function',
+                        [/function flagsFor\(c\)/.test(ci2),
+                         /const f = flagsFor\(c\);/.test(ci2),           // behaviour() sums the same flags
+                         /calls: calls\.map\(c => \{/.test(ci2),
+                         (ci2.match(/function flagsFor/g) || []).length], [true, true, true, 1]);
+                    // A read capped at 1,000 rows silently drops the tail — at ~60 calls a day a month
+                    // is ~1,800, so every number on the page would quietly understate the period.
+                    check('call insights: the call read is paged, not capped at one silent page',
+                        [/\.range\(page \* 1000, page \* 1000 \+ 999\)/.test(ci2),
+                         /if \(!data \|\| data\.length < 1000\) break;/.test(ci2),
+                         !/\.limit\(1200\)/.test(ci2)],
+                        [true, true, true]);
+                    // The carrier's ring/hangup facts live only in the turnstile, and are read in
+                    // chunks keyed by order — never one query per call — and a miss must not 500 the
+                    // page: this is a reporting surface, not the call path.
+                    check('call insights: dial history is chunked and never fatal',
+                        [/\.in\('order_name', names\.slice\(i, i \+ 200\)\)/.test(ci2),
+                         /catch \(e\) \{ console\.log\('\[CallInsights\] dial history unavailable:/.test(ci2)],
+                        [true, true]);
+                    // The recording proxy takes ?u=<vobiz url>; an <audio src> cannot carry a bearer
+                    // token, hence fetch→blob. Getting the parameter name wrong fails only at click.
+                    const appJs = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('call insights: the recording opens through the proxy with the right parameter',
+                        [/\/api\/vobiz\/recording\?u=\$\{encodeURIComponent\(_sci\.view\[i\]\.recording_url/.test(appJs),
+                         /URL\.createObjectURL\(await r\.blob\(\)\)/.test(appJs)],
+                        [true, true]);
+                }
+                {
+                    // A SECOND DATE RANGE, ON WHEN WE CALLED (user, 2026-09-05: "add call log date
+                    // filter along with current date filter and it should work simultaneously").
+                    // It composes with the header range rather than replacing it: the header decides
+                    // which parcels are in the queue, this narrows those to the ones rung in a window.
+                    // Days are compared as LOCAL calendar days — slicing an ISO string to 10 chars is
+                    // UTC and would file an evening IST call under the previous day.
+                    const appJs2 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('queue: the call-date filter is a second range that applies on top of the header range',
+                        [/function supCallDateWindow\(\)/.test(appJs2),
+                         /function supCalledInWindow\(r, w\)/.test(appJs2),
+                         /if\(fCD\) list=list\.filter\(r=>supCalledInWindow\(r,fCD\)\);/.test(appJs2),
+                         /\.map\(t=>_ymd\(new Date\(t\)\)\)/.test(appJs2),
+                         // an incomplete custom range must filter NOTHING, never everything
+                         /return \(f&&t\)\?\{from:f,to:t\}:null;/.test(appJs2)],
+                        [true, true, true, true, true]);
+                    // The clear button used to map eleven inputs onto a seven-entry defaults array, so
+                    // every filter added since reset to undefined and only behaved by luck.
+                    check('queue: every filter control carries its own reset value',
+                        [/const SUP_FILTER_DEFAULTS=\{/.test(appJs2),
+                         /'sup-f-calldate':'all'/.test(appJs2),
+                         !/el\.value=\['all','any','all','all','all','all','all'\]\[i\]/.test(appJs2)],
+                        [true, true, true]);
+                }
+                {
+                    // THE UNDELIVERED DATE MEANS "WHEN IT FAILED", NOT "WHEN IT WAS ORDERED" (user,
+                    // 2026-09-05: "how this possible last 3 days show que is clear"). A parcel fails a
+                    // median of 8 days after purchase, so filtering that tab on the order date matched
+                    // 3 orders while 132 parcels had actually gone undelivered in the window.
+                    // Two things are pinned because getting either wrong returns an empty queue that
+                    // looks like a working filter:
+                    //   · the UNION — a row counts if the courier scanned it in range OR it was ordered
+                    //     in range, so a shipment with no journey row at all (DocPharma often has none)
+                    //     cannot silently vanish;
+                    //   · BOTH NAME SPELLINGS — order_buckets stores "#TE25-44160", the journey stores
+                    //     "TE25-44160", and matching one form returned zero rows on the first attempt.
+                    const sc3 = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+                    check('undelivered tab: the date range means when it went undelivered, order date kept as a union',
+                        [/\.select\('order_name'\)\.gte\('last_scan_at', fromISO\)\.lte\('last_scan_at', toISO\)/.test(sc3),
+                         /byScan\.flatMap\(n => \[n, '#' \+ n\]\)/.test(sc3),
+                         /const \[orderedRows, scannedRows\] = await Promise\.all\(\[/.test(sc3),
+                         // Hold Orders (the repeat tab) must NOT have been changed with it
+                         /\.eq\('bucket', 'repeat_cod'\)|repeat/.test(sc3)],
+                        [true, true, true, true]);
+                }
+                {
+                    // MANUAL CALL — a human agent bridged to the customer (user, 2026-09-05).
+                    // The AGENT is rung FIRST and the customer only when they answer. That order is
+                    // the safety property, not a nicety: dialling the customer first means their
+                    // phone rings with nobody there. If this ever inverts, customers get silence.
+                    const mc = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_manual_call.js'), 'utf8');
+                    const sv2 = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+                    check('manual call: the agent is rung first, the customer only once they answer',
+                        [/to: '91' \+ agent,\s+\/\/ the AGENT's phone rings first/.test(mc),
+                         /<Dial callerId="\$\{V_FROM\(\)\}" timeout="45"><Number>91\$\{p\.customer\}<\/Number><\/Dial>/.test(mc),
+                         // an unknown or expired bridge must hang up, never dial a stored number blind
+                         /if \(!p\) return xml\('<Hangup\/>'\);/.test(mc)],
+                        [true, true, true]);
+                    // The webhooks are public because Vobiz calls them, so the token is the only gate;
+                    // placing a call stays behind the same permission as every other dial route.
+                    check('manual call: webhooks are token-gated and public, placing one is permission-gated',
+                        [/\^\\\/vobiz\\\/manual-\(answer\|hangup\)\$/.test(sv2),
+                         /manual-call\)\$\/i, 'support-ai-call'/.test(sv2),
+                         /if \(q\.token !== V_TOKEN\(\)\) return xml\('<Hangup\/>'\);/.test(mc)],
+                        [true, true, true]);
+                    // It lands in the same call log as an AI call, tagged so the queue's call-type
+                    // filter classifies it as `manual` — otherwise the filter option matches nothing.
+                    const sc2 = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+                    // TWO UI TRAPS, both caught on the first real click (2026-09-05):
+                    //   · an arbitrary Tailwind z-[86] class is not in the compiled CSS, so it applies
+                    //     NO z-index and the dialog opened underneath the order modal. The same trap is
+                    //     already documented on supTrackOpen; inline style is the only reliable way.
+                    //   · it asked the agent to type their own mobile before every call, when every
+                    //     dashboard user already has one on file and the server falls back to it.
+                    const appJs3 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('manual call dialog: z-index is inline, and it does not ask for a number it already has',
+                        [/wrap\.style\.zIndex='96';/.test(appJs3),
+                         // Scoped to the two dialogs added on 2026-09-05: the long-standing z-[80]/z-[85]
+                         // elsewhere are fine, because those classes were in the build before Tailwind
+                         // last compiled. Only a NEWLY invented z-[..] silently resolves to nothing.
+                         ['sup-dialer', 'sup-calllog-modal'].every(id => {
+                             const at = appJs3.indexOf("wrap.id='" + id + "'");
+                             if (at < 0) return false;
+                             // the className LINE only — a z-[..] inside the comment explaining this
+                             // trap is documentation, not a bug, and matched the naive check twice.
+                             const cls = appJs3.slice(at, at + 900).split('\n').find(l => l.includes("wrap.className='fixed"));
+                             return !!cls && !/z-\[\d+\]/.test(cls);
+                         }),
+                         /class="sup-d-phonewrap hidden"/.test(appJs3),      // field hidden by default
+                         /if\(\/phone number is needed\|own phone\/i\.test\(e\.message\)\) showField/.test(appJs3)],
+                        [true, true, true, true]);
+                    // THE DIALOG MUST SHOW THE CALL ENDING. It sat on "Calling…" long after both
+                    // parties had hung up (user, 2026-09-05), because nothing ever asked the server
+                    // what the bridge was doing. The record is now kept past hangup — the sweeper
+                    // clears it minutes later — so ringing → talking → ended is observable.
+                    check('manual call: the dialog polls live state instead of freezing on "Calling…"',
+                        [/router\.get\('\/vobiz\/manual-call\/:id'/.test(mc),
+                         /const state = p\.endedAt \? 'ended' : p\.bridgedAt \? 'talking' : 'ringing';/.test(mc),
+                         !/pending\.delete\(String\(q\.id \|\| ''\)\);/.test(mc),   // no longer deleted on hangup
+                         /const poll=setInterval\(async \(\)=>\{/.test(appJs3),
+                         /if\(st2\.state==='ended'\|\|st2\.state==='unknown'\)\{/.test(appJs3)],
+                        [true, true, true, true, true]);
+                    // The JWT carries the address on `sub`; reading `email` logged "(unknown user)"
+                    // and attributed a real call to "agent" instead of the person who placed it.
+                    check('manual call: attributed to the person who placed it',
+                        [/req\.user\.sub \|\| req\.user\.email/.test(mc)], [true]);
+                    // A MANUAL CALL IS RECORDED TOO (user, 2026-09-05: "recording not come of this
+                    // manual call its should come"). The live Record API on the agent leg, not an XML
+                    // <Record> verb: the verb captured a single leg on the AI path and slowed setup,
+                    // and here it would sit in front of the Dial the customer is waiting on. The
+                    // 3600s limit is load-bearing — the API default is 60s and truncated every AI
+                    // recording at 00:59. The url has to reach the log row or ▶ Play has nothing.
+                    check('manual call: recorded, and the recording reaches the log row',
+                        [mc.includes('startManualRecording(p);'),
+                         mc.includes('${p.uuid}/Record/'),        // the live API, on the leg we own
+                         /time_limit: 3600/.test(mc),
+                         /recording_url: p.recordingUrl || null/.test(mc),
+                         !mc.includes('<Record recordSession')],     // never the XML verb — one leg only
+                        [true, true, true, true, true]);
+                    // A human call badged "🤖 AI call" is a false record of who spoke to the customer.
+                    check('manual call: the history badge does not call a human an AI',
+                        [appJs3.includes("==='manual_human'") || appJs3.includes('==="manual_human"'), appJs3.includes('Manual call</span>')],
+                        [true, true]);
+                    check('manual call: logged like any other call and classified as manual',
+                        [/manual human call by \$\{p\.email/.test(mc),
+                         /call_type: 'manual_human'/.test(mc),
+                         /\/manual human\/i\.test\(s\) \? 'manual'/.test(sc2)],
+                        [true, true, true]);
+                }
+                // ── ONE NUMBER, ONE CALL (user, 2026-09-05: "avoid overlapping") ──
+                // Run the registry for real rather than grepping it: the property that matters is
+                // behavioural — a refused multi-number claim must not leave HALF a claim behind, or
+                // the agent's own handset stays locked for ten minutes after a refusal nobody saw.
+                {
+                    const reg = require('../app/api/call_registry');
+                    const CUST = '9990001111', AGENT = '9990002222';
+                    const first  = reg.claim([CUST], 'ai', 'cod TE-TEST');
+                    const second = reg.claim([CUST, AGENT], 'manual', 'TE-TEST by tester');
+                    const leaked = !!reg.holder(AGENT);        // the half-claim bug
+                    const said   = (reg.holder(CUST) || {}).who;
+                    reg.release(CUST);
+                    const third  = reg.claim([CUST, AGENT], 'manual', 'TE-TEST by tester');
+                    reg.release([CUST, AGENT]);
+                    check('call registry: one number is on one call, and a refusal leaks nothing',
+                        [first.ok, second.ok, leaked, said, third.ok, !!reg.holder(CUST)],
+                        [true, false, false, 'ai', true, false]);
+                }
+                const acAll = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8');
+                const mcAll = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_manual_call.js'), 'utf8');
+                // Both callers must go through it, and a collision must not cost the order a retry.
+                check('no overlap: both callers claim the line, and a collision defers instead of failing',
+                    [vb.includes("callRegistry.holder(phone)"),          // the AI checks before dialling/
+                     vb.includes("callRegistry.claim(phone, 'ai'"),
+                     vb.includes('callRegistry.release(this.s.phone)'),   // and frees it when the call ends
+                     mcAll.includes("callRegistry.claim([customer, agent], 'manual'"),
+                     mcAll.includes('callRegistry.release([p.customer, p.agent])'),
+                     acAll.split('if (r.busy) {').length - 1],   // rolled back at BOTH tick sites
+                    [true, true, true, true, true, 2]);
                 // THE AUDIT RUNS ON THE MAX PLAN, THE CALL BRAIN DOES NOT (user, 2026-09-04: "for call
                 // kind of anyalsis use calude code max plan and only for brain use clause api").
                 // Two halves, and both matter: the audit must reach Claude Code, and it must NOT heal
@@ -1592,7 +1784,9 @@ function check(name, got, want) {
             [true, true, true, true, true]);
         check('hv-call: route and auto-caller share ONE placeOrderCall (allowlist inside it), cron wired, endpoint capability-gated',
             [/async function placeOrderCall\(b\)/.test(vb), /placeOrderCall, vobizConfigured/.test(hv),
-             /HighValueCall \(\*\/5/.test(sv), /high-value-call-tick\|rto-call-tick\)\$\/i, 'support-ai-call'/.test(sv)],
+             // manual-call joined the same permission rule on 2026-09-05: placing a real call is one
+             // right whether a human or the AI does the talking.
+             /HighValueCall \(\*\/5/.test(sv), /high-value-call-tick\|rto-call-tick\|manual-call\)\$\/i, 'support-ai-call'/.test(sv)],
             [true, true, true, true]);
         // AI Calling Statement (2026-09-02): per-call cost sheet under Customer Support.
         {

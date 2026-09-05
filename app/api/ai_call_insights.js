@@ -23,21 +23,24 @@ const agentLines = (t) => String(t || '').split('\n').filter(l => /^agent:/i.tes
 
 // Every counter here mirrors a RULE the agent is meant to follow, so a rising number is a
 // regression and a falling one is proof a fix worked.
+// Aggregate counters, summed from the SAME per-call flags the detail rows show — so a bar can never
+// claim five breaches while the list underneath shows four.
 function behaviour(calls) {
     const b = { double_intro: 0, hello_storm: 0, wantit_overasked: 0, reached_closing: 0,
         lang_switched: 0, agent_turns: 0, one_sided: 0 };
     for (const c of calls) {
-        const ag = agentLines(c.transcript);
-        b.agent_turns += ag.length;
-        if (ag.filter(l => /this is \w+ from The Element|मैं \w+ बोल|from The Element,? (calling|and)/i.test(l)).length > 1) b.double_intro++;
-        if (/\[language switched/.test(c.transcript || '')) b.lang_switched++;
-        if ((String(c.transcript || '').split('\n').filter(l => /^customer:\s*(hello|हेलो|हैलो)[\s.,!?।]*$/i.test(l.trim())).length) >= 3) b.hello_storm++;
-        if (ag.filter(l => /would you still like to receive|receive करना चाहेंगे|send (it|the .*) again|भेज (दूँ|देने)/i.test(l)).length > 2) b.wantit_overasked++;
-        if (/great day|दिन शुभ हो|choosing The Element|चुनने के लिए/i.test(ag[ag.length - 1] || '')) b.reached_closing++;
-        if (durOf(c) > 0 && custTurns(c.transcript) === 0) b.one_sided++;
+        const f = flagsFor(c);
+        b.agent_turns += f.agent_turns;
+        if (f.double_intro) b.double_intro++;
+        if (f.hello_storm) b.hello_storm++;
+        if (f.wantit_overasked) b.wantit_overasked++;
+        if (f.one_sided) b.one_sided++;
+        if (f.reached_closing) b.reached_closing++;
+        if (f.lang_switched) b.lang_switched++;
     }
     return b;
 }
+
 
 function outcomeOf(summary) {
     const l = (String(summary || '').split('\n')[0] || '').toLowerCase();
@@ -49,13 +52,63 @@ function outcomeOf(summary) {
     return 'other';
 }
 
-async function loadCalls(fromIso, toIso) {
-    const { data, error } = await supabase.from('agent_call_logs')
-        .select('id, order_id, call_type, language, exchanges, summary, transcript, called_at')
-        .gte('called_at', fromIso).lte('called_at', toIso)
-        .order('called_at', { ascending: false }).limit(1200);
-    if (error) throw new Error('call log read failed: ' + error.message);
-    return (data || []).filter(c => c.transcript && c.transcript.length > 30);
+// PAGED, because Supabase caps a read at 1,000 rows and silently returns the first page — at ~60
+// calls a day a month of history is ~1,800 and the tail would simply vanish from every number on
+// the page. Walks in 1,000-row pages until a short page comes back, with a hard ceiling so a huge
+// range cannot pull the server over.
+async function loadCalls(fromIso, toIso, { cap = 5000 } = {}) {
+    const out = [];
+    for (let page = 0; page * 1000 < cap; page++) {
+        const { data, error } = await supabase.from('agent_call_logs')
+            .select('id, order_id, customer_name, call_type, language, exchanges, summary, transcript, called_at, recording_url, cost_meta')
+            .gte('called_at', fromIso).lte('called_at', toIso)
+            .order('called_at', { ascending: false })
+            .range(page * 1000, page * 1000 + 999);
+        if (error) throw new Error('call log read failed: ' + error.message);
+        out.push(...(data || []));
+        if (!data || data.length < 1000) break;
+    }
+    return out.filter(c => c.transcript && c.transcript.length > 30);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE SOURCE OF TRUTH FOR THE RULE FLAGS. The compliance bars used to be counted inline, so the
+// page could tell you five calls broke a rule but never WHICH five — and a per-call view computed
+// separately would drift from the totals it sits under. Both now read this.
+// Each flag is a rule the agent must follow; true means this call BROKE it, except `reached_closing`
+// and `lang_switched`, which are good things and are counted as such.
+// ─────────────────────────────────────────────────────────────────────────────
+function flagsFor(c) {
+    const ag = agentLines(c.transcript);
+    const t = String(c.transcript || '');
+    return {
+        double_intro: ag.filter(l => /this is \w+ from The Element|मैं \w+ बोल|from The Element,? (calling|and)/i.test(l)).length > 1,
+        hello_storm: t.split('\n').filter(l => /^customer:\s*(hello|हेलो|हैलो)[\s.,!?।]*$/i.test(l.trim())).length >= 3,
+        wantit_overasked: ag.filter(l => /would you still like to receive|receive करना चाहेंगे|send (it|the .*) again|भेज (दूँ|दें|दीजिए)/i.test(l)).length >= 3,
+        one_sided: durOf(c) > 0 && custTurns(c.transcript) === 0,
+        reached_closing: /great day|दिन शुभ हो|choosing The Element|चुनने के लिए/i.test(ag[ag.length - 1] || ''),
+        lang_switched: /\[language switched/.test(t),
+        blocked_line: /\[not spoken — blocked by rule\]/.test(t),
+        agent_turns: ag.length,
+        customer_turns: custTurns(c.transcript),
+    };
+}
+
+// What one call cost in Claude tokens, from the ledger the bridge writes per call (cost_meta).
+// Anthropic list prices, the same ones the AI Calling Statement uses; null when a call predates
+// the ledger rather than a fabricated zero.
+const CLAUDE_RATES = { 'claude-haiku-4-5-20251001': [1, 5], 'claude-sonnet-5': [3, 15], 'claude-opus-5': [15, 75] };
+function claudeCostOf(c) {
+    const m = c.cost_meta && c.cost_meta.claude;
+    if (!m || typeof m !== 'object') return null;
+    let usd = 0, tokens = 0;
+    for (const [model, u] of Object.entries(m)) {
+        const [pin, pout] = CLAUDE_RATES[model] || CLAUDE_RATES['claude-haiku-4-5-20251001'];
+        const i = +u.in || 0, o = +u.out || 0, cr = +u.cr || 0, cw = +u.cw || 0;
+        usd += (i * pin + o * pout + cr * pin * 0.1 + cw * pin * 1.25) / 1e6;
+        tokens += i + o + cr + cw;
+    }
+    return { inr: Math.round(usd * Number(process.env.COST_USD_INR || 88) * 100) / 100, tokens };
 }
 
 router.get('/support/call-insights', async (req, res) => {
@@ -79,6 +132,21 @@ router.get('/support/call-insights', async (req, res) => {
         const repeatCalled = Object.values(byOrder).filter(n => n >= 3).length;
         const b = behaviour(calls);
 
+        // THE DIAL HISTORY, from the turnstile — ring seconds, hangup cause and attempt number come
+        // from the carrier's CDR and exist nowhere in the call log. One chunked read keyed by order,
+        // never a query per call, and a miss is simply absent rather than fatal: the detail rows are
+        // a reporting surface and must never be the reason the page fails to load.
+        const dials = {};
+        try {
+            const names = [...new Set(calls.map(c => c.order_id).filter(Boolean))];
+            for (let i = 0; i < names.length; i += 200) {
+                const { data } = await supabase.from('vobiz_auto_calls_ecom')
+                    .select('order_name, purpose, status, attempts, next_attempt_at, attempt_log, detail')
+                    .in('order_name', names.slice(i, i + 200));
+                for (const r of (data || [])) (dials[r.order_name] = dials[r.order_name] || []).push(r);
+            }
+        } catch (e) { console.log('[CallInsights] dial history unavailable:', e.message); }
+
         // the cached audit for this window (newest first)
         const { data: cached } = await supabase.from('agent_call_insights_ecom')
             .select('*').eq('from_date', from).eq('to_date', to)
@@ -95,6 +163,33 @@ router.get('/support/call-insights', async (req, res) => {
                 repeat_called_orders: repeatCalled,
             },
             outcomes, languages: langs, types,
+            // EVERY CALL IN THE RANGE, with everything known about it (user, 2026-09-05: "i want full
+            // detail of call and every log each and every"). The aggregates above are summed from the
+            // very same flags, so a compliance bar and this list can never disagree. Transcripts are
+            // sent whole — they are the point of the page — which is why the range is what bounds the
+            // payload rather than an arbitrary row cap.
+            calls: calls.map(c => {
+                const f = flagsFor(c);
+                const d = (dials[c.order_id] || []).find(r => String(c.call_type || '').startsWith(String(r.purpose || '').split('_')[0]))
+                    || (dials[c.order_id] || [])[0] || null;
+                const last = d && Array.isArray(d.attempt_log) ? d.attempt_log[d.attempt_log.length - 1] : null;
+                return {
+                    id: c.id, order_id: c.order_id, customer_name: c.customer_name || null,
+                    call_type: String(c.call_type || '').replace('_vobiz', ''),
+                    language: c.language, called_at: c.called_at,
+                    seconds: durOf(c), outcome: outcomeOf(c.summary), summary: c.summary || '',
+                    exchanges: c.exchanges, transcript: c.transcript || '',
+                    recording_url: c.recording_url || null,
+                    claude: claudeCostOf(c),
+                    flags: f,
+                    dial: d ? {
+                        status: d.status, attempts: d.attempts, next_attempt_at: d.next_attempt_at,
+                        ring_s: last && last.ring_s, cause: last && last.cause, hangup_by: last && last.hangup_by,
+                        result: last && last.result, log: d.attempt_log || [],
+                        note: (d.detail && (d.detail.outcome_note || d.detail.why)) || null,
+                    } : null,
+                };
+            }),
             behaviour: {
                 double_intro: b.double_intro, hello_storm: b.hello_storm,
                 wantit_overasked: b.wantit_overasked, reached_closing: b.reached_closing,

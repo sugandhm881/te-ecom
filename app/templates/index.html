@@ -2042,7 +2042,15 @@
                          present, so a new courier state appears here without a code change. -->
                     <select id="sup-f-status" class="filter-select"><option value="all">All statuses</option></select>
                     <!-- Raised-with-courier state. Hidden on Repeat (pre-dispatch orders are never raised). -->
-                    <select id="sup-f-raised" class="filter-select"><option value="all">All raised</option><option value="none">Not raised</option><option value="any">Raised (any)</option><option value="raised">Raised</option><option value="raised_voc">Raised with VOC</option></select>
+                    <select id="sup-f-raised" class="filter-select"><option value="all">All raised</option><option value="none">Not raised</option><option value="any">Raised (any)</option><option value="raised">Raised</option><option value="raised_voc">Raised with VOC</option><option value="customer_rto">Customer Requested RTO</option></select>
+                    <select id="sup-f-calltype" class="filter-select"><option value="all">All call types</option><option value="none">Never called</option><option value="any">Called (any)</option><option value="auto_ai">Auto AI call</option><option value="manual_ai">Manual AI call</option><option value="manual">Manual call</option></select>
+                    <!-- A SECOND date range, on WHEN THE CALL HAPPENED (user, 2026-09-05). It works
+                         alongside the header range, not instead of it: the header answers "which parcels"
+                         and this answers "which of those did we ring, and when". Both apply together. -->
+                    <select id="sup-f-calldate" class="filter-select"><option value="all">Any call date</option><option value="0">Called today</option><option value="y">Called yesterday</option><option value="3">Called last 3 days</option><option value="7">Called last 7 days</option><option value="14">Called last 14 days</option><option value="custom">Called between…</option></select>
+                    <span id="sup-f-calldate-custom" class="hidden items-center gap-1">
+                      <input type="date" id="sup-f-callfrom" class="filter-input"><span class="text-slate-400">→</span>
+                      <input type="date" id="sup-f-callto" class="filter-input"></span>
                     <button id="sup-f-clear" class="filter-btn" style="display:none">Clear</button>
                     <span id="sup-queue-count" class="text-sm text-slate-400 ml-auto"></span>
                 </div>
@@ -2168,6 +2176,42 @@
                 <div class="grid lg:grid-cols-2 gap-6">
                     <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">🔧 Top 5 to improve</h3><div id="sci-improve" class="space-y-3"></div></div>
                     <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">✅ Top 5 done well</h3><div id="sci-good" class="space-y-3"></div></div>
+                </div>
+                <!-- EVERY CALL IN THE RANGE. The cards above are the summary; this is the evidence
+                     behind them — one row per call, expanding to the whole transcript, the recording,
+                     the dial history and what the brain cost. -->
+                <div class="card">
+                    <div class="p-5 pb-3 flex flex-wrap items-center justify-between gap-3">
+                        <div><h3 class="font-semibold text-slate-700">Every call<span id="sci-calls-count" class="text-xs font-normal text-slate-400 ml-2"></span></h3>
+                            <p class="text-xs text-slate-400 mt-0.5">Click a row for the full transcript, recording, dial history and cost.</p></div>
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <input id="sci-calls-q" type="search" class="filter-input" placeholder="Order, phone, or words said…">
+                            <select id="sci-calls-filter" class="filter-select">
+                                <option value="">All calls</option>
+                                <option value="broke">⚠ Broke a rule</option>
+                                <option value="one_sided">Customer never spoke</option>
+                                <option value="double_intro">Introduced twice</option>
+                                <option value="wantit_overasked">Asked "want it?" 3+×</option>
+                                <option value="hello_storm">Hello-storm</option>
+                                <option value="lang_switched">Language switched</option>
+                                <option value="blocked_line">A line was blocked by a rule</option>
+                                <option value="reattempt">Outcome: reattempt</option>
+                                <option value="confirmed">Outcome: confirmed</option>
+                                <option value="cancelled">Outcome: cancelled</option>
+                                <option value="no_answer">Outcome: no answer</option>
+                            </select>
+                            <button id="sci-calls-csv" class="filter-btn">⬇ CSV</button>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto"><table class="w-full text-sm">
+                        <thead><tr class="text-left text-[11px] uppercase tracking-wide text-slate-400 border-y border-slate-200">
+                            <th class="px-5 py-2 font-semibold">When</th><th class="px-3 py-2 font-semibold">Order</th>
+                            <th class="px-3 py-2 font-semibold">Type</th><th class="px-3 py-2 font-semibold">Lang</th>
+                            <th class="px-3 py-2 font-semibold text-right">Secs</th><th class="px-3 py-2 font-semibold text-right">Turns</th>
+                            <th class="px-3 py-2 font-semibold">Outcome</th><th class="px-3 py-2 font-semibold">Rules</th>
+                            <th class="px-3 py-2 font-semibold text-right">Brain</th></tr></thead>
+                        <tbody id="sci-calls-body"></tbody></table></div>
+                    <div id="sci-calls-more" class="p-4 text-center"></div>
                 </div>
             </div>
         </div>
