@@ -213,7 +213,14 @@ const _VIEW_PERMS = [
     [/^\/voice-(config|order-lookup|order-list)/i, 'support-voice'],   // Voice Agent tool endpoints — permitted users / admins only
     // Placing a REAL outbound AI call is its own right (user, 2026-09-01: "manual AI Call Button
     // make permission based") — support-queue alone no longer dials; admins always pass.
-    [/^\/vobiz\/(call|high-value-call-tick|rto-call-tick|manual-call)$/i, 'support-ai-call'],
+    [/^\/vobiz\/(call|high-value-call-tick|rto-call-tick)$/i, 'support-ai-call'],
+    // A HUMAN CALL IS ITS OWN RIGHT (user, 2026-09-07: "make manual call and AI Call Button
+    // Seprately"). It rode on support-ai-call until now, so one grant handed out both the robot and
+    // the agent's own handset. They are different acts by different people: letting someone launch
+    // the AI agent should not put them on the phone with a customer, and letting a support person
+    // ring a customer themselves should not hand them the auto-dialler.
+    // The :id status poll is gated with it — it names the customer and the agent on a live bridge.
+    [/^\/vobiz\/manual-call(\/|$)/i, 'support-manual-call'],
     [/^\/vobiz\/(recording|ai-call-report)$/i, ['support-voice', 'support-queue', 'support-ai-call']],   // playback + report stay broad
     // Influencer Marketing CRM — any influencer view permission unlocks its API group.
     [/^\/inf\//i, ['inf-dashboard', 'inf-discover', 'inf-influencers', 'inf-lists', 'inf-calendar', 'inf-mentions']],

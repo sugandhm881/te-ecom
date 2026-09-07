@@ -758,7 +758,7 @@ function check(name, got, want) {
                 [true, true, true, true, true, true]);
             check('ai-call permission: placing a manual AI call needs support-ai-call (server-enforced), button hides without it, catalog lists it',
                 [fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8').includes("'support-ai-call'"),
-                 /function canAiCall/.test(ap2), /if\(!canAiCall\(\)\)\{ host\.innerHTML=''; return; \}/.test(ap2),
+                 /function canAiCall/.test(ap2), ap2.includes('host.innerHTML = canAiCall() ?'),
                  /\['support-ai-call','Place manual AI calls/.test(ap2)],
                 [true, true, true, true]);
             check('voice stt noise guard + real note id: looped-phrase hallucinations are dropped before the model, and the RTO note uses the AI agent uuid (order_notes.agent_id is uuid)',
@@ -1463,7 +1463,7 @@ function check(name, got, want) {
                     // placing a call stays behind the same permission as every other dial route.
                     check('manual call: webhooks are token-gated and public, placing one is permission-gated',
                         [/\^\\\/vobiz\\\/manual-\(answer\|hangup\)\$/.test(sv2),
-                         /manual-call\)\$\/i, 'support-ai-call'/.test(sv2),
+                         sv2.includes('manual-call(') && sv2.includes("'support-manual-call'"),
                          /if \(q\.token !== V_TOKEN\(\)\) return xml\('<Hangup\/>'\);/.test(mc)],
                         [true, true, true]);
                     // It lands in the same call log as an AI call, tagged so the queue's call-type
@@ -1782,11 +1782,27 @@ function check(name, got, want) {
              /supAiRowTint/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8')),
              /ai_call/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8'))],
             [true, true, true, true, true]);
+        // TWO RIGHTS, NOT ONE (user, 2026-09-07). Launching the AI agent and putting yourself on the
+        // phone with a customer are different acts by different people. The no-fallback check is the
+        // one that matters: if canManualCall() also accepted support-ai-call the split would be
+        // cosmetic — the whole point is that one grant stops handing out both.
+        {
+            const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+            const apx = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+            check('manual call has its OWN permission, separate from the AI call button',
+                [srv.includes("'support-manual-call'"),
+                 srv.includes("rto-call-tick)$/i, 'support-ai-call'"),      // the AI rule stops naming it
+                 apx.includes("function canManualCall() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('support-manual-call'))); }"),
+                 apx.includes('const manualBtn = canManualCall()'),
+                 apx.includes('host.innerHTML = canAiCall() ?'),
+                 apx.includes("['support-manual-call','Place manual calls")],             // grantable in Settings
+                [true, true, true, true, true, true]);
+        }
         check('hv-call: route and auto-caller share ONE placeOrderCall (allowlist inside it), cron wired, endpoint capability-gated',
             [/async function placeOrderCall\(b\)/.test(vb), /placeOrderCall, vobizConfigured/.test(hv),
-             // manual-call joined the same permission rule on 2026-09-05: placing a real call is one
-             // right whether a human or the AI does the talking.
-             /HighValueCall \(\*\/5/.test(sv), /high-value-call-tick\|rto-call-tick\|manual-call\)\$\/i, 'support-ai-call'/.test(sv)],
+             // manual-call was SPLIT OUT of this rule on 2026-09-07 (user: "make manual call and AI
+             // Call Button Permission Seprately") — the AI rule must no longer name it.
+             /HighValueCall \(\*\/5/.test(sv), sv.includes("rto-call-tick)$/i, 'support-ai-call'")],
             [true, true, true, true]);
         // AI Calling Statement (2026-09-02): per-call cost sheet under Customer Support.
         {

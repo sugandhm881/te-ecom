@@ -1180,6 +1180,36 @@ single source of truth for rule compliance so the dashboard's count and the AI a
 disagree, and `loadCalls` pages the query, because **Supabase caps a read at 1000 rows** and a silent
 truncation would have shown a clean scorecard built from a fraction of the calls.
 
+### The AI Call and Manual Call buttons become separate rights (2026-09-07)
+
+User: *"make manual call and AI Call Button Permission Seprately."* The manual dialler had ridden on
+`support-ai-call` since it shipped, so a single grant handed out both the robot **and** the agent's own
+handset. They are different acts by different people: letting someone launch the AI agent should not
+put them on the phone with a customer, and letting a support person ring a customer themselves should
+not hand them the auto-dialler.
+
+| Permission | Button | What it allows |
+|---|---|---|
+| `support-ai-call` | 🤖 AI Call | `POST /vobiz/call` and the high-value / RTO tick endpoints |
+| `support-manual-call` | 📞 Manual call | `POST /vobiz/manual-call` **and** its `:id` status poll |
+
+The status poll is gated with the manual right rather than left open, because it names the customer and
+the agent on a live bridge.
+
+**Front end:** `canManualCall()` joins `canAiCall()`, and each button is built behind its own predicate
+instead of one guard hiding both. The call bar disappears entirely only when the user holds neither, and
+the AI click handler is no longer bound when the AI button was not rendered. The new key is listed in
+the Actions group of the admin permission catalogue (`PERM_GROUPS`); permissions are a free-form array
+on `app_users_ecom` with no server-side whitelist, so that listing is all a new right needs to be
+grantable in **Settings → Users**.
+
+**`canManualCall()` deliberately does NOT fall back to `support-ai-call`.** Accepting either key would
+leave the two permissions joined at the hip, which is the thing being undone — so the selftest pins the
+*absence* of that fallback, not merely the presence of the new key.
+
+**Migration note:** anyone holding `support-ai-call` loses the Manual call button until they are granted
+`support-manual-call`. Admins are unaffected, as everywhere. Selftests **515 passing**.
+
 ### Manual calls: recorded, badged honestly, and one number = one call (2026-09-05)
 
 **A human agent can now dial a customer from the dashboard**, and the two callers — robot and human —

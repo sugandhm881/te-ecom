@@ -896,6 +896,10 @@ function canCancelOrders() { return !!(currentUser && (currentUser.isAdmin || (c
 // Placing a real AI phone call is its own right (2026-09-01) — the button hides without it, and the
 // server enforces the same key on /vobiz/call, so hiding is UX, not the security boundary.
 function canAiCall() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('support-ai-call'))); }
+// Dialling the customer YOURSELF is a separate right from launching the AI agent (user, 2026-09-07).
+// Deliberately does NOT fall back to support-ai-call: accepting either key would leave the two
+// permissions joined at the hip, which is the thing being undone. Admins pass, as they do everywhere.
+function canManualCall() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('support-manual-call'))); }
 
 async function handleSignup() {
     const name = String((document.getElementById('signup-name') || {}).value || '').trim();
@@ -6287,16 +6291,18 @@ function supAiCallMount(o){
   const host=document.getElementById('supd-aicall'); if(!host) return;
   const map=(currentView==='support-queue' && SUP_AI_CALL_BY_TAB[_supTab]) || SUP_AI_CALL_BY_TAB.repeat;
   if(!o.order_name) return;
-  if(!canAiCall()){ host.innerHTML=''; return; }
+  if(!canAiCall() && !canManualCall()){ host.innerHTML=''; return; }   // neither right: no call bar at all
+  // Each button answers to its own permission now — one grant no longer hands out both.
   // The manual button lives beside the AI one, both inside the order popup: placing a call is a
   // deliberate act taken with the order open in front of you, not a click while scanning a list.
-  const manualBtn = o.order_name
+  const manualBtn = canManualCall()
     ? `<button id="supd-mancall-btn" class="px-4 py-2 rounded-lg text-sm font-semibold border border-slate-300 text-slate-700 hover:bg-slate-50" title="Call the customer yourself — your phone rings first">📞 Manual call</button>`
     : '';
-  host.innerHTML=`<button id="supd-aicall-btn" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700" title="The AI agent calls the customer to ${escapeHtml(map.label)}">🤖 AI Call</button>`;
+  host.innerHTML = canAiCall() ? `<button id="supd-aicall-btn" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700" title="The AI agent calls the customer to ${escapeHtml(map.label)}">🤖 AI Call</button>` : '';
   host.insertAdjacentHTML('beforeend', manualBtn);
   document.getElementById('supd-mancall-btn')?.addEventListener('click',()=>supManualCallDialer(o.order_name));
-  document.getElementById('supd-aicall-btn').addEventListener('click',()=>{
+  const aiBtn = document.getElementById('supd-aicall-btn');
+  if(aiBtn) aiBtn.addEventListener('click',()=>{
     supConfirm({
       title:`AI agent will call the customer`, icon:'🤖', tone:'go', confirmLabel:'Place the call',
       message:`Purpose: ${map.label} (${o.order_name}). The agent speaks in the configured voice and the call is recorded.`,
@@ -8647,7 +8653,7 @@ const PERM_GROUPS = [
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
   // Capabilities (not dashboard views) — granted per-user by the admin. Server enforces each one too.
-  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-ai-call','Place manual AI calls (🤖 AI Call button — real phone calls to customers)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)'],['delivery-perf-revenue','See ₹ revenue on Delivery Performance & Last-Mile Funnel (order values)'],['purchase-orders-write','Create purchase orders & change PO status (EasyEcom)'],['grn-write','Receive stock — create GRNs in EasyEcom (Auto & against PO)']]]
+  ['Actions', [['send-escalation-emails','Send escalation emails (critical / RapidShyp / claims)'],['support-ai-call','Place manual AI calls (🤖 AI Call button — real phone calls to customers)'],['support-manual-call','Place manual calls (📞 Manual call button — rings your own phone, then bridges you to the customer)'],['support-cancel-order','Cancel held orders (Customer Support Call Queue)'],['finance-post-tally','Post vouchers to Tally (drafting is separate)'],['delivery-perf-revenue','See ₹ revenue on Delivery Performance & Last-Mile Funnel (order values)'],['purchase-orders-write','Create purchase orders & change PO status (EasyEcom)'],['grn-write','Receive stock — create GRNs in EasyEcom (Auto & against PO)']]]
 ];
 const PERM_CATALOG = PERM_GROUPS.flatMap(g=>g[1]);
 const PERM_TOTAL = PERM_CATALOG.length;
