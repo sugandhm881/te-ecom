@@ -1782,6 +1782,25 @@ function check(name, got, want) {
              /supAiRowTint/.test(fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8')),
              /ai_call/.test(fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8'))],
             [true, true, true, true, true]);
+        // ── THE AWB IS NOT ALWAYS THE SAME AWB (user, 2026-09-07: TE25-46079, "scan log also show
+        // blank") ── A DocPharma journey is keyed on whatever identifier existed when it was written
+        // (DocPharma's own tracking_number), while the order row carries EasyEcom's 'EL12<order>'
+        // reference: 1,307 of 1,872 DocPharma shipments have the two disagreeing, against 17 of 7,582
+        // on RapidShyp. Looking the journey up by AWB alone therefore found nothing — and with no
+        // journey the endpoint could not even tell the parcel was DocPharma, so it asked RAPIDSHYP
+        // about it and showed an empty panel. The order NAME is what both rows always agree on.
+        {
+            const dr = fs.readFileSync(path.join(ROOT, 'app/api/delivery_reports.js'), 'utf8');
+            const sc = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+            check('scan log: falls back to the order name when the AWB finds no journey',
+                [dr.includes('let { data: j }'),                                  // reassignable, or the fallback cannot land
+                 dr.includes(".eq('awb_number', awb)"),                          // AWB -> order name
+                 dr.includes('order_name.eq.${nm},order_name.eq.#${nm}'),         // both spellings
+                 dr.includes("order('updated_at', { ascending: false })"),        // newest journey wins
+                 sc.includes('const missed = rows.filter(r => !scans[r.order_id]'), // queue: only the misses
+                 sc.includes("names.flatMap(n => [n, '#' + n])")],
+                [true, true, true, true, true, true]);
+        }
         // TWO RIGHTS, NOT ONE (user, 2026-09-07). Launching the AI agent and putting yourself on the
         // phone with a customer are different acts by different people. The no-fallback check is the
         // one that matters: if canManualCall() also accepted support-ai-call the split would be

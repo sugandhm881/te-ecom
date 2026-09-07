@@ -177,6 +177,32 @@ async function overlayJourneyScans(rows, scans) {
         if (t) scans[r.order_id] = t;
         if (attByAwb[awb] != null) r.delivery_attempts = attByAwb[awb];
     });
+    // SECOND PASS, BY ORDER NAME — for every row the AWB join missed. A DocPharma journey is keyed on
+    // whatever identifier existed when it was written (DocPharma's tracking_number), while the order row
+    // carries EasyEcom's 'EL12<order>' reference: 70% of DocPharma shipments have the two disagreeing, so
+    // the Called column and the attempt badge were blank on exactly the parcels most in need of chasing.
+    // Only the misses are looked up, so a queue of RapidShyp rows costs nothing extra.
+    const missed = rows.filter(r => !scans[r.order_id] && r.order_name);
+    if (missed.length) {
+        // BOTH SPELLINGS: order_buckets keeps the '#', the journey does not — the same trap that made the
+        // undelivered date filter return zero on its first run.
+        const names = [...new Set(missed.map(r => String(r.order_name).replace('#', '').trim()).filter(Boolean))];
+        const jn = await chunkedIn('shipment_journey_ecom', 'order_name, last_scan_at, attempts, updated_at',
+            'order_name', names.flatMap(n => [n, '#' + n]));
+        const byName = {};
+        // newest wins: an order that moved between partners can still carry a superseded row
+        jn.forEach(j => {
+            const k = String(j.order_name || '').replace('#', '').trim();
+            if (!k) return;
+            if (!byName[k] || String(j.updated_at || '') > String(byName[k].updated_at || '')) byName[k] = j;
+        });
+        missed.forEach(r => {
+            const j = byName[String(r.order_name).replace('#', '').trim()];
+            if (!j) return;
+            if (j.last_scan_at) scans[r.order_id] = j.last_scan_at;
+            if (j.attempts != null && r.delivery_attempts == null) r.delivery_attempts = j.attempts;
+        });
+    }
     return scans;
 }
 // Courier PLATFORM (the aggregator the parcel shipped through) per order — RapidShyp / DocPharma / KwikShip.

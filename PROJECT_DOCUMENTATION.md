@@ -1180,6 +1180,88 @@ single source of truth for rule compliance so the dashboard's count and the AI a
 disagree, and `loadCalls` pages the query, because **Supabase caps a read at 1000 rows** and a silent
 truncation would have shown a clean scorecard built from a fraction of the calls.
 
+### DocPharma was invisible to the queue, and 59 finished parcels were still "order to dispatch" (2026-09-07)
+
+Reported on **TE25-46079**: *"why this order status scan log not show properly and DocPharma orders
+status not properly updated and fall in Undelivered tab in case of NDR and scan log also show blank."*
+Three separate defects, all of them the same shape — **the shipment engine only speaks RapidShyp** —
+and this is the THIRD partner to hit it, after the Kwikship bucket-engine gap of 2026-08-08.
+
+**1. THE SAME SHIPMENT CARRIES TWO DIFFERENT AWBs.** `orders`/`order_buckets` had `EL12TE25-46079`
+(EasyEcom's reference); `shipment_journey_ecom` was keyed on DocPharma's own tracking number
+`34597510671263`. `updateJourneyForOrder` writes `awb || ld.tracking_number || orderName`, so a journey
+built before the order had an AWB is keyed on the courier's number and the two never meet again.
+Measured over 60 days: **1,307 of 1,872 DocPharma shipments (70%)** disagree, against 17 of 7,582 on
+RapidShyp and 6 of 4,041 on Kwikship.
+
+The tracking modal resolves the journey with `.eq('awb', awb)` — no match — and it then got worse: with
+`j` null the guard `j?.source !== 'docpharma'` is *true*, so it asked **RapidShyp** about a DocPharma
+parcel, failed, and skipped the DocPharma fallback below it because that needs `j.order_name`. Hence
+"No scan log available yet".
+
+**Fix (code):** when the AWB finds no journey, resolve the order name from `orders.awb_number` and
+retry by name — **both spellings**, newest journey first. The order name is the one identifier both
+rows always agree on. No data migration, and it fixes all 1,307 at once. The same fallback runs as a
+**second pass over only the missed rows** in `overlayJourneyScans`, so the Called column and the
+attempt badge fill in too and a queue of RapidShyp rows costs nothing extra.
+
+**2. DOCPHARMA NDR NEVER REACHED THE UNDELIVERED TAB.** `order_buckets` is a VIEW whose undelivered
+test is written entirely in RapidShyp's vocabulary — `"rapidshyp_status_code": "UND"`,
+`"latest_ndr_reason_code": "UND…"`, plus a `tracking_status` list DocPharma never writes — and it did
+not reference `shipment_journey_ecom` **at all**. A journey reading `ndr_pending`, 4 attempts, 3 NDRs,
+"Maximum attempts reached" changed nothing. Over 60 days: **Kwikship 91/91 NDRs in the tab, RapidShyp
+80/80, DocPharma 0 of 5.** Those customers are never called and the parcel goes RTO by itself —
+TE25-45435 had been failing since 29 Aug with **7 attempts and 6 NDRs** and had never once appeared.
+
+**3. THE STATUS FROZE AT "ORDER TO DISPATCH".** The view derives dispatch from `order_tracking` and
+explicitly **excludes `in progress`** from counting as dispatched. DocPharma's only tracking row says
+exactly `in-progress`, so `dispatch_at` stays NULL and the bucket never advances — for a parcel out for
+delivery four times. The three compound: the status is wrong so it is not in the queue, it is not in
+the queue so nobody looks, and if someone does open it the scan log is empty.
+
+**Fix (view, applied to the live database 2026-09-07).** Two changes, in this order:
+- `latest_journey` — a `DISTINCT ON` CTE of the newest journey per order (12 orders still carry a
+  superseded row from a prior aggregator; a plain join would duplicate them in every dashboard), joined
+  `LEFT` on `replace(o.name,'#','')`, so an order with no journey behaves exactly as before.
+- The journey's own verdict decides the bucket: `ndr_pending|ndr|undelivered|exception` (with
+  `out_for_delivery_at` as the proof of dispatch `order_tracking` withholds, and `is_final = false`)
+  ⇒ **undelivered**; `delivered` / `rto` ⇒ those buckets, placed **immediately after `cancelled` so they
+  outrank the tracking-derived branches**. `cancelled` still wins over everything.
+
+**WHY NOT THE KWIKSHIP FIX.** That one added no view logic — it mirrored a truthful row into
+`order_tracking`, because Kwikship wrote nothing there. DocPharma is the opposite: an external sync
+**outside this repo** writes its `order_tracking` rows (refreshed minutes before the diagnosis), so
+anything we wrote would be reset to `in-progress` on its next run. The journey is our own data.
+
+**THE JOURNEY GOES FIRST BECAUSE THE COURIER SAID SO — verified, not assumed.** Every stuck shipment was
+re-fetched from RapidShyp's own API before the view was touched: **57 of 57 agree with the journey,
+zero disagreements**. The 6 orders where the view and the journey BOTH claimed a terminal status and
+conflicted were checked one by one, and all 4 RapidShyp can answer for say **the view is wrong** —
+TE25-21940 / TE25-26929 / TE25-29612 read `RTO_INITIATED` in the view and `DELIVERED` on the API;
+TE25-33493 reads delivered and is `RTO_DELIVERED`. 61 of 61 verifiable shipments back the journey.
+
+Root cause of the 59: **48 have `orders.awb_number` NULL** and **10 carry a superseded AWB** from a
+re-shipment, so the view's join lands on a stale "Shipment Booked" row. Only 8 could have been fixed by
+repairing the AWB. **Result: 75 orders moved** — 51 order_to_dispatch→delivered, 8 →rto, 6
+undelivered→delivered, 3 rto→delivered, 3 delivered→rto, 2 undelivered→rto, 2 five_days_plus→rto.
+`order_to_dispatch` 1,169 → 1,114; **finished parcels still stuck: 0**. Eight pointless calls left the
+queue; the four DocPharma NDRs stayed in it. Some had been mis-filed since **16 May**.
+
+**⚠️ A VIEW ROLLBACK MUST NEVER BE STRING SURGERY.** The first rollback script removed the migration's
+additions with `replace()` against the live view text — and **silently did nothing while reporting
+success**, because Postgres RE-RENDERS a view's SQL when it stores it, so the exact strings no longer
+existed. It was run and the migration stayed live; that is how this was found. The second migration
+therefore saves the definition verbatim into **`public.view_backups`** before changing anything, and
+rollback is `CREATE OR REPLACE VIEW … AS <that row>`. That table row is the live rollback path — the
+`.sql` files were deleted at the user's request after the migrations were applied, so **the database
+holds the only copy of the pre-change definition**. There is no saved copy from before the DocPharma
+NDR change; undoing that one means removing the `latest_journey` CTE, the `lj.outcome = ANY (ARRAY[…])`
+WHEN clause and the `LEFT JOIN latest_journey` line by hand.
+
+**Still open:** the AWBs themselves are still wrong on those 58 orders. The scan-log fallback works
+around it and the buckets no longer depend on it, but anything else keyed on `orders.awb_number`
+(charges recon, the queue's terminal-drop) still joins the wrong row. Selftests **516 passing**.
+
 ### The AI Call and Manual Call buttons become separate rights (2026-09-07)
 
 User: *"make manual call and AI Call Button Permission Seprately."* The manual dialler had ridden on

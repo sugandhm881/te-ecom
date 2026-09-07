@@ -674,9 +674,30 @@ router.get('/delivery-performance/shipment/:awb', async (req, res) => {
     const awb = String(req.params.awb || '').trim();
     if (!awb) return res.status(400).json({ success: false, error: 'awb required' });
     try {
-        const { data: j } = await supabase.from('shipment_journey_ecom')
+        let { data: j } = await supabase.from('shipment_journey_ecom')
             .select('awb, order_name, source, courier, outcome, status_code, order_date, dispatched_at, out_for_delivery_at, delivered_at, rto_at, last_scan_at, first_edd, ndr_reasons, attempts, ndr_count, raw, freight_total, freight_forward, freight_rto, cod_charges, shipment_value, applied_weight, charges_fetched_at')
             .eq('awb', awb).maybeSingle();
+
+        // THE AWB IS NOT ALWAYS THE SAME AWB (user, 2026-09-07: "scan log also show blank"). A DocPharma
+        // journey is keyed on whatever identifier existed when it was first written — DocPharma's own
+        // tracking_number when the order had no AWB yet (see updateJourneyForOrder) — while the order row
+        // later gets EasyEcom's 'EL12<order>' reference. 1,307 of 1,872 DocPharma shipments carry two
+        // different numbers this way, against 17 of 7,582 on RapidShyp. With no journey found, the code
+        // below cannot even tell the parcel is DocPharma, so it asks RAPIDSHYP about it, fails, and shows
+        // an empty panel. The order NAME is the one identifier both rows always agree on.
+        if (!j) {
+            const { data: ord } = await supabase.from('orders').select('name').eq('awb_number', awb).limit(1).maybeSingle();
+            const nm = String((ord && ord.name) || '').replace('#', '').trim();
+            if (nm) {
+                // Newest first: supersedeStaleJourneys usually clears a prior aggregator's row, but an
+                // order that moved between partners can still have two — the live one is the last written.
+                const { data: alt } = await supabase.from('shipment_journey_ecom')
+                    .select('awb, order_name, source, courier, outcome, status_code, order_date, dispatched_at, out_for_delivery_at, delivered_at, rto_at, last_scan_at, first_edd, ndr_reasons, attempts, ndr_count, raw, freight_total, freight_forward, freight_rto, cod_charges, shipment_value, applied_weight, charges_fetched_at')
+                    .or(`order_name.eq.${nm},order_name.eq.#${nm}`)
+                    .order('updated_at', { ascending: false }).limit(1);
+                if (alt && alt.length) { j = alt[0]; console.log(`[Shipment] ${awb}: no journey by AWB — matched ${nm} by order name (${j.source}/${j.awb})`); }
+            }
+        }
 
         // Normalize any scan array → { at, desc, code, location }, oldest first.
         const norm = (scans) => (scans || []).map(s => ({
