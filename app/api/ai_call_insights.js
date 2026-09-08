@@ -145,8 +145,19 @@ router.get('/support/call-insights', async (req, res) => {
         // 31% when the agent's own 121 calls were 44%, and the one-sided bar was 40% padding.
         // This page audits what the AGENT says, so only her calls are scored. They stay in the list
         // below with their own badge — "every call" still means every call.
-        const ai = calls.filter(c => String(c.call_type || '') !== 'manual_human');
-        const manualCalls = calls.length - ai.length;
+        // CALL TYPE IS NOW A FILTER, NOT A FIXED RULE (user, 2026-09-08: "give one more filter in
+        // dashboard as Call Type - Manual Call and AI Call"). The page still DEFAULTS to the agent's own
+        // calls, because that is what it is a report card for and every number on it was defined that
+        // way. Choosing Manual or All re-scores everything from the same rows, so the tiles, the funnel
+        // and the list underneath always describe the same set of calls — the failure mode worth
+        // avoiding is a header that says Manual over totals that are still counting the AI.
+        const isManual = c => String(c.call_type || '') === 'manual_human';
+        // Deliberately no combined "All" option: a manual call is logged without a transcript, so folding
+        // the two sets together puts rows where nobody COULD have been heard back into the answer rate —
+        // the exact distortion (31% vs the real 44%) that splitting them fixed a few hours ago.
+        const type = String(req.query.type) === 'manual' ? 'manual' : 'ai';
+        const ai = calls.filter(c => isManual(c) === (type === 'manual'));
+        const manualCalls = calls.filter(isManual).length;
         const connected = ai.filter(c => durOf(c) > 0);
         // "ANSWERED" MUST MEAN A PERSON SPOKE (user, 2026-09-08: "check the number showing on the
         // dashboard is correct?"). It did not. `connected` only asks whether the summary carries a
@@ -173,6 +184,7 @@ router.get('/support/call-insights', async (req, res) => {
             byOrder[c.order_id] = (byOrder[c.order_id] || 0) + 1;
         }
         const repeatCalled = Object.values(byOrder).filter(n => n >= 3).length;
+        const ordersCalled = Object.keys(byOrder).length;   // the denominator for "called 3+ times"
         // SILENCE, CATEGORISED. One "one-sided" bar counted 116 calls and told you nothing you could
         // act on. These four separate a customer who hung up on the greeting from a line that stayed
         // open for half a minute while the agent talked to nobody — the second is the deaf-agent
@@ -227,13 +239,17 @@ router.get('/support/call-insights', async (req, res) => {
 
         res.json({
             success: true,
-            range: { from, to },
+            range: { from, to, type },
+            // Manual calls are logged without a transcript by design, so every transcript-derived card on
+            // the page (rule compliance, outcomes, the AI audit) has nothing to read. The client says so
+            // in words rather than drawing five empty bars and letting them read as a perfect score.
+            transcribed: type !== 'manual',
             metrics: {
                 calls: ai.length, connected: connected.length, answered: answered.length, manual_calls: manualCalls,
                 answer_rate: ai.length ? Math.round(answered.length / ai.length * 100) : 0,
                 avg_seconds: connected.length ? Math.round(connected.reduce((a, c) => a + durOf(c), 0) / connected.length) : 0,
                 avg_agent_turns: ai.length ? Number((b.agent_turns / ai.length).toFixed(1)) : 0,
-                repeat_called_orders: repeatCalled,
+                repeat_called_orders: repeatCalled, orders_called: ordersCalled,
             },
             outcomes, languages: langs, types, silence, by_type: byType,
             // EVERY CALL IN THE RANGE, with everything known about it (user, 2026-09-05: "i want full
@@ -241,7 +257,7 @@ router.get('/support/call-insights', async (req, res) => {
             // very same flags, so a compliance bar and this list can never disagree. Transcripts are
             // sent whole — they are the point of the page — which is why the range is what bounds the
             // payload rather than an arbitrary row cap.
-            calls: calls.map(c => {
+            calls: ai.map(c => {
                 const f = flagsFor(c);
                 const d = (dials[c.order_id] || []).find(r => String(c.call_type || '').startsWith(String(r.purpose || '').split('_')[0]))
                     || (dials[c.order_id] || [])[0] || null;

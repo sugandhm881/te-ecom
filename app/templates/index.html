@@ -177,6 +177,57 @@
         box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
     }
 
+    /* ── Call Insights — the SAME language as Delivery Performance (user, 2026-09-08: "you already
+       have dashboard UI/UX benchmark Delivery Performance"). Same ground, same KPI treatment, same
+       split bar — because two pages in one product reading differently is the actual defect.
+       ⚠️ REAL CSS, not Tailwind arbitrary values: tailwind.css here is PREBUILT, so text-[11px] and
+       h-[6px] compile to NOTHING. Eight of them were sitting in this page's render doing exactly
+       nothing, which is why the last round of "UI changes" looked like no change at all. */
+    #support-call-insights-view { background:
+        radial-gradient(1200px 400px at 100% -5%, rgba(99,102,241,.06), transparent 60%),
+        radial-gradient(900px 360px at -5% 0%, rgba(16,185,129,.05), transparent 55%),
+        #f8fafc; }
+    #support-call-insights-view .card { transition: box-shadow .18s ease, transform .18s ease, border-color .18s ease; }
+    /* KPI tiles: the 3px accent rail is what makes a number read as a headline rather than a cell. */
+    #support-call-insights-view .sci-kpi { position: relative; overflow: hidden; }
+    #support-call-insights-view .sci-kpi::before { content:''; position:absolute; inset:0 0 auto 0; height:3px; background:#4f46e5; }
+    #support-call-insights-view .sci-kpi:hover { transform: translateY(-3px); box-shadow: 0 16px 34px -16px rgba(15,23,42,.22); border-color:#e0e7ff; }
+    /* Two tiles carry meaning, so they carry colour: what the agent WON, and what it lost to silence. */
+    #support-call-insights-view .sci-kpi.is-good::before { background:#059669; }
+    #support-call-insights-view .sci-kpi.is-bad::before  { background:#e11d48; }
+    /* Figures line up down a column instead of jittering — the page is mostly numbers. */
+    #support-call-insights-view .sci-n { font-variant-numeric: tabular-nums; }
+    /* The prebuilt tailwind.css carries no arbitrary-value utilities, so every text-[11px] and
+       text-[10px] in this app renders at the inherited size — 40-odd of them, silently. Defining them
+       here, scoped to this view, makes the ones on THIS page do what they say without resizing text
+       across the rest of the dashboard. */
+    #support-call-insights-view .text-\[11px\] { font-size: 11px; line-height: 1.45; }
+    #support-call-insights-view .text-\[10px\] { font-size: 10px; line-height: 1.4; }
+    /* The breakdown tiles. Same visual family as the KPI row above them — a figure, its share, its
+       name — so the page reads as one thing rather than tiles at the top and a table underneath. */
+    .sci-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(158px,1fr)); gap:10px; }
+    .sci-mini { display:block; width:100%; text-align:left; background:#fff; border:1px solid #e9edf3;
+                border-radius:11px; padding:11px 12px 12px; transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
+    button.sci-mini { cursor:pointer; }
+    button.sci-mini:hover { transform:translateY(-2px); box-shadow:0 10px 22px -14px rgba(15,23,42,.3); border-color:#c7d2fe; }
+    .sci-mini.is-on { border-color:#a5b4fc; background:#f7f8ff; box-shadow:0 0 0 3px #eef2ff; }
+    .sci-mini .n { font-size:21px; font-weight:700; line-height:1.05; color:#0f172a; font-variant-numeric:tabular-nums; }
+    .sci-mini .p { font-size:11px; font-weight:700; color:#94a3b8; margin-left:5px; font-variant-numeric:tabular-nums; }
+    .sci-mini .l { font-size:11.5px; color:#64748b; line-height:1.35; margin-top:4px; }
+    .sci-mini .s { font-size:10.5px; color:#94a3b8; line-height:1.4; margin-top:5px; font-variant-numeric:tabular-nums; }
+    .sci-mini .rail { height:3px; border-radius:999px; background:#eef2f7; margin-top:8px; overflow:hidden; }
+    .sci-mini .rail i { display:block; height:100%; border-radius:999px; }
+    /* Colour is meaning, not decoration: green won it back, rose lost it, amber needs a person. */
+    .sci-mini.t-good .n { color:#059669; } .sci-mini.t-bad .n { color:#e11d48; } .sci-mini.t-warn .n { color:#b45309; }
+    .sci-mini.t-mute .n { color:#94a3b8; }
+    .sci-sub { font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:#94a3b8; margin-bottom:8px; }
+    .sci-sub b { color:#334155; font-weight:700; }
+    .sci-note { font-size:11px; color:#94a3b8; line-height:1.45; }
+    .sci-pct  { font-size:11px; color:#94a3b8; font-variant-numeric:tabular-nums; margin-left:6px; }
+    .sci-lede { font-size:14.5px; line-height:1.55; color:#475569; }
+    .sci-lede b { color:#0f172a; font-weight:600; }
+    .sci-lede .g { color:#059669; } .sci-lede .r { color:#e11d48; }
+
     /* ── Delivery Performance — elevated, professional styling (scoped) ── */
     #delivery-perf-view { background:
         radial-gradient(1200px 400px at 100% -5%, rgba(99,102,241,.06), transparent 60%),
@@ -2166,11 +2217,16 @@
                     <button id="sci-run" class="filter-btn-primary">Run AI audit</button></div>
             </header>
             <div class="p-8 space-y-6">
+                <div id="sci-headline" class="mb-4"></div>
                 <div id="sci-kpis" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4"></div>
-                <div class="grid lg:grid-cols-3 gap-6">
+                <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">Where the calls went <span class="text-xs font-normal text-slate-400">(each call once — click a tile to see them)</span></h3><div id="sci-funnel" class="sci-grid"></div></div>
+                <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">Outcomes</h3><div id="sci-outcomes"></div></div>
+                <div class="grid lg:grid-cols-2 gap-6">
+                    <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">Call type</h3><div id="sci-bytype" class="sci-grid"></div></div>
+                    <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">Languages</h3><div id="sci-langs" class="sci-grid"></div></div>
+                </div>
+                <div class="grid lg:grid-cols-2 gap-6">
                     <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">Rule compliance <span class="text-xs font-normal text-slate-400">(counted, not judged)</span></h3><div id="sci-behaviour"></div></div>
-                    <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">Where the calls went <span class="text-xs font-normal text-slate-400">(each call once)</span></h3><div id="sci-funnel" class="mb-5"></div><h3 class="font-semibold text-slate-700 mb-3">Call type</h3><div id="sci-bytype" class="mb-5"></div><h3 class="font-semibold text-slate-700 mb-3">Outcomes</h3><div id="sci-outcomes"></div>
-                        <h3 class="font-semibold text-slate-700 mb-3 mt-5">Languages</h3><div id="sci-langs"></div></div>
                     <div class="card p-5"><h3 class="font-semibold text-slate-700 mb-3">⚠ Worst behaviour</h3><div id="sci-worst" class="text-sm text-slate-600"></div></div>
                 </div>
                 <div class="grid lg:grid-cols-2 gap-6">
@@ -3954,7 +4010,7 @@
      ONLY thing that makes a browser re-fetch. Forgetting it means the change ships and nobody sees it:
      on 2026-08-13 a whole session of Last-Mile + Purchase Order work was invisible for exactly this
      reason, and it looks identical to "the fix didn't work". -->
-<script src="/static/app.js?v=2026-09-02-ledger"></script>
+<script src="/static/app.js?v=2026-09-08-insights"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

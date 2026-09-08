@@ -63,7 +63,7 @@ router.post('/support/sarvam-usage', express.text({ type: '*/*', limit: '256kb' 
         // reads: the per-model split is what the breakdown shows, and the raw blob was never used.
         if (Array.isArray(body.d) && body.d.length) {
             const rows = body.d
-                .filter(x => /^d{4}-d{2}-d{2}$/.test(String(x.d || '')))
+                .filter(x => /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(String(x.d || '')))
                 .map(x => ({
                     day: x.d,
                     total_cost: Number(x.t) || null,
@@ -85,7 +85,7 @@ router.post('/support/sarvam-usage', express.text({ type: '*/*', limit: '256kb' 
 
         if (Array.isArray(body.days) && body.days.length) {
             const rows = body.days
-                .filter(d => /^d{4}-d{2}-d{2}$/.test(String(d.date || '').slice(0, 10)))
+                .filter(d => /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(String(d.date || '').slice(0, 10)))
                 .map(d => ({
                     day: String(d.date).slice(0, 10),
                     total_cost: Number((d.usage || {}).total_cost ?? (d.usage || {}).subtotal ?? 0) || null,

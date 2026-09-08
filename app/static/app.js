@@ -8128,9 +8128,16 @@ let _sci = { wired:false, rangeSel:'7',
   range: (() => { try { const r=JSON.parse(localStorage.getItem('sci.dateRange')); if(r&&r.from&&r.to) return r; } catch(_){}
     const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-7); return {from:_ymd(f),to:_ymd(d)}; })() };
 try { const r=JSON.parse(localStorage.getItem('sci.dateRange')); if(r&&r.sel) _sci.rangeSel=r.sel; } catch(_){}
+// AI or human, chosen (user, 2026-09-08). Defaults to the agent's own calls — this page is her report
+// card and every figure on it was defined that way — but the human calls are one select away now.
+_sci.type = (()=>{ try { const t=localStorage.getItem('sci.callType'); return t==='manual'?'manual':'ai'; } catch(_){ return 'ai'; } })();
 function sciRenderRange(){
   const el=document.getElementById('sci-range'); if(!el) return;
   el.innerHTML=`<div class="flex items-center gap-2 flex-wrap">
+    <select class="filter-select sci-type" title="Whose calls this page is scoring">
+      <option value="ai" ${_sci.type==='ai'?'selected':''}>AI calls</option>
+      <option value="manual" ${_sci.type==='manual'?'selected':''}>Manual calls</option>
+    </select>
     <select class="filter-select sci-preset">
       <option value="custom" ${_sci.rangeSel==='custom'?'selected':''}>Custom</option>
       <option value="0" ${_sci.rangeSel==='0'?'selected':''}>Today</option>
@@ -8144,6 +8151,13 @@ function sciRenderRange(){
       <button class="filter-btn sci-apply">Apply</button></span></div>`;
   const save=()=>localStorage.setItem('sci.dateRange',JSON.stringify({..._sci.range,sel:_sci.rangeSel}));
   const custom=el.querySelector('.sci-custom');
+  el.querySelector('.sci-type').addEventListener('change',e=>{
+    _sci.type=e.target.value; localStorage.setItem('sci.callType',_sci.type);
+    // a pick like "silent 20s+" names calls in the set you just left, so it goes with it
+    _sci.pick=null;
+    const rb=document.getElementById('sci-run'); if(rb) rb.style.display = _sci.type==='manual' ? 'none' : '';
+    sciLoad();
+  });
   el.querySelector('.sci-preset').addEventListener('change',e=>{
     const v=e.target.value;
     if(v==='custom'){ _sci.rangeSel='custom'; custom.classList.remove('hidden'); custom.classList.add('flex'); return; }
@@ -8169,6 +8183,8 @@ function sciRenderRange(){
 function sciInit(){
   if(!_sci.wired){ _sci.wired=true; sciRenderRange();
     document.getElementById('sci-run')?.addEventListener('click', sciRun); }
+  // the audit reads transcripts; on the manual set there are none to read
+  const rb=document.getElementById('sci-run'); if(rb) rb.style.display = _sci.type==='manual' ? 'none' : '';
   sciLoad();
 }
 async function sciRun(){
@@ -8186,20 +8202,49 @@ async function sciRun(){
 async function sciLoad(){
   const k=document.getElementById('sci-kpis'); if(k) k.innerHTML='<div class="col-span-full">'+brandLoader('Reading the calls…')+'</div>';
   try{
-    const d=await supFetch(`/api/support/call-insights?from=${_sci.range.from}&to=${_sci.range.to}`);
+    const d=await supFetch(`/api/support/call-insights?from=${_sci.range.from}&to=${_sci.range.to}&type=${_sci.type}`);
     const m=d.metrics;
-    const tile=(l,v,s,c)=>`<div class="card p-4"><p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${l}</p><p class="text-xl font-bold ${c||'text-slate-800'} mt-1">${v}</p>${s?`<p class="text-[11px] text-slate-400 mt-0.5">${s}</p>`:''}</div>`;
-    k.innerHTML = tile('AI calls with transcripts', m.calls, `${d.range.from} → ${d.range.to}` + (m.manual_calls ? ` · ${m.manual_calls} manual calls not scored` : ''))
-      + tile('Answered', m.answered, m.answer_rate+'% of calls — the customer actually spoke','text-emerald-700')
+    // `sci-kpi` is the Delivery Performance treatment: a 3px accent rail and a hover lift, which is
+    // what makes a figure read as a headline instead of a table cell. `tone` colours the rail on the
+    // two tiles that mean something — what was won, and what was lost to silence.
+    const tile=(l,v,s,c,tone)=>`<div class="card sci-kpi p-4 ${tone||''}"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">${l}</p><p class="text-xl font-bold sci-n ${c||'text-slate-800'} mt-1">${v}</p><p class="sci-note mt-1">${s}</p></div>`;
+
+    // ── MANUAL CALLS ARE A DIFFERENT PAGE, not the same page with zeroes in it.
+    // A human call is logged without a transcript on purpose, so answered, rule compliance, outcomes,
+    // languages and the AI audit have literally nothing to read — rendered anyway they would draw five
+    // empty bars and a 0% answer rate, which reads as "the humans reached nobody" rather than "we did
+    // not record it". So this branch shows only what is actually known about a human call: how many,
+    // how long, and which orders — and says in words why the rest is absent.
+    if(d.transcribed === false){
+      k.innerHTML = tile('Manual calls', m.calls, `${d.range.from}${d.range.from!==d.range.to?' → '+d.range.to:''} · placed by a person from the dashboard`)
+        + tile('Avg length', m.avg_seconds+'s', 'time the line was open')
+        + tile('Orders called', m.orders_called, `${m.calls&&m.orders_called?(m.calls/m.orders_called).toFixed(1):0} calls per order`)
+        + tile('Orders called 3+×', m.repeat_called_orders, m.orders_called?`${Math.round(m.repeat_called_orders/m.orders_called*100)}% of ${m.orders_called} orders`:'—', (m.repeat_called_orders?'text-amber-700':''), (m.repeat_called_orders?'is-bad':''));
+      document.getElementById('sci-headline').innerHTML = m.calls ? `
+        <div class="card p-4"><p class="sci-lede"><b>${m.calls}</b> calls were placed by a person on
+          <b>${m.orders_called}</b> orders. Manual calls are not transcribed, so there is nothing here to
+          score — the recording on each row below is the record.</p></div>` : '';
+      const none=(what)=>`<p class="text-sm text-slate-400" style="grid-column:1/-1">Nothing to show — ${what} is read from the transcript, and manual calls are not transcribed.</p>`;
+      document.getElementById('sci-behaviour').innerHTML = none('rule compliance');
+      document.getElementById('sci-funnel').innerHTML   = none('what happened on the call');
+      document.getElementById('sci-bytype').innerHTML   = '<p class="text-sm text-slate-400" style="grid-column:1/-1">All of these are manual (human) calls.</p>';
+      document.getElementById('sci-outcomes').innerHTML = none('the outcome');
+      document.getElementById('sci-langs').innerHTML    = none('the language spoken');
+      ['sci-worst','sci-improve','sci-good'].forEach(id=>document.getElementById(id).innerHTML = none('the AI audit'));
+      _sci.calls = d.calls || []; sciWireCalls(); sciRenderCalls(true);
+      return;
+    }
+    k.innerHTML = tile('AI calls with transcripts', m.calls, `${d.range.from} → ${d.range.to}` + (m.manual_calls ? ` · ${Math.round(m.calls/(m.calls+m.manual_calls)*100)}% of ${m.calls+m.manual_calls} logged · ${m.manual_calls} manual not scored` : ''))
+      + tile('Answered', m.answered, m.answer_rate+'% of calls — the customer actually spoke','text-emerald-700','is-good')
       + tile('Avg length', m.avg_seconds+'s', 'connected calls')
       + tile('Avg agent turns', m.avg_agent_turns, 'lower is tighter')
-      + tile('Reattempts won', d.outcomes.reattempt||0, 'customer said yes','text-emerald-700')
-      + tile('Orders called 3+×', m.repeat_called_orders, 'candidates for a human', (m.repeat_called_orders?'text-amber-700':''));
+      + tile('Reattempts won', d.outcomes.reattempt||0, `customer said yes${m.answered?` · ${Math.round((d.outcomes.reattempt||0)/m.answered*100)}% of answered`:''}`,'text-emerald-700','is-good')
+      + tile('Orders called 3+×', m.repeat_called_orders, `candidates for a human${m.orders_called?` · ${Math.round(m.repeat_called_orders/m.orders_called*100)}% of ${m.orders_called} orders`:''}`, (m.repeat_called_orders?'text-amber-700':''), (m.repeat_called_orders?'is-bad':''));
     // rule compliance — each row is a rule the agent must follow; % of calls that BROKE it
     const tot=d.behaviour.total||1;
     const bar=(label,n,good,tip)=>{ const pct=Math.round(n/tot*100);
       const col=good?(pct>=70?'bg-emerald-500':pct>=40?'bg-amber-400':'bg-rose-400'):(pct<=5?'bg-emerald-500':pct<=20?'bg-amber-400':'bg-rose-400');
-      return `<div class="mb-2.5" title="${escapeHtml(tip||'')}"><div class="flex items-center justify-between text-sm"><span class="text-slate-600">${label}</span><span class="font-semibold tabular-nums text-slate-700">${n} <span class="text-[11px] text-slate-400">(${pct}%)</span></span></div>
+      return `<div class="mb-2.5" title="${escapeHtml(tip||'')}"><div class="flex items-center justify-between text-sm"><span class="text-slate-600">${label}</span><span class="font-semibold tabular-nums text-slate-700">${n} <span class="sci-note">(${pct}%)</span></span></div>
         <div class="h-1.5 rounded-full bg-slate-100 mt-1 overflow-hidden"><div class="h-full rounded-full ${col}" style="width:${Math.min(100,pct)}%"></div></div></div>`; };
     document.getElementById('sci-behaviour').innerHTML =
       bar('Introduced herself twice', d.behaviour.double_intro, false, 'Rule: introduce exactly once per call')
@@ -8210,41 +8255,105 @@ async function sciLoad(){
     // "other" used to be 51 of 121 and meant nothing; the server now names it no_conversation — the
     // call ended before there was anything to summarise. These labels are the human wording for that.
     const OUT_LABEL={ no_conversation:'Ended before any conversation', no_answer:'No answer', reattempt:'Re-attempt agreed',
-                      confirmed:'Confirmed', cancelled:'Cancelled', unclear:'Unclear', other:'Other' };
-    const rows=(o,pickPrefix)=>Object.entries(o||{}).sort((a,b)=>b[1]-a[1]).map(([k2,v])=>{
-      const label=escapeHtml((pickPrefix==='outcome:'?OUT_LABEL[k2]:null)||k2);
-      if(!pickPrefix) return `<div class="flex items-center justify-between py-1 text-sm border-b border-slate-50"><span class="text-slate-600">${label}</span><span class="tabular-nums text-slate-700">${v}</span></div>`;
-      const p=pickPrefix+k2;
-      return `<button data-pick="${p}" class="sci-pick w-full text-left flex items-center justify-between py-1 text-sm border-b border-slate-50 hover:bg-slate-50 rounded px-1 -mx-1 ${_sci.pick===p?'bg-indigo-50 ring-1 ring-indigo-200':''}"><span class="text-slate-600">${label}</span><span class="tabular-nums text-slate-700">${v}</span></button>`;
-    });
+                      confirmed:'Confirmed', cancelled:'Cancelled', unclear:'Unclear', other:'Other',
+                      no_outcome:'Spoke, but no outcome recorded' };
+    // ONE TILE, USED BY EVERY BREAKDOWN ON THE PAGE. A funnel step, a call type, an outcome and a
+    // language are all the same thing — a count, its share of a stated whole, and a name — so they get
+    // one shape rather than three hand-rolled row layouts that drift apart. `pick` makes it clickable;
+    // without one it renders as a plain tile.
+    const TONE_BAR={ good:'#059669', bad:'#e11d48', warn:'#f59e0b', mute:'#cbd5e1', '':'#94a3b8' };
+    const mini=(o)=>{
+      const pct=Math.round((o.n||0)/(o.of||1)*100);
+      const t=o.tone||'';
+      const body=`<div><span class="n">${o.n}</span><span class="p">${pct}%</span></div>`
+        +`<div class="l">${o.label}</div>`
+        +(o.sub?`<div class="s">${o.sub}</div>`:'')
+        +`<div class="rail"><i style="width:${Math.max(2,Math.min(100,pct))}%;background:${TONE_BAR[t]}"></i></div>`;
+      const cls=`sci-mini ${t?'t-'+t:''} ${o.pick&&_sci.pick===o.pick?'is-on':''}`;
+      const tip=escapeHtml(o.tip||'');
+      return o.pick
+        ? `<button data-pick="${o.pick}" class="sci-pick ${cls}" title="${tip}${tip?' — ':''}click to see these calls">${body}</button>`
+        : `<div class="${cls}" title="${tip}">${body}</div>`;
+    };
     // WHERE THE CALLS WENT (user, 2026-09-08: "other call card like Answered — which fall in which
     // category"). Answered is the good end; everything else is named rather than left as the
     // difference between two numbers. The rows sum to the AI call count exactly, so nothing hides.
-    const sil=d.silence||{}, tot2=m.calls||1;
-    const frow=(label,n,tone,tip,pick)=>`<button data-pick="${pick}" class="sci-pick w-full text-left flex items-center justify-between py-1.5 border-b border-slate-100 last:border-0 hover:bg-slate-50 rounded px-1 -mx-1 ${_sci.pick===pick?'bg-indigo-50 ring-1 ring-indigo-200':''}" title="${escapeHtml(tip||'')} — click to see these calls">
-      <span class="text-sm ${tone||'text-slate-600'}">${label}</span>
-      <span class="text-sm tabular-nums"><b class="${tone||'text-slate-700'}">${n}</b> <span class="text-slate-400 text-xs">${Math.round(n/tot2*100)}%</span></span></button>`;
-    document.getElementById('sci-funnel').innerHTML =
-      frow('✓ Answered — customer spoke', m.answered||0, 'text-emerald-700', 'The only rows that produced a conversation', 'answered')
-      + frow('Hung up within 5 seconds', sil.hung_up_fast||0, '', 'Picked up and dropped almost immediately', 'hung_up_fast')
-      + frow('Silent, under 20s', sil.silent_short||0, '', 'Line open, agent spoke, nothing came back', 'silent_short')
-      + frow('Silent 20s+ — agent may be deaf', sil.silent_long||0, 'text-rose-700', 'Half a minute of open line with no reply is the STT failing, not a quiet customer', 'silent_long')
-      + frow('Never connected', sil.never_connected||0, 'text-slate-400', 'No media at all — the leg never opened', 'never_connected');
+    const sil=d.silence||{};
+    // ONE BAR THAT IS THE WHOLE DAY. Five rows of numbers are a table you read; a single stacked bar
+    // is a shape you recognise — green means reached, rose means lost to silence, and the balance
+    // between them is legible from across the room without reading a single figure.
+    const seg=[['#059669',m.answered||0,'reached'],['#cbd5e1',sil.hung_up_fast||0,'hung up in 5s'],
+               ['#94a3b8',sil.silent_short||0,'silent <20s'],['#e11d48',sil.silent_long||0,'silent 20s+'],
+               ['#e2e8f0',sil.never_connected||0,'never connected']];
+    const segTot=seg.reduce((a,s)=>a+s[1],0)||1;
+    document.getElementById('sci-headline').innerHTML = m.calls ? `
+      <div class="card p-4">
+        <div class="flex items-baseline justify-between mb-3 flex-wrap gap-2">
+          <p class="sci-lede">Of <b>${m.calls}</b> AI calls, <b class="g">${m.answered||0} reached someone</b>
+            and <b class="g">${d.outcomes.reattempt||0} agreed to a re-attempt</b>.
+            ${(sil.silent_long||0)?`<b class="r">${sil.silent_long} were lost to silence</b> — the line stayed open 20 seconds or more and the customer was never heard.`:''}</p>
+          <p class="sci-note">${d.range.from}${d.range.from!==d.range.to?' → '+d.range.to:''}</p>
+        </div>
+        <div class="dp-splitbar">
+          ${seg.filter(s=>s[1]>0).map(s=>`<i class="dp-seg" style="width:${s[1]/segTot*100}%;background:${s[0]}"></i>`).join('')}
+        </div>
+        <div class="dp-splitkeys">
+          ${seg.filter(s=>s[1]>0).map(s=>`<span class="dp-segkey"><i style="background:${s[0]}"></i>${s[2]} <b>${s[1]}</b> <em>${Math.round(s[1]/segTot*100)}%</em></span>`).join('')}
+        </div>
+      </div>` : '';
+    // Each tile is a share of every AI call in the range, and the five add to that number exactly, so
+    // nothing hides in a gap between two figures.
+    const F=n=>({of:m.calls||1,n});
+    document.getElementById('sci-funnel').innerHTML = [
+      {...F(m.answered||0), label:'Answered — customer spoke', tone:'good', pick:'answered', tip:'The only calls that produced a conversation'},
+      {...F(sil.hung_up_fast||0), label:'Hung up within 5 seconds', pick:'hung_up_fast', tip:'Picked up and dropped almost immediately'},
+      {...F(sil.silent_short||0), label:'Silent, under 20s', pick:'silent_short', tip:'Line open, agent spoke, nothing came back'},
+      {...F(sil.silent_long||0), label:'Silent 20s+ — agent may be deaf', tone:'bad', pick:'silent_long', tip:'Half a minute of open line with no reply is the STT failing, not a quiet customer'},
+      {...F(sil.never_connected||0), label:'Never connected', tone:'mute', pick:'never_connected', tip:'No media at all — the leg never opened'},
+    ].map(mini).join('');
     // RTO RECOVERY AND COD CONFIRMATION ARE DIFFERENT JOBS (user, 2026-09-08: "call type … all number
     // should show separate") — different customers, different success conditions. One blended average
     // hid both. `won` is whichever counts as a win for that job: a re-attempt agreed, or an order
     // confirmed. Clicking a row filters the call list to that type.
     const TYPE_LABEL={ rto_recovery:'RTO recovery', cod_confirm:'COD confirmation', cod_rejected:'COD rejection check', manual_human:'Manual (human)' };
     document.getElementById('sci-bytype').innerHTML = Object.entries(d.by_type||{})
-      .sort((a,b)=>b[1].calls-a[1].calls).map(([k,t])=>
-        `<button data-pick="type:${k}" class="sci-pick w-full text-left py-2 border-b border-slate-100 last:border-0 hover:bg-slate-50 rounded px-1 -mx-1 ${_sci.pick==='type:'+k?'bg-indigo-50 ring-1 ring-indigo-200':''}">
-          <div class="flex items-center justify-between"><span class="text-sm font-medium text-slate-700">${escapeHtml(TYPE_LABEL[k]||k)}</span>
-            <span class="text-sm tabular-nums font-semibold text-slate-700">${t.calls}</span></div>
-          <div class="text-[11px] text-slate-400 mt-0.5 tabular-nums">answered <b class="text-emerald-700">${t.answered}</b> (${t.answer_rate}%)
-            · won <b class="text-emerald-700">${t.won}</b> · silent 20s+ <b class="${t.silent_long?'text-rose-600':''}">${t.silent_long}</b>
-            · avg ${t.avg_seconds}s</div></button>`).join('') || '<p class="text-sm text-slate-400">—</p>';
-    document.getElementById('sci-outcomes').innerHTML=rows(d.outcomes,'outcome:').join('');
-    document.getElementById('sci-langs').innerHTML=rows(d.languages).join('');
+      .sort((a,b)=>b[1].calls-a[1].calls).map(([k,t])=>mini({
+        n:t.calls, of:m.calls||1, label:TYPE_LABEL[k]||k, pick:'type:'+k,
+        sub:`answered ${t.answered} (${t.answer_rate}%) · won ${t.won} · silent 20s+ ${t.silent_long} · avg ${t.avg_seconds}s`,
+        tip:'A different job with a different success condition',
+      })).join('') || '<p class="text-sm text-slate-400">—</p>';
+    // OUTCOMES SPLIT BY WHETHER ANYONE SPOKE (user, 2026-09-08: "based on answered call total, % of
+    // Confirm Cancel and Reattempt, Unclear etc is missing"). One list against all 951 calls made the
+    // figures that matter unreadable: 150 re-attempts showed as 16% when the honest conversion is 150
+    // of the 551 people the agent actually reached. But the two groups cannot share a denominator
+    // either — "no answer" is not a conversation outcome and would drag every rate down.
+    // So each group is counted against ITSELF, and both are tallied from the same per-call rows the
+    // table below renders, which is why a tile and the list it opens can never disagree.
+    const spokeOf=c=>!!(c.flags&&c.flags.customer_turns>0);
+    // A call where the customer SPOKE cannot honestly be filed under "no answer" or "ended before any
+    // conversation" — those two labels come from the mechanical fallback summary written when the
+    // summarizer never ran. Left as they are, the answered group would contradict its own header on a
+    // quarter of its calls.
+    const tally=(arr,spoke)=>arr.reduce((o,c)=>{
+      let k=c.outcome||'other';
+      if(spoke && (k==='no_answer'||k==='no_conversation')) k='no_outcome';
+      o[k]=(o[k]||0)+1; return o; },{});
+    const ansCalls=(d.calls||[]).filter(spokeOf), silCalls=(d.calls||[]).filter(c=>!spokeOf(c));
+    const OUT_MINI={ confirmed:'good', reattempt:'good', cancelled:'bad', unclear:'warn', other:'warn', no_outcome:'warn' };
+    const block=(title,sub,o,prefix)=>{
+      const ent=Object.entries(o).sort((a,b)=>b[1]-a[1]);
+      const of=ent.reduce((a,[,v])=>a+v,0)||1;   // each group is a share of ITSELF, never of the other
+      return `<p class="sci-sub">${title} <b>${sub}</b></p>`
+        + (ent.length ? `<div class="sci-grid">`+ent.map(([k2,v])=>mini({
+            n:v, of, label:OUT_LABEL[k2]||k2, tone:OUT_MINI[k2]||'mute', pick:prefix+k2 })).join('')+`</div>`
+          : '<p class="text-sm text-slate-400">—</p>');
+    };
+    document.getElementById('sci-outcomes').innerHTML =
+      block('Of the answered calls', `${ansCalls.length} where the customer spoke`, tally(ansCalls,true), 'outa:')
+      + `<div class="mt-5">` + block('Nobody spoke', `${silCalls.length} calls`, tally(silCalls,false), 'outs:') + `</div>`;
+    const langTot=Object.values(d.languages||{}).reduce((a,v)=>a+v,0)||1;
+    document.getElementById('sci-langs').innerHTML = Object.entries(d.languages||{}).sort((a,b)=>b[1]-a[1])
+      .map(([k2,v])=>mini({n:v, of:langTot, label:k2, tone:'mute'})).join('') || '<p class="text-sm text-slate-400">—</p>';
     // THE CALL LIST IS FILLED BEFORE THE AUDIT, NOT AFTER (user, 2026-09-08: "why i need to run audit
     // to see every call detail" and "Every call — 956 of 956 should be changed as per date filter").
     // Both complaints were this one ordering bug. These three lines used to sit at the END of the
@@ -8259,7 +8368,7 @@ async function sciLoad(){
     // AI audit
     const a=d.audit;
     const when=a?new Date(a.created_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):null;
-    const stamp=a?`<p class="text-[11px] text-slate-400 mt-3">audited ${a.calls_analysed} conversations · ${when} · ${escapeHtml(a.model||'')}</p>`:'';
+    const stamp=a?`<p class="sci-note mt-3">audited ${a.calls_analysed} conversations · ${when} · ${escapeHtml(a.model||'')}</p>`:'';
     if(!a){ ['sci-worst','sci-improve','sci-good'].forEach(id=>document.getElementById(id).innerHTML='<p class="text-sm text-slate-400">No audit yet for this range — press <b>Run AI audit</b>.</p>'); return; }
     document.getElementById('sci-worst').innerHTML = a.worst
       ? `<div class="rounded-lg bg-rose-50 border border-rose-100 p-3"><p class="font-semibold text-rose-800">${escapeHtml(a.worst.title||'')}</p><p class="text-sm text-rose-700 mt-1">${escapeHtml(a.worst.detail||'')}</p></div>${stamp}`
@@ -8288,7 +8397,12 @@ function sciMatchesPick(c){
   const p=_sci.pick; if(!p) return true;
   if(p.startsWith('type:')) return String(c.call_type||'')===p.slice(5);
   if(p.startsWith('outcome:')) return String(c.outcome||'')===p.slice(8);
-  const spoke=(c.flags&&c.flags.customer_turns>0), s=Number(c.seconds)||0;
+  // the outcome card is split in two, so a pick names an outcome AND which side of the split it is on
+  const spoke=!!(c.flags&&c.flags.customer_turns>0);
+  if(p==='outa:no_outcome') return spoke && ['no_answer','no_conversation'].includes(String(c.outcome||''));
+  if(p.startsWith('outa:')) return spoke && String(c.outcome||'')===p.slice(5);
+  if(p.startsWith('outs:')) return !spoke && String(c.outcome||'')===p.slice(5);
+  const s=Number(c.seconds)||0;
   if(p==='answered') return spoke;
   if(p==='never_connected') return !spoke && s===0;
   if(p==='hung_up_fast') return !spoke && s>0 && s<6;
@@ -8326,7 +8440,7 @@ function sciCallRow(c, i){
   const tone = { reattempt:'text-emerald-700', confirmed:'text-emerald-700', cancelled:'text-rose-600', no_answer:'text-slate-400' }[c.outcome] || 'text-slate-600';
   return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer sci-row" data-i="${i}">
     <td class="px-5 py-2.5 whitespace-nowrap text-slate-500">${when}</td>
-    <td class="px-3 py-2.5 font-medium text-slate-700">${escapeHtml(c.order_id||'—')}${c.customer_name?`<span class="block text-[11px] text-slate-400">${escapeHtml(c.customer_name)}</span>`:''}</td>
+    <td class="px-3 py-2.5 font-medium text-slate-700">${escapeHtml(c.order_id||'—')}${c.customer_name?`<span class="block sci-note">${escapeHtml(c.customer_name)}</span>`:''}</td>
     <td class="px-3 py-2.5 text-slate-500">${escapeHtml(c.call_type||'')}</td>
     <td class="px-3 py-2.5 text-slate-500">${escapeHtml((c.language||'').replace('-IN',''))}</td>
     <td class="px-3 py-2.5 text-right tabular-nums text-slate-600">${c.seconds||0}</td>
@@ -8354,13 +8468,13 @@ function sciCallDetail(c){
         <span class="w-32">${a.at?new Date(a.at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false}):''}</span>
         <span class="w-24">${escapeHtml(a.result||'')}</span><span class="w-16 text-right tabular-nums">${a.ring_s!=null?a.ring_s+'s ring':''}</span>
         <span class="text-slate-400">${escapeHtml(a.cause||'')}${a.hangup_by?' · by '+escapeHtml(a.hangup_by):''}</span></div>`).join('')
-    : '<p class="text-[11px] text-slate-400">No carrier dial log for this order.</p>';
+    : '<p class="sci-note">No carrier dial log for this order.</p>';
   const kv = (k,v)=>`<div class="flex justify-between gap-3 py-0.5 text-[12px]"><span class="text-slate-400">${k}</span><span class="text-slate-700 text-right">${v}</span></div>`;
   return `<div class="grid lg:grid-cols-3 gap-5">
     <div class="lg:col-span-2">
       <p class="text-[11px] uppercase tracking-wide text-slate-400 mb-2">Transcript — what the customer heard</p>
       <div class="rounded-lg bg-slate-100/60 p-3 max-h-[26rem] overflow-y-auto">${bubbles||'<p class="text-sm text-slate-400">No transcript.</p>'}</div>
-      ${c.recording_url?`<button class="filter-btn mt-3 sci-play" data-id="${escapeHtml(c.id)}">▶ Play recording</button><div class="sci-audio mt-2"></div>`:'<p class="text-[11px] text-slate-400 mt-2">No recording stored for this call.</p>'}
+      ${c.recording_url?`<button class="filter-btn mt-3 sci-play" data-id="${escapeHtml(c.id)}">▶ Play recording</button><div class="sci-audio mt-2"></div>`:'<p class="sci-note mt-2">No recording stored for this call.</p>'}
     </div>
     <div class="space-y-4">
       <div><p class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">Outcome</p>
@@ -8375,7 +8489,7 @@ function sciCallDetail(c){
       </div>
       <div><p class="text-[11px] uppercase tracking-wide text-slate-400 mb-1">Dial history${d&&d.status?` · <span class="text-slate-500">${escapeHtml(d.status)}</span>`:''}</p>
         ${attempts}
-        ${d&&d.note?`<p class="text-[11px] text-slate-500 mt-1">${escapeHtml(d.note)}</p>`:''}
+        ${d&&d.note?`<p class="sci-note mt-1">${escapeHtml(d.note)}</p>`:''}
         ${d&&d.next_attempt_at?`<p class="text-[11px] text-amber-700 mt-1">retry ${new Date(d.next_attempt_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false})}</p>`:''}</div>
     </div></div>`;
 }

@@ -1013,7 +1013,15 @@ class VoiceCall {
         // audio of that turn — after this, the customer is hearing her.
         if (this._speechEndAt) {
             const total = Date.now() - this._speechEndAt;
-            const endpoint = this._brainStartAt ? this._brainStartAt - this._speechEndAt : null;
+            // NEGATIVE ENDPOINT IS REAL, AND MEANINGLESS AS A WAIT. The first 40 measured turns
+            // averaged endpoint -197ms, because the hold path composes the reply WHILE her own line is
+            // still playing — so the brain often starts before the customer's speech_end even fires.
+            // That is the feature working, but "they waited minus 197 milliseconds" is not a fact about
+            // anyone's experience, and it silently drags the average down. Clamped at zero, and the
+            // pre-composition is logged instead so the head start stays visible.
+            const rawEndpoint = this._brainStartAt ? this._brainStartAt - this._speechEndAt : null;
+            if (rawEndpoint !== null && rawEndpoint < 0) this.log(`reply was pre-composed ${-rawEndpoint}ms before they finished speaking`);
+            const endpoint = rawEndpoint === null ? null : Math.max(0, rawEndpoint);
             const think = this._firstSentenceAt && this._brainStartAt ? this._firstSentenceAt - this._brainStartAt : null;
             const voice = this._firstSentenceAt ? Date.now() - this._firstSentenceAt : null;
             // …AND THE PART THE EAR ACTUALLY FEELS. The measurements above end when the first frame is

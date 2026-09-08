@@ -1231,6 +1231,70 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### Call Insights reads like the rest of the dashboard, and every rate has its denominator (2026-09-08)
+
+**"Nothing changed in the UI/UX."** The user was right, and the reason is a trap worth naming: the
+previous round's styling was written with Tailwind **arbitrary values** — `text-[11px]`, `h-[6px]` — and
+`app/static/tailwind.css` is **PREBUILT**. Grep it: `text-[11px]` appears **zero** times, while the app
+uses it in ~40 places. Every one of them renders at the inherited size, silently. Fifteen were in the
+Call Insights render alone. Fixed two ways: the page's own text now uses real classes (`.sci-note`,
+`.sci-lede`, `.sci-sub`), and `text-[11px]` / `text-[10px]` are defined as real CSS **scoped to
+`#support-call-insights-view`** — so this page renders as written without resizing text across the rest
+of the dashboard. ⚠️ The same trap is still live everywhere else in `app.js`; a utility that is not in
+the prebuilt sheet does nothing and reports nothing.
+
+**Delivery Performance is the design benchmark** (user: *"you already have dashboard UI/UX benchmark
+Delivery Performance"*). Call Insights now shares its language rather than inventing one: the same
+radial-gradient ground, the same KPI treatment (`.sci-kpi` — a 3px accent rail and a hover lift,
+mirroring `.dp-kpi`), and the headline bar is no longer hand-rolled — it uses the **existing global**
+`.dp-splitbar` / `.dp-splitkeys` / `.dp-segkey` classes, so it is literally the same component.
+(One real bug found doing it: the `never connected` segment was `#f1f5f9`, which *is* the split bar's own
+track colour — the segment was invisible and read as a gap. Now `#e2e8f0`.)
+
+**Small cards, not one tall column** (user: *"instead of this type of long card can you show me data in
+small card like ans call total call"*). Four sections — funnel, call type, outcomes, languages — were
+stacked inside a third of the page width, putting Languages ~1,600px below the header and making every
+figure a row you read in order. They are **tiles** now, in the same visual family as the KPI row: a
+figure, its share, its name, a thin toned rail. Layout: *Where the calls went* full width, *Outcomes*
+full width, then *Call type* + *Languages* side by side, then *Rule compliance* + *Worst behaviour*.
+**One builder for all four** (`mini()`) — a funnel step, a call type, an outcome and a language are the
+same thing (a count, its share of a stated whole, and a name), and three hand-rolled row layouts were
+three places for them to drift apart. Every tile stays clickable through the one delegated
+`.sci-pick` handler. Colour is meaning, not decoration: green won it back, rose lost it, amber needs a
+person, grey nobody reached.
+
+**Every rate is counted against the group it belongs to** (user: *"based on answered call total, % of
+Confirm Cancel and Reattempt, Unclear etc is missing"*). One outcome list against all 951 calls made the
+figures that matter unreadable — 150 re-attempts showed as 16% when the honest conversion is 150 of the
+551 people actually reached (**27%**). But the two groups cannot share a denominator either: *no answer*
+is not a conversation outcome and would drag every rate down. Outcomes is now two labelled groups —
+**Of the answered calls (551)** and **Nobody spoke (400)** — each a share of **itself**. Both are tallied
+from `d.calls`, the same rows the table below renders, so a tile and the list it opens can never disagree.
+
+⚠️ **This surfaced a real defect.** The outcome label comes from the summary text; "answered" comes from
+the customer's own turns — and they disagree on **249 of 551 answered calls (45%)**. Every one is the
+mechanical fallback summary (`"27s call to 98… (stream closed)"`) written when **the summarizer never
+ran**. Inside the answered group they are named *"Spoke, but no outcome recorded"* in amber rather than
+left contradicting the header. **The summarizer is failing on nearly half the conversations we actually
+win** — the transcripts are there and clickable; the summaries are not. Not yet chased.
+
+**Call Type is a filter** (user: *"give one more filter in dashboard as Call Type — Manual Call and AI
+Call"*). A select beside the range, remembered in `localStorage`, defaulting to **AI calls** — this page
+is the agent's report card and every figure on it was defined that way. Choosing **Manual calls**
+re-scores the whole page server-side (`?type=manual`), list included, so the header can never say Manual
+over totals that are still counting the AI. **There is deliberately no combined "All"**: a manual call
+carries no transcript, so pooling them puts rows where nobody *could* have been heard back into the
+answer rate — the exact 31%-vs-44% distortion the manual/AI split was introduced to remove. On the manual
+set every transcript-derived card (rule compliance, outcomes, languages, the AI audit) **says so in
+words** instead of drawing five zeroed bars that read as a terrible score, the *Run AI audit* button
+hides, and the KPIs become the four things actually known about a human call: how many, how long, on how
+many orders, and which orders got 3+.
+
+Selftests: five new cases pin the two-set rule and its AI default, the per-group denominators, the
+no-answer→no_outcome remap, the one-builder tile layout (including that the tile CSS is **real** CSS),
+and that the manual branch fills the call list before returning. Three older cases were re-pinned: they
+had been asserting `calls: calls.map(` and the old row markup. **549 passing.**
+
 ### The statement was under-reporting by 2.5x — both vendors, both fixed (2026-09-08)
 **⚠️ AND THEN CSP, WHICH NO AMOUNT OF CORS CAN FIX.** With both gates open the click still failed —
 `Capture failed: Failed to fetch` — while curl to the same endpoint returned a clean 401 WITH the CORS
@@ -1375,7 +1439,13 @@ reads is lost, because the per-model split IS the breakdown and the raw blob was
 ingest upserts in chunks of 100, since Supabase refuses very large ones. Use `N=180` once to backfill,
 then `N=7` weekly — 180 requests a week would be needless when only recent days move.
 
-Selftests **544 passing**.
+⚠️ **The backfill shipped rejecting all 180 days, and said only "no valid days".** The date guard had
+been written as `/^d{4}-d{2}-d{2}$/` — the backslashes were eaten in transit, so it demanded a literal
+"dddd-dd-dd". Both guards now use `[0-9]` classes, which cannot be silently disarmed the same way.
+**This is the third time a doubled backslash has been eaten between here and a file** (see the Sarvam
+ingest and the audit shell); a regex written through a shell heredoc is worth re-reading in the file.
+
+Selftests **549 passing**.
 
 ### Six live calls, six guards: she stops losing customers and stops promising the wrong thing (2026-09-08)
 
@@ -1447,6 +1517,13 @@ merely draining → HOLD, because there is nothing to interrupt and replying onl
 **A DEPLOYMENT CHECK, FOUND BY ACCIDENT.** The transcript markers say which build placed a call. When
 TE25-44826 showed none, that is how it was established the VPS was behind rather than that a fix had
 failed; the 12:12 markers are what proved the new build HAD landed. Presence is proof, absence is not.
+
+⚠️ **`endpoint_ms` was averaging −197ms across the first 40 measured turns.** Not a bug in the clock: the
+whole-call hold composes her reply WHILE her own line is still playing, so the brain routinely starts
+BEFORE the customer’s `speech_end` fires. That is the feature working, but “they waited minus 197
+milliseconds” is not a fact about anyone’s experience and it silently drags the average down. Clamped at
+zero; the head start is logged separately (`reply was pre-composed Nms before they finished speaking`) so
+it stays visible rather than being averaged away.
 
 **AND THE WAIT IS NOW KEPT.** `call_turn_timings_ecom` (created 2026-09-08) stores one row per exchange
 as VOICE time — the clock starts at `vad.speech_end`, not at a transcript — split into endpoint / think

@@ -1385,7 +1385,7 @@ function check(name, got, want) {
                     check('call insights: per-call rows and the compliance bars share one flag function',
                         [/function flagsFor\(c\)/.test(ci2),
                          /const f = flagsFor\(c\);/.test(ci2),           // behaviour() sums the same flags
-                         /calls: calls\.map\(c => \{/.test(ci2),
+                         /calls: ai\.map\(c => \{/.test(ci2),
                          (ci2.match(/function flagsFor/g) || []).length], [true, true, true, 1]);
                     // A read capped at 1,000 rows silently drops the tail — at ~60 calls a day a month
                     // is ~1,800, so every number on the page would quietly understate the period.
@@ -1594,21 +1594,44 @@ function check(name, got, want) {
                 {
                     const load = ap2.slice(ap2.indexOf('async function sciLoad'));
                     const body = load.slice(0, load.indexOf('// ── EVERY CALL, IN FULL'));
+                    // The manual-call branch returns early with its own copy of the same three lines, so
+                    // each path is checked on its own text rather than by indexOf across both.
+                    const manualBranch = body.slice(body.indexOf('if(d.transcribed === false){'), body.indexOf('    // rule compliance'));
+                    const aiPath = body.slice(0, body.indexOf('if(d.transcribed === false){')) + body.slice(body.indexOf('    // rule compliance'));
                     check('call insights: every-call list is filled before the audit, so it never needs one',
-                        [body.indexOf('_sci.calls = d.calls') > -1,
-                         body.indexOf('_sci.calls = d.calls') < body.indexOf("['sci-worst','sci-improve','sci-good']"),
-                         body.indexOf('sciRenderCalls(true)') < body.indexOf("['sci-worst','sci-improve','sci-good']")],
-                        [true, true, true]);
+                        [aiPath.indexOf('_sci.calls = d.calls') > -1,
+                         aiPath.indexOf('_sci.calls = d.calls') < aiPath.indexOf("['sci-worst','sci-improve','sci-good']"),
+                         aiPath.indexOf('sciRenderCalls(true)') < aiPath.indexOf("['sci-worst','sci-improve','sci-good']"),
+                         manualBranch.includes('_sci.calls = d.calls || []; sciWireCalls(); sciRenderCalls(true);')],
+                        [true, true, true, true]);
                 }
                 // A HUMAN'S CALL IS NOT THE AGENT'S SCORE. Manual calls carry no transcript by design,
                 // so all 48 of them on 07 Sep counted as "customer never spoke": the answered rate read
                 // 31% where the agent's own 121 calls were 44%. They stay in the list, out of the score.
                 check('call insights: manual human calls are not scored as AI calls',
-                    [ci.includes("const ai = calls.filter(c => String(c.call_type || '') !== 'manual_human')"),
+                    [ci.includes("const isManual = c => String(c.call_type || '') === 'manual_human';"),
+                     ci.includes("const type = String(req.query.type) === 'manual' ? 'manual' : 'ai';"),   // AI is the default
                      ci.includes('const b = behaviour(ai);'), ci.includes('total: ai.length,'),
                      ci.includes('answer_rate: ai.length ?'), ci.includes('manual_calls: manualCalls'),
-                     ci.includes('calls: calls.map(')],          // …but the LIST still holds every call
-                    [true, true, true, true, true, true]);
+                     ci.includes('calls: ai.map(')],             // the list is the SET the numbers describe
+                    [true, true, true, true, true, true, true]);
+                // CALL TYPE IS A FILTER (user, 2026-09-08: "give one more filter in dashboard as Call Type
+                // - Manual Call and AI Call"). Two sets only, never a blended one: a manual call carries no
+                // transcript, so folding them together puts rows where nobody COULD be heard back into the
+                // answer rate — the 31%-vs-44% distortion the split was introduced to remove. And because
+                // every transcript-derived card is empty for the manual set, the client must SAY so rather
+                // than draw five zeroed bars that read as a bad score.
+                check('call insights: the call-type filter picks a set, and never blends the two',
+                    [ci.includes("calls.filter(c => isManual(c) === (type === 'manual'))"),
+                     ci.includes("transcribed: type !== 'manual'"),
+                     !ci.includes("'ai', 'manual', 'all'"),
+                     ap2.includes('<option value="ai"') && ap2.includes('<option value="manual"'),
+                     !ap2.includes('<option value="all">All calls</option>'),
+                     ap2.includes('&type=${_sci.type}'),
+                     ap2.includes("localStorage.setItem('sci.callType'"),
+                     ap2.includes('if(d.transcribed === false){'),
+                     ap2.includes("_sci.pick=null;")],
+                    [true, true, true, true, true, true, true, true, true]);
                 // Silence categorised: 20s+ of open line with no reply is the deaf-agent signature, and
                 // it was invisible inside a single 'one-sided' bar counting 116 calls.
                 check('call insights: silence is broken down, and the 20s+ alarm row exists',
@@ -1622,6 +1645,28 @@ function check(name, got, want) {
                 check('call insights: outcomes name the real reason instead of a bucket',
                     [ci.includes("return 'no_conversation'"), ci.includes('/^[0-9]+s call to/'),
                      ap2.includes("no_conversation:'Ended before any conversation'")],
+                    [true, true, true]);
+                // A CONVERSION RATE NEEDS THE RIGHT DENOMINATOR (user, 2026-09-08: "based on answered call
+                // total, % of Confirm Cancel and Reattempt, Unclear etc is missing"). 13 re-attempts against
+                // all 114 calls reads 11%; against the 63 people actually reached it is 21%, which is the
+                // figure the agent is judged on. The two groups get separate denominators because "no answer"
+                // is not a conversation outcome and would drag every rate down if pooled with them.
+                // Both blocks are tallied from d.calls — the same rows the table below renders — so a card
+                // and the list it opens can never disagree.
+                check('call insights: outcome rates are counted against the group they belong to',
+                    [ap2.includes("const ansCalls=(d.calls||[]).filter(spokeOf)"),
+                     ap2.includes("block('Of the answered calls'"), ap2.includes("block('Nobody spoke'"),
+                     ap2.includes("tally(ansCalls,true)"), ap2.includes("tally(silCalls,false)"),
+                     ap2.includes("if(p.startsWith('outa:'))") && ap2.includes("if(p.startsWith('outs:'))")],
+                    [true, true, true, true, true, true]);
+                // …and a call where the customer SPOKE cannot be filed under 'no answer'. That label comes
+                // from the mechanical fallback summary written when the summarizer never ran, so inside the
+                // answered block it is named for what it is — otherwise the block contradicts its own header
+                // on ~20 calls a day.
+                check('call insights: an answered call is never labelled no-answer',
+                    [ap2.includes("if(spoke && (k==='no_answer'||k==='no_conversation')) k='no_outcome';"),
+                     ap2.includes("no_outcome:'Spoke, but no outcome recorded'"),
+                     ap2.includes("if(p==='outa:no_outcome')")],
                     [true, true, true]);
                 // RTO recovery and COD confirmation are different jobs — one blended average hid both.
                 check('call insights: each call type is counted separately',
@@ -1947,6 +1992,11 @@ function check(name, got, want) {
                          // JSON is ~100 KB and the payload rides in a URL fragment; trimmed to date,
                          // total and the per-model split it is ~33 KB, which browsers carry fine.
                          su.includes('if (Array.isArray(body.d) && body.d.length) {'),
+                         // …with a date guard that actually matches a date. It shipped as /^d{4}-d{2}-d{2}$/
+                         // — the backslashes eaten in an edit — so it tested for the literal letter 'd',
+                         // rejected all 180 days of the first backfill, and reported only "no valid days".
+                         // Character classes, not d: they survive any edit path.
+                         su.includes('/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/') && !su.includes('/^d{4}-d{2}-d{2}$/'),
                          su.includes('for (let k = 0; k < rows.length; k += 100)'),   // Supabase upsert limit
                          sv2.includes('sarvam-usage$/') && sv2.includes('(?!sarvam-usage$)'),
                          // …AND THE HANDOFF PAGE, because Sarvam's console sets a CSP whose connect-src
@@ -1958,7 +2008,7 @@ function check(name, got, want) {
                          sv2.includes("app.get('/sarvam-capture'"),
                          fs.existsSync(path.join(ROOT, 'app/templates/sarvam-capture.html')),
                          !su.includes('req.headers.cookie') && !su.includes('cookie:') && !su.includes('document.cookie')],
-                        [true, true, true, true, true, true, true, true, true]);
+                        [true, true, true, true, true, true, true, true, true, true]);
                 }
                 // "CALL ME BACK IN 10 MINUTES" IS AN INSTRUCTION WITH A TIME IN IT (TE25-44759,
                 // 2026-09-08). He said it; she said "I'll call you back in 10 minutes" — then stayed on
@@ -1983,6 +2033,55 @@ function check(name, got, want) {
                          vbs.includes('this.s.endRequested = true;'),               // closes, not continues
                          acb.includes("outcome: 'callback_requested'") && acb.includes('next_attempt_at: at,')],
                         [true, true, true, true, true, true, true, true, true, true]);
+                }
+                // SMALL CARDS, NOT ONE TALL COLUMN (user, 2026-09-08: "instead of this type of long card can
+                // you show me data in small card like ans call total call"). Four sections stacked inside a
+                // third of the page width put Languages ~1,600px below the header and made every figure a row
+                // you read in order. They are tiles now, in the same visual language as the KPI row above.
+                // One builder for all four: a funnel step, a call type, an outcome and a language are the same
+                // thing — a count, its share of a stated whole, and a name — and three hand-rolled row layouts
+                // were three places for them to drift apart.
+                {
+                    const apm = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    const idx = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+                    check('call insights: every breakdown is a tile from one builder, not a stacked row list',
+                        [apm.includes('const mini=(o)=>{'),
+                         !apm.includes('const rows=(o,pickPrefix'), !apm.includes('const frow=(label,n,tone'),
+                         apm.includes("].map(mini).join('')"),                         // the funnel
+                         apm.includes('.sort((a,b)=>b[1].calls-a[1].calls).map(([k,t])=>mini({'), // call type
+                         apm.includes("ent.map(([k2,v])=>mini({"),                     // both outcome groups
+                         apm.includes("mini({n:v, of:langTot"),                         // languages
+                         // the tile is real CSS — the prebuilt tailwind has no arbitrary values, so a
+                         // utility-only tile would have rendered as unstyled text
+                         idx.includes('.sci-mini { display:block;') && idx.includes('.sci-grid { display:grid;'),
+                         idx.includes('id="sci-funnel" class="sci-grid"') && idx.includes('id="sci-langs" class="sci-grid"'),
+                         // still clickable, still through the one delegated handler
+                         apm.includes('<button data-pick="${o.pick}" class="sci-pick ${cls}"'),
+                         apm.includes("e.target.closest('.sci-pick')")],
+                        [true, true, true, true, true, true, true, true, true, true, true]);
+                }
+                // A COUNT WITHOUT A DENOMINATOR SAYS NOTHING (user, 2026-09-08: "add % in outcome").
+                // "No answer 40" and "No answer 40 · 37%" are different facts, and the funnel above
+                // already read the second way — two cards side by side in different styles was the
+                // inconsistency. The share is computed from the card's OWN rows, so the percentages
+                // always sum to 100 rather than quietly disagreeing with the tiles above. Colour is
+                // meaning, not decoration: green recovered, rose lost, amber needs a person.
+                {
+                    const apo = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('call insights: outcomes, languages and call types all show their share',
+                        [apo.includes('const of=ent.reduce((a,[,v])=>a+v,0)||1;'),
+                         apo.includes('const pct=Math.round((o.n||0)/(o.of||1)*100);'),
+                         apo.includes("cancelled:'bad'"),
+                         apo.includes('n:t.calls, of:m.calls||1'),
+                         // …and the tiles carry their denominators too. "Reattempts won 12" is trivia;
+                         // "12 · 20% of answered" is a conversion rate, and it is the number the agent
+                         // exists to move. Measured against ANSWERED rather than against all calls,
+                         // because against the total it would read as failure on every good day.
+                         apo.includes('% of answered'),
+                         apo.includes('% of ${m.calls+m.manual_calls} logged'),
+                         apo.includes('m.repeat_called_orders/m.orders_called*100'),
+                         fs.readFileSync(path.join(ROOT, 'app/api/ai_call_insights.js'), 'utf8').includes('orders_called: ordersCalled')],
+                        [true, true, true, true, true, true, true, true]);
                 }
                 // Yesterday is a CLOSED one-day window; every other preset ends today, and reusing that
                 // arithmetic would have folded today's calls into it.
