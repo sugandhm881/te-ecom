@@ -224,6 +224,10 @@ const HISTORY_TURNS = () => Number(process.env.VOBIZ_HISTORY_TURNS || 12);   // 
 const FLOOR_MIN = () => Number(process.env.VOBIZ_MIN_PEAK_FLOOR || 250);   // never deafer than this
 const FLOOR_CEIL = () => Number(process.env.VOBIZ_MIN_PEAK_CEIL || 6000);   // a loud room must not mute the caller
 const FIRST_REPLY_MIN = () => Number(process.env.VOBIZ_FIRST_REPLY_MIN || 150);   // above line noise, below the floor
+// The pause after she finishes her own sentence and turns to what was said over it. Natural
+// turn-taking is ~200ms and a person assumes the line is dead past ~800ms, so this is a beat, not a
+// hesitation. It is a MINIMUM, never an addition: if the reply is already late the audio goes at once.
+const ACK_BEAT_MS = () => Number(process.env.VOBIZ_ACK_BEAT_MS || 400);
 const AMBIENT_MULT = () => Number(process.env.VOBIZ_AMBIENT_MULT || 5);     // a handset sits well clear of the room
 // THE RESCUE. If the gate has been refusing speech and nothing has been heard for this long while the
 // agent is idle, the next transcript is taken WHATEVER its level. Answering the room once is a small
@@ -873,7 +877,19 @@ class VoiceCall {
                     : Math.min(peak, Math.round(this._ambient * 1.002) + 1);
             }
         } catch (_) {}
+        // 16-bit mono at 16 kHz → 32,000 bytes per second of audio. Sarvam bills the realtime STT by
+        // the second of audio it receives, so this is the meter, not the call duration: silence we
+        // stream is billed and hold music we never send is not.
+        try { this.s.sttSeconds = (this.s.sttSeconds || 0) + Buffer.from(b64, 'base64').length / 32000; } catch (_) {}
         this.stt.send(JSON.stringify({ event: 'audio_input', audio: payload }));
+    }
+
+    // Characters handed to a synthesizer, whoever synthesizes them. Sarvam bills ₹3 per 1,000 and
+    // does not care whether the audio was ever played — a greeting pre-synthesized for a phone that
+    // rings out is billed exactly like one that was heard.
+    meterTts(text) {
+        const n = String(text || '').length;
+        if (n) this.s.ttsChars = (this.s.ttsChars || 0) + n;
     }
 
     async sayLine(text, langOverride) {
@@ -882,6 +898,7 @@ class VoiceCall {
             if (EL_ON()) {
                 pcm = await elevenPcm(text, langOverride || this.s.lang);
             } else {
+                this.meterTts(text);          // Sarvam bills this one; ElevenLabs is a different vendor
                 const r = await axios.post('https://api.sarvam.ai/text-to-speech', {
                     inputs: [text], target_language_code: TTS_LANG(langOverride || this.s.lang), speaker: this.s.voice,
                     model: 'bulbul:v3', speech_sample_rate: 24000, enable_preprocessing: true, output_audio_codec: 'wav', pace: 1,
@@ -952,6 +969,20 @@ class VoiceCall {
 
     playToCaller(b64linear16) {
         if (!this.streamId) return;                // start event not seen yet — nothing to address
+        // THE BEAT. While it is running, frames are queued rather than sent — Vobiz plays whatever it
+        // receives immediately after the current audio, so sending early would give NO pause at all.
+        // Queued in order and released together, so nothing is reordered.
+        if (this._beatUntil && Date.now() < this._beatUntil) {
+            (this._beatQueue = this._beatQueue || []).push(b64linear16);
+            if (!this._beatTimer) {
+                this._beatTimer = setTimeout(() => {
+                    this._beatTimer = null; this._beatUntil = 0;
+                    const q = this._beatQueue || []; this._beatQueue = [];
+                    for (const c of q) this.playToCaller(c);
+                }, Math.max(0, this._beatUntil - Date.now()));
+            }
+            return;
+        }
         // THE GAP THE CUSTOMER ACTUALLY FEELS, split into its parts. Only the brain leg was ever
         // logged, so "the reply is slow" could not be attributed: is it the STT waiting out the
         // silence, Claude thinking, or the voice synthesizing? Printed once per turn, on the FIRST
@@ -1138,6 +1169,7 @@ class VoiceCall {
                 }
                 if (!firstFlushed && wsOk && tts && tts.readyState === 1 && !abort.signal.aborted) {
                     firstFlushed = true; sentAny = true;
+                    this.meterTts(spoken);
                     tts.send(JSON.stringify({ type: 'text', data: { text: spoken } }));
                     tts.send(JSON.stringify({ type: 'flush' }));
                 } else pending.push(spoken);
@@ -1174,6 +1206,7 @@ class VoiceCall {
             const text = await chatStream(messages, prompt, say, abort.signal, brainModel, (this.s.claudeUsage = this.s.claudeUsage || {}));
             if (wsOk && tts.readyState === 1 && pending.length && !abort.signal.aborted) {
                 sentAny = true;
+                this.meterTts(pending.join(' '));
                 tts.send(JSON.stringify({ type: 'text', data: { text: pending.join(' ') } }));
                 tts.send(JSON.stringify({ type: 'flush' }));
             } else if (pending.length && !abort.signal.aborted) {
@@ -1187,6 +1220,7 @@ class VoiceCall {
                         catch (e) { this.log('elevenlabs failed — Sarvam REST fallback:', e.message); }
                     }
                     if (!pcm) {
+                        this.meterTts(pending.join(' '));
                         const r = await axios.post('https://api.sarvam.ai/text-to-speech', {
                             inputs: [pending.join(' ')], target_language_code: TTS_LANG(this.s.lang), speaker: this.s.voice,
                             model: 'bulbul:v3', speech_sample_rate: 24000, enable_preprocessing: true, output_audio_codec: 'wav', pace: 1,
@@ -1260,12 +1294,12 @@ class VoiceCall {
             if (this._overlap && !this.closed) {
                 const held = this._overlap; this._overlap = '';
                 this._ackOverlap = true;                      // the prompt is told it arrived over her
-                const wait = Math.max(0, (this.audioEndsAt || 0) - Date.now()) + 150;
-                setTimeout(() => {
-                    if (this.closed) return;
-                    if (this.turnAbort) { this._overlap = held + (this._overlap ? ' ' + this._overlap : ''); return; }
-                    this.speakTurn(held).catch(e => this.log('held-turn error:', e.message));
-                }, wait);
+                // Compose NOW, speak on the beat. The thinking (~1.3s) overlaps her own audio instead
+                // of following it, so the customer hears a short intentional pause rather than a long
+                // empty one — and if the model takes longer than the drain, the beat has already
+                // passed and the audio goes immediately. It can only ever remove silence, never add it.
+                this._beatUntil = Math.max(this.audioEndsAt || 0, Date.now()) + ACK_BEAT_MS();
+                this.speakTurn(held).catch(e => this.log('held-turn error:', e.message));
             }
             // audio is queued inside Vobiz — speaking ends a beat after the last frame is sent
             setTimeout(() => { if (!this.turnAbort) this.speaking = false; }, 1500);
@@ -1549,7 +1583,19 @@ class VoiceCall {
                 summary,
                 exchanges: Math.ceil(this.s.transcript.length / 2),
                 recording_url: this.s.recordingUrl || null,
-                cost_meta: this.s.claudeUsage && Object.keys(this.s.claudeUsage).length ? { claude: this.s.claudeUsage } : null,
+                // MEASURED, not inferred. `sarvam` carries what was actually handed to the synthesizer
+                // and streamed to the recognizer, so the statement stops deriving characters from the
+                // transcript — which missed everything synthesized but never stored, and came out at
+                // less than half of Sarvam's own figure for 08 Sep.
+                cost_meta: (() => {
+                    const m = {};
+                    if (this.s.claudeUsage && Object.keys(this.s.claudeUsage).length) m.claude = this.s.claudeUsage;
+                    if (this.s.ttsChars || this.s.sttSeconds) m.sarvam = {
+                        tts_chars: Math.round(this.s.ttsChars || 0),
+                        stt_seconds: Math.round(this.s.sttSeconds || 0),
+                    };
+                    return Object.keys(m).length ? m : null;
+                })(),
             });
 
             // THE PER-TURN DELAYS, one row per exchange, written after the call log so the id it points

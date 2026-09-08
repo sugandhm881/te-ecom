@@ -40,6 +40,12 @@ const SARVAM = {
     is_actual: true,
 };
 const CLAUDE_EST_PER_TURN = 0.40;                 // fallback for calls logged before token capture
+// What each of Vobiz's debit kinds actually is. Discovered 2026-09-08 — we had no idea we were paying
+// for the media stream or for recordings until the ledger itemised them.
+const TXN_LABEL = {
+    cdr: 'calls', stream_cdr: 'media stream', recording: 'recordings', ncc: 'unconnected-dial fees',
+};
+
 const FIXED_MONTHLY = [
     { name: 'Vobiz mobile number', amount: 708, note: '₹600 + 18% GST' },
 ];
@@ -58,6 +64,60 @@ function claudeCostINR(meta) {
 
 // The platform's own bill for the range: page the CDR list (newest first) until we pass `fromMs`.
 // Returns { byKey: Map('<last10>|<minuteBucket>' → {costInr, uuid}), totalInr, calls }.
+// One snapshot of the prepaid wallet. Called on a schedule, and once more whenever the statement is
+// opened, so a range always has a reading at each end.
+async function snapshotVobizBalance() {
+    const id = process.env.VOBIZ_AUTH_ID, tok = process.env.VOBIZ_AUTH_TOKEN;
+    if (!id || !tok) return null;
+    try {
+        const r = await axios.get(`https://api.vobiz.ai/api/v1/account/${id}/balance`,
+            { headers: { 'X-Auth-ID': id, 'X-Auth-Token': tok }, timeout: 15000, validateStatus: () => true });
+        const b = r.data && Array.isArray(r.data.balances) ? r.data.balances[0] : null;
+        if (r.status !== 200 || !b) return null;
+        const row = { balance_inr: Number(b.balance), available_inr: Number(b.available_balance), currency: b.currency || 'INR', raw: b };
+        await supabase.from('vobiz_balance_ecom').insert(row);
+        return row;
+    } catch (e) { console.warn('[ai-costs] balance snapshot failed:', e.message); return null; }
+}
+
+// What the wallet actually paid out across a range. Sums only the DROPS between consecutive readings,
+// so a top-up shows as a gap rather than cancelling out real spend — the mistake that would make a
+// recharge look like a refund.
+async function walletSpend(fromIso, toIso) {
+    try {
+        const { data } = await supabase.from('vobiz_balance_ecom')
+            .select('at, balance_inr').gte('at', fromIso).lte('at', toIso).order('at', { ascending: true });
+        const rows = data || [];
+        if (rows.length < 2) return { inr: null, readings: rows.length, topups: 0 };
+        let spent = 0, topups = 0;
+        for (let i = 1; i < rows.length; i++) {
+            const d = Number(rows[i - 1].balance_inr) - Number(rows[i].balance_inr);
+            if (d > 0) spent += d; else if (d < 0) topups += -d;
+        }
+        return { inr: r2(spent), readings: rows.length, topups: r2(topups),
+            first: rows[0], last: rows[rows.length - 1] };
+    } catch (e) { return { inr: null, readings: 0, topups: 0 }; }
+}
+
+// What Vobiz ACTUALLY charged in a range, itemised. The summary covers the whole range regardless of
+// page size, so one request answers it — no paging, and none of the deep-paging limit that makes
+// /Call/ stop returning records after ~820 of a claimed 2047.
+async function vobizBilled(from, to) {
+    const id = process.env.VOBIZ_AUTH_ID, tok = process.env.VOBIZ_AUTH_TOKEN;
+    if (!id || !tok) return { ok: false, total: 0, byType: {}, count: 0 };
+    try {
+        const r = await axios.get(`https://api.vobiz.ai/api/v1/account/${id}/transactions`,
+            { params: { page: 1, per_page: 1, from_date: from, to_date: to },
+              headers: { 'X-Auth-ID': id, 'X-Auth-Token': tok }, timeout: 20000, validateStatus: () => true });
+        const s = r.data && r.data.summary;
+        if (r.status !== 200 || !s) return { ok: false, total: 0, byType: {}, count: 0 };
+        const byType = {};
+        for (const b of s.by_reference_type || []) byType[b.reference_type] = { inr: r2(b.total_debit), count: b.count };
+        return { ok: true, total: r2(s.total_debit), credit: r2(s.total_credit || 0),
+            byType, count: Number(r.data.total || 0) };
+    } catch (e) { console.warn('[ai-costs] vobiz transactions failed:', e.message); return { ok: false, total: 0, byType: {}, count: 0 }; }
+}
+
 async function vobizActuals(fromMs, toMs) {
     const id = process.env.VOBIZ_AUTH_ID, tok = process.env.VOBIZ_AUTH_TOKEN;
     const byKey = new Map(); let totalInr = 0, count = 0;
@@ -101,12 +161,15 @@ router.get('/support/ai-call-costs', async (req, res) => {
         const fromIso = new Date(`${from}T00:00:00+05:30`).toISOString();
         const toIso = new Date(`${to}T23:59:59.999+05:30`).toISOString();
 
-        const [{ data: rows, error }, vob, { data: ledger }] = await Promise.all([
+        const [{ data: rows, error }, vob, _bal, billed, sarvamBill, { data: ledger }] = await Promise.all([
             supabase.from('agent_call_logs')
                 .select('id, order_id, call_type, language, called_at, exchanges, summary, transcript, cost_meta')
                 .gte('called_at', fromIso).lte('called_at', toIso)
                 .order('called_at', { ascending: false }).limit(1500),
             vobizActuals(new Date(fromIso).getTime(), new Date(toIso).getTime()),
+            snapshotVobizBalance(),           // a reading now, so today's range always has an end point
+            vobizBilled(from, to),           // the itemised bill — the only telephony figure that reconciles
+            require('./sarvam_usage').sarvamBilled(from, to),   // what Sarvam actually charged, when captured
             // EVERY Anthropic call this system made in the window (claude_usage_ecom) — the call
             // brain plus the work that is not attributable to one call: summaries, agent-learning
             // reviews, the Call Insights audit. Without this the statement showed only ~half of
@@ -134,6 +197,13 @@ router.get('/support/ai-call-costs', async (req, res) => {
             const mins = durS > 0 ? Math.max(1, Math.ceil(durS / 60)) : 0;
             const agentChars = String(c.transcript || '').split('\n').filter(l => /^agent:/i.test(l))
                 .reduce((s, l) => s + Math.max(0, l.length - 7), 0);
+            // PREFER THE METER OVER THE TRANSCRIPT. Characters counted from `Agent:` lines miss every
+            // one we paid to synthesize and never stored — above all the greeting pre-synthesized for
+            // each dial while the phone rings, and on 08 Sep only 156 of 273 dials were answered.
+            // Sarvam billed 47,296 characters that day; the transcript implied 22,697.
+            const sMeter = (c.cost_meta && c.cost_meta.sarvam) || null;
+            const ttsChars = sMeter && sMeter.tts_chars ? sMeter.tts_chars : agentChars;
+            const sttSecs = sMeter && sMeter.stt_seconds ? sMeter.stt_seconds : null;
             const turns = Number(c.exchanges) || 0;
 
             // telephony: the platform's own number when we can match the CDR, else 0-with-flag
@@ -151,7 +221,7 @@ router.get('/support/ai-call-costs', async (req, res) => {
             else brain = r2(turns * CLAUDE_EST_PER_TURN);
 
             const cost = {
-                telephony, stt: r2(mins * SARVAM.stt_per_min), tts: r2(agentChars / 1000 * SARVAM.tts_per_1k), brain,
+                telephony, stt: r2(sttSecs != null ? sttSecs / 60 * SARVAM.stt_per_min : mins * SARVAM.stt_per_min), tts: r2(ttsChars / 1000 * SARVAM.tts_per_1k), brain,
             };
             cost.total = r2(cost.telephony + cost.stt + cost.tts + cost.brain);
             for (const k of Object.keys(comp)) comp[k] += cost[k];
@@ -160,7 +230,7 @@ router.get('/support/ai-call-costs', async (req, res) => {
             byType[t].calls++; byType[t].cost = r2(byType[t].cost + cost.total); byType[t].seconds += durS;
             const outcome = (mech.split('\n')[0] || '').replace(/^(RESULT|OUTCOME)\s*:\s*/i, '').slice(0, 90);
             return { id: c.id, order: c.order_id, type: t, language: c.language, at: c.called_at,
-                seconds: durS, turns, agent_chars: agentChars, cost,
+                seconds: durS, turns, agent_chars: ttsChars, agent_chars_metered: !!(sMeter && sMeter.tts_chars), cost,
                 actual: { telephony: telActual, brain: brainActual }, outcome };
         });
 
@@ -171,9 +241,20 @@ router.get('/support/ai-call-costs', async (req, res) => {
         comp.platform = r2(platformInr);
         // The Vobiz component row shows the PLATFORM total for the range (covers unanswered dials
         // our logs never see) — the more complete of the two numbers.
+        // THE BILL REPLACES THE ESTIMATE. /Call/ was never the bill — it lists parent calls and stops
+        // paging at ~820 of a claimed 2047 — and the manual-second-leg estimate written an hour before
+        // this was a guess at one part of a gap that is now itemised in full. Vobiz's OWN dashboard
+        // headline (₹83 on 08 Sep) is also short: it shows the `cdr` line alone and omits the stream
+        // and recording charges, so matching it would have been wrong too.
+        const telephonyBilled = billed.ok ? billed.total : null;
         const telephonyPlatformTotal = vob.ok ? vob.totalInr : null;
-        if (telephonyPlatformTotal != null && telephonyPlatformTotal >= comp.telephony) comp.telephony = telephonyPlatformTotal;
+        if (telephonyBilled != null) comp.telephony = telephonyBilled;
+        else if (telephonyPlatformTotal != null && telephonyPlatformTotal >= comp.telephony) comp.telephony = telephonyPlatformTotal;
         const varTotal = r2(Object.values(comp).reduce((a, b) => a + b, 0));
+        // THE WALLET'S OWN VERDICT. Not folded into the component maths — those add up to what we can
+        // ATTRIBUTE, and this is what was actually paid. Shown side by side so the gap is visible
+        // instead of hidden inside a total nobody can check.
+        const wallet = await walletSpend(fromIso, toIso);
 
         const days = Math.max(1, Math.round((new Date(`${to}T00:00:00Z`) - new Date(`${from}T00:00:00Z`)) / 864e5) + 1);
         const fixed = FIXED_MONTHLY.map(f => ({ ...f, in_range: r2(f.amount * days / 30.44) }));
@@ -183,8 +264,28 @@ router.get('/support/ai-call-costs', async (req, res) => {
         res.json({
             success: true,
             range: { from, to, days },
+            telephony_breakdown: billed.ok
+                ? Object.entries(billed.byType).map(([k2, v]) => ({ kind: k2, label: TXN_LABEL[k2] || k2, inr: v.inr, count: v.count }))
+                : null,
+            // WHAT SARVAM BILLED, beside what we measured. Their console has no API and sits behind
+            // Cloudflare, so this arrives from a bookmarklet the user clicks on their own usage page.
+            // Shown next to our meter rather than replacing it: the gap is the interesting number.
+            sarvam_billed: sarvamBill.ok
+                ? { inr: sarvamBill.total, days: sarvamBill.days, by_model: sarvamBill.byModel, balance: sarvamBill.balance }
+                : null,
+            wallet: {
+                spend_inr: wallet.inr, readings: wallet.readings, topups_inr: wallet.topups,
+                balance_inr: wallet.last ? Number(wallet.last.balance_inr) : null,
+                note: wallet.readings < 2
+                    ? 'not enough balance readings in this range yet — snapshots run every 15 minutes'
+                    : 'actual — the prepaid wallet fell by this much (top-ups excluded). The only figure that cannot be argued with.',
+            },
             sources: {
-                telephony: vob.ok ? `actual — Vobiz CDR API (${vob.count} platform calls in range)` : 'Vobiz CDR API unreachable — matched per-call costs only',
+                telephony: billed.ok
+                    ? `ACTUAL — Vobiz's own transaction ledger (${billed.count} debits): `
+                      + Object.entries(billed.byType).map(([k, v]) => `${TXN_LABEL[k] || k} ₹${v.inr} (${v.count})`).join(' · ')
+                      + '. Reconciles with the wallet. Note their dashboard headline shows the calls line only.'
+                    : 'Vobiz transaction ledger unreachable — falling back to the CDR list, which under-reports',
                 brain: `actual tokens × Anthropic list price for ${brainActualCalls}/${calls.length} calls (older calls estimated @ ₹${CLAUDE_EST_PER_TURN}/turn)`,
                 sarvam: `measured usage × Sarvam's billing (TTS ₹${SARVAM.tts_per_1k}/1k chars — exact match to their export; STT ₹${SARVAM.stt_per_min}/call-min — calibrated to their processed-audio billing, 02-Sep export)`,
                 usd_inr: USD_INR(),
@@ -207,4 +308,4 @@ router.get('/support/ai-call-costs', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-module.exports = { router };
+module.exports = { router, snapshotVobizBalance };

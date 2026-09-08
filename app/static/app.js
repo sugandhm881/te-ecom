@@ -8512,14 +8512,29 @@ async function sacLoad(silent){
     const c=d.components, src=d.sources||{};
     document.getElementById('sac-components').innerHTML =
       row('📞 Vobiz telephony', _sacInr(c.telephony), escapeHtml(src.telephony||''))+
+      // ITEMISED, because until 08 Sep nobody knew we were paying for media streams and recordings at
+      // all — they are ~29% of the telephony bill and scale with every call the agent makes.
+      ((d.telephony_breakdown&&d.telephony_breakdown.length)?`<div class="pl-4 mt-1">${d.telephony_breakdown.sort((a,b)=>b.inr-a.inr).map(b=>
+        `<div class="flex items-center justify-between text-[11px] text-slate-400 py-0.5"><span>${escapeHtml(b.label)} <span class="text-slate-300">×${b.count}</span></span><span class="tabular-nums">${_sacInr(b.inr)}</span></div>`).join('')}</div>`:'')+
       row('👂 Sarvam STT (ears)', _sacInr(c.stt), 'measured minutes')+
       row('🗣 Sarvam TTS (voice)', _sacInr(c.tts), 'measured characters')+
+      // SARVAM'S OWN BILL, when the bookmarklet has captured it. The two lines above are what we
+      // measured at the synthesizer and the recognizer; this is what they charged. On 08 Sep those
+      // differed by 59%, all of it in characters we synthesized but never stored — so the gap is the
+      // number to watch, and hiding it inside a total would have kept it invisible for another month.
+      ((d.sarvam_billed&&d.sarvam_billed.inr!=null)?row('🧾 Sarvam — actually billed', _sacInr(d.sarvam_billed.inr),
+        Object.entries(d.sarvam_billed.by_model||{}).map(([m,v])=>`${escapeHtml(m)} ${_sacInr(v)}`).join(' · ')
+        +` · vs ${_sacInr((c.stt||0)+(c.tts||0))} measured`):'')+
       row('🧠 Claude brain', _sacInr(c.brain), escapeHtml(src.brain||''))+
       row('⚙️ Claude — platform', _sacInr(c.platform||0), 'summaries, agent learning, audits')+
       ((d.platform_breakdown&&Object.keys(d.platform_breakdown).length)?`<div class="pl-4 mt-1">${Object.entries(d.platform_breakdown).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div class="flex items-center justify-between text-[11px] text-slate-400 py-0.5"><span>${escapeHtml(k.replace(/_/g,' '))}</span><span class="tabular-nums">${_sacInr(v)}</span></div>`).join('')}</div>`:'')+
       `<div class="text-[11px] text-slate-400 mt-1.5">${escapeHtml(src.sarvam||'')}</div>`+
       `<div class="text-[11px] text-slate-400 mt-1">${escapeHtml(src.platform||'')}</div>`+
-      `<div class="flex items-center justify-between pt-2 text-sm font-bold"><span>Variable total</span><span class="tabular-nums text-indigo-700">${_sacInr(t.variable)}</span></div>`;
+      `<div class="flex items-center justify-between pt-2 text-sm font-bold"><span>Variable total</span><span class="tabular-nums text-indigo-700">${_sacInr(t.variable)}</span></div>`+
+      // THE WALLET'S OWN VERDICT, shown under the total rather than folded into it: the components are
+      // what we can attribute, this is what actually left the account. A gap between them is a question.
+      ((d.wallet&&d.wallet.spend_inr!=null)?`<div class="flex items-center justify-between pt-1.5 text-[12px]"><span class="text-slate-500">Wallet actually paid${d.wallet.topups_inr?` <span class="text-slate-400">(excl. ${_sacInr(d.wallet.topups_inr)} top-ups)</span>`:''}</span><span class="tabular-nums font-semibold text-slate-700">${_sacInr(d.wallet.spend_inr)}</span></div>`
+        +`<div class="text-[11px] text-slate-400 mt-0.5">balance ${_sacInr(d.wallet.balance_inr)} · ${escapeHtml(d.wallet.note||'')}</div>`:'');
     document.getElementById('sac-fixed').innerHTML =
       (d.fixed||[]).map(f=>row(f.name, _sacInr(f.in_range), `${f.note||''} · ${_sacInr(f.amount)}/month`)).join('')+
       `<div class="flex items-center justify-between pt-2 text-sm font-bold"><span>Fixed total (range share)</span><span class="tabular-nums text-slate-800">${_sacInr(t.fixed)}</span></div>`;

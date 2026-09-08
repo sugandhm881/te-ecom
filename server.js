@@ -153,7 +153,7 @@ const { tokenRequired: _apiAuth, requirePermission } = require('./app/auth');
 // /vobiz/manual-(answer|hangup) are called BY Vobiz mid-call and cannot carry our JWT. The webhook
 // token is what makes them act, and an unknown or expired bridge id returns <Hangup/> rather than
 // dialling anyone — the customer's phone only ever rings for a bridge this server itself created.
-const PUBLIC_API = [/^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/, /^\/tally\/bridge\//, /^\/bot\/messages$/, /^\/vobiz\/(answer|hangup)$/, /^\/vobiz\/local-test-call$/, /^\/vobiz\/manual-(answer|hangup)$/];
+const PUBLIC_API = [/^\/support\/sarvam-usage$/, /^\/login(\/(verify|resend)-otp)?$/, /^\/signup$/, /^\/webhook(\/|$)/, /^\/tally\/bridge\//, /^\/bot\/messages$/, /^\/vobiz\/(answer|hangup)$/, /^\/vobiz\/local-test-call$/, /^\/vobiz\/manual-(answer|hangup)$/];
 app.use('/api', (req, res, next) => {
     if (req.method === 'OPTIONS') return next();
     if (PUBLIC_API.some(rx => rx.test(req.path))) return next();
@@ -359,6 +359,7 @@ app.use('/api', require('./app/api/vobiz_auto_calls').router);   // high-value C
 app.use('/api', require('./app/api/vobiz_manual_call').router);   // human click-to-call: rings the agent, then bridges the customer
 app.use('/api', require('./app/api/ai_call_report').router);     // daily AI calling report → Teams (manual trigger/preview)
 app.use('/api', require('./app/api/ai_call_costs').router);      // AI Calling Statement — per-call cost breakdown dashboard
+app.use('/api', require('./app/api/sarvam_usage').router);       // Sarvam's own billed usage, posted by the bookmarklet
 app.use('/api', require('./app/api/ai_call_insights').router);   // Call Insights — hard behaviour metrics + AI audit of transcripts
 app.use('/api', require('./app/api/user_activity').router);   // activity logging (POST /activity — any signed-in user)
 app.use('/api', require('./app/api/influencer_crm'));          // Influencer Marketing CRM (discover/influencers/lists/calendar/mentions)
@@ -584,6 +585,16 @@ cronJob('WA NDR (*/15 * * * *)', '*/15 * * * *', async () => {
 
 // High-value COD confirmation CALLS (2026-08-31): orders held for the ≥₹1500 rule ALONE get an AI
 // confirmation call (Vobiz). 10:00–19:59 IST only; VOBIZ_CALL_ALLOWLIST gates every dial while set.
+// THE WALLET, EVERY 15 MINUTES. The CDR API and Vobiz's own dashboard disagree by ~2.5x on the same
+// day (measured 2026-09-08: 120 calls / ₹32.85 against 273 / ₹83), and neither can be audited from
+// the other. The prepaid balance can: whatever it falls by IS what was spent. Four readings an hour
+// is enough to attribute spend to a day without pretending to attribute it to a call.
+cronJob('VobizBalance (*/15 * * * *)', '*/15 * * * *', async () => {
+    const { snapshotVobizBalance } = require('./app/api/ai_call_costs');
+    const row = await snapshotVobizBalance();
+    if (row) console.log(`[VobizBalance] ₹${row.balance_inr}`);
+});
+
 // */5 (2026-09-01, was */10): with the 5-minute placement floor, a 10-minute tick made the first
 // call land 5-15 min after placement (TE25-46042 waited 13) — a 5-minute tick keeps it at 5-10.
 cronJob('HighValueCall (*/5 * * * *)', '*/5 * * * *', async () => {

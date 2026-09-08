@@ -1730,10 +1730,10 @@ function check(name, got, want) {
                          vbo.includes('return false;             // the floor was NOT yielded'),
                          vbo.includes("this._overlap = (this._overlap ? this._overlap + \" \" : \"\") + text;"),
                          // flushed on the DRAIN clock, not when synthesis finished
-                         vbo.includes('const wait = Math.max(0, (this.audioEndsAt || 0) - Date.now()) + 150;'),
+                         vbo.includes('this._beatUntil = Math.max(this.audioEndsAt || 0, Date.now()) + ACK_BEAT_MS();'),
                          vbo.includes('Acknowledge what they said first, briefly, then continue.'),
                          // and never dropped if a turn slipped in first
-                         vbo.includes("this._overlap = held + (this._overlap ? ' ' + this._overlap : '');")],
+                         vbo.includes('if (this._beatUntil && Date.now() < this._beatUntil) {') && vbo.includes('for (const c of q) this.playToCaller(c);')],
                         [true, true, true, true, true, true]);
                 }
                 // ALREADY ARRANGED IS ALREADY A YES (TE25-46651, 2026-09-08). Shivani said she had asked
@@ -1850,6 +1850,102 @@ function check(name, got, want) {
                          vbr.includes('const HAND_OFF = {'),
                          vbr.includes("this.closingDone = true;                 // the goodbye machinery")],
                         [true, true, true, true, true, true]);
+                }
+                // A BEAT, NOT A STALL (user, 2026-09-08: "take 1 or 1.5 second gap to acknowledge…
+                // it sounds authentic"). The instinct was right and the number was not: natural
+                // turn-taking is ~200ms and a person assumes the line is dead past ~800ms. And the gap
+                // would not have been added to zero — the held reply waited for the drain and only THEN
+                // started thinking, so the customer already sat through ~1.75s. Composing during her
+                // own audio and releasing on a fixed beat turns that into ~400ms of intentional pause.
+                // The beat is a MINIMUM: a slow model finds it already passed and sends at once.
+                {
+                    const vbb = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    check('voice: the acknowledgement lands on a beat, and the beat never adds delay',
+                        [vbb.includes('VOBIZ_ACK_BEAT_MS || 400'),
+                         // composed while her line still plays, not after it
+                         vbb.includes('this._beatUntil = Math.max(this.audioEndsAt || 0, Date.now()) + ACK_BEAT_MS();'),
+                         !vbb.includes('const wait = Math.max(0, (this.audioEndsAt || 0) - Date.now()) + 150;'),
+                         // frames are queued in order while the beat runs, never dropped or reordered
+                         vbb.includes('(this._beatQueue = this._beatQueue || []).push(b64linear16);'),
+                         vbb.includes('for (const c of q) this.playToCaller(c);')],
+                        [true, true, true, true, true]);
+                }
+                // THE LEDGER IS THE BILL. /Call/ never was: it lists parent calls, stops paging at ~820
+                // of a claimed 2047, and omits stream and recording charges entirely. Vobiz's own
+                // dashboard headline (₹83 on 08 Sep) is short for the same reason — it shows the `cdr`
+                // line alone. The transaction ledger itemises all of it and reconciles with the wallet:
+                // ₹120.48 that day, where the statement had been showing ₹34.20.
+                {
+                    const cc = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_costs.js'), 'utf8');
+                    check("cost: telephony comes from Vobiz's own transaction ledger, itemised",
+                        [cc.includes('async function vobizBilled(from, to)'),
+                         cc.includes('/api/v1/account/${id}/transactions'),
+                         cc.includes('if (telephonyBilled != null) comp.telephony = telephonyBilled;'),
+                         // the two charges nobody knew about until the ledger showed them
+                         cc.includes("stream_cdr: 'media stream'") && cc.includes("recording: 'recordings'"),
+                         cc.includes('telephony_breakdown'),
+                         // and the guess it replaced is gone
+                         !cc.includes('manualSecondLegInr')],
+                        [true, true, true, true, true, true]);
+                }
+                // THE WALLET IS THE ONLY FIGURE THAT CANNOT ARGUE. The CDR API and Vobiz's own
+                // dashboard disagree ~2.5x on the same day and neither can be audited from the other;
+                // the prepaid balance can, because whatever it falls by IS what was spent. The path is
+                // lowercase and has no trailing slash — the capitalised form 401s, which is why it
+                // looked unavailable. Only DROPS are summed: a top-up must show as a gap, never as a
+                // refund cancelling out real spend.
+                {
+                    const cw = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_costs.js'), 'utf8');
+                    const sv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+                    check('cost: the prepaid wallet is snapshotted and reconciled, top-ups excluded',
+                        [cw.includes('/api/v1/account/${id}/balance'),
+                         cw.includes("supabase.from('vobiz_balance_ecom').insert(row)"),
+                         cw.includes('if (d > 0) spent += d; else if (d < 0) topups += -d;'),
+                         cw.includes('const wallet = await walletSpend(fromIso, toIso);'),
+                         sv.includes("cronJob('VobizBalance (*/15 * * * *)'")],
+                        [true, true, true, true, true]);
+                }
+                // MEASURE WHAT WE SEND, DON'T INFER IT FROM THE TRANSCRIPT. Sarvam's console for 08 Sep:
+                // bulbul ₹141.89 for 47,296 characters. The statement showed ₹68.09 — the RATE was
+                // exactly right (₹3/1k) and the COUNT was less than half, because `Agent:` lines cannot
+                // see anything synthesized but never stored. The biggest such thing: every dial
+                // pre-synthesizes its greeting while the phone rings, and only 156 of 273 dials were
+                // answered that day. The meter must also stay Sarvam-only — ElevenLabs is a different
+                // vendor and counting it here would re-create the same error in the other direction.
+                {
+                    const vm = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    const cm = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_costs.js'), 'utf8');
+                    check('cost: Sarvam usage is metered at the synthesizer, not inferred from the transcript',
+                        [vm.includes('meterTts(text) {'),
+                         vm.includes('this.s.sttSeconds = (this.s.sttSeconds || 0)') && vm.includes('.length / 32000;'),
+                         vm.includes('tts_chars: Math.round(this.s.ttsChars || 0),'),
+                         // never metered into the Sarvam counter from the ElevenLabs branch
+                         vm.indexOf('this.meterTts(text);          // Sarvam bills this one') > 0,
+                         cm.includes('const ttsChars = sMeter && sMeter.tts_chars ? sMeter.tts_chars : agentChars;'),
+                         cm.includes('sttSecs != null ? sttSecs / 60 * SARVAM.stt_per_min')],
+                        [true, true, true, true, true, true]);
+                }
+                // SARVAM'S BILL ARRIVES FROM A BOOKMARKLET, NOT A SCRAPER (user, 2026-09-08: "without
+                // extension, max safest option"). Sarvam has no usage API and the console sits behind
+                // Cloudflare with a 12-hour Google session, so the three options were: a headless
+                // browser holding a logged-in Google session ON THE SERVER, a browser extension with a
+                // permanent broad capability, or a bookmarklet that runs once when clicked and is gone.
+                // The property that matters: no credential ever reaches this server. The script runs on
+                // Sarvam's own origin so the browser attaches the cookies itself, and it could not read
+                // them anyway — the session cookie is httpOnly. Only rupees and counts arrive here.
+                // text/plain is deliberate: it is a CORS simple request, so the cross-origin POST needs
+                // no preflight that Sarvam's origin would never answer. The key rides in the BODY for
+                // the same reason — a custom header would force the preflight back.
+                {
+                    const su = fs.readFileSync(path.join(ROOT, 'app/api/sarvam_usage.js'), 'utf8');
+                    const sv2 = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+                    check('cost: Sarvam billed usage is ingested safely, key-gated, no credentials stored',
+                        [su.includes("express.text({ type: '*/*', limit: '256kb' })"),
+                         su.includes("String(body.key || '') !== KEY()"),
+                         su.includes("upsert(row, { onConflict: 'day' })"),      // re-posting a day updates it
+                         sv2.includes('sarvam-usage$/'),                          // public: no dashboard session exists
+                         !su.includes('req.headers.cookie') && !su.includes('cookie:') && !su.includes('document.cookie')],
+                        [true, true, true, true, true]);
                 }
                 // Yesterday is a CLOSED one-day window; every other preset ends today, and reusing that
                 // arithmetic would have folded today's calls into it.

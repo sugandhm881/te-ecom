@@ -1231,6 +1231,74 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### The statement was under-reporting by 2.5x — both vendors, both fixed (2026-09-08)
+
+The AI Calling Statement showed **₹279.21** for the day. The two vendors' own books said **₹279.56 for
+telephony and Sarvam alone**. Neither figure was a rounding error and neither was arithmetic: both were
+built from the wrong source.
+
+**VOBIZ — /Call/ IS NOT THE BILL.** Our telephony line read `actual — Vobiz CDR API`, which is the most
+misleading label in the file: precise-looking, authoritative-sounding, and a floor. The list returns
+~120 records/day where their dashboard shows 273, claims `total_count: 2047` but stops paging at ~820,
+and — the part that mattered — carries only *calls*. The account's **transaction ledger**
+(`GET /api/v1/account/{id}/transactions`, works with our own X-Auth headers) itemises what was actually
+taken. For 08 Sep:
+
+| kind | ₹ | items | what it is |
+|---|---|---|---|
+| `cdr` | 83.70 | 156 | the calls — **and this alone is Vobiz's dashboard headline** |
+| `stream_cdr` | 19.20 | 84 | the media stream, billed SEPARATELY from the call |
+| `recording` | 15.20 | 129 | every recording, ~₹0.10/60s |
+| `ncc` | 2.38 | 119 | ₹0.02 for each dial that never connected |
+| | **120.48** | | against **₹34.20** on the statement |
+
+Three mysteries collapsed into one: "273 vs 120 calls" is 156 connected + 119 non-connected; the paging
+limit stopped mattering; and **nothing was per-leg** — the manual-second-leg estimate written an hour
+earlier was a guess at the wrong thing and is gone. **We had no idea we were paying for media streams
+or recordings at all** — together 29% of telephony, and both scale with every call.
+
+**AND THE WALLET, WHICH CANNOT ARGUE.** `GET /account/{id}/balance` (lowercase, no trailing slash — the
+capitalised form 401s, which is why it looked unavailable). Snapshotted every 15 minutes into
+`vobiz_balance_ecom`; range spend sums only the DROPS between readings, so a top-up shows as a gap
+rather than as a refund cancelling real spend. Shown beside the components, never merged into them: the
+components are what we can *attribute*, the wallet is what *left the account*, and the gap is a question.
+
+**SARVAM — THE RATE WAS RIGHT, THE COUNT WAS HALF.** Their console for 08 Sep: **₹159.08** —
+bulbul ₹141.89 (47,296 chars), saaras realtime ₹12.13 (2,426s), saarika ₹5.06 (417s, our own diagnostic
+transcriptions of call recordings). The statement said ₹100.01, and the two halves were wrong in
+opposite directions: TTS ₹68.09 against ₹141.89, STT ₹31.92 against ₹12.13.
+
+₹141.888 ÷ 47,296 = **exactly ₹3/1k**, our own rate — so pricing was never the problem. `agent_chars`
+was counted from `Agent:` lines in stored transcripts, which cannot see anything synthesized but never
+stored. **The largest such thing: every dial pre-synthesizes its greeting while the phone rings, and only
+156 of 273 dials were answered** — ~117 greetings paid for and never heard, with no call log to attribute
+them to. Characters are now metered at the synthesizer and seconds at the recognizer
+(`cost_meta.sarvam`), and the statement prefers the meter. Two traps: the meter counts **Sarvam paths
+only** (ElevenLabs is a different vendor — metering it there would recreate the same error in reverse),
+and STT is metered by audio actually streamed, not call duration, which is why the old figure was 2.6x
+too high.
+
+**SARVAM'S BILL ARRIVES BY BOOKMARKLET (`sarvam_usage.js`, `sarvam_usage_ecom`).** Sarvam has no usage
+API — every plausible path on api.sarvam.ai 404s — and the console sits behind Cloudflare with a
+12-hour Google-OIDC session. Three options were weighed and the least-trust one won:
+- headless browser on the VPS — fully automatic, but a logged-in Google session lives on the server and
+  fights Cloudflare's bot protection forever;
+- a browser extension — safe in practice, but a permanent broad capability;
+- **a bookmarklet** — nothing installed, nothing granted, no background execution; it runs once when
+  clicked and is gone. ✔
+
+**No credential ever reaches the server.** It runs on Sarvam's own origin so the browser attaches the
+cookies itself, and it could not read them anyway (`sarvam_identity_session` is httpOnly). Only rupees
+and counts arrive. Two implementation details that are load-bearing: the post is `text/plain` because
+that is a CORS *simple request* and needs no preflight Sarvam's origin would never answer, and the key
+rides in the **body** for the same reason — a custom header would force the preflight back. The endpoint
+returns CORS headers so the click can READ its result: under `no-cors` the fetch resolves even on a 401
+and the alert would cheerfully report "sent" while nothing was stored.
+
+Result on the statement: telephony itemised from the ledger, "Wallet actually paid" beneath the variable
+total, and **🧾 Sarvam — actually billed … vs ₹X measured**. The gap is deliberately visible rather than
+blended away; today it is 59% and should close now that we meter at source. Selftests **543 passing**.
+
 ### Six live calls, six guards: she stops losing customers and stops promising the wrong thing (2026-09-08)
 
 An afternoon of real calls on the new build, each one read against its own recording. Every fix below
