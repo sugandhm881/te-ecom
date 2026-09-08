@@ -203,7 +203,12 @@ const _VIEW_PERMS = [
     [/^\/support\/ai-call-costs/i, ['support-ai-costs', 'support-agent-learning', 'support-voice']],   // AI calling cost statement
     [/^\/support\/call-insights/i, ['support-agent-learning', 'support-voice']],                       // Call Insights audit
     [/^\/voice-lessons/i, ['support-voice', 'support-agent-learning']],             // lessons block for the browser agent
-    [/^\/support\//i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist', 'customer-profile']],
+    // …EXCLUDING /support/sarvam-usage. Being in PUBLIC_API only skips the JWT gate, not this one, so
+    // the bookmarklet's POST — which carries no dashboard session at all — matched the general support
+    // rule and was 403'd before it ever reached the route. Worse, that 403 comes from middleware and
+    // carries no CORS header, so the browser could only report "Failed to fetch" with no clue why.
+    // Exactly the trap /tally/bridge/* has below, and the same lookahead fixes it.
+    [/^\/support\/(?!sarvam-usage$)/i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist', 'customer-profile']],
     // Customer Profile page (replaces Blacklist Numbers) — same audience. Issuing store credit is gated
     // a SECOND time inside the router by requirePermission('support-store-credit'), so being able to
     // view a customer never implies being able to hand out money.

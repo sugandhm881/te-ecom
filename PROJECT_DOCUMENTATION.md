@@ -1232,6 +1232,19 @@ once succeeded. The shell is now win32-only, where it is genuinely needed (`clau
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
 ### The statement was under-reporting by 2.5x — both vendors, both fixed (2026-09-08)
+**⚠️ FOLLOW-UP THE SAME DAY — PUBLIC_API IS NOT THE ONLY GATE.** The first click of the bookmarklet
+reported only `Capture failed: Failed to fetch`. The endpoint had deployed correctly and was answering
+**403, not 404**: `PUBLIC_API` skips the **JWT** gate, but the PERMISSION map is a second gate and its
+general rule `/^/support//` matches every route under `/support/` — including this one. A POST that
+carries no dashboard session by design was refused before the route ever ran.
+
+The misleading part is worth remembering: **that 403 comes from middleware, which never adds the CORS
+header**, so the browser blocked the response and could report nothing but "Failed to fetch" — no
+status, no reason, while the request had in fact arrived perfectly. Fixed with the same lookahead
+`/tally/bridge/*` already uses a few lines below: `/^/support/(?!sarvam-usage$)/i`. Both exemptions
+are now pinned together, because either one alone leaves the bookmarklet silently unable to post.
+
+
 
 The AI Calling Statement showed **₹279.21** for the day. The two vendors' own books said **₹279.56 for
 telephony and Sarvam alone**. Neither figure was a rounding error and neither was arithmetic: both were

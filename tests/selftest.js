@@ -1943,7 +1943,7 @@ function check(name, got, want) {
                         [su.includes("express.text({ type: '*/*', limit: '256kb' })"),
                          su.includes("String(body.key || '') !== KEY()"),
                          su.includes("upsert(row, { onConflict: 'day' })"),      // re-posting a day updates it
-                         sv2.includes('sarvam-usage$/'),                          // public: no dashboard session exists
+                         sv2.includes('sarvam-usage$/') && sv2.includes('(?!sarvam-usage$)'),
                          !su.includes('req.headers.cookie') && !su.includes('cookie:') && !su.includes('document.cookie')],
                         [true, true, true, true, true]);
                 }
