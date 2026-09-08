@@ -108,6 +108,30 @@ const HAND_OFF = {
     'hi-IN': 'माफ़ कीजिए, आवाज़ ठीक से नहीं आ रही। हमारी team आपसे WhatsApp पर confirm कर लेगी। The Element को चुनने के लिए धन्यवाद।',
     'en-IN': 'I am sorry, the line is not clear. Our team will confirm with you on WhatsApp. Thank you for choosing The Element.',
 };
+// A REQUEST TO BE CALLED BACK LATER, and the delay if they named one. Broad on the ASK, narrow on the
+// NUMBER: hearing "ten minutes" as fifteen costs nothing, while treating "call me later" as ordinary
+// conversation costs the whole call — TE25-44759 stayed on the line, re-introduced itself and asked
+// the delivery question to a man who had just said "After 10 minutes call back".
+// \b is ASCII-only and never fires beside Devanagari, so the Hindi alternatives carry no boundaries.
+const CALLBACK_RX = new RegExp(
+    '(?:call\\s*(?:me\\s*)?(?:back|again|later))' +
+    '|(?:call\\s*(?:me\\s*)?(?:after|in)\\s*[0-9])' +
+    '|(?:(?:baad|bad)\\s*m[ei]\\s*(?:call|phone|baat))' +
+    '|(?:(?:बाद|थोड़ी\\s*देर|थोडी\\s*देर)\\s*म[ेैं]{1,2}\\s*(?:call|कॉल|फ़ोन|फोन|बात))' +
+    '|(?:(?:अभी|abhi)\\s*(?:busy|व्यस्त|मीटिंग|meeting|driving|गाड़ी))' +
+    '|(?:(?:after|in)\\s*[0-9]+\\s*(?:min|mins|minute|minutes|hour|hours|घंटे)[^.?!]{0,20}(?:call|back))',
+    'i');
+// Minutes they asked for, when they named a number. Bounded at both ends: five minutes is the least
+// useful gap to redial in, and a customer saying "call me next month" is asking us to stop rather
+// than to schedule — the ladder should not hold an order open for that.
+function callbackMinutes(text) {
+    const m = String(text || '').match(/([0-9]{1,3})\s*(min|mins|minute|minutes|मिनट|hour|hours|घंटे|ghante)/i);
+    if (!m) return 15;
+    const n = Number(m[1]) || 15;
+    const isHours = /hour|घंटे|ghante/i.test(m[2]);
+    return Math.max(5, Math.min(180, isHours ? n * 60 : n));
+}
+
 const REFUSAL_RX = new RegExp(
     '(?:(?:not|never|don\\047?t|do\\s*not|dont|didn\\047?t|won\\047?t|no)\\s+(?:\\S+\\s+){0,2}?(?:want|wanting|need|needing|receive|received|receiving|deliver|delivering|delivery|take|taking))' +
     '|(?:नहीं\\s*(?:चाहिए|चाहिये|चाहता|चाहती|लूँगा|लूंगा|लेना|भेज))' +
@@ -1463,6 +1487,20 @@ class VoiceCall {
             this.s.endRequested = true;
             this.closingDone = false;               // the next turn IS the closing — let it speak once
         }
+        // CALL BACK LATER = ACKNOWLEDGE ONCE, THEN HANG UP (user, 2026-09-08, TE25-44759). He said
+        // "After 10 minutes call back"; she said "I'll call you back in 10 minutes" — and then stayed on
+        // the line, said it again, and when he said "Hello" she RE-INTRODUCED herself and asked the
+        // delivery question as though the call had just begun. Flagged "Introduced twice", filed
+        // no_answer, 38 seconds and ₹1.52 for a call that should have ended at 20 — and nothing
+        // scheduled the callback, so the promise was empty. Same machinery as the hang-up request
+        // above: one closing, then the goodbye cuts. The retry is booked in close().
+        if (!this.s.callbackMins && CALLBACK_RX.test(text)) {
+            this.s.callbackMins = callbackMinutes(text);
+            this.s.endRequested = true;
+            this.closingDone = false;               // the next turn IS the closing — let it speak once
+            this.log(`customer asked to be called back in ~${this.s.callbackMins} min — closing and rescheduling`);
+            this.s.transcript.push(`[customer asked for a callback in ~${this.s.callbackMins} minutes]`);
+        }
         // DISTRESS SCORE (MODEL_DECISION.md): the caller's own words drive the model ladder — each
         // frustration marker (or a third consecutive bare "hello?") is +1; at ESCALATE_AT the brain
         // steps up from the Haiku floor to Sonnet for the REST of the call (sticky).
@@ -1635,6 +1673,7 @@ class VoiceCall {
                 // call read as 'unclear' (no retry) instead of 'no_answer' (retry ladder).
                 require('./vobiz_auto_calls').handleCodCallOutcome({
                     orderName: this.s.ctx.order_name, summary,
+                    callbackMins: this.s.callbackMins || null,   // "call me in 10 minutes" is a booking, not a mood
                     customerTurns: this.s.transcript.filter(l => /^customer:/i.test(l)).length,
                 }).catch(e => this.log('outcome handling failed:', e.message));
             }
@@ -2208,4 +2247,4 @@ function attachVobizWs(httpServer) {
     });
 }
 
-module.exports = { router, attachVobizWs, createSession, sessions, placeOrderCall, vobizConfigured };
+module.exports = { router, CALLBACK_RX, callbackMinutes, attachVobizWs, createSession, sessions, placeOrderCall, vobizConfigured };

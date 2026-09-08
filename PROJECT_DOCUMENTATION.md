@@ -1330,6 +1330,53 @@ Result on the statement: telephony itemised from the ledger, "Wallet actually pa
 total, and **🧾 Sarvam — actually billed … vs ₹X measured**. The gap is deliberately visible rather than
 blended away; today it is 59% and should close now that we meter at source. Selftests **543 passing**.
 
+### A callback is a booking, and overlapping audio is two Kavyas at once (2026-09-08)
+
+Two more live calls, both read against their recordings.
+
+**TE25-44759 (Kushal) — "After 10 minutes call back".** She replied *"Got it, I'll call you back in 10
+minutes. Thank you."* — and then stayed on the line, said it a second time, and when he said "Hello"
+**re-introduced herself and asked the delivery question** as though the call had just begun. Flagged
+`Introduced twice`, filed `no_answer`, 38 seconds and ₹1.52 for a call that should have ended at 20.
+And nothing anywhere scheduled the callback, so the promise was empty on a recorded line.
+
+`CALLBACK_RX` now recognises the ask and `callbackMinutes()` reads the time they named — bounded 5 min
+to 3 hours, defaulting to 15 for a bare "later", because "call me next month" is a request to stop
+rather than to schedule. It sets `endRequested`, which routes the rules into their end-the-call group so
+the next turn is the closing and the goodbye machinery cuts — the same path "please hang up" already
+takes. The retry is then **actually booked** by `handleRtoCallOutcome`: `status: 'retry'`,
+`next_attempt_at = now + N`, outcome `callback_requested`, and an early return, because no outcome was
+reached and nothing else about the call should be filed.
+
+The discrimination that matters: *"I have asked them to reschedule for tomorrow"* is a **yes**, not a
+callback request. Confusing the two would end calls that are going well, so both are pinned.
+
+**TE25-46934 (Ruksar) — the transcript said she asked twice; the recording says worse.** Sarvam's
+diariser split her single voice into TWO speakers and returned the fragments out of order:
+
+```
+[8s ] …कंप्लीट ब्राइटनिंग सोल्यूशन, ब्राइटनिंग ड्रॉप्स और नायासिनामाइड सीरम का ऑर्डर…
+      जी रुक्सर जी, आपका नौ सौ अड़तालीस… का ऑर्डर… क्या आप भाई?
+[24s] अभी भी रिसीव करना चाहिए।
+[26s] नहीं हो पाया, क्या आप इसे?
+```
+
+**Her second turn's audio was playing on top of her first.** Two of Ruksar's replies arrived close
+together, both composed turns, and both played — so the customer heard two agents talking at once,
+said nothing more, and it filed as no-answer. No new fix: this is exactly what the whole-call hold
+does — the second utterance waits while her audio drains, then both are answered once.
+
+**SARVAM BACKFILL — SIX MONTHS IN ONE CLICK.** Their summary endpoint is per-RANGE, so a per-day
+history needs one request per day. The bookmarklet runs **5 at a time** rather than firing 180 at once,
+counts progress in the tab title so a slow run does not look like a hang, and sends a **compact**
+payload: 180 days of full summary JSON is ~100 KB and the figures travel in a URL fragment, which is
+long enough to be refused — trimmed to `{d, t, g:[[model, cost]]}` it is ~33 KB. Nothing the statement
+reads is lost, because the per-model split IS the breakdown and the raw blob was never used. The
+ingest upserts in chunks of 100, since Supabase refuses very large ones. Use `N=180` once to backfill,
+then `N=7` weekly — 180 requests a week would be needless when only recent days move.
+
+Selftests **544 passing**.
+
 ### Six live calls, six guards: she stops losing customers and stops promising the wrong thing (2026-09-08)
 
 An afternoon of real calls on the new build, each one read against its own recording. Every fix below

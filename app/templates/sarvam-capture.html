@@ -49,8 +49,8 @@
     const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     if (j.success) {
       say('Saved ✓', 'ok', [
-        ['Date', j.day],
-        ['Sarvam billed', inr(j.total_cost)],
+        [j.days > 1 ? 'Days captured' : 'Date', j.days > 1 ? j.days + ' (to ' + j.day + ')' : j.day],
+        [j.days > 1 ? 'Sarvam billed, total' : 'Sarvam billed', inr(j.total_cost)],
         ['Balance', inr(p.balance)],
       ], 'You can close this tab. Re-running it for the same day just updates the figure.');
       history.replaceState(null, '', location.pathname);   // drop the payload from the address bar

@@ -1943,6 +1943,11 @@ function check(name, got, want) {
                         [su.includes("express.text({ type: '*/*', limit: '256kb' })"),
                          su.includes("String(body.key || '') !== KEY()"),
                          su.includes("upsert(row, { onConflict: 'day' })"),      // re-posting a day updates it
+                         // …and the compact form, for a six-month backfill. 180 days of full summary
+                         // JSON is ~100 KB and the payload rides in a URL fragment; trimmed to date,
+                         // total and the per-model split it is ~33 KB, which browsers carry fine.
+                         su.includes('if (Array.isArray(body.d) && body.d.length) {'),
+                         su.includes('for (let k = 0; k < rows.length; k += 100)'),   // Supabase upsert limit
                          sv2.includes('sarvam-usage$/') && sv2.includes('(?!sarvam-usage$)'),
                          // …AND THE HANDOFF PAGE, because Sarvam's console sets a CSP whose connect-src
                          // lists only their own domains: a bookmarklet there cannot fetch() to us at all,
@@ -1953,7 +1958,31 @@ function check(name, got, want) {
                          sv2.includes("app.get('/sarvam-capture'"),
                          fs.existsSync(path.join(ROOT, 'app/templates/sarvam-capture.html')),
                          !su.includes('req.headers.cookie') && !su.includes('cookie:') && !su.includes('document.cookie')],
-                        [true, true, true, true, true, true, true]);
+                        [true, true, true, true, true, true, true, true, true]);
+                }
+                // "CALL ME BACK IN 10 MINUTES" IS AN INSTRUCTION WITH A TIME IN IT (TE25-44759,
+                // 2026-09-08). He said it; she said "I'll call you back in 10 minutes" — then stayed on
+                // the line, said it again, and when he said "Hello" RE-INTRODUCED herself and asked the
+                // delivery question as though the call had just begun. Flagged "Introduced twice", filed
+                // no_answer, 38s and ₹1.52 for a call that should have ended at 20 — and nothing
+                // scheduled the callback, so the promise was empty on a recorded line.
+                {
+                    const vbk = require(path.join(ROOT, 'app/api/vobiz_bridge.js'));
+                    const acb = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8');
+                    const vbs = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    check('voice: a callback request ends the call and books the retry for when they asked',
+                        [vbk.CALLBACK_RX.test('After 10 minutes call back'),
+                         vbk.CALLBACK_RX.test('call me after 2 hours'),
+                         vbk.CALLBACK_RX.test('थोड़ी देर में call कीजिए'),
+                         // and never on an ordinary reply, or every call would end early
+                         !vbk.CALLBACK_RX.test('जी बोलिए।'),
+                         !vbk.CALLBACK_RX.test('I have asked them to reschedule for tomorrow'),
+                         vbk.callbackMinutes('After 10 minutes call back') === 10,
+                         vbk.callbackMinutes('call me after 2 hours') === 120,
+                         vbk.callbackMinutes('call me back later') === 15,          // sane default
+                         vbs.includes('this.s.endRequested = true;'),               // closes, not continues
+                         acb.includes("outcome: 'callback_requested'") && acb.includes('next_attempt_at: at,')],
+                        [true, true, true, true, true, true, true, true, true, true]);
                 }
                 // Yesterday is a CLOSED one-day window; every other preset ends today, and reusing that
                 // arithmetic would have folded today's calls into it.

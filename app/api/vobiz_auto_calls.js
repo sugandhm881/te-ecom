@@ -625,7 +625,7 @@ function answeredTheAsk(transcript) {
     return true;
 }
 
-async function handleRtoCallOutcome({ orderName, summary, customerTurns, transcript }) {
+async function handleRtoCallOutcome({ orderName, summary, customerTurns, transcript, callbackMins }) {
     const name = String(orderName || '').replace(/^#/, '').trim();
     if (!name) return;
     const line = String(summary || '').split('\n')[0] || '';
@@ -634,6 +634,24 @@ async function handleRtoCallOutcome({ orderName, summary, customerTurns, transcr
     // (first live day: a 10s hello-only call got marked CANCELLED exactly this way).
     const shaped = /^\s*(RESULT|OUTCOME)\b/i.test(line);
     let outcome = 'unclear', note = 'customer talked but outcome unclear';
+    // THEY TOLD US WHEN TO CALL — BOOK IT (user, 2026-09-08, TE25-44759). "After 10 minutes call back"
+    // is an instruction with a time in it, and the agent said "I'll call you back in 10 minutes" while
+    // nothing anywhere scheduled it. An empty promise on a recorded line is worse than not answering.
+    // Booked as a plain retry so the existing ladder owns it from here, and returned early: no outcome
+    // was reached, so nothing else about this call should be filed.
+    if (callbackMins) {
+        const at = new Date(Date.now() + callbackMins * 60e3).toISOString();
+        const { data: row } = await supabase.from('vobiz_auto_calls_ecom').select('detail, attempt_log')
+            .eq('order_name', name).eq('purpose', RTO_PURPOSE).maybeSingle();
+        await supabase.from('vobiz_auto_calls_ecom')
+            .update({ status: 'retry', next_attempt_at: at,
+                detail: { ...((row && row.detail) || {}), outcome: 'callback_requested',
+                    outcome_note: `customer asked to be called back in ~${callbackMins} minutes`, at: new Date().toISOString() },
+                attempt_log: logResult(row, 'callback_requested') })
+            .eq('order_name', name).eq('purpose', RTO_PURPOSE);
+        console.log(`[RTOCall] ${name}: callback booked for ${at} (~${callbackMins} min)`);
+        return;
+    }
     const saysCancel = /cancel/i.test(line) && !/(?:not|never|no|don'?t|doesn'?t|didn'?t|won'?t)(?:s+S+){0,3}s+cancel/i.test(line) && !/cancels*नहीं|नहींs*cancel/i.test(line);
     // THE TRANSCRIPT OVERRULES THE SUMMARY ON "NO ANSWER" TOO (user, 2026-09-08, TE25-46457). The
     // phrase alone forced no_answer even with FIVE customer turns on the record: the summarizer wrote

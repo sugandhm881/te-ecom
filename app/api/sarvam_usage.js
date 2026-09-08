@@ -49,6 +49,59 @@ router.post('/support/sarvam-usage', express.text({ type: '*/*', limit: '256kb' 
         // that text/plain exists to avoid.
         if (String(body.key || '') !== KEY()) return res.status(401).json({ success: false, error: 'bad key' });
 
+        // A WEEK IN ONE CLICK (user, 2026-09-08: "how do I avoid manual click … it should update in a
+        // few times"). No browser will auto-run a script on a third-party page without an extension —
+        // that is the rule that makes a bookmarklet safe, not a gap to route around. So instead of
+        // clicking more often, one click now carries several days: Sarvam's summary is per-RANGE, not
+        // per-day, so the bookmarklet asks day by day and posts them together. A weekly click keeps the
+        // figures complete, and a missed week costs nothing because each day is re-fetchable.
+        // COMPACT FORM, for a six-month backfill (user, 2026-09-08: "update that as last 6 month when
+        // click"). 180 days of full summary JSON is ~100 KB, and the payload travels in a URL fragment
+        // — long enough to be refused. So the bookmarklet may send the trimmed shape instead:
+        //     { d: '2026-09-08', t: 159.08, g: [['bulbul:v3', 141.888], …] }
+        // ~120 bytes a day, so half a year fits in about 20 KB. Nothing is lost that the statement
+        // reads: the per-model split is what the breakdown shows, and the raw blob was never used.
+        if (Array.isArray(body.d) && body.d.length) {
+            const rows = body.d
+                .filter(x => /^d{4}-d{2}-d{2}$/.test(String(x.d || '')))
+                .map(x => ({
+                    day: x.d,
+                    total_cost: Number(x.t) || null,
+                    balance: body.balance != null ? Number(body.balance) : null,
+                    groups: (x.g || []).map(([model, total_cost]) => ({ model, total_cost })),
+                    raw: null,
+                    captured_at: new Date().toISOString(),
+                }));
+            if (!rows.length) return res.status(400).json({ success: false, error: 'no valid days' });
+            // Chunked: Supabase refuses very large upserts, and half a year is 180 rows.
+            for (let k = 0; k < rows.length; k += 100) {
+                const { error: e3 } = await supabase.from('sarvam_usage_ecom').upsert(rows.slice(k, k + 100), { onConflict: 'day' });
+                if (e3) return res.status(500).json({ success: false, error: e3.message });
+            }
+            const sum = Math.round(rows.reduce((a, r) => a + (r.total_cost || 0), 0) * 100) / 100;
+            console.log(`[SarvamUsage] ${rows.length} days backfilled · ₹${sum}`);
+            return res.json({ success: true, days: rows.length, day: rows[0].day, total_cost: sum });
+        }
+
+        if (Array.isArray(body.days) && body.days.length) {
+            const rows = body.days
+                .filter(d => /^d{4}-d{2}-d{2}$/.test(String(d.date || '').slice(0, 10)))
+                .map(d => ({
+                    day: String(d.date).slice(0, 10),
+                    total_cost: Number((d.usage || {}).total_cost ?? (d.usage || {}).subtotal ?? 0) || null,
+                    balance: body.balance != null ? Number(body.balance) : null,
+                    groups: (d.usage || {}).groups || null,
+                    raw: d.usage || null,
+                    captured_at: new Date().toISOString(),
+                }));
+            if (!rows.length) return res.status(400).json({ success: false, error: 'no valid days' });
+            const { error: e2 } = await supabase.from('sarvam_usage_ecom').upsert(rows, { onConflict: 'day' });
+            if (e2) return res.status(500).json({ success: false, error: e2.message });
+            const sum = Math.round(rows.reduce((a, r) => a + (r.total_cost || 0), 0) * 100) / 100;
+            console.log(`[SarvamUsage] ${rows.length} days captured · ₹${sum} · balance ₹${rows[0].balance}`);
+            return res.json({ success: true, days: rows.length, day: rows[0].day, total_cost: sum });
+        }
+
         const day = String(body.date || '').slice(0, 10);
         if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ success: false, error: 'date (YYYY-MM-DD) required' });
 
