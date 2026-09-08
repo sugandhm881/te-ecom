@@ -1231,6 +1231,52 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### "Hello" is shorter than 500ms — min speech 500 → 250 (2026-09-08)
+
+The last of the day's deaf-agent causes, and the only one that was UPSTREAM of every gate being tuned.
+
+**TE25-44826 (Mohan), 12:20, on the NEW build.** 13 seconds. Stored transcript: the agent's opening and
+nothing else. The recording — pulled from Vobiz with the account headers and run through Sarvam's batch
+engine — has him saying **"Hello" at 3s and again at 7s**, plainly. He was called twice an hour apart,
+answered both times, and both attempts were burned.
+
+**The absence of a marker was the clue.** The build running had already been logging every rejected
+utterance into the transcript, and a call at 12:12 proved it:
+
+```
+[not heard — too quiet, peak 202: "Okay"]
+[not heard — too quiet, peak 15: "Hello"]
+```
+
+(Peak 15 is not a person — real speech into a handset measures 2,371–6,002 — so that gate was correct,
+and visibly so for the first time.) Mohan's call carried **no marker at all**, and neither did two of the
+six calls after noon. No rejection means **no transcript was ever produced**: no `vad.speech_start`, no
+partial, no final, nothing for any gate to judge.
+
+**The cause is `min_speech_duration_ms=500`.** Sarvam does not treat sound as SPEECH until it has lasted
+that long, and a one-word greeting does not. That is precisely why the word "hello" goes missing while
+whole sentences get through — and no amount of tuning the VAD threshold or the noise floor could ever
+have reached it, because both sit downstream of a decision that was never made.
+
+Lowered to **250ms**. It still refuses a cough or a door, and the two defences that matter now sit BELOW
+it anyway: the ambient-relative floor rejects a blip on energy, and the rescue means over-rejection
+cannot last more than 6 seconds. Being too slow to call something speech was costing whole calls; being
+too quick costs one discarded fragment.
+
+**THE FOUR CAUSES OF A DEAF AGENT, ALL FOUND ON 2026-09-08**, each downstream of the last:
+1. Sound never became SPEECH — `min_speech_duration_ms` 500 → **250** (a one-word "Hello").
+2. Speech never fired the VAD — `threshold` 0.75 → **0.45** (a quiet "हाँ हाँ जी").
+3. A final was produced and thrown away — fixed floor 3000 → **ambient × 5**, bounded (a real "जी बताइए"
+   at 2371).
+4. The socket died and never reopened — reconnect with backoff, then an honest goodbye.
+Plus two backstops that work whatever the cause: the **rescue** at 6s and the **watchdog** at 7s/22s.
+
+⚠️ **AND A DEPLOYMENT CHECK FELL OUT OF IT.** The transcript markers say which build placed a call. When
+Mohan's call showed none, that is how it was established the VPS was still on the previous build rather
+than that the fix had failed — and equally, the 12:12 markers are what proved the new build HAD landed.
+Absence of a marker is weak evidence on its own (a call with nothing rejected has none either); presence
+is proof. Selftests **530 passing**.
+
 ### The noise floor became a ratio, and deafness got a hard time limit (2026-09-08)
 
 User: *"i want full proof silent fixed and customer every word should detected."* The two changes that

@@ -150,7 +150,17 @@ const MIN_PEAK = () => Number(process.env.VOBIZ_MIN_PEAK || 1200);
 // actually separates a handset from a room across it. The VAD should not be doing that job twice.
 const VAD_THRESHOLD = () => Number(process.env.VOBIZ_VAD_THRESHOLD || 0.45);
 const STT_SILENCE_MS = () => Number(process.env.VOBIZ_STT_SILENCE_MS || 400);   // 550: snappier turn-taking
-const MIN_SPEECH_MS = () => Number(process.env.VOBIZ_MIN_SPEECH_MS || 500);     // a blip is not a turn
+// 500ms IS LONGER THAN THE WORD "HELLO" (TE25-44826, 2026-09-08). Sarvam will not treat sound as
+// SPEECH until it has lasted this long, so a one-word greeting never becomes an utterance at all —
+// no vad.speech_start, no partial, no final, nothing for any later gate to judge. Mohan said "Hello"
+// at 3s and again at 7s, both plainly audible on the recording, and the stored transcript holds only
+// the agent's opening. Of the six calls in the hour after the new build went live, three produced NO
+// final transcript at all — this is why, and it is upstream of every gate we had been tuning.
+// 250ms still refuses a cough or a door, and the two defences that matter now sit BELOW it anyway:
+// the ambient-relative floor rejects a blip on energy, and the rescue means over-rejection cannot
+// last. Being too slow to call something speech was costing whole calls; being too quick costs one
+// discarded fragment.
+const MIN_SPEECH_MS = () => Number(process.env.VOBIZ_MIN_SPEECH_MS || 250);
 // The mid-call watchdog. 7s of silence is already past what a person tolerates before assuming the
 // line is dead (natural turn-taking is ~200ms); 15s more after she has asked "can you hear me" is a
 // dead call, not a thinking customer.

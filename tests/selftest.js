@@ -1130,7 +1130,9 @@ function check(name, got, want) {
             check('voice noise+sonnet 2026-09-02: no temperature in Claude bodies; 300ms min-speech; sustained barge-in',
                 // min-speech rose 300 -> 400 on 2026-09-04 and became env-tunable, in the same change
                 // that finally set the VAD threshold: a blip must not be a turn. Pin the new floor.
-                [/no `temperature`: Claude 5 models reject it/.test(vb2) && /model, stream: true, max_tokens: 200,\n/.test(vb2), /VOBIZ_MIN_SPEECH_MS \|\| 500/.test(vb2),
+                     // 500ms is longer than the word "Hello": a one-word greeting never became an
+                     // utterance at all, so no gate ever saw it (TE25-44826, 2026-09-08).
+                [/no `temperature`: Claude 5 models reject it/.test(vb2) && /model, stream: true, max_tokens: 200,\n/.test(vb2), /VOBIZ_MIN_SPEECH_MS \|\| 250/.test(vb2),
                  /_bargeTimer/.test(vb2), !/temperature, \.\.\.\(system/.test(fs.readFileSync(path.join(ROOT, 'app/api/ai.js'), 'utf8'))],
                 [true, true, true, true]);
             // TWO-STAGE BARGE-IN (user, 2026-09-04: "hmm, hello, envroment noise is overlap and agent
@@ -1337,7 +1339,7 @@ function check(name, got, want) {
              // the VAD fired zero times, and the recording proved the audio was on the line. Noise is
              // MIN_PEAK's job — it judges loudness after transcription; the VAD only hears sound.
                  /VOBIZ_VAD_THRESHOLD \|\| 0\.45/.test(vb2),
-                 /VOBIZ_MIN_SPEECH_MS \|\| 500/.test(vb2)],
+                 /VOBIZ_MIN_SPEECH_MS \|\| 250/.test(vb2)],
                 [true, true, true]);
             // And she must never AGREE with what she could not understand: emphatic validation of a
             // sentence the customer never said is worse than silence. Rule in the prompt, cap in code.
