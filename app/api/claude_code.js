@@ -21,6 +21,16 @@ const os = require('os');
 // shell:true below. CLAUDE_CLI overrides with an absolute path when the CLI is not on the server
 // process's PATH (a very common case: the PATH a service inherits is not a login shell's PATH).
 const CLI = () => process.env.CLAUDE_CLI || 'claude';
+// SHELL ON WINDOWS ONLY — this cost a live outage on the VPS (2026-09-08: "Claude Code exited 2:
+// /bin/sh: 1: Syntax error: \"(\" unexpected"). With shell:true Node joins the command and its args
+// into ONE string and hands it to /bin/sh -c WITHOUT quoting anything. The audit's system prompt is a
+// paragraph of English containing brackets — "rto_recovery (order came back undelivered — …)" — so
+// dash parsed the "(" as shell syntax and refused to run. Windows hid it: cmd.exe tolerates the same
+// line, which is why every local test passed while live never worked once.
+// Without a shell the args go straight to execve as argv, so brackets, quotes, newlines and em-dashes
+// are all just characters — and there is no shell-injection surface either. The shell is only needed
+// on Windows, where `claude` resolves to claude.cmd, which spawn() cannot run on its own.
+const NEEDS_SHELL = process.platform === 'win32';
 const TIMEOUT_MS = () => Number(process.env.CLAUDE_CLI_TIMEOUT_MS || 300000);   // an audit is minutes, not seconds
 
 // THE WHOLE POINT IS TO SPEND THE SUBSCRIPTION, NOT THE API BUDGET — and Claude Code's credential
@@ -39,7 +49,7 @@ function childEnv() {
 
 function cliAvailable() {
     return new Promise((resolve) => {
-        const p = spawn(CLI(), ['--version'], { shell: true, windowsHide: true, env: childEnv() });
+        const p = spawn(CLI(), ['--version'], { shell: NEEDS_SHELL, windowsHide: true, env: childEnv() });
         let out = '';
         p.stdout.on('data', (d) => { out += d; });
         p.on('error', () => resolve(null));
@@ -56,7 +66,7 @@ function askClaudeCode(prompt, { system = '', model = '' } = {}) {
         const args = ['-p', '--output-format', 'json'];
         if (model) args.push('--model', model);
         if (system) args.push('--append-system-prompt', system);
-        const p = spawn(CLI(), args, { shell: true, windowsHide: true, cwd: os.tmpdir(), env: childEnv() });
+        const p = spawn(CLI(), args, { shell: NEEDS_SHELL, windowsHide: true, cwd: os.tmpdir(), env: childEnv() });
         let out = '', err = '';
         const timer = setTimeout(() => {
             try { p.kill(); } catch (_) {}

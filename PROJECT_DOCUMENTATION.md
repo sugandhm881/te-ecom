@@ -885,7 +885,7 @@ Defined in `.env` (git-ignored — **never commit**) and, since 2026-08-27, **se
 | RapidShyp sync | `RS_TIMEOUT_MS` (default 25000 — per-AWB tracking call), `RS_ABORT_AFTER` (default 6 — consecutive AWB failures that mean "RapidShyp is down", ends the run early) |
 | Warehouse Ops report | `WH_REPORT_CRON` (default `30 8-20/2 * * *` — every 2h, 08:30–20:30 IST), `WH_STUCK_HOURS` (default `48` — the Ready-for-Pickup age that triggers the 🚨 stuck block), `RS_CACHE_TTL_HOURS` (default 12 — how stale a RapidShyp cache row may be before the sync refreshes it) |
 | Voice agent — telephony | `VOBIZ_AUTH_ID`, `VOBIZ_AUTH_TOKEN`, `VOBIZ_FROM_NUMBER`, `VOBIZ_PUBLIC_BASE`, `VOBIZ_WEBHOOK_TOKEN`, `VOBIZ_L16_SWAP` (`in`\|`out`\|`both` — endianness, `none` normally), `VOBIZ_RECORD`, `VOBIZ_CALL_ALLOWLIST` (unset = every customer), `SARVAM_API_KEY` |
-| Voice agent — ears (2026-09-04) | All four have **code defaults equal to the tested values**, so the VPS needs no `.env` entry: `VOBIZ_VAD_THRESHOLD` (0.75 — Sarvam's own default is 0.3, tuned for a whisper, and shipping on it let the room into the call), `VOBIZ_MIN_SPEECH_MS` (500), `VOBIZ_STT_SILENCE_MS` (400 — how long a silence ends a turn), `VOBIZ_MIN_PEAK` (**3000** — the loudness floor below which an utterance is background, not the caller; every final logs its peak so this is re-tuned from a log line, never guessed), `VOBIZ_BARGE_MS` (1200 — sustained voice needed to interrupt her) |
+| Voice agent — ears (2026-09-04) | All four have **code defaults equal to the tested values**, so the VPS needs no `.env` entry: `VOBIZ_VAD_THRESHOLD` (**0.45 since 2026-09-08**, was 0.75 — Sarvam's own default is 0.3, tuned for a whisper, and shipping on it let the room into the call), `VOBIZ_MIN_SPEECH_MS` (500), `VOBIZ_STT_SILENCE_MS` (400 — how long a silence ends a turn), `VOBIZ_MIN_PEAK` (**3000** — the loudness floor below which an utterance is background, not the caller; every final logs its peak so this is re-tuned from a log line, never guessed), `VOBIZ_BARGE_MS` (1200 — sustained voice needed to interrupt her) |
 | Voice agent — brain & persona | `CLAUDE_API_KEY`, `CLAUDE_MODEL` (haiku floor), `CLAUDE_ESCALATE_AT`, `CLAUDE_CACHE_TTL` (`1h` — on the 5-minute default nearly every call was a cache miss), `VOBIZ_AGENT_VOICE` (pins her name independently of the engine), `VOBIZ_INBOUND_LANG`, `VOBIZ_INBOUND_VOICE`, `VOBIZ_INBOUND_TEST_ORDER`, `VOBIZ_TTS` (`elevenlabs` to switch engines), `VOBIZ_TTS_CACHE` / `VOBIZ_TTS_CACHE_DIR` (fixed lines synthesized once; the key is tagged per ENGINE so one engine can never replay another's audio) |
 | Voice agent — gates (never set on live) | `VOBIZ_RTO_ENABLED` (arms the RTO **fleet sweep** — the cron that dials every pending NDR), `VOBIZ_RTO_ENABLED_TEST` (satisfies the gate only **together with a named order**, so it can never arm the sweep), `VOBIZ_LOCAL_TEST_TRIGGER` (dev box only — absent ⇒ `POST /api/vobiz/local-test-call` returns **404**, so the route does not exist on the VPS) |
 | Call audit on the Max plan (2026-09-04) | `CLAUDE_CODE_OAUTH_TOKEN` (one-year token from `claude setup-token`; the CLI cannot browser-login on a headless VPS), `CLAUDE_CLI` (absolute path — pm2 does not inherit a login shell's PATH; `/root/.local/bin/claude`), `CLAUDE_CLI_TIMEOUT_MS` (300000), `CALL_INSIGHTS_MODEL`, `CALL_INSIGHTS_ALLOW_API` (**unset**: the audit fails loudly rather than silently falling back to the billed API) |
@@ -1135,7 +1135,7 @@ an exemption for a forced single-order test dial only (`opts.testOrder`), never 
 matters), and `VOBIZ_RTO_ENABLED_TEST` — dialling exactly one named order, never a bulk tick.
 
 **Tuned values live in the CODE defaults**, not the VPS `.env`, so live behaves exactly as tested with
-no server-side edit: VAD threshold **0.75**, min speech **500ms**, endpoint **400ms**, noise floor
+no server-side edit: VAD threshold **0.75** (lowered to **0.45** on 2026-09-08 — see below), min speech **500ms**, endpoint **400ms**, noise floor
 **3,000**. Selftests **497 passing**. Last verified call before deploy: a clean COD confirm — one `हूँ`,
 both products named, `रहेंगे`, English adopted on the turn after a full English sentence, zero
 barge-ins, zero guard corrections, `CONFIRMED → shopify released` in 56 seconds.
@@ -1179,6 +1179,170 @@ the **dial history** behind each attempt — instead of aggregate counts alone. 
 single source of truth for rule compliance so the dashboard's count and the AI audit's count can never
 disagree, and `loadCalls` pages the query, because **Supabase caps a read at 1000 rows** and a silent
 truncation would have shown a clean scorecard built from a fraction of the calls.
+
+### Call Insights: the page stopped scoring humans, and every number reconciles (2026-09-08)
+
+**Manual calls were being scored as failed AI calls.** They are logged with
+`[manual human call — not transcribed]` — no transcript by design — so all 48 of them on 07 Sep counted
+as "customer never spoke". The answered rate read **31%** where the agent's own 121 calls were **44%**.
+`manual_human` is now excluded from the tiles, the bars, the outcome mix and the audit; it stays in the
+call list with its own badge, and the first tile says `48 manual calls not scored`.
+
+**"Answered" counted dials, not conversations.** It filtered on the summary carrying a duration, and the
+bridge writes one for any leg that opened — so a call whose own outcome line said *"no answer: customer
+never engaged"* counted as answered. The tile read **19 · 100%** on a day the Outcomes card beneath it
+said no-answer 10. It now means the customer actually spoke.
+
+**…and the cards disagreed with each other.** The tile required duration>0 AND a customer turn while the
+per-type card required only the turn, so the tile read 52 where RTO 51 + COD 2 made 53 and the funnel
+summed 120 of 121. One definition now. The call that fell between them was a **live-backup row**:
+`⏳ call in progress (live backup, 36s so far)` — a call whose `close()` never ran, whose duration
+therefore parsed as ZERO, and which was being filed under "never connected" despite 36 seconds and two
+customer turns. `durOf` reads the backup's own seconds when the final line is absent.
+
+**"Other" was 51 of 121 and meant nothing.** Every one was the mechanical fallback line
+(`13s call to … (stream closed)`), written when the summarizer never ran because the call ended before
+there was a conversation. That is the outcome, so it now says **"Ended before any conversation"**, along
+with the wordings the model phrases its own way ("did not respond", "dropped before", "no clear answer").
+
+**Silence is categorised instead of lumped.** One "one-sided" bar counting 116 calls told nobody
+anything. The **Where the calls went** card accounts for every AI call exactly once — answered · hung up
+within 5s · silent under 20s · **silent 20s+ (agent may be deaf)** · never connected. That last row is
+the deaf-agent scoreboard: 21 on 07 Sep.
+
+**Call type is counted separately** — RTO recovery and COD confirmation are different jobs with
+different win conditions, and one blended average hid both. Each shows calls · answered · won ·
+silent 20s+ · avg length.
+
+**Every card row filters the call list.** A count you cannot open is a dead end. The click is delegated,
+because the cards are re-rendered on every range change, and the count line names the active filter so
+a click never looks like data loss.
+
+**The list no longer depends on the audit.** `_sci.calls = d.calls` sat AFTER the `if(!a){ …; return; }`
+that handles "no audit cached for this range" — so on any such range the loader returned before filling
+the list. Two bugs from one ordering: no per-call rows until an audit was paid for, and the list kept the
+PREVIOUS range's calls, so the tiles could read 19 for today while the table said "956 of 956" from a
+30-day load. **Yesterday** also joined the range picker, as a closed one-day window.
+
+**The audit could never have run on the VPS.** `spawn(CLI, args, { shell: true })` joins the command and
+its arguments into ONE string for `/bin/sh -c` **without quoting**, and the audit's system prompt contains
+brackets — *"rto_recovery (order came back undelivered — …)"*. dash read the `(` as syntax and exited 2.
+Windows hid it, because `cmd.exe` tolerates the same line, so every local test passed while live had never
+once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
+⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
+
+### She can no longer go deaf, go silent, or promise a date (2026-09-08)
+
+A day of evidence from two recordings and one live test call, and four fixes that came out of it.
+Every one was found by listening to the audio and comparing it with what we had stored — the stored
+record was clean in all three cases, and wrong in all three.
+
+**1. THE EAR NOW COMES BACK.** `sttOpen()` ran once per call. `stt.on('close')` wrote one log line and
+gave up, and `feedCaller` then discarded every frame in silence — so she stayed on the line, sounding
+well, and simply could not hear. It now reopens with a short backoff (250ms × attempt, 4 tries,
+`VOBIZ_STT_MAX_REOPENS`), re-reading `this.s.lang` so a switched call keeps its language, and the
+transcript records the gap: `[audio link to the customer was restored]`. Out of attempts, she SAYS SO
+in the call's language (`LINE_LOST`) and hangs up, which files as no-answer so the retry ladder calls
+back — making the promise true rather than abandoning someone on a dead line.
+
+**2. THE WATCHDOG COVERS THE WHOLE CALL.** `presenceTimer` cleared itself the moment `presence` turned
+true, so everything it did protected only the OPENING. From turn two onward nothing watched the line:
+one dropped utterance, one dead socket, one hung model, and she sat mute. Now 7s of silence
+(`VOBIZ_SILENCE_NUDGE_MS`) triggers one line check, 15s more (`VOBIZ_SILENCE_END_MS`) ends the call
+cleanly, and the nudge re-arms whenever the customer speaks. Both events are written into the
+transcript, so they are visible on Call Insights instead of being guessed at.
+
+**3. AN ARRIVAL DATE IS A PROMISE WE CANNOT KEEP.** On the 08 Sep test call she closed with
+*"आपका ऑर्डर अब जल्दी डिस्पैच हो जाएगा, 3-4 दिन में पहुंच जाएगा"* — an arrival window, in our own voice,
+on a recorded line, for an RTO parcel whose reship was not even booked. `SLOT_RX` blocks ASKING for a
+slot ("morning or evening"), not PROMISING an arrival, so nothing stopped it. **10 calls in the prior
+30 days** made the same promise. Fixed at both levels: rule `no-arrival-date` (critical) so she stops
+writing it, and `ARRIVAL_RX` so she cannot say it — the clause is cut before the synthesizer and the
+rest of the sentence still plays:
+
+```
+SAID   : आपका ऑर्डर अब जल्दी डिस्पैच हो जाएगा, 3-4 दिन में पहुंच जाएगा।
+SPOKEN : आपका ऑर्डर अब जल्दी डिस्पैच हो जाएगा।
+```
+
+⚠️ **The risk in this guard is cutting too MUCH, not too little.** *"Brightening Drops एक bottle 15 दिन
+चलती है"* is a product fact she is REQUIRED to say. The difference is the verb — a pack **lasts**, an
+order **arrives** — so a day count only matches near an arrival verb, never alone. Pinned both ways.
+The cut also strips the sentence's own terminator BEFORE the orphan connector, or it leaves
+"…हो जाएगा, ।", which is worse than the promise because it is gibberish.
+
+**4. A DROPPED UTTERANCE LEAVES A TRACE.** The 08 Sep recording has the customer saying "जी बताइए।" at
+6s and again at 15s — both measured 2371 and 2879, both below the 3000 floor, both thrown away — then
+at 20s: *"काव्या मैं सुन रहा हूँ बताइए आप।"* A line that exists ONLY because she had gone quiet. **None
+of it was in the stored transcript**, which read like a clean call. So the audit scored it clean, Call
+Insights counted it answered, and the self-learning loop trained on a record with the failure deleted.
+Drops are now written in as `[not heard — too quiet, peak 2371: "जी बताइए।"]` — unmistakably not
+conversation, capped at 6 per call so a noisy room cannot flood the log. **44 calls in 30 days** contain
+the customer flagging silence like this; every one had been invisible.
+
+**THE FLOOR NOW CALIBRATES TO THE CALLER.** 3000 was measured on a raised voice (8,930–32,149) and was
+throwing away normal speech at 2371. Default lowered to **1200** — background measures 77–312, so that
+still clears it ~4x — and once a caller has been heard clearly, their own level sets the bar: a quarter
+of their quietest accepted utterance, never above `VOBIZ_MIN_PEAK`, never below `VOBIZ_MIN_PEAK_FLOOR`
+(600). A loud caller keeps full protection; a soft-spoken one stops being cut out.
+
+**HISTORY IS CAPPED** at 12 exchanges (`VOBIZ_HISTORY_TURNS`). Only the fixed system-prompt prefix
+caches; the conversation grows on the end and is re-sent uncached every turn, so TTFT drifts upward as
+a call runs. The trim always lands on a USER message — the API rejects a history starting with an
+assistant turn, which is the trap in the obvious one-line version.
+
+**MEASURED, NOT GUESSED.** The 08 Sep call gave the first real per-turn split:
+```
+reply gap 1966ms = endpoint 390ms + think 1308ms + voice 268ms
+reply gap 2433ms = endpoint 448ms + think 1683ms + voice 302ms
+```
+**The brain is 65–70% of the wait.** Endpointing behaves exactly as configured and the voice already
+streams — so latency advice aimed at those legs is aimed at the smallest ones. `VOBIZ_STT_SILENCE_MS`
+was also corrected from a local 200 to **400**, which is what live had been running all along via the
+code default; every prior local test had used a setting production never had.
+
+All new values are CODE DEFAULTS, so live needs no `.env` entry — the same reason the ear settings were
+put in code on 2026-09-04. Selftests **530 passing**.
+
+### The noise fix had made her partially deaf — VAD 0.75 → 0.45 (2026-09-08)
+
+Proved from a recording, not inferred. **TE25-46342 / Navjot, 07 Sep 17:44, 26 seconds.** The stored
+transcript is two AGENT lines and nothing else:
+
+```
+Agent: नमस्ते Navjot ji, मैं Kavya हूँ The Element से, क्या आपके पास दो मिनट हैं?
+Agent: हेलो? क्या आपको मेरी आवाज़ आ रही है?
+```
+
+The **recording of the same 26 seconds** has him speaking four times — "हाँ हाँ जी" at 6s, then 16s,
+18s and 25s — all transcribed cleanly by Sarvam's own batch model from that very file. So the audio
+was on the line, reached Vobiz and reached the recorder, and never reached the live agent. He hung up
+on her; the summary reads `(stream closed)` with no auto-end marker, so the presence timer had not
+even expired. Cost ₹0.54 for a customer reached and lost.
+
+**The second agent line is the diagnosis.** It is not a reply — it is the automatic hello-check, which
+fires only when `sawVoice` is false, and `sawVoice` is set by the STT's `vad.speech_start`. So the VAD
+never fired ONCE in 26 seconds of clear speech. That also **rules out the noise floor**: `MIN_PEAK`
+filters at `transcript.final`, and this failed a step earlier — there was never a partial.
+
+`VOBIZ_VAD_THRESHOLD` had been raised **0.3 → 0.6 → 0.75** on 2026-09-04 to stop her answering a
+television. That worked, and it also made her deaf to a short, quietly-spoken "हाँ जी". The code
+default is now **0.45** (the VPS carries no `.env` entry for it, so the code default IS live's value —
+the same reason the tuned numbers were put in the code in the first place).
+
+**The noise job belongs to `VOBIZ_MIN_PEAK` (3000), not to the VAD.** The peak gate judges LOUDNESS
+after transcription, which is the check that actually separates someone speaking into a handset
+(measured 8,930–32,149) from a room across it (77–312). The VAD only ever decides whether there is
+SOUND, so asking it to do the noise job too was doing it twice — and the second copy cost hearing.
+
+**Scale of what this was costing:** on 07 Sep, 21 AI calls ran 20 seconds or longer with the agent
+speaking and the customer never once heard. That is the row now surfaced on Call Insights as
+"Silent 20s+ (agent may be deaf)".
+
+⚠️ **If silent calls persist at 0.45 it is not the threshold** — it is the STT socket dying mid-call.
+`sttOpen()` is called once and `stt.on('close')` only logs `stt closed mid-call`; there is no
+reconnect, and `feedCaller` then discards every frame in silence. `grep` the pm2 log for the call's
+number: `stt closed mid-call` or `stt error` means the socket, neither means the threshold.
 
 ### DocPharma was invisible to the queue, and 59 finished parcels were still "order to dispatch" (2026-09-07)
 

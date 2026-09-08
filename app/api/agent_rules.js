@@ -121,6 +121,10 @@ const RULES = [
     // ── WHAT SHE MAY NOT ASK ────────────────────────────────────────────────────
     { id: 'no-delivery-slot', sev: 'critical', when: 'always', src: 'SPOKEN DELIVERY', guard: 'SLOT_RX',
       text: 'Never ask for a delivery time or offer slots like morning or evening — the courier team schedules delivery.' },
+    // The guard (ARRIVAL_RX) cuts this before the synthesizer, because once the audio is out the
+    // promise has been made. The rule is here so she stops writing it, not only stops saying it.
+    { id: 'no-arrival-date', sev: 'critical', when: 'always', src: 'SPOKEN DELIVERY', guard: 'ARRIVAL_RX',
+      text: 'Never promise an arrival date or day count — say it will be dispatched soon, nothing more.' },
     { id: 'arrival-assurance', sev: 'high', when: 'always', src: 'SPOKEN DELIVERY',
       text: 'A "when will it arrive?" question gets the courier-team assurance, answered in the language they asked in.' },
     { id: 'two-minutes-is-a-question', sev: 'normal', when: 'always', src: 'SPOKEN DELIVERY',

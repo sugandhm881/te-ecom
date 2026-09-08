@@ -17,7 +17,15 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../supabase');
 
-const durOf = (c) => Number((String(c.summary || '').match(/(\d+)s call to/) || [])[1] || 0);
+// A call whose close() never ran (a restart mid-call) keeps its LIVE BACKUP summary — "⏳ call in
+// progress (live backup, 36s so far)" — which carries no "Ns call to" and so read as ZERO seconds.
+// One such call on 07 Sep had two customer turns across 36 seconds and was being filed under "never
+// connected". Read the backup's own number when the final one is absent.
+const durOf = (c) => {
+    const s = String(c.summary || '');
+    const m = s.match(/([0-9]+)s call to/) || s.match(/live backup, ([0-9]+)s/);
+    return Number((m || [])[1] || 0);
+};
 const custTurns = (t) => (String(t || '').match(/^customer:/gim) || []).length;
 const agentLines = (t) => String(t || '').split('\n').filter(l => /^agent:/i.test(l));
 
@@ -49,6 +57,15 @@ function outcomeOf(summary) {
     if (/no answer|unresponsive|never engaged|voicemail/.test(l)) return 'no_answer';
     if (/unclear/.test(l)) return 'unclear';
     if (/confirmed/.test(l)) return 'confirmed';
+    // "OTHER" WAS 51 OF 121 CALLS AND MEANT NOTHING (user, 2026-09-08: "instead of other use actual
+    // reason"). Every one of them was the MECHANICAL fallback line — "13s call to 9979549400 (stream
+    // closed) · auto engine" — which is written when the summarizer never ran, because the call ended
+    // before there was any conversation to summarise. That is a real outcome and the most common one
+    // on a bad day, so it gets its own name instead of hiding in a bucket.
+    if (/^[0-9]+s call to/.test(l.trim())) return 'no_conversation';
+    // Wordings the model produces that the checks above miss — real answers, phrased its own way.
+    if (/did not respond|no response|dropped before|call dropped|not reachable|switched off/.test(l)) return 'no_answer';
+    if (/no clear answer|could not determine|not clear/.test(l)) return 'unclear';
     return 'other';
 }
 
@@ -121,16 +138,72 @@ router.get('/support/call-insights', async (req, res) => {
         const toIso = new Date(`${to}T23:59:59.999+05:30`).toISOString();
 
         const calls = await loadCalls(fromIso, toIso);
-        const connected = calls.filter(c => durOf(c) > 0);
+        // A HUMAN'S CALL IS NOT THE AGENT'S SCORE (user, 2026-09-08: "what is 117 call happen,
+        // categorise that properly"). Manual calls are logged with "[manual human call — not
+        // transcribed]" — there is no transcript by design — so every one of them counted as a call
+        // where the customer never spoke. On 07 Sep that was 48 of 169 rows: the answered rate read
+        // 31% when the agent's own 121 calls were 44%, and the one-sided bar was 40% padding.
+        // This page audits what the AGENT says, so only her calls are scored. They stay in the list
+        // below with their own badge — "every call" still means every call.
+        const ai = calls.filter(c => String(c.call_type || '') !== 'manual_human');
+        const manualCalls = calls.length - ai.length;
+        const connected = ai.filter(c => durOf(c) > 0);
+        // "ANSWERED" MUST MEAN A PERSON SPOKE (user, 2026-09-08: "check the number showing on the
+        // dashboard is correct?"). It did not. `connected` only asks whether the summary carries a
+        // duration — and the bridge writes one for any leg that opened, including a call whose own
+        // outcome line reads "no answer: customer never engaged" and which ran 36 seconds into a
+        // ringing phone. So the tile read "Answered 19 · 100%" on a day when the Outcomes card
+        // directly beneath it said no-answer 10 and the one-sided bar said 15 of 19. The page was
+        // contradicting itself, and the flattering number was the wrong one.
+        // The customer's own voice is the only honest test: a call is answered when they said
+        // something. `connected` stays, but only for AVG LENGTH, where the question really is how
+        // long the line was open.
+        // ONE DEFINITION OF ANSWERED, used by the tile, the funnel and the per-type card alike (user,
+        // 2026-09-08: "why these number are not matching"). This used to require durOf(c) > 0 AS WELL
+        // as a customer turn, while the per-type card required only the turn — so one call fell between
+        // them: the tile read 52 where RTO 51 + COD 2 made 53, and the funnel summed to 120 of 121.
+        // Whether we reached someone is whether they SPOKE. How long the line was open is a different
+        // question, and it stays where it belongs — on Avg length, which still uses `connected`.
+        const answered = ai.filter(c => custTurns(c.transcript) > 0);
         const outcomes = {}, langs = {}, types = {}, byOrder = {};
-        for (const c of calls) {
+        for (const c of ai) {
             const o = outcomeOf(c.summary); outcomes[o] = (outcomes[o] || 0) + 1;
             langs[c.language || '?'] = (langs[c.language || '?'] || 0) + 1;
             const t = String(c.call_type || '').replace('_vobiz', ''); types[t] = (types[t] || 0) + 1;
             byOrder[c.order_id] = (byOrder[c.order_id] || 0) + 1;
         }
         const repeatCalled = Object.values(byOrder).filter(n => n >= 3).length;
-        const b = behaviour(calls);
+        // SILENCE, CATEGORISED. One "one-sided" bar counted 116 calls and told you nothing you could
+        // act on. These four separate a customer who hung up on the greeting from a line that stayed
+        // open for half a minute while the agent talked to nobody — the second is the deaf-agent
+        // signature (the speech socket dies mid-call and never reconnects), and on 07 Sep it was 21
+        // customers reached and lost. A number you can act on beats a number you learn to ignore.
+        const byType = {};
+        for (const c of ai) {
+            const k = String(c.call_type || 'unknown').replace('_vobiz', '');
+            const t = byType[k] = byType[k] || { calls: 0, answered: 0, silent_long: 0, won: 0, seconds: 0 };
+            t.calls++;
+            if (custTurns(c.transcript) > 0) t.answered++;
+            if (custTurns(c.transcript) === 0 && durOf(c) >= 20) t.silent_long++;
+            // the win condition differs by job: RTO wants a re-attempt agreed, COD wants a confirmation
+            if (['reattempt', 'confirmed'].includes(outcomeOf(c.summary))) t.won++;
+            t.seconds += durOf(c);
+        }
+        for (const k of Object.keys(byType)) {
+            const t = byType[k];
+            t.avg_seconds = t.calls ? Math.round(t.seconds / t.calls) : 0;
+            t.answer_rate = t.calls ? Math.round(t.answered / t.calls * 100) : 0;
+            delete t.seconds;
+        }
+        const silentCalls = ai.filter(c => custTurns(c.transcript) === 0);
+        const silence = {
+            never_connected: silentCalls.filter(c => durOf(c) === 0).length,
+            hung_up_fast:    silentCalls.filter(c => durOf(c) > 0 && durOf(c) < 6).length,
+            silent_short:    silentCalls.filter(c => durOf(c) >= 6 && durOf(c) < 20).length,
+            silent_long:     silentCalls.filter(c => durOf(c) >= 20).length,
+            total: silentCalls.length,
+        };
+        const b = behaviour(ai);
 
         // THE DIAL HISTORY, from the turnstile — ring seconds, hangup cause and attempt number come
         // from the carrier's CDR and exist nowhere in the call log. One chunked read keyed by order,
@@ -156,13 +229,13 @@ router.get('/support/call-insights', async (req, res) => {
             success: true,
             range: { from, to },
             metrics: {
-                calls: calls.length, connected: connected.length,
-                answer_rate: calls.length ? Math.round(connected.length / calls.length * 100) : 0,
+                calls: ai.length, connected: connected.length, answered: answered.length, manual_calls: manualCalls,
+                answer_rate: ai.length ? Math.round(answered.length / ai.length * 100) : 0,
                 avg_seconds: connected.length ? Math.round(connected.reduce((a, c) => a + durOf(c), 0) / connected.length) : 0,
-                avg_agent_turns: calls.length ? Number((b.agent_turns / calls.length).toFixed(1)) : 0,
+                avg_agent_turns: ai.length ? Number((b.agent_turns / ai.length).toFixed(1)) : 0,
                 repeat_called_orders: repeatCalled,
             },
-            outcomes, languages: langs, types,
+            outcomes, languages: langs, types, silence, by_type: byType,
             // EVERY CALL IN THE RANGE, with everything known about it (user, 2026-09-05: "i want full
             // detail of call and every log each and every"). The aggregates above are summed from the
             // very same flags, so a compliance bar and this list can never disagree. Transcripts are
@@ -193,7 +266,7 @@ router.get('/support/call-insights', async (req, res) => {
             behaviour: {
                 double_intro: b.double_intro, hello_storm: b.hello_storm,
                 wantit_overasked: b.wantit_overasked, reached_closing: b.reached_closing,
-                lang_switched: b.lang_switched, one_sided: b.one_sided, total: calls.length,
+                lang_switched: b.lang_switched, one_sided: b.one_sided, total: ai.length,
             },
             audit: cached || null,
         });
@@ -221,7 +294,8 @@ router.post('/support/call-insights/run', async (req, res) => {
         // results ("the calls that ended in no_answer all did X") instead of only reading prose.
         const blob = rich.map((c, i) => `=== CALL ${i + 1} · ${c.order_id} · ${c.language} · ${durOf(c)}s · ${custTurns(c.transcript)} customer turns · outcome: ${outcomeOf(c.summary)}\n${String(c.transcript).slice(0, 1400)}`).join('\n\n');
         const mix = {}; for (const c of calls) { const o = outcomeOf(c.summary); mix[o] = (mix[o] || 0) + 1; }
-        const context = `PERIOD TOTALS: ${calls.length} calls logged, ${calls.filter(c => durOf(c) > 0).length} connected, outcome mix ${JSON.stringify(mix)}.
+        const aiCalls = calls.filter(c => String(c.call_type || '') !== 'manual_human');   // a human's call is not her score
+        const context = `PERIOD TOTALS: ${aiCalls.length} calls logged, ${aiCalls.filter(c => durOf(c) > 0).length} connected, outcome mix ${JSON.stringify(mix)}.
 THE AGENT'S STANDING RULES (a breach is a real finding): introduce herself once per call; ask "do you still want it?" at most twice; never ask for a delivery time (the courier team schedules); answer "when will it arrive" with the courier-team assurance, never a date; give the courier's recorded NDR reason with attempt dates when asked; confirm the address ONLY when an address is provided in her prompt; acknowledge trouble in the customer's own language before continuing; never invent facts, never promise refunds; end with the brand closing.`;
         const model = process.env.CALL_INSIGHTS_MODEL || 'claude-sonnet-5';
         const SYSTEM = 'You audit outbound AI phone calls for an Indian D2C skincare brand. Call types: rto_recovery (order came back undelivered — does the customer still want it) and cod_confirm (verify a COD order before dispatch). Be blunt, specific and evidence-led; never pad with praise. Reply ONLY with JSON.';

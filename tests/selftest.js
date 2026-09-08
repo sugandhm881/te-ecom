@@ -1320,7 +1320,10 @@ function check(name, got, want) {
             // from a hallucination is how loud the audio was, and the raw frames are in feedCaller.
             // Every final logs its peak so the floor is calibrated from real calls, not guessed.
             check('stt noise: an utterance is judged on how loud its audio actually was, not just VAD',
-                [/const MIN_PEAK = \(\) => Number\(process\.env\.VOBIZ_MIN_PEAK \|\| 3000\)/.test(vb2),
+             // 3000 was calibrated on a raised voice and dropped normal speech: on the 2026-09-08 test
+             // call "जी बताइए।" measured 2371 and 2879, was transcribed perfectly, and was thrown away
+             // twice while the agent sat silent. Background measures 77-312, so 1200 clears it by ~4x.
+                [/const MIN_PEAK = \(\) => Number\(process\.env\.VOBIZ_MIN_PEAK \|\| 1200\)/.test(vb2),
                  /if \(peak > \(this\._uttPeak \|\| 0\)\) this\._uttPeak = peak;/.test(vb2),
                  /background, not the caller/.test(vb2),
                  // measured per utterance — one loud moment must not vouch for a later quiet one
@@ -1330,7 +1333,10 @@ function check(name, got, want) {
                 [true, true, true, true, true]);
             check('stt noise: VAD sensitivity is set explicitly and never left on the whisper-level default',
                 [/threshold=\$\{VAD_THRESHOLD\(\)\}/.test(vb2),
-                 /VOBIZ_VAD_THRESHOLD \|\| 0\.75/.test(vb2),
+             // 0.75 made her partially deaf (TE25-46342, 2026-09-08): the customer spoke four times,
+             // the VAD fired zero times, and the recording proved the audio was on the line. Noise is
+             // MIN_PEAK's job — it judges loudness after transcription; the VAD only hears sound.
+                 /VOBIZ_VAD_THRESHOLD \|\| 0\.45/.test(vb2),
                  /VOBIZ_MIN_SPEECH_MS \|\| 500/.test(vb2)],
                 [true, true, true]);
             // And she must never AGREE with what she could not understand: emphatic validation of a
@@ -1566,6 +1572,142 @@ function check(name, got, want) {
                 // The live bridge must keep its own API path, because a phone call cannot wait on a CLI.
                 const ci = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_insights.js'), 'utf8');
                 const cc = fs.readFileSync(path.join(ROOT, 'app/api/claude_code.js'), 'utf8');
+                // "ANSWERED" COUNTED DIALS, NOT CONVERSATIONS. It filtered on the summary carrying a
+                // duration, and the bridge writes one for any leg that opened — so a call whose own
+                // outcome line says "no answer: customer never engaged" counted as answered. The tile
+                // read 19 · 100% on a day the Outcomes card underneath said no-answer 10 (2026-09-08).
+                check('call insights: answered means the customer spoke, not that a leg opened',
+                    [ci.includes('const answered = ai.filter(c => custTurns(c.transcript) > 0)'),
+                     ci.includes('answered: answered.length'),
+                     ci.includes('Math.round(answered.length / ai.length * 100)'),
+                     !ci.includes('Math.round(connected.length / calls.length * 100)'),
+                     ap2.includes("tile('Answered', m.answered")],
+                    [true, true, true, true, true]);
+                // THE EVIDENCE MUST NOT DEPEND ON THE OPINION. `_sci.calls = d.calls` sat AFTER the
+                // `if(!a){ …; return; }` that handles "no audit cached for this range" — so on any such
+                // range the loader returned before filling the list. Two bugs from one ordering: no
+                // per-call rows until you paid for an audit, and the list kept the PREVIOUS range's
+                // calls, so the tiles read 19 for today while the table still said 956 of 956 from a
+                // 30-day load (user, 2026-09-08). The list must be built before the audit section.
+                {
+                    const load = ap2.slice(ap2.indexOf('async function sciLoad'));
+                    const body = load.slice(0, load.indexOf('// ── EVERY CALL, IN FULL'));
+                    check('call insights: every-call list is filled before the audit, so it never needs one',
+                        [body.indexOf('_sci.calls = d.calls') > -1,
+                         body.indexOf('_sci.calls = d.calls') < body.indexOf("['sci-worst','sci-improve','sci-good']"),
+                         body.indexOf('sciRenderCalls(true)') < body.indexOf("['sci-worst','sci-improve','sci-good']")],
+                        [true, true, true]);
+                }
+                // A HUMAN'S CALL IS NOT THE AGENT'S SCORE. Manual calls carry no transcript by design,
+                // so all 48 of them on 07 Sep counted as "customer never spoke": the answered rate read
+                // 31% where the agent's own 121 calls were 44%. They stay in the list, out of the score.
+                check('call insights: manual human calls are not scored as AI calls',
+                    [ci.includes("const ai = calls.filter(c => String(c.call_type || '') !== 'manual_human')"),
+                     ci.includes('const b = behaviour(ai);'), ci.includes('total: ai.length,'),
+                     ci.includes('answer_rate: ai.length ?'), ci.includes('manual_calls: manualCalls'),
+                     ci.includes('calls: calls.map(')],          // …but the LIST still holds every call
+                    [true, true, true, true, true, true]);
+                // Silence categorised: 20s+ of open line with no reply is the deaf-agent signature, and
+                // it was invisible inside a single 'one-sided' bar counting 116 calls.
+                check('call insights: silence is broken down, and the 20s+ alarm row exists',
+                    [ci.includes('silent_long:'), ci.includes('hung_up_fast:'), ci.includes('never_connected:'),
+                     ap2.includes('Silent 20s+') && ap2.includes("'silent_long'"),
+                     !ap2.includes("bar('One-sided (customer silent)'")],
+                    [true, true, true, true, true]);
+                // "other" was 51 of 121 calls and named nothing. Every one was the mechanical fallback
+                // line — "13s call to … (stream closed)" — written when the summarizer never ran because
+                // the call ended before there was a conversation. That is the outcome, so it says so.
+                check('call insights: outcomes name the real reason instead of a bucket',
+                    [ci.includes("return 'no_conversation'"), ci.includes('/^[0-9]+s call to/'),
+                     ap2.includes("no_conversation:'Ended before any conversation'")],
+                    [true, true, true]);
+                // RTO recovery and COD confirmation are different jobs — one blended average hid both.
+                check('call insights: each call type is counted separately',
+                    [ci.includes('by_type: byType'), ci.includes("t.silent_long++"),
+                     ap2.includes('sci-bytype')],
+                    [true, true, true]);
+                // A COUNT YOU CANNOT OPEN IS A DEAD END. Every card row names the calls behind it, and
+                // the click is delegated because the cards are re-rendered on every range change.
+                check('call insights: cards filter the call list, and say so',
+                    [ap2.includes('function sciMatchesPick(c)'), ap2.includes("closest('.sci-pick')"),
+                     ap2.includes('if (!sciMatchesPick(c)) return false;'),
+                     ap2.includes('click that card again to clear')],
+                    [true, true, true, true]);
+                // THE CARDS MUST AGREE. The tile counted answered as duration>0 AND a customer turn,
+                // while the per-type card counted only the turn — so the tile read 52 where RTO 51 +
+                // COD 2 made 53, and the funnel summed 120 of 121 (user, 2026-09-08). One definition
+                // now, and durOf reads an unfinalized call's live-backup seconds so a 36s conversation
+                // is not filed under 'never connected'.
+                check('call insights: the tile, the funnel and the per-type card all agree',
+                    [ci.includes('const answered = ai.filter(c => custTurns(c.transcript) > 0)'),
+                     ci.includes('live backup, ([0-9]+)s'),
+                     !ci.includes('const answered = connected.filter')],
+                    [true, true, true]);
+                // ── THE AGENT MAY NEVER GO DEAF OR SILENT (TE25-46342, 2026-09-08) ──
+                // The customer spoke four times and got nothing back: the STT socket opened once, and a
+                // mid-call close only wrote a log line while feedCaller silently dropped every frame
+                // after it. The presence watchdog stopped the instant the first word arrived, so from
+                // turn two onward nothing was watching the line at all. Both are now covered, and the
+                // give-up path SAYS SO to the customer rather than leaving them on a dead line.
+                {
+                    const vbz = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    check('voice: a dropped STT socket reopens, and a silent line is never left running',
+                        [vbz.includes('setTimeout(() => { if (!this.closed) this.sttOpen(); }, wait);'),
+                         vbz.includes('const LINE_LOST = {'), vbz.includes('STT_MAX_REOPENS()'),
+                         vbz.includes('[audio link to the customer was restored]'),
+                         // the watchdog no longer stops at the first word
+                         !vbz.includes('if (this.closed || this.presence) { clearInterval(this.presenceTimer); return; }'),
+                         vbz.includes('[silence mid-call — agent checked the line]'),
+                         vbz.includes('[no response after the mid-call check — call auto-ended]')],
+                        [true, true, true, true, true, true, true]);
+                    // Turn 12 must not be slower than turn 2: only the cached prefix is free, the
+                    // conversation is re-sent every turn. Trimming must land on a USER message.
+                    check('voice: conversation history is capped, and trimmed to a user turn',
+                        [vbz.includes('const cap = HISTORY_TURNS() * 2;'),
+                         vbz.includes("while (cut < this.history.length && this.history[cut].role !== 'user') cut++;")],
+                        [true, true]);
+                }
+                {
+                    const vbx = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    const rls = fs.readFileSync(path.join(ROOT, 'app/api/agent_rules.js'), 'utf8');
+                    // AN ARRIVAL DATE IS A PROMISE WE CANNOT KEEP. She closed a recorded call with
+                    // "3-4 दिन में पहुंच जाएगा" on an RTO parcel whose reship was not even booked
+                    // (2026-09-08). SLOT_RX blocks ASKING for a slot, not PROMISING an arrival, so it
+                    // needed its own pattern AND its own rule — the guard stops the audio, the rule
+                    // stops her writing it. The guard must not eat pack durations: "15 दिन चलती है" is
+                    // a product fact she is required to say, and the difference is the verb.
+                    const _a = vbx.indexOf('const ARRIVAL_RX = new RegExp(');
+                    const _b = vbx.indexOf("'i');", _a) + 5;
+                    const R = eval(vbx.slice(_a, _b).replace('const ARRIVAL_RX = ', ''));
+                    check('voice: an arrival-date promise is cut before it is spoken, pack durations are not',
+                        [R.test('आपका ऑर्डर अब जल्दी डिस्पैच हो जाएगा, 3-4 दिन में पहुंच जाएगा।'),
+                         R.test('दो दिन में मिल जाएगा।'), R.test('it will reach in 3 to 4 days'),
+                         R.test('कल तक पहुँच जाएगा।'),
+                         !R.test('Brightening Drops एक bottle 15 दिन चलती है।'),
+                         !R.test('यह pack दो हफ़्ते चलता है।'),
+                         !R.test('आपका order अब जल्दी dispatch हो जाएगा।'),
+                         vbx.includes('if (ARRIVAL_RX.test(spoken)) {'),
+                         rls.includes("id: 'no-arrival-date'") && rls.includes("guard: 'ARRIVAL_RX'")],
+                        [true, true, true, true, true, true, true, true, true]);
+                    // A DROPPED UTTERANCE MUST LEAVE A TRACE, or the audit, the dashboard and the
+                    // self-learning loop all read a record with the failure deleted.
+                    check('voice: speech dropped by the noise floor is written into the transcript',
+                        [vbx.includes('[not heard — too quiet, peak ${peak}:'),
+                         vbx.includes('this._dropsLogged = (this._dropsLogged || 0) + 1) <= 6')],
+                        [true, true]);
+                    // One fixed floor is wrong for someone by definition — it calibrates per caller now.
+                    check('voice: the noise floor calibrates to the caller, within bounds',
+                        [vbx.includes('const floor = this._callerFloor || MIN_PEAK();'),
+                         vbx.includes('Math.max(FLOOR_MIN(), Math.min(MIN_PEAK(), tuned))'),
+                         vbx.includes('VOBIZ_MIN_PEAK_FLOOR || 600')],
+                        [true, true, true]);
+                }
+                // Yesterday is a CLOSED one-day window; every other preset ends today, and reusing that
+                // arithmetic would have folded today's calls into it.
+                check('call insights: the range picker offers Yesterday, as one day',
+                    [ap2.includes('>Yesterday</option>'),
+                     ap2.includes("_sci.range = v==='y' ? {from:_ymd(back(1)),to:_ymd(back(1))}")],
+                    [true, true]);
                 check('call audit: runs on Claude Code, and refuses to bill the API unless explicitly allowed',
                     [/require\('\.\/claude_code'\)\.askClaudeCode\(ASK/.test(ci),
                      /CALL_INSIGHTS_ALLOW_API/.test(ci),
@@ -1575,8 +1717,16 @@ function check(name, got, want) {
                 // The prompt is tens of kilobytes of transcripts; argv would truncate it on Windows at
                 // ~32k and the audit would silently analyse only part of the period.
                 check('call audit: the prompt goes over stdin, and the CLI runs tool-free outside the repo',
-                    [/p\.stdin\.write\(prompt\)/.test(cc), /cwd: os\.tmpdir\(\)/.test(cc), /shell: true/.test(cc)],
-                    [true, true, true]);
+                    [/p\.stdin\.write\(prompt\)/.test(cc), /cwd: os\.tmpdir\(\)/.test(cc),
+                     // A SHELL ONLY ON WINDOWS. This assertion used to demand `shell: true` — it pinned
+                     // the bug in place. With a shell, Node joins the command and args into ONE string
+                     // for /bin/sh -c WITHOUT quoting, and the audit's system prompt contains brackets:
+                     // "rto_recovery (order came back undelivered — …)". dash read the "(" as syntax, so
+                     // the live audit died with: exited 2: /bin/sh: 1: Syntax error: "(" unexpected
+                     // (2026-09-08) — while every Windows test passed, because cmd.exe tolerates it.
+                     cc.includes("const NEEDS_SHELL = process.platform === 'win32'"),
+                     !cc.includes('shell: true')],
+                    [true, true, true, true]);
                 // Claude Code ranks ANTHROPIC_API_KEY ABOVE the subscription token, and with -p it uses
                 // the key whenever it is present. A stray key in the host environment would therefore
                 // send every audit back to the paid API with nothing in the logs to show it. Both spawn
