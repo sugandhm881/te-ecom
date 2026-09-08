@@ -634,9 +634,26 @@ async function handleRtoCallOutcome({ orderName, summary, customerTurns, transcr
     // (first live day: a 10s hello-only call got marked CANCELLED exactly this way).
     const shaped = /^\s*(RESULT|OUTCOME)\b/i.test(line);
     let outcome = 'unclear', note = 'customer talked but outcome unclear';
-    if (!customerTurns || /voice ?mail|answering machine|no answer/i.test(line)) { outcome = 'no_answer'; note = 'call not answered / never engaged'; }
-    else if (shaped && /reattempt agreed|will reattempt|agreed/i.test(line)) { outcome = 'reattempt'; note = 'customer agreed to the reattempt'; }
-    else if (shaped && /cancel/i.test(line)) { outcome = 'cancelled'; note = 'customer wants to cancel'; }
+    const saysCancel = /cancel/i.test(line) && !/(?:not|never|no|don'?t|doesn'?t|didn'?t|won'?t)(?:s+S+){0,3}s+cancel/i.test(line) && !/cancels*नहीं|नहींs*cancel/i.test(line);
+    // THE TRANSCRIPT OVERRULES THE SUMMARY ON "NO ANSWER" TOO (user, 2026-09-08, TE25-46457). The
+    // phrase alone forced no_answer even with FIVE customer turns on the record: the summarizer wrote
+    // "no answer: customer never engaged on reattempt question" because her actual replies had been
+    // dropped by the noise floor, so from the text she looked silent. The call was a success — she
+    // agreed and the closing was reached — and it was filed as unanswered and a FOURTH call scheduled
+    // to a customer who had already said yes. If they spoke, they answered; only a real silence or a
+    // machine is a no-answer.
+    if (!customerTurns || /voice ?mail|answering machine/i.test(line)) { outcome = 'no_answer'; note = 'call not answered / never engaged'; }
+    // ALREADY ARRANGED IS ALREADY A YES (user, 2026-09-08, TE25-46651). Shivani said she had asked the
+    // courier to reschedule for tomorrow — she had gone and organised the delivery herself, which is a
+    // firmer yes than "haan" — and it filed as 'unclear' because the wording did not contain the word
+    // "agreed". The order then sat waiting on a human for a decision the customer had already made.
+    // CANCELLING WINS OVER RESCHEDULING. Widening the reattempt test to accept "reschedul" put it
+    // AHEAD of the cancel test, so a summary carrying both — "asked to cancel; had earlier arranged a
+    // reschedule" — would have filed as agreement and re-shipped a parcel the customer had just
+    // refused. The costly mistake is shipping, not waiting, so cancel is read first. The negative
+    // guard keeps "does not want to cancel" out of it.
+    else if (shaped && saysCancel) { outcome = 'cancelled'; note = 'customer wants to cancel'; }
+    else if (shaped && /reattempt agreed|will reattempt|agreed|reschedul|re-?arrang|already asked|asked (them|courier)/i.test(line)) { outcome = 'reattempt'; note = 'customer agreed to the reattempt'; }
     // THE TRANSCRIPT OVERRULES THE SUMMARY: no customer word after the question means no decision
     // was given, whatever the model wrote. Such a call is a no-answer and earns its retry.
     if (['reattempt', 'cancelled'].includes(outcome) && answeredTheAsk(transcript) === false) {

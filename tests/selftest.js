@@ -733,7 +733,7 @@ function check(name, got, want) {
             check('voice lang: Hindi-belt states open in Hindi, others in English; the FIRST reliable sighting of another language switches DIRECTLY, no confirmation question',
                 [/HINDI_BELT_RX\.test\(String\(addr\.province/.test(vb2) && /return 'en-IN';\s+\/\/ everywhere else opens in English/.test(vb2), /\[\/\[\\u0900-\\u097F\]\/, 'hi-IN'\]/.test(vb2),
                  hasRule('screener-english'), /DIRECT SWITCH — no confirmation question/.test(vb2),
-                 /if \(seen && seen !== this\.s\.lang\) this\.switchLanguage\(seen\)/.test(vb2),
+                 vb2.includes('else this.switchLanguage(seen);') && vb2.includes('one ${seen} sentence is not a switch back'),
                  !/this\.s\.offerAsk = seen/.test(vb2)],
                 [true, true, true, true, true, true]);
             check('voice product-answer rules (Ele behavior, PRODUCT QUESTIONS ONLY, own names kept): brand-only, no diagnosis, prices → theelement.skin, drops 15 days/bottle; the call flow itself unchanged',
@@ -1259,7 +1259,7 @@ function check(name, got, want) {
                 // wrong lesson. Dropped lines are kept, but clearly marked as never spoken.
                 check('transcript fidelity: it records the spoken turn, and marks blocked lines as not spoken',
                     [/const spokenTurn = \(this\._spokenThisTurn \|\| \[\]\)\.join\(' '\)\.trim\(\)/.test(vb2),
-                     /this\.s\.transcript\.push\('Agent: ' \+ \(spokenTurn \|\| text\)\)/.test(vb2),
+                     vb2.includes("this.s.transcript.push('Agent: ' + (spokenTurn || text) + (cut ?"),
                      /\[not spoken — blocked by rule\]/.test(vb2),
                      /this\._spokenThisTurn = \[\]; this\._droppedThisTurn = \[\];/.test(vb2)],
                     [true, true, true, true]);
@@ -1713,6 +1713,142 @@ function check(name, got, want) {
                          vbx.includes('[taken despite the noise floor'),
                          vbx.includes('VOBIZ_MIN_PEAK_CEIL || 6000'),
                          !vbx.includes('_callerFloor')],
+                        [true, true, true, true, true, true]);
+                }
+                {
+                    const vbo = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    // SHE FINISHES HER LINE, THEN ANSWERS WHAT WAS SAID OVER IT (user, 2026-09-08).
+                    // Her audio is never cut — bargeIn already declines during the intro and the order
+                    // information. What changed is the CUSTOMER's words: they used to trigger a reply
+                    // immediately, on top of the line still draining, so two turns played back to back
+                    // and the second answered a fragment the customer had already finished (TE25-46651:
+                    // "I have" at 14s, the real answer at 18s, the same question asked three times).
+                    // Now they are held, merged, and answered ONCE after the audio has actually drained
+                    // — and the model is told they arrived over her, so she acknowledges them.
+                    check('voice: words spoken over her are held, then acknowledged after her line ends',
+                        [vbo.includes('const stillAudible = Date.now() < (this.audioEndsAt || 0);') && vbo.includes('const yielded = !stillAudible ? true'),
+                         vbo.includes('return false;             // the floor was NOT yielded'),
+                         vbo.includes("this._overlap = (this._overlap ? this._overlap + \" \" : \"\") + text;"),
+                         // flushed on the DRAIN clock, not when synthesis finished
+                         vbo.includes('const wait = Math.max(0, (this.audioEndsAt || 0) - Date.now()) + 150;'),
+                         vbo.includes('Acknowledge what they said first, briefly, then continue.'),
+                         // and never dropped if a turn slipped in first
+                         vbo.includes("this._overlap = held + (this._overlap ? ' ' + this._overlap : '');")],
+                        [true, true, true, true, true, true]);
+                }
+                // ALREADY ARRANGED IS ALREADY A YES (TE25-46651, 2026-09-08). Shivani said she had asked
+                // the courier to reschedule for tomorrow — a firmer yes than "haan", since she had gone
+                // and organised it — and was asked the same question twice more, ending in "Hello?…" and
+                // an outcome of 'unclear' that parked the order waiting on a human decision the customer
+                // had already made. Fixed in both places: the rule so she stops asking, the classifier so
+                // the queue stops mis-filing it.
+                {
+                    const rl2 = fs.readFileSync(path.join(ROOT, 'app/api/agent_rules.js'), 'utf8');
+                    const ac3 = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8');
+                    const line = "RESULT: unclear: customer mentioned rescheduling but final intent unclear.";
+                    const RX = /reattempt agreed|will reattempt|agreed|reschedul|re-?arrang|already asked|asked (them|courier)/i;
+                    check('voice: a customer who already rescheduled is not asked again',
+                        [rl2.includes("id: 'confirm-reschedule-is-yes'"),
+                         ac3.includes('reschedul|re-?arrang|already asked'),
+                         RX.test(line),                                        // the exact summary that mis-filed
+                         !RX.test('RESULT: cancelled: customer does not want the order.'),
+                         !RX.test('RESULT: no answer: customer never engaged.'),
+                         // …and cancelling still wins over rescheduling. Widening the reattempt test put
+                         // it AHEAD of the cancel test, so "asked to cancel; had earlier rescheduled"
+                         // would have re-shipped a refused parcel. Shipping is the costly mistake, so
+                         // cancel is read first — with a guard that spans words, because "does not want
+                         // to cancel" is agreement, not cancellation.
+                         ac3.includes('const saysCancel = /cancel/i.test(line)'),
+                         ac3.indexOf('saysCancel) { outcome') < ac3.indexOf("outcome = 'reattempt'"),
+                        ],
+                        [true, true, true, true, true, true, true]);
+                }
+                // THE WAIT IS NOW KEPT, NOT JUST PRINTED (user, 2026-09-08). The split has always been
+                // measured and always been thrown away with the log; one row per exchange means "the
+                // reply is slow" can be answered with a number over time. Two properties matter: it is
+                // buffered on the session and written ONCE at the end, so no call ever waits on a
+                // database, and the insert is fire-and-forget so a missing table cannot fail a call.
+                {
+                    const vbt = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    const sqlPath = path.join(ROOT, 'db/2026-09-08_call_turn_timings.sql');
+                    // VOICE TIME, NOT TRANSCRIPT TIME, and honest about the queue: Vobiz plays our audio
+                    // in order, so a reply sent while her previous line is still draining is not HEARD
+                    // until that finishes. audible_ms is the number to judge a conversation by.
+                    check('voice: per-turn reply delays are persisted, and cannot break a call',
+                        [vbt.includes("(this.s.turnTimings = this.s.turnTimings || []).push({"),
+                         vbt.includes("supabase.from('call_turn_timings_ecom').insert("),
+                         vbt.includes('const queued = Math.max(0, (this.audioEndsAt || 0) - Date.now());'),
+                         vbt.includes('audible_ms: total + queued'),
+                         !vbt.includes("await supabase.from('call_turn_timings_ecom')"),   // never awaited
+
+                         vbt.includes("this.log('turn timings not saved:', error.message)"),
+                         fs.existsSync(sqlPath)],
+                        [true, true, true, true, true, true, true]);
+                }
+                {
+                    const vbg = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    const _c = vbg.indexOf('const CANCEL_OFFER_RX = new RegExp(');
+                    const CR = eval(vbg.slice(_c, vbg.indexOf("'i');", _c) + 5).replace('const CANCEL_OFFER_RX = ', ''));
+                    // A RULE ASKS, A GUARD STOPS. `cancel-never-offer` had existed for days and was
+                    // broken again on TE25-46201 — "क्या आप sure हैं कि आप इस order को cancel करना चाहते
+                    // हैं?". Suggesting cancellation to a hesitant customer talks them out of the order,
+                    // and confirming one is the team's decision, not hers. Third guard of this shape,
+                    // after delivery slots and arrival dates.
+                    check('voice: she can never raise cancellation, and normal lines survive',
+                        [CR.test('क्या आप sure हैं कि आप इस order को cancel करना चाहते हैं?'),
+                         CR.test('Shall I cancel the order for you?'),
+                         CR.test('मैं आपका order cancel कर देती हूँ।'),
+                         !CR.test('क्या आप इसे receive करना चाहेंगे?'),
+                         !CR.test('हमारी team आपसे संपर्क करेगी।'),
+                         vbg.includes('if (CANCEL_OFFER_RX.test(spoken)) {')],
+                        [true, true, true, true, true, true]);
+                    // A noise floor must be a decaying MINIMUM: any average is dragged up by speech,
+                    // and then the floor chases the customer and grows deafer the more they talk.
+                    check('voice: the ambient floor cannot be raised by the customer speaking',
+                        [vbg.includes('Math.min(peak, Math.round(this._ambient * 1.002) + 1)'),
+                         !vbg.includes('this._ambient * 0.97 + peak * 0.03'),
+                         vbg.includes('VOBIZ_MIN_PEAK_FLOOR || 250')],
+                        [true, true, true]);
+                }
+                // THE FIRST REPLY IS ALWAYS THE CUSTOMER, and it is the one no timer can save: the
+                // rescue needs 6s of idle and the watchdog 7s, but someone who answers and hears
+                // nothing hangs up in three or four. TE25-46514 lost "Hello" at peak 2484 and was hung
+                // up on at 8s; TE25-45843 lost "Yeah" at 280 and went at 11s — both the first thing
+                // said, both ended by the callee, both dead before any guard could fire.
+                {
+                    const vbf = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    check('voice: the first reply of a call is never discarded for being quiet',
+                        [vbf.includes('if (!this.presence && peak >= FIRST_REPLY_MIN()) {'),
+                         vbf.includes('VOBIZ_FIRST_REPLY_MIN || 150'),
+                         vbf.includes('[taken as the first reply — quieter than the floor at peak')],
+                        [true, true, true]);
+                }
+                {
+                    const vbr = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    const ev = (n) => { const a = vbr.indexOf('const ' + n + ' = new RegExp('); 
+                        return eval(vbr.slice(a, vbr.indexOf("'i');", a) + 5).replace('const ' + n + ' = ', '')); };
+                    const REF = ev('REFUSAL_RX'), RA = ev('REATTEMPT_ASSERT_RX'), ASK = ev('THE_ASK_RX');
+                    // SHE MAY NOT PROMISE DELIVERY TO SOMEONE WHO REFUSED (TE25-45876). "I am not deliver
+                    // this order" at 69s, confirmed "Yeah, Ma'am" at 80s, and at 105s "our team will
+                    // arrange the re-attempt". The costly direction is shipping: a wrongly cancelled
+                    // order is a phone call, a wrongly re-shipped one is a second RTO and freight twice.
+                    check('voice: no re-attempt is promised after the customer refused',
+                        [REF.test('I am not deliver this order'), REF.test('I am not receiving'),
+                         REF.test('मुझे नहीं चाहिए'), !REF.test('Okay, please deliver it'),
+                         RA.test('Our team will arrange the reattempt and try to deliver as soon as possible.'),
+                         RA.test('आपका order दोबारा deliver करवा दिया जाएगा।'),
+                         !RA.test('Thank you for choosing The Element. Have a great day.'),
+                         vbr.includes('if (this.s.refusalSeen && REATTEMPT_ASSERT_RX.test(spoken)) {')],
+                        [true, true, true, true, true, true, true, true]);
+                    // TWO CLARIFICATIONS, COUNTED IN CODE. The rule existed; the call asked four times
+                    // across 122 seconds on a line where nothing was audible, then asserted an outcome.
+                    check('voice: the third clarifying ask is replaced by the WhatsApp hand-off',
+                        [ASK.test('Would you still like to receive it?'),
+                         ASK.test('क्या आप इसे अभी भी receive करना चाहेंगे?'),
+                         !ASK.test('May I know what went wrong with the delivery?'),
+                         vbr.includes('if (this.s.askCount > 2) {'),
+                         vbr.includes('const HAND_OFF = {'),
+                         vbr.includes("this.closingDone = true;                 // the goodbye machinery")],
                         [true, true, true, true, true, true]);
                 }
                 // Yesterday is a CLOSED one-day window; every other preset ends today, and reusing that

@@ -1231,6 +1231,87 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### Six live calls, six guards: she stops losing customers and stops promising the wrong thing (2026-09-08)
+
+An afternoon of real calls on the new build, each one read against its own recording. Every fix below
+came from a call, and every one is a GUARD in code rather than a rule in the prompt — the day's clearest
+lesson is that a rule asks and only code stops.
+
+**THE FIRST REPLY IS ALWAYS THE CUSTOMER.** TE25-46514 lost *"Hello"* at **peak 2484** and was hung up on
+at 8s; TE25-45843 lost *"Yeah"* at 280 and went at 11s. Both were the first thing said on the call, both
+ended `Normal Hangup · by Callee`. No timer could have saved either — the rescue needs 6s of idle and
+the watchdog 7s, while her greeting alone runs 6-7s, so the clocks would have fired around 13s. A person
+who answers and hears nothing gives up in three or four. So the floor gets no vote on the first
+utterance: anything above `VOBIZ_FIRST_REPLY_MIN` (150 — a hallucinated "Hello" on a dead line measured
+29) is taken, and the transcript says `[taken as the first reply — quieter than the floor at peak N]`.
+
+**THE FLOOR WAS CHASING THE CUSTOMER'S OWN VOICE.** TE25-46201 refused real words at **2874, 1836, 1585,
+1386**, which can only happen if the floor had climbed above 2874. It climbs because quiet speech that
+never fires the VAD gets averaged in as room noise — so the floor rose with the customer and grew
+DEAFER the more they talked, the exact opposite of its purpose. An average cannot do this job. It is now
+a **decaying minimum**: it drops to any quieter frame instantly and rises 0.2% per frame, so two seconds
+of speech moves it 600 → 1100 instead of past 2874, while a genuinely louder room is still tracked over
+~30s. `VOBIZ_MIN_PEAK_FLOOR` also went 600 → **250**, because TE25-46457's real *"ओके"* measured 575
+while the noise the gate exists to stop measured 29.
+
+**A SWITCH IS A ONE-WAY DOOR.** TE25-46457: Vishakha answered in Hindi, the call switched, she said one
+English sentence — *"I didn't get any call"* — and the agent went straight back to English, then to
+Hindi again on the next turn. Mirroring every sentence reads as a machine following syntax. A switch now
+holds; only an explicit ask moves it, and that check still runs first.
+
+**A CUT LINE MUST LOOK CUT.** Same call, stored: *"जी, कोई बात नहीं Vishakha ji. मैं आपका order दुबारा भेज
+देती हूँ…"*. Heard, per the recording: *"कोई बात नहीं"*. `_spokenThisTurn` records a sentence when it
+reaches the SYNTHESIZER, but a barge-in stops the voice before that audio exists. An interrupted turn is
+now marked `[…cut off — the customer spoke]`.
+
+**"NO ANSWER" CANNOT OUTVOTE A CUSTOMER WHO SPOKE.** Same call again: FIVE customer turns, the closing
+reached, and it filed `no_answer` — scheduling a **fourth** call — because the summarizer had written
+"customer never engaged". It wrote that because her replies had been dropped by the floor, so from the
+text she looked silent. Two fixes: the phrase no longer forces the outcome when the transcript shows
+turns, and the summarizer is now told that `[not heard — too quiet…]` means WE failed to hear, not that
+the customer was silent.
+
+**SHE MAY NEVER RAISE CANCELLATION.** Rule `cancel-never-offer` had existed for days and TE25-46201 broke
+it again — *"क्या आप sure हैं कि आप इस order को cancel करना चाहते हैं?"*. Suggesting it to a hesitant
+customer talks them out of the order; confirming it is the team's decision, not hers. `CANCEL_OFFER_RX`
+now cuts it before the synthesizer, while *"क्या आप इसे receive करना चाहेंगे?"* is untouched.
+
+**SHE MAY NEVER PROMISE DELIVERY TO SOMEONE WHO REFUSED — the one with money attached.** TE25-45876, 122
+seconds, ₹2.28. The recording: *"I am not deliver this order"* at 69s; *"so you would prefer not to
+receive this order, is that correct?"*; **"Yeah, Ma'am."** at 80s. And at 105s: *"Our team will arrange
+the re-attempt and try to deliver as soon as possible."* That parcel ships and RTOs a second time.
+`REFUSAL_RX` marks the call the moment a refusal is heard — a later "okay" is politeness, not a
+reversal, and on a line that poor it is usually a mis-transcription — and `REATTEMPT_ASSERT_RX` then
+cuts any promise of re-delivery. **The asymmetry is deliberate: a wrongly cancelled order costs a phone
+call, a wrongly re-shipped one costs a second RTO and freight both ways.**
+
+**TWO CLARIFICATIONS, COUNTED IN CODE.** The same call asked *"would you still like to receive it?"* four
+times. `confirm-two-attempts` and `confirm-leave-gracefully` both existed and both lost. The asks are
+now counted as they are spoken and the THIRD is replaced by the hand-off — *"the line is not clear, our
+team will confirm on WhatsApp"* — and the call closes. A bad line ends in a follow-up instead of a
+fourth question and an invented outcome.
+
+**AND SHE STOPS ANSWERING HER OWN QUESTION.** At 105s two turns played back to back with no gap: the
+question, then *"You are welcome…"* — the second replying to a "Thank you" that arrived while the
+question was still playing. The hold now covers the WHOLE call, and the distinction is why she is still
+audible: a turn in flight → `bargeIn()` decides as before (declining through the intro and information
+so those land whole, yielding in conversation so a real interruption still stops her); no turn, audio
+merely draining → HOLD, because there is nothing to interrupt and replying only stacks a second turn.
+
+**A DEPLOYMENT CHECK, FOUND BY ACCIDENT.** The transcript markers say which build placed a call. When
+TE25-44826 showed none, that is how it was established the VPS was behind rather than that a fix had
+failed; the 12:12 markers are what proved the new build HAD landed. Presence is proof, absence is not.
+
+**AND THE WAIT IS NOW KEPT.** `call_turn_timings_ecom` (created 2026-09-08) stores one row per exchange
+as VOICE time — the clock starts at `vad.speech_end`, not at a transcript — split into endpoint / think
+/ voice, plus `queued_ms`, the honest extra when a reply waits behind her own still-playing audio.
+**Judge by `audible_ms`; `total_ms` flatters us by ignoring the queue.** Buffered on the session and
+written once at the end of the call, fire-and-forget, so no call can ever wait on or be failed by it.
+The first measurements: **the brain is 65-70% of the wait**, endpointing ~400ms and the voice ~300ms —
+so the legs most latency advice aims at are the smallest ones.
+
+Selftests **538 passing**.
+
 ### "Hello" is shorter than 500ms — min speech 500 → 250 (2026-09-08)
 
 The last of the day's deaf-agent causes, and the only one that was UPSTREAM of every gate being tuned.

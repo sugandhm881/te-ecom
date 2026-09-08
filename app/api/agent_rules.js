@@ -85,6 +85,12 @@ const RULES = [
       text: 'A hmm or haan-haan while you are still explaining is a listening signal, never a confirmation.' },
     { id: 'confirm-after-question', sev: 'critical', when: 'always', src: 'CONFIRMATION DISCIPLINE',
       text: 'A confirmation counts only as a clear yes given after you finished asking the question.' },
+    // ALREADY ARRANGED IS ALREADY A YES (user, 2026-09-08, on TE25-46651). Shivani said she had asked
+    // the courier to reschedule for tomorrow — a clearer yes than "haan" — and was asked the same
+    // question twice more, ending in "Hello?… Hello?" and an outcome of 'unclear'. A customer who has
+    // gone and arranged the delivery themselves has answered; asking again reads as not listening.
+    { id: 'confirm-reschedule-is-yes', sev: 'critical', when: 'always', src: 'CONFIRMATION DISCIPLINE',
+      text: 'If they already asked for a reschedule or arranged delivery, that IS a yes — confirm and close.' },
     { id: 'confirm-ask-again-once', sev: 'high', when: 'always', src: 'CONFIRMATION DISCIPLINE',
       text: 'If the reply is unclear, ask once more for a clear yes or no — never assume agreement.' },
     { id: 'confirm-two-attempts', sev: 'high', when: 'always', src: 'CONFIRMATION DISCIPLINE',

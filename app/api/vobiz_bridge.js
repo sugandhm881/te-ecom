@@ -83,6 +83,54 @@ const VALIDATION_RX = /^\s*(?:[^।.?!]{0,40}?,\s*)?आप\s+(?:बिल्क�
 // verb — never on its own.
 // \b is ASCII-only and never fires beside Devanagari (this bug has been hit twice) — so the Hindi
 // alternatives carry no boundaries and the Latin ones do.
+// CANCELLATION IS NEVER HERS TO RAISE (user, 2026-09-08, TE25-46201: "again in this call agent break
+// rule and offer cancellation — how to get agent strictly follow the rule"). The answer is the same
+// as it was for delivery slots and arrival dates: a rule asks, a guard stops. Every phrasing here is
+// her PROPOSING or CONFIRMING a cancellation — "shall I cancel", "do you want to cancel", "are you
+// sure you want to cancel". Suggesting it to a hesitant customer talks them into losing the order,
+// and confirming it is a decision the team makes, not her.
+// \b never fires beside Devanagari, so the Hindi alternatives carry no boundaries.
+// A REFUSAL, IN THE CUSTOMER'S WORDS. Broad on purpose — this only ever makes the agent MORE careful,
+// and the words arrive through an STT that was rendering this customer's English into Kannada and
+// Tamil script. \b never fires beside Devanagari, so the Hindi alternatives carry no boundaries.
+// THE ASK ITSELF — "would you still like to receive it", "क्या आप इसे receive करना चाहेंगे", and the
+// paraphrases the model reaches for when it has already asked twice.
+const THE_ASK_RX = new RegExp(
+    '(?:would you (?:still )?like (?:us )?to (?:receive|deliver|send))' +
+    '|(?:do you (?:still )?want (?:it|the order|us to))' +
+    '|(?:शा?ल्?\\s*आई)|(?:क्या आप[^।?]{0,40}(?:receive|रिसीव|लेना|लेंगे|चाहेंगे|चाहते))' +
+    '|(?:क्या आप[^।?]{0,40}(?:deliver|डिलीवर)[^।?]{0,20}(?:चाहेंगे|चाहते|करवाना))',
+    'i');
+// What she says INSTEAD of a third ask. The team follows up; she stops pressing a customer who has
+// already failed to be understood twice — pressing a third time is what makes a call feel like a
+// machine, and it is the rule the transcripts break most.
+const HAND_OFF = {
+    'hi-IN': 'माफ़ कीजिए, आवाज़ ठीक से नहीं आ रही। हमारी team आपसे WhatsApp पर confirm कर लेगी। The Element को चुनने के लिए धन्यवाद।',
+    'en-IN': 'I am sorry, the line is not clear. Our team will confirm with you on WhatsApp. Thank you for choosing The Element.',
+};
+const REFUSAL_RX = new RegExp(
+    '(?:(?:not|never|don\\047?t|do\\s*not|dont|didn\\047?t|won\\047?t|no)\\s+(?:\\S+\\s+){0,2}?(?:want|wanting|need|needing|receive|received|receiving|deliver|delivering|delivery|take|taking))' +
+    '|(?:नहीं\\s*(?:चाहिए|चाहिये|चाहता|चाहती|लूँगा|लूंगा|लेना|भेज))' +
+    '|(?:मुझे\\s*नहीं)|(?:नहीं\\s*लेना)|(?:nahi\\s*(?:chahiye|chahie|lena))' +
+    '|(?:cancel\\s*(?:कर|कीजिए|करना))',
+    'i');
+// …and the promise she must not then make.
+const REATTEMPT_ASSERT_RX = new RegExp(
+    '(?:[^।.?!]{0,60}?(?:arrange|schedule)\\s+(?:the\\s+)?re-?attempt[^।.?!]*)' +
+    '|(?:[^।.?!]{0,60}?deliver[^।.?!]{0,30}?again[^।.?!]*)' +
+    '|(?:[^।.?!]{0,60}?re-?send[^।.?!]*)' +
+    '|(?:[^।.?!]{0,60}?(?:दोबारा|दुबारा|फिर\\s*से)\\s*(?:भेज|deliver|डिलीवर)[^।.?!]*)',
+    'i');
+const CANCEL_OFFER_RX = new RegExp(
+    // "क्या आप ... cancel करना चाहते/चाहेंगे" · "cancel कर दूँ" · "cancel कर दें"
+    '(?:[^।.?!]{0,60}?cancel\\s*(?:करना|करवाना|कर)\\s*(?:चाहते|चाहेंगे|चाहती|दूँ|दूं|दें|द[ूु]|सकते)[^।.?!]*)' +
+    // "are you sure ... cancel" · "do you want to cancel" · "shall I cancel" · "should I cancel"
+    '|(?:(?:are you sure|do you want|would you like|shall i|should i|can i)[^.?!]{0,60}?cancel[^.?!]*)' +
+    // "sure हैं कि ... cancel" — the exact sentence from TE25-46201
+    '|(?:sure\\s*ह[ैे]ं?[^।.?!]{0,60}?cancel[^।.?!]*)' +
+    // "order cancel कर देती हूँ" — announcing it as done is worse than asking
+    '|(?:cancel\\s*कर\\s*(?:देती|देता|देंगे|दिया)[^।.?!]*)',
+    'i');
 const ARRIVAL_RX = new RegExp(
     // "3-4 दिन में पहुँच जाएगा" · "दो दिन में मिल जाएगा" · "in 3 to 4 days it will reach"
     '(?:(?:[0-9०-९]+|एक|दो|तीन|चार|पाँच|पांच|छह|सात|आठ|नौ|दस|one|two|three|four|five|six|seven|eight|nine|ten)\\s*(?:-|–|to|से)?\\s*(?:[0-9०-९]+|एक|दो|तीन|चार|पाँच|पांच|छह|सात|आठ|नौ|दस|one|two|three|four|five|six|seven|eight|nine|ten)?\\s*(?:दिन|din|days?|hours?|घंटे|घंटों|weeks?|हफ़्ते|हफ्ते)' +
@@ -168,8 +216,14 @@ const SILENCE_NUDGE_MS = () => Number(process.env.VOBIZ_SILENCE_NUDGE_MS || 7000
 const SILENCE_END_MS = () => Number(process.env.VOBIZ_SILENCE_END_MS || 15000);
 const STT_MAX_REOPENS = () => Number(process.env.VOBIZ_STT_MAX_REOPENS || 4);
 const HISTORY_TURNS = () => Number(process.env.VOBIZ_HISTORY_TURNS || 12);   // exchanges kept in the prompt
-const FLOOR_MIN = () => Number(process.env.VOBIZ_MIN_PEAK_FLOOR || 600);   // never deafer than this, never blinder
+// 600 WAS STILL TOO DEAF — measured on a live call, not guessed (TE25-46457, 2026-09-08). On a quiet
+// line the ambient multiple falls under the minimum, so FLOOR_MIN alone decides, and it refused this
+// customer three times: "Hello" at 1196, "ओके" at 575, another at 662 — while the noise it exists to
+// stop measured 29. Real speech and line noise are two orders of magnitude apart here, so 250 keeps
+// an 8x margin over the noise and stops discarding people who simply do not shout into the phone.
+const FLOOR_MIN = () => Number(process.env.VOBIZ_MIN_PEAK_FLOOR || 250);   // never deafer than this
 const FLOOR_CEIL = () => Number(process.env.VOBIZ_MIN_PEAK_CEIL || 6000);   // a loud room must not mute the caller
+const FIRST_REPLY_MIN = () => Number(process.env.VOBIZ_FIRST_REPLY_MIN || 150);   // above line noise, below the floor
 const AMBIENT_MULT = () => Number(process.env.VOBIZ_AMBIENT_MULT || 5);     // a handset sits well clear of the room
 // THE RESCUE. If the gate has been refusing speech and nothing has been heard for this long while the
 // agent is idle, the next transcript is taken WHATEVER its level. Answering the room once is a small
@@ -697,6 +751,19 @@ class VoiceCall {
                     ? MIN_PEAK()                                              // nothing measured yet
                     : Math.max(FLOOR_MIN(), Math.min(FLOOR_CEIL(), Math.round(this._ambient * AMBIENT_MULT())));
                 if (peak && peak < floor) {
+                    // THE FIRST REPLY IS ALWAYS THE CUSTOMER. Nothing has been heard yet, she has just
+                    // asked a question, and the only thing that reasonably follows is them answering it.
+                    // Every other guard is too slow to help here: the rescue needs 6s of idle and the
+                    // watchdog 7s, but a person who answers and hears nothing gives up in three or four
+                    // — TE25-46514 lost "Hello" at peak 2484 and was hung up on at 8s, TE25-45843 lost
+                    // "Yeah" at 280 and was hung up on at 11s. Both were the FIRST thing said on the
+                    // call, both by the callee, and both calls died before any timer could fire.
+                    // FIRST_REPLY_MIN stays above true line noise (a hallucinated "Hello" measured 29)
+                    // while accepting anything that could plausibly be a voice.
+                    if (!this.presence && peak >= FIRST_REPLY_MIN()) {
+                        this.log(`first reply of the call — taking it despite peak ${peak} < ${floor}`);
+                        this.s.transcript.push(`[taken as the first reply — quieter than the floor at peak ${peak}]`);
+                    } else {
                     // THE RESCUE. Silence is the expensive failure, not a stray sentence. If nothing
                     // has been accepted for a while and she is not talking, this transcript is taken
                     // regardless of level — she answers rather than sits there. Bounds deafness to a
@@ -724,6 +791,7 @@ class VoiceCall {
                         this.s.transcript.push(`[not heard — too quiet, peak ${peak}: "${d.text.trim().slice(0, 60)}"]`);
                     this._partialText = '';
                     return;
+                    }
                     }
                 }
                 this.log(`heard (peak ${peak}): ${d.text.trim().slice(0, 40)}`);
@@ -788,7 +856,21 @@ class VoiceCall {
             // everybody, because "loud enough to be the caller" depends entirely on how loud the room
             // behind them is. A slow EMA so one door slam does not move it.
             if (!this.vadActive) {
-                this._ambient = (this._ambient == null) ? peak : Math.round(this._ambient * 0.97 + peak * 0.03);
+                // FAST DOWN, SLOW UP — a symmetric average lets SPEECH raise the floor. TE25-46201
+                // showed it: real words refused at 2874, 1836, 1585, 1386, which only happens if the
+                // floor had climbed above 2874, and it climbs when quiet speech that never fired the
+                // VAD is averaged in as though it were room noise. The floor then chases the customer
+                // upward and grows deafer the more they talk — the exact opposite of what it is for.
+                // A noise floor must fall quickly to a quiet line and rise only grudgingly.
+                // A DECAYING MINIMUM, not an average. Any average — even a lopsided one — is dragged
+                // upward by speech, and TE25-46201 is what that costs: real words refused at 2874,
+                // 1836, 1585, 1386, which can only happen if the floor had climbed above 2874. It
+                // climbs whenever quiet speech that never fired the VAD gets averaged in as room
+                // noise, so the floor chases the customer and grows deafer the more they say.
+                // Instead: drop to any quieter frame at once, and rise only 0.2% per frame — a burst
+                // of speech barely moves it, while a genuinely louder room is still tracked over ~30s.
+                this._ambient = (this._ambient == null) ? peak
+                    : Math.min(peak, Math.round(this._ambient * 1.002) + 1);
             }
         } catch (_) {}
         this.stt.send(JSON.stringify({ event: 'audio_input', audio: payload }));
@@ -824,9 +906,21 @@ class VoiceCall {
     agentTurnDone() {
         this._agentTurns = (this._agentTurns || 0) + 1;
         if (this.introPhase && this._agentTurns >= 2) {
-            const left = Math.max(0, (this.audioEndsAt || 0) - Date.now());
-            setTimeout(() => { this.introPhase = false; }, left + 200);
-            this.log('introduction complete — normal turn-taking resumes');
+            // WAIT FOR THE AUDIO TO ACTUALLY FINISH, don't estimate it now. This measured the drain
+            // clock at the instant the TEXT was written — but the voice is still being synthesized and
+            // queued at that point, so `audioEndsAt` was far short of the real end and the protection
+            // expired while she was mid-sentence. The simulator caught it (2026-09-08): the log read
+            // "introduction complete" and then, 3 seconds later and still talking, she yielded to a
+            // customer she was supposed to finish the order information for. Poll the clock instead —
+            // it keeps growing as frames are queued, so this ends when the audio truly ends.
+            if (this._introTick) return;               // turn 3 can land before turn 2's audio drains
+            const tick = this._introTick = setInterval(() => {
+                if (this.closed) { clearInterval(tick); return; }
+                if (Date.now() < (this.audioEndsAt || 0)) return;
+                clearInterval(tick);
+                this.introPhase = false;
+                this.log('introduction complete — normal turn-taking resumes');
+            }, 200);
         }
     }
 
@@ -839,7 +933,7 @@ class VoiceCall {
         // for the opening turns, so ordinary conversation keeps full barge-in.
         if (this.introPhase && Date.now() < (this.audioEndsAt || 0)) {
             this.log('interrupted during the introduction — finishing the line first');
-            return;
+            return false;             // the floor was NOT yielded — the caller must hold what it heard
         }
         // SHE FINISHES THE SENTENCE SHE IS SPEAKING (user, 2026-09-04: "when agent explain any info
         // she must finish her sentence info, intro and other important thing").
@@ -853,6 +947,7 @@ class VoiceCall {
         if (this.turnAbort) { try { this.turnAbort.abort(); } catch (_) {} this.turnAbort = null; }
         if (this.ttsWs) { try { this.ttsWs.close(); } catch (_) {} this.ttsWs = null; }
         this.speaking = false;
+        return true;
     }
 
     playToCaller(b64linear16) {
@@ -866,8 +961,26 @@ class VoiceCall {
             const endpoint = this._brainStartAt ? this._brainStartAt - this._speechEndAt : null;
             const think = this._firstSentenceAt && this._brainStartAt ? this._firstSentenceAt - this._brainStartAt : null;
             const voice = this._firstSentenceAt ? Date.now() - this._firstSentenceAt : null;
+            // …AND THE PART THE EAR ACTUALLY FEELS. The measurements above end when the first frame is
+            // SENT — but Vobiz plays our audio in order, so if her previous line is still draining this
+            // reply queues behind it and the customer hears nothing for that much longer. Read the drain
+            // clock BEFORE this chunk extends it, and the real silence the customer sat through is
+            // total + queued (PSTN transport, ~100-250ms, is the only piece nobody here can measure).
+            const queued = Math.max(0, (this.audioEndsAt || 0) - Date.now());
             this.log(`reply gap ${total}ms = endpoint ${endpoint === null ? '?' : endpoint + 'ms'}`
-                + ` + think ${think === null ? '?' : think + 'ms'} + voice ${voice === null ? '?' : voice + 'ms'}`);
+                + ` + think ${think === null ? '?' : think + 'ms'} + voice ${voice === null ? '?' : voice + 'ms'}` + (queued ? ` (+${queued}ms queued behind her own audio → ${total + queued}ms in the ear)` : ''));
+            // KEEP IT, DON'T JUST PRINT IT (user, 2026-09-08: "note delay of customer and agent reply to
+            // each other and save in new table"). The split has only ever gone to the terminal, so the
+            // moment a log rotated the evidence was gone — and "the reply is slow" could never be
+            // answered with a number over time, only with an impression. Buffered on the session and
+            // written once at the end of the call, so a phone call never waits on a database.
+            (this.s.turnTimings = this.s.turnTimings || []).push({
+                n: this.s.turnTimings.length + 1,
+                at: new Date(this._speechEndAt).toISOString(),   // when the CUSTOMER stopped speaking
+                total_ms: total, endpoint_ms: endpoint, think_ms: think, voice_ms: voice,
+                queued_ms: queued, audible_ms: total + queued,   // what the customer's ear waited
+                model: this.chatModel() || 'sarvam',
+            });
             this._speechEndAt = 0;
         }
         let buf = Buffer.from(b64linear16, 'base64');
@@ -965,6 +1078,43 @@ class VoiceCall {
                     if (kept.length < 12) return;                   // the whole sentence was the promise
                     spoken = /[।.?!]$/.test(kept) ? kept : kept + '।';
                 }
+                // NO CANCELLATION OFFER — see CANCEL_OFFER_RX. Cut before the synthesizer; whatever
+                // else the sentence carried still plays. If nothing else was in it the turn is dropped,
+                // which is the right outcome: silence beats talking a customer out of their order.
+                if (CANCEL_OFFER_RX.test(spoken)) {
+                    const kept = spoken.replace(CANCEL_OFFER_RX, '')
+                        .replace(/[।.?!]+\s*$/, '')
+                        .replace(/[\s—–,-]*(?:और|तथा|फिर|तो|अब|क्या|and|then|so|now)\s*$/i, '')
+                        .replace(/[\s—–,-]+$/, '').trim();
+                    this.log('cancellation offer dropped (never hers to raise):', spoken.slice(0, 56));
+                    (this._droppedThisTurn = this._droppedThisTurn || []).push(spoken);
+                    if (kept.length < 12) return;
+                    spoken = /[।.?!]$/.test(kept) ? kept : kept + '।';
+                }
+                // NO RE-ATTEMPT AFTER A REFUSAL. The costly direction is shipping: a wrongly cancelled
+                // order is a phone call, a wrongly re-shipped one is a second RTO and the freight both
+                // ways. If she has been told no, she may not promise delivery, whatever the model wrote.
+                // AT MOST TWO ASKS, COUNTED HERE. The third is replaced by the hand-off, so a bad line
+                // ends in a WhatsApp follow-up instead of a fourth question and an invented outcome.
+                if (THE_ASK_RX.test(spoken)) {
+                    this.s.askCount = (this.s.askCount || 0) + 1;
+                    if (this.s.askCount > 2) {
+                        this.log(`ask #${this.s.askCount} suppressed — two clarifications is the limit`);
+                        (this._droppedThisTurn = this._droppedThisTurn || []).push(spoken);
+                        spoken = HAND_OFF[this.s.lang] || HAND_OFF['en-IN'];
+                        this.closingDone = true;                 // the goodbye machinery takes it from here
+                    }
+                }
+                if (this.s.refusalSeen && REATTEMPT_ASSERT_RX.test(spoken)) {
+                    const kept = spoken.replace(REATTEMPT_ASSERT_RX, '')
+                        .replace(/[।.?!]+\s*$/, '')
+                        .replace(/[\s—–,-]*(?:और|तथा|फिर|तो|अब|and|then|so|now)\s*$/i, '')
+                        .replace(/[\s—–,-]+$/, '').trim();
+                    this.log('re-attempt promise dropped — the customer already refused:', spoken.slice(0, 56));
+                    (this._droppedThisTurn = this._droppedThisTurn || []).push(spoken);
+                    if (kept.length < 12) return;
+                    spoken = /[।.?!]$/.test(kept) ? kept : kept + '।';
+                }
                 // WHAT SHE ACTUALLY SAID, not what the model wrote. The transcript used to be the raw
                 // model output, so a sentence this function dropped still appeared there word for word
                 // — twice on 2026-09-04 that made a working guard look broken and a chopped sentence
@@ -1001,6 +1151,19 @@ class VoiceCall {
             // Hindi does not want the rest of the call in English, and a mechanical flip reads worse
             // than simply answering the way they spoke. So the reminder is soft and only appears
             // AFTER a switch has genuinely been established, leaving her free to follow the customer.
+            // SHE ACKNOWLEDGES BEING TALKED OVER. Appended to this request only, never to the stored
+            // history — the same trick the language reminder uses. Without it she simply answers, which
+            // reads as though she never noticed the customer had been speaking.
+            if (this._ackOverlap && messages.length) {
+                this._ackOverlap = false;
+                const last = messages[messages.length - 1];
+                if (last && last.role === 'user') {
+                    messages = messages.slice(0, -1).concat([{ role: 'user',
+                        content: `${last.content}
+
+[They said this while you were still speaking. Acknowledge what they said first, briefly, then continue.]` }]);
+                }
+            }
             if (this.s.langSwitched && messages.length) {
                 const last = messages[messages.length - 1];
                 if (last && last.role === 'user') {
@@ -1060,7 +1223,14 @@ class VoiceCall {
             // on its own line so a rule breach is still visible to an audit — the model attempting it
             // is worth knowing about — while never being mistaken for something that was said aloud.
             const spokenTurn = (this._spokenThisTurn || []).join(' ').trim();
-            this.s.transcript.push('Agent: ' + (spokenTurn || text));
+            // A CUT LINE MUST LOOK CUT (user, 2026-09-08, TE25-46457: "transcript is complete but as per
+            // transcript voice of agent is not complete"). `_spokenThisTurn` records a sentence when it
+            // is handed to the SYNTHESIZER — but a barge-in stops the voice before that audio exists, so
+            // the log kept a full sentence the customer heard two words of: stored "जी, कोई बात नहीं
+            // Vishakha ji. मैं आपका order दुबारा भेज देती हूँ…", heard "कोई बात नहीं". Attributing audio
+            // to individual sentences is not possible here, but saying so honestly is.
+            const cut = abort.signal.aborted && (spokenTurn || text);
+            this.s.transcript.push('Agent: ' + (spokenTurn || text) + (cut ? ' […cut off — the customer spoke]' : ''));
             for (const d of (this._droppedThisTurn || [])) this.s.transcript.push('[not spoken — blocked by rule] ' + d);
             this._spokenThisTurn = []; this._droppedThisTurn = [];
             this.agentTurnDone();
@@ -1083,6 +1253,20 @@ class VoiceCall {
             try { tts && tts.close(); } catch (_) {}
             if (this.ttsWs === tts) this.ttsWs = null;
             if (this.turnAbort === abort) this.turnAbort = null;
+            // …AND NOW ANSWER WHAT THEY SAID OVER HER. Held while she was mid-line, flushed once the
+            // audio has genuinely drained out of Vobiz's buffer — not when synthesis finished, which
+            // is seconds earlier. One reply for everything they said during the line, so she can never
+            // stack two turns back to back the way she did on TE25-46651.
+            if (this._overlap && !this.closed) {
+                const held = this._overlap; this._overlap = '';
+                this._ackOverlap = true;                      // the prompt is told it arrived over her
+                const wait = Math.max(0, (this.audioEndsAt || 0) - Date.now()) + 150;
+                setTimeout(() => {
+                    if (this.closed) return;
+                    if (this.turnAbort) { this._overlap = held + (this._overlap ? ' ' + this._overlap : ''); return; }
+                    this.speakTurn(held).catch(e => this.log('held-turn error:', e.message));
+                }, wait);
+            }
             // audio is queued inside Vobiz — speaking ends a beat after the last frame is sent
             setTimeout(() => { if (!this.turnAbort) this.speaking = false; }, 1500);
             // Goodbye grace: ~3s for the closing audio to play out of Vobiz's buffer + a 5s
@@ -1166,7 +1350,12 @@ class VoiceCall {
         // the summary say voicemail → classifyOutcome files it no_answer → the retry ladder proceeds.
         const VOICEMAIL_RX = /person you.?re trying to reach|at the tone|record your message|after the (beep|tone)|please record|customer you (are|have) (called|calling)|is not reachable|switched off|coverage area|not answering (the|your) call|जिस व्यक्ति|ग्राहक.{0,20}(व्यस्त|उपलब्ध नहीं|पहुंच)|संदेश रिकॉर्ड/i;
         if (VOICEMAIL_RX.test(text)) {
-        this.lastHeardAt = Date.now(); this._nudged = false;   // the mid-call watchdog measures silence from here
+        // Once refused, always refused for the rest of the call — a later "okay" is politeness, not a
+        // reversal, and on a line this poor it is usually a mis-transcription.
+        if (!this.s.refusalSeen && REFUSAL_RX.test(text)) {
+            this.s.refusalSeen = true;
+            this.log('customer refused the order — no re-attempt may be promised from here');
+        }
             this.s.transcript.push('Customer: ' + text);
             this.s.transcript.push('[voicemail greeting detected — hung up immediately, no message left]');
             this.log('voicemail detected — hanging up:', text.slice(0, 60));
@@ -1194,6 +1383,7 @@ class VoiceCall {
         }
         const FILLER_RX = /^[\s]*(हम(्?म)*|म्म+|उम+|हूँ|हुं|आं*|hm+m*|um+|uh+|mm+)[\s।,.!]*$/i;
         if (FILLER_RX.test(text)) { this.log('filler ignored:', text.slice(0, 20)); return; }
+        this.lastHeardAt = Date.now(); this._nudged = false;   // the mid-call watchdog measures silence from here
         this.s.transcript.push('Customer: ' + text);
         this.log('customer:', text.slice(0, 60));
         if (this.closingDone) {
@@ -1219,7 +1409,18 @@ class VoiceCall {
             // Same ordering as above: Devanagari-written English must be caught before the script check
         // decides "these are Devanagari letters, therefore Hindi".
         const seen = (sttLang && sttLang !== this.s.lang ? sttLang : null) || devEnglishLangOf(text, this.s.lang) || scriptLangOf(text) || romanLangOf(text, this.s.lang);
-            if (seen && seen !== this.s.lang) this.switchLanguage(seen);
+            // A SWITCH IS A ONE-WAY DOOR (user, 2026-09-08, on TE25-46457: "we already said that if once
+            // language is switched don't need to go back on previous language"). Vishakha answered in
+            // Hindi, the call switched to Hindi, then she said one English sentence — "I didn't get any
+            // call" — and the agent went straight back to English mid-conversation, then to Hindi again
+            // on the next turn. Mirroring every sentence reads as a machine following syntax; a person
+            // who has settled into Hindi with you stays there even when you drop an English word in.
+            // Only an explicit ASK moves it after that — requestedLanguage() above still switches, and
+            // it is checked first, so a customer who says "English में बात कीजिए" is always obeyed.
+            if (seen && seen !== this.s.lang) {
+                if (this.s.langSwitched) this.log(`staying in ${this.s.lang} — one ${seen} sentence is not a switch back`);
+                else this.switchLanguage(seen);
+            }
         }
         // END-ON-REQUEST (call 18, 2026-09-02: the customer said "प्लीज़ कॉल रखिए" TWICE and got two
         // full closings instead of a hangup): the ask to end the call is honored on the very next
@@ -1240,8 +1441,40 @@ class VoiceCall {
             this.s.escalated = true;
             this.log(`distress ${this.s.distress} — brain escalated to ${CLAUDE_ESC()}`);
         }
-        if (this.turnAbort) this.bargeIn();     // they answered before the agent finished
-        this.speakTurn(text).catch(e => this.log('turn error:', e.message));
+        // THEY SPOKE OVER HER — HOLD IT, DO NOT ANSWER YET (user, 2026-09-08: "if agent is saying
+        // info and then customer said anything at that same time, after agent finish her info she
+        // should acknowledge what customer said in overlap").
+        // Before this, the reply was composed the instant the words arrived, while her own line was
+        // still playing — so on TE25-46651 two turns played back to back with no gap, the second
+        // answering a fragment ("I have") that the customer had already finished into a real answer
+        // four seconds later. She asked the same question three times and the customer said "Hello"
+        // into what she assumed was a dead line.
+        // Now: whatever they say while she is mid-line is HELD, merged with anything else they add,
+        // and answered once when her audio has actually drained — with the model told it arrived
+        // over her, so she acknowledges it rather than ploughing on.
+        // "Still speaking" means HER AUDIO IS STILL PLAYING, which lasts well past the moment the
+        // turn object is torn down: `turnAbort` is cleared when the text finishes, while the voice is
+        // still draining out of Vobiz's buffer. Keying off the drain clock is what makes the hold
+        // actually fire — keyed off turnAbort it never did.
+        const stillAudible = Date.now() < (this.audioEndsAt || 0);
+        // THE HOLD COVERS THE WHOLE CALL NOW, not just the intro (TE25-45876). At 105s she asked
+        // "would you like us to deliver it again?" and, with no gap at all, said "You are welcome…" —
+        // two turns back to back, the second answering a "Thank you" that arrived while the question
+        // was still playing. She asked and answered for the customer.
+        // The distinction that matters is WHY she is still audible:
+        //   • a turn is in flight  → bargeIn() decides, exactly as before (it declines during the
+        //     intro and information so those land whole, and yields in normal conversation so a real
+        //     interruption still stops her),
+        //   • no turn, audio still draining → HOLD. There is nothing to interrupt and nothing to
+        //     decide; replying now just stacks a second turn onto the first.
+        const yielded = !stillAudible ? true
+                      : (this.turnAbort ? this.bargeIn() : false);
+        if (!yielded) {
+            this._overlap = (this._overlap ? this._overlap + " " : "") + text;
+            this.log("heard while she was still speaking — holding it until her line finishes:", text.slice(0, 40));
+            return;
+        }
+        this.speakTurn(text).catch(e => this.log("turn error:", e.message));
     }
 
     // Which brain answers this turn: no Claude key → Sarvam (null); otherwise the Haiku floor, or
@@ -1318,6 +1551,23 @@ class VoiceCall {
                 recording_url: this.s.recordingUrl || null,
                 cost_meta: this.s.claudeUsage && Object.keys(this.s.claudeUsage).length ? { claude: this.s.claudeUsage } : null,
             });
+
+            // THE PER-TURN DELAYS, one row per exchange, written after the call log so the id it points
+            // at already exists. Fire-and-forget on purpose: a reporting table must never be able to
+            // fail a call, and a missing table (before the migration is run) is logged, not thrown.
+            if ((this.s.turnTimings || []).length) {
+                supabase.from('call_turn_timings_ecom').insert(this.s.turnTimings.map(t => ({
+                    call_log_id: this.logId,
+                    order_id: this.s.ctx.order_name || null,
+                    call_type: (this.s.callType || 'cod_confirm') + '_vobiz',
+                    language: this.s.lang,
+                    turn_no: t.n, turn_at: t.at,
+                    total_ms: t.total_ms, endpoint_ms: t.endpoint_ms, think_ms: t.think_ms, voice_ms: t.voice_ms,
+                    queued_ms: t.queued_ms, audible_ms: t.audible_ms,
+                    model: t.model,
+                }))).then(({ error }) => { if (error) this.log('turn timings not saved:', error.message); })
+                  .catch(() => {});
+            }
             // RTO-recovery calls leave their result ON THE ORDER (training review 2026-08-31: "मैं team
             // से बात करके arrange करवा दूँगी" went nowhere — no note, no flag, the 4:30 PM slot lost in
             // the transcript). The note lands in order_notes, which the Support order modal shows.
@@ -1784,8 +2034,8 @@ async function summarizeCall(transcriptText, callType) {
     // RTO calls carry different facts worth keeping: did they agree to a reattempt, why did delivery
     // fail, what time slot did they give — the COD vocabulary lost all three ("confirmed cancel none").
     const sys = callType === 'rto_recovery'
-        ? 'You summarize RTO-recovery phone calls (an order came back undelivered; the agent asked if the customer wants it re-sent). Reply in English only, max 2 short lines: line 1 = RESULT (reattempt agreed / cancelled / no answer / unclear): then the failure reason in a few words. Line 2 = the exact preferred delivery time or address correction the customer gave, or "none" — a customer saying any time is fine IS an answer: write "anytime", never "none", for it. If the transcript is too short or the customer only said hello, output exactly "RESULT: no answer: customer never engaged. none" — NEVER ask for more transcript, never explain yourself, never use the words cancel or confirm in that case. CRITICAL: only the customer\'s words AFTER the agent asked "would you still like to receive it?" can settle that question — a "haan/yes" spoken earlier (answering "do you have two minutes?" or a greeting) is NOT agreement, and if the call ends on the agent\'s question with no reply after it, the RESULT is "no answer", never "reattempt agreed". Never infer, assume or invent a customer decision that is not literally in the transcript.'
-        : 'You summarize customer support phone calls. Reply in English only, max 2 short lines: line 1 = OUTCOME (confirmed / wants cancel / will reattempt / no clear answer / other): then 5-10 words of detail. Line 2 = promise or follow-up needed, or "none".';
+        ? 'You summarize RTO-recovery phone calls (an order came back undelivered; the agent asked if the customer wants it re-sent). Reply in English only, max 2 short lines: line 1 = RESULT (reattempt agreed / cancelled / no answer / unclear): then the failure reason in a few words. Line 2 = the exact preferred delivery time or address correction the customer gave, or "none" — a customer saying any time is fine IS an answer: write "anytime", never "none", for it. If the transcript is too short or the customer only said hello, output exactly "RESULT: no answer: customer never engaged. none" — NEVER ask for more transcript, never explain yourself, never use the words cancel or confirm in that case. CRITICAL: only the customer\'s words AFTER the agent asked "would you still like to receive it?" can settle that question — a "haan/yes" spoken earlier (answering "do you have two minutes?" or a greeting) is NOT agreement, and if the call ends on the agent\'s question with no reply after it, the RESULT is "no answer", never "reattempt agreed". Never infer, assume or invent a customer decision that is not literally in the transcript. A line like [not heard - too quiet, peak N: "..."] means OUR system failed to hear them, NOT that they were silent - never call such a call unanswered. [...cut off - the customer spoke] means the agent was interrupted mid-sentence.'
+        : 'You summarize customer support phone calls. Reply in English only, max 2 short lines: line 1 = OUTCOME (confirmed / wants cancel / will reattempt / no clear answer / other): then 5-10 words of detail. Line 2 = promise or follow-up needed, or "none". A line like [not heard - too quiet, peak N: "..."] means OUR system failed to hear them, NOT that they were silent - never call such a call unanswered. [...cut off - the customer spoke] means the agent was interrupted mid-sentence.';
     // Claude first (ai.js — the configured provider; 2026-09-02: a Sarvam summarizer failure left a
     // call with no RESULT line at all), Sarvam as fallback, the mechanical line beyond that.
     try {
