@@ -1231,6 +1231,65 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### The noise floor became a ratio, and deafness got a hard time limit (2026-09-08)
+
+User: *"i want full proof silent fixed and customer every word should detected."* The two changes that
+make that close to true — and they change what the gate IS, not just its number.
+
+**A FIXED FLOOR IS WRONG FOR EVERYBODY.** "Loud enough to be the caller" depends entirely on how loud
+the room behind them is, so no constant can serve both a soft-spoken customer on a quiet line and a
+television playing across the room. 3000 was simultaneously **too deaf** (it discarded a real "जी बताइए।"
+at 2371) and **too open** (a 2400 hallucination would have cleared it in a noisy room). The bridge now
+measures **the line's own ambient level** continuously — an EMA of frame peaks taken while nobody is
+speaking — and gates at `VOBIZ_AMBIENT_MULT` (5) times it, bounded by `VOBIZ_MIN_PEAK_FLOOR` (600) and
+`VOBIZ_MIN_PEAK_CEIL` (6000). A ceiling matters as much as a floor: without it a genuinely loud room
+would mute the customer entirely.
+
+| Situation | Ambient | Floor | Peak | Result |
+|---|---|---|---|---|
+| Quiet line, softly spoken "जी बताइए" | 150 | 750 | 2371 | **heard** |
+| Television playing, STT hallucination | 2000 | 6000 | 2400 | refused |
+| Television playing, customer over it | 2000 | 6000 | 8000 | **heard** |
+| Very noisy room, real voice | 4000 | 6000 | 9000 | **heard** |
+
+No single constant produces those four rows. This does, and it re-derives itself on every call. It
+replaces the per-caller calibration written earlier the same day, which could only ever tighten the
+floor because it learned from ACCEPTED utterances — it could never discover that it was refusing
+someone.
+
+**AND A REJECTION CAN NO LONGER KEEP HER DEAF.** If nothing has been accepted for `VOBIZ_DEAF_RESCUE_MS`
+(6s) while the agent is idle, the next transcript is taken **whatever its level**:
+
+```
+RESCUE — nothing heard for 7s, taking this despite peak 900 < 6000
+[taken despite the noise floor — the line had been silent 7s]
+```
+
+This inverts the failure mode, which is the real point. Before, one wrong judgement meant deaf for the
+rest of the call. Now the worst case is answering the room ONCE, and the line can never stay dead —
+rescue at 6s, watchdog at 7s, clean end with a retry booked at 22s. Answering a stray sentence is a
+small embarrassment; ignoring the customer for the rest of the call is a lost order, and that is what
+happened every single time.
+
+**WHAT THIS STILL CANNOT PROMISE.** Sarvam must first transcribe it, and an inaudible mumble is
+inaudible. What is now true: no word is discarded for being quiet on a quiet line; no rejection is
+silent (each is written into the transcript with its measured peak); and no deafness outlasts ~6
+seconds regardless of cause.
+
+**PROVEN ON A LIVE CALL THE SAME DAY — TE25-44826 (Mohan), 12:20.** 13 seconds, and the stored
+transcript is Kavya's opening and nothing else. The recording, pulled from Vobiz and run through
+Sarvam's batch engine, has him saying **"Hello" at 3s and again at 7s**. He was called twice an hour
+apart and answered both times; both attempts were burned. The rescue alone would have taken his 7s
+"Hello" regardless of level.
+
+⚠️ **THAT CALL ALSO SHOWED HOW TO TELL WHICH BUILD IS RUNNING.** Of 40 AI calls after 09:00 IST, exactly
+ONE carried any of the new transcript markers — the local test call. Mohan's had none, which is how it
+was established that the VPS was still on the previous build rather than that the fix had failed. The
+markers (`[not heard — too quiet…]`, `[silence mid-call…]`, `[audio link…restored]`,
+`[taken despite the noise floor…]`) are a deployment check as well as a diagnostic.
+
+Selftests **530 passing**.
+
 ### She can no longer go deaf, go silent, or promise a date (2026-09-08)
 
 A day of evidence from two recordings and one live test call, and four fixes that came out of it.

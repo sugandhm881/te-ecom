@@ -1696,11 +1696,22 @@ function check(name, got, want) {
                          vbx.includes('this._dropsLogged = (this._dropsLogged || 0) + 1) <= 6')],
                         [true, true]);
                     // One fixed floor is wrong for someone by definition — it calibrates per caller now.
-                    check('voice: the noise floor calibrates to the caller, within bounds',
-                        [vbx.includes('const floor = this._callerFloor || MIN_PEAK();'),
-                         vbx.includes('Math.max(FLOOR_MIN(), Math.min(MIN_PEAK(), tuned))'),
-                         vbx.includes('VOBIZ_MIN_PEAK_FLOOR || 600')],
-                        [true, true, true]);
+                    // A FIXED FLOOR IS WRONG FOR EVERYBODY, because "loud enough to be the caller"
+                    // depends on how loud the room behind them is. It is now a RATIO against this
+                    // line's own ambient level, measured continuously from frames where nobody is
+                    // speaking — a quiet line admits a soft 2371, a television-loud one still rejects
+                    // a 2400 hallucination. And the rescue is the property that matters most: if the
+                    // gate has been refusing while she sits idle, the next transcript is taken whatever
+                    // its level. Answering the room once is cheap; ignoring the customer for the rest
+                    // of the call is the lost order that started all of this.
+                    check('voice: the floor is relative to the room, and deafness cannot outlast the rescue',
+                        [vbx.includes('this._ambient = (this._ambient == null)'),
+                         vbx.includes('Math.round(this._ambient * AMBIENT_MULT())'),
+                         vbx.includes('if (!this.speaking && idleFor >= DEAF_RESCUE_MS())'),
+                         vbx.includes('[taken despite the noise floor'),
+                         vbx.includes('VOBIZ_MIN_PEAK_CEIL || 6000'),
+                         !vbx.includes('_callerFloor')],
+                        [true, true, true, true, true, true]);
                 }
                 // Yesterday is a CLOSED one-day window; every other preset ends today, and reusing that
                 // arithmetic would have folded today's calls into it.

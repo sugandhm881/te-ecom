@@ -159,6 +159,13 @@ const SILENCE_END_MS = () => Number(process.env.VOBIZ_SILENCE_END_MS || 15000);
 const STT_MAX_REOPENS = () => Number(process.env.VOBIZ_STT_MAX_REOPENS || 4);
 const HISTORY_TURNS = () => Number(process.env.VOBIZ_HISTORY_TURNS || 12);   // exchanges kept in the prompt
 const FLOOR_MIN = () => Number(process.env.VOBIZ_MIN_PEAK_FLOOR || 600);   // never deafer than this, never blinder
+const FLOOR_CEIL = () => Number(process.env.VOBIZ_MIN_PEAK_CEIL || 6000);   // a loud room must not mute the caller
+const AMBIENT_MULT = () => Number(process.env.VOBIZ_AMBIENT_MULT || 5);     // a handset sits well clear of the room
+// THE RESCUE. If the gate has been refusing speech and nothing has been heard for this long while the
+// agent is idle, the next transcript is taken WHATEVER its level. Answering the room once is a small
+// embarrassment; ignoring the customer for the rest of the call is a lost order — and that was the
+// real failure every time (2026-09-08). It also bounds deafness: at worst a few seconds, never a call.
+const DEAF_RESCUE_MS = () => Number(process.env.VOBIZ_DEAF_RESCUE_MS || 6000);
 // The sounds a listener makes to show they are still there. Said OVER the agent these mean "go on",
 // never "stop" — the opposite of what a barge-in assumes. Hindi and English, bare only: a customer
 // who says "haan boliye" or "haan lekin" is starting a sentence and DOES interrupt, so the anchors
@@ -669,14 +676,26 @@ class VoiceCall {
                 // from real calls rather than guessed at; VOBIZ_MIN_PEAK moves it without a deploy.
                 const peak = this._uttPeak || 0;
                 this._uttPeak = 0;
-                // CALIBRATED TO THIS CALLER, not to one number for everybody. A fixed floor is wrong
-                // for someone by definition: 3000 was measured on a raised voice and threw away real
-                // speech at 2371, while a loud room needs more than a soft-spoken customer does.
-                // Once she has been heard clearly ONCE, that caller's own level sets the bar — a
-                // quarter of their quietest accepted utterance, never above the configured ceiling and
-                // never below FLOOR_MIN, which still clears measured background (77-312) twice over.
-                const floor = this._callerFloor || MIN_PEAK();
+                // RELATIVE TO THE ROOM, NOT AN ABSOLUTE NUMBER (user, 2026-09-08: "customer every word
+                // should be detected"). Speaking INTO a handset is near-field and always stands well
+                // clear of whatever is across the room — but "well clear" is a RATIO, never a fixed
+                // value. A quiet line (ambient ~150) admits a softly spoken 2371; a television playing
+                // (ambient ~2000) rejects a 2400 hallucination while still admitting a real voice over
+                // it at 8000. One constant could never do both, which is why 3000 was simultaneously
+                // too deaf for a quiet customer and too open for a loud room.
+                const floor = this._ambient == null
+                    ? MIN_PEAK()                                              // nothing measured yet
+                    : Math.max(FLOOR_MIN(), Math.min(FLOOR_CEIL(), Math.round(this._ambient * AMBIENT_MULT())));
                 if (peak && peak < floor) {
+                    // THE RESCUE. Silence is the expensive failure, not a stray sentence. If nothing
+                    // has been accepted for a while and she is not talking, this transcript is taken
+                    // regardless of level — she answers rather than sits there. Bounds deafness to a
+                    // few seconds instead of a whole call, whatever the cause.
+                    const idleFor = Date.now() - Math.max(this.lastHeardAt || 0, this.audioEndsAt || 0, this.startedAt || 0);
+                    if (!this.speaking && idleFor >= DEAF_RESCUE_MS()) {
+                        this.log(`RESCUE — nothing heard for ${Math.round(idleFor / 1000)}s, taking this despite peak ${peak} < ${floor}`);
+                        this.s.transcript.push(`[taken despite the noise floor — the line had been silent ${Math.round(idleFor / 1000)}s]`);
+                    } else {
                     // Not "too quiet to be speech" — it usually IS speech, just not the caller's.
                     // The STT happily transcribes a song playing in the room ("जो कृष्णा की देवी है",
                     // 2026-09-04) and a television, and the agent then answers the room. What
@@ -695,17 +714,9 @@ class VoiceCall {
                         this.s.transcript.push(`[not heard — too quiet, peak ${peak}: "${d.text.trim().slice(0, 60)}"]`);
                     this._partialText = '';
                     return;
-                }
-                this.log(`heard (peak ${peak}): ${d.text.trim().slice(0, 40)}`);
-                if (peak) {
-                    this._quietestHeard = Math.min(this._quietestHeard || Infinity, peak);
-                    const tuned = Math.round(this._quietestHeard * 0.25);
-                    const next = Math.max(FLOOR_MIN(), Math.min(MIN_PEAK(), tuned));
-                    if (next !== this._callerFloor) {
-                        this.log(`noise floor tuned to this caller: ${next} (quietest heard ${this._quietestHeard})`);
-                        this._callerFloor = next;
                     }
                 }
+                this.log(`heard (peak ${peak}): ${d.text.trim().slice(0, 40)}`);
                 const src = this._partialText || '';
                 this._partialText = '';
                 // devEnglishLangOf runs FIRST: transliterated English is still Devanagari, so
@@ -762,6 +773,13 @@ class VoiceCall {
                 if (v > peak) peak = v;
             }
             if (peak > (this._uttPeak || 0)) this._uttPeak = peak;
+            // THE LINE'S OWN NOISE LEVEL, measured continuously from frames where the customer is NOT
+            // speaking. This is the number a floor should be built from: a fixed threshold is wrong for
+            // everybody, because "loud enough to be the caller" depends entirely on how loud the room
+            // behind them is. A slow EMA so one door slam does not move it.
+            if (!this.vadActive) {
+                this._ambient = (this._ambient == null) ? peak : Math.round(this._ambient * 0.97 + peak * 0.03);
+            }
         } catch (_) {}
         this.stt.send(JSON.stringify({ event: 'audio_input', audio: payload }));
     }
