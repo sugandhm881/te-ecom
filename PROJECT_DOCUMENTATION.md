@@ -1232,6 +1232,24 @@ once succeeded. The shell is now win32-only, where it is genuinely needed (`clau
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
 ### The statement was under-reporting by 2.5x — both vendors, both fixed (2026-09-08)
+**⚠️ AND THEN CSP, WHICH NO AMOUNT OF CORS CAN FIX.** With both gates open the click still failed —
+`Capture failed: Failed to fetch` — while curl to the same endpoint returned a clean 401 WITH the CORS
+header. The server was never involved: Sarvam's console sends a Content-Security-Policy whose
+`connect-src` lists only their own domains, and a bookmarklet runs INSIDE that page, so the browser
+refuses the connection before it leaves the machine. CORS is the server's permission; CSP is the
+page's, and the page's wins.
+
+**CSP governs connections, not NAVIGATION.** So the bookmarklet stops posting across origins entirely:
+it reads Sarvam's own API (same-origin, allowed), then navigates to `/sarvam-capture` on our domain
+with the figures in the URL **fragment**, and that page — on our origin, where no CSP or CORS applies —
+posts them normally. The fragment is the right carrier: everything after `#` is never sent to any
+server, so the payload appears in no access log, no proxy, and no Referer header. It exists only in
+that tab until the same-origin POST, and the page clears it from the address bar afterwards.
+
+Three failures, three different layers, each masked by the same useless browser message — worth
+remembering as a diagnostic order: **curl the endpoint first** (server reachable? what status?), then
+check the permission map, then read the origin page's CSP.
+
 **⚠️ FOLLOW-UP THE SAME DAY — PUBLIC_API IS NOT THE ONLY GATE.** The first click of the bookmarklet
 reported only `Capture failed: Failed to fetch`. The endpoint had deployed correctly and was answering
 **403, not 404**: `PUBLIC_API` skips the **JWT** gate, but the PERMISSION map is a second gate and its

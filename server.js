@@ -85,6 +85,12 @@ app.use((req, res, next) => {
 // on each update (a new query string = a fresh URL), and index.html itself is served no-cache below.
 app.use('/static', express.static(path.join(__dirname, 'app/static'), { maxAge: '30d', etag: true }));
 app.use('/templates', express.static(path.join(__dirname, 'app/templates'), { maxAge: '7d', etag: true }));
+// THE SARVAM HANDOFF PAGE. Public and session-free on purpose: it is opened by a bookmarklet from
+// Sarvam's console, where their Content-Security-Policy forbids fetch() to any origin but their own.
+// CSP governs connections, not navigation — so the bookmarklet NAVIGATES here with the figures in the
+// URL fragment, and this page (on our origin, no CSP, no CORS) posts them to the API properly.
+// The fragment never reaches a server, so nothing lands in the access log on the way in.
+app.get('/sarvam-capture', (req, res) => res.sendFile(path.join(__dirname, 'app/templates/sarvam-capture.html')));
 
 // --- Import Routes ---
 const authRoutes = require('./app/api/auth_routes');

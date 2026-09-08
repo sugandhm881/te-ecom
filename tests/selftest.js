@@ -1944,8 +1944,16 @@ function check(name, got, want) {
                          su.includes("String(body.key || '') !== KEY()"),
                          su.includes("upsert(row, { onConflict: 'day' })"),      // re-posting a day updates it
                          sv2.includes('sarvam-usage$/') && sv2.includes('(?!sarvam-usage$)'),
+                         // …AND THE HANDOFF PAGE, because Sarvam's console sets a CSP whose connect-src
+                         // lists only their own domains: a bookmarklet there cannot fetch() to us at all,
+                         // whatever CORS we send, and the browser reports only "Failed to fetch". CSP
+                         // governs connections, not navigation — so the click navigates to a page on OUR
+                         // origin carrying the figures in the URL FRAGMENT, which never reaches a server,
+                         // and that page posts them same-origin where no CSP or CORS applies.
+                         sv2.includes("app.get('/sarvam-capture'"),
+                         fs.existsSync(path.join(ROOT, 'app/templates/sarvam-capture.html')),
                          !su.includes('req.headers.cookie') && !su.includes('cookie:') && !su.includes('document.cookie')],
-                        [true, true, true, true, true]);
+                        [true, true, true, true, true, true, true]);
                 }
                 // Yesterday is a CLOSED one-day window; every other preset ends today, and reusing that
                 // arithmetic would have folded today's calls into it.

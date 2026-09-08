@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sarvam capture</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!--
+  THE HANDOFF PAGE. Sarvam's console sets a Content-Security-Policy whose connect-src lists only their
+  own domains, so a bookmarklet running on that page cannot fetch() anything to us — the browser blocks
+  it before it leaves, and reports only "Failed to fetch". CSP governs connections, not NAVIGATION, so
+  the bookmarklet navigates here with the figures in the URL FRAGMENT and this page — which is on our
+  own origin, where no CSP or CORS applies — posts them properly.
+
+  The fragment matters: everything after '#' is never sent to a server, so the payload does not land in
+  our access logs, any proxy in between, or the Referer header. It exists only in this tab until the
+  same-origin POST below.
+-->
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0; display: grid; place-items: center;
+         min-height: 100vh; background: #f8fafc; color: #0f172a; }
+  .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 28px 32px;
+          box-shadow: 0 1px 3px rgba(15,23,42,.06); max-width: 460px; }
+  h1 { font-size: 16px; margin: 0 0 14px; }
+  .ok { color: #047857; } .bad { color: #be123c; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; margin: 14px 0 0; font-size: 14px; }
+  dt { color: #64748b; } dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .hint { color: #64748b; font-size: 13px; margin-top: 16px; }
+</style>
+<div class="card">
+  <h1 id="h">Saving Sarvam usage…</h1>
+  <dl id="d"></dl>
+  <p class="hint" id="hint"></p>
+</div>
+<script>
+(async () => {
+  const h = document.getElementById('h'), d = document.getElementById('d'), hint = document.getElementById('hint');
+  const say = (title, cls, rows, note) => {
+    h.textContent = title; h.className = cls || '';
+    d.innerHTML = (rows || []).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+    hint.textContent = note || '';
+  };
+  let p;
+  try { p = JSON.parse(decodeURIComponent(location.hash.slice(1))); }
+  catch (e) { return say('Nothing to save', 'bad', [], 'Open this from the Sarvam bookmarklet, not directly.'); }
+  try {
+    // Same origin: no CORS, no CSP, and the key never leaves this machine except to our own API.
+    const r = await fetch('/api/support/sarvam-usage', {
+      method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(p),
+    });
+    const j = await r.json();
+    const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (j.success) {
+      say('Saved ✓', 'ok', [
+        ['Date', j.day],
+        ['Sarvam billed', inr(j.total_cost)],
+        ['Balance', inr(p.balance)],
+      ], 'You can close this tab. Re-running it for the same day just updates the figure.');
+      history.replaceState(null, '', location.pathname);   // drop the payload from the address bar
+    } else {
+      say('Not saved', 'bad', [['Reason', j.error || r.status]],
+        j.error === 'bad key' ? 'The key in the bookmarklet does not match SARVAM_USAGE_INGEST_KEY on the server.' : '');
+    }
+  } catch (e) { say('Not saved', 'bad', [['Reason', e.message]], ''); }
+})();
+</script>
