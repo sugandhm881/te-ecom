@@ -2060,6 +2060,95 @@ function check(name, got, want) {
                          apm.includes("e.target.closest('.sci-pick')")],
                         [true, true, true, true, true, true, true, true, true, true, true]);
                 }
+                // A VARIANT WEARS ITS OWN PICTURE (user, 2026-09-09: "TE-UCSC combo shows 2 drops when he has
+                // only one drop in the combo", influencer order booking). The sync stamped
+                // product.images[0].src onto every variant and threw variant.image_id away. Shopify was right
+                // all along — TE-UCSC carries comboucscv2.png, TE-UCSC1M carries comboucsc1mv2.png — but the
+                // product lists the 1-Month artwork FIRST, so the Combo Pack row showed the 1-month picture,
+                // which has two dropper bottles. 19 of 31 active multi-variant products shared one image.
+                // AND a deleted variant lived forever: 27 of 198 rows were ghosts the picker still counted.
+                // ⚠️ The edge function is deployed separately from this repo and has drifted three times, so
+                // its source is kept HERE and these checks read the file that gets deployed.
+                {
+                    const fnPath = path.join(ROOT, 'supabase/functions/sync-shopify-products/index.ts');
+                    const fn = fs.existsSync(fnPath) ? fs.readFileSync(fnPath, 'utf8') : '';
+                    const inf = fs.readFileSync(path.join(ROOT, 'app/api/influencer_crm.js'), 'utf8');
+                    check('shopify sync: a variant gets its OWN image, the product first image only as fallback',
+                        [!!fn,
+                         fn.includes('const own = variant.image_id != null ? byId.get(String(variant.image_id)) : null;'),
+                         fn.includes('image_url: own || fallbackImage,'),
+                         // the old line is gone — it is what produced the two-drops picture
+                         !fn.includes('const imageUrl = product.images?.[0]?.src || null;'),
+                         // no extra API call needed: the ids arrive with the images already requested
+                         fn.includes('fields=id,title,variants,status,product_type,vendor,tags,images')],
+                        [true, true, true, true, true]);
+                    // Retirement must be impossible to trigger by accident: an outage returning an empty list,
+                    // or a run with a failed batch, would otherwise read as "the whole catalogue was deleted".
+                    check('shopify sync: deleted variants are retired, and only after a run that saw the catalogue',
+                        [fn.includes("removed_at: null,"),                                  // seen = alive again
+                         fn.includes('if (!upsertFailed && rows.length > 0 && totalSynced === rowsToUpsert.length)'),
+                         fn.includes('gone.length <= Math.max(20, Math.floor(liveIds.size / 3))'),   // sanity ceiling
+                         fn.includes('Refusing to retire'),
+                         // marked, never deleted — cost_price and old order names live on these rows
+                         fn.includes("update({ removed_at: new Date().toISOString() })"),
+                         !fn.includes(".delete()")],
+                        [true, true, true, true, true, true]);
+                    // The picker must not offer, or count the stock of, a variant Shopify no longer has —
+                    // but the NAME lookup still has to see them, or an order placed months ago shows a bare id.
+                    check('influencer picker: retired variants are hidden, yet still resolve to a name',
+                        [inf.includes(".is('removed_at', null)"),
+                         /select\('shopify_product_id, product_title, sku'\)/.test(inf) &&
+                           !/select\('shopify_product_id, product_title, sku'\)[^;]*removed_at/.test(inf)],
+                        [true, true]);
+                }
+                // A 1-HOUR CACHE WRITE COSTS 2x INPUT, NOT 1.25x (user, 2026-09-09: "claude api costing also
+                // come incorrect figure — yesterday used 2.55 usd but our dashboard shows less"). The call
+                // brain has always asked for the 1-hour cache (extended-cache-ttl beta, CLAUDE_CACHE_TTL
+                // defaults to '1h'), while both price tables charged the 5-minute rate. 08-Sep read $1.83
+                // against a console figure of $2.55; the same tokens at 2x come to $2.536 — a 0.6% residual.
+                // Over the ledger's whole life it had under-reported $4.64 of $16.08, or 29%.
+                // The TTL is STORED on the row rather than inferred, because it is an env var: a future '5m'
+                // would otherwise misprice every historical row in the other direction.
+                {
+                    const cu = require(path.join(ROOT, 'app/api/claude_usage.js'));
+                    const vbc = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
+                    const acc = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_costs.js'), 'utf8');
+                    const cus = fs.readFileSync(path.join(ROOT, 'app/api/claude_usage.js'), 'utf8');
+                    // Sep 8's real call_brain totals, priced both ways.
+                    const day = { tokens_in: 248100, tokens_out: 16205, cache_read: 888121, cache_write: 936500 };
+                    const oneHour = cu.usdFor('claude-haiku-4-5-20251001', { ...day, cache_ttl: '1h' });
+                    const fiveMin = cu.usdFor('claude-haiku-4-5-20251001', { ...day, cache_ttl: '5m' });
+                    check('claude cost: a 1h cache write bills at 2x input, a 5m one at 1.25x',
+                        [cu.CACHE_WRITE_MULT('1h') === 2.0, cu.CACHE_WRITE_MULT('5m') === 1.25,
+                         cu.CACHE_WRITE_MULT(null) === 1.25,                    // unknown = the cheap one, never the dear one
+                         Math.abs(oneHour - 2.2909) < 0.002,                    // …and 08-Sep's call_brain reconciles
+                         Math.abs(oneHour - fiveMin - 0.7024) < 0.002,          // the whole gap is the cache write
+                         // the compact {in,out,cr,cw,ttl} shape the bridge tallies must price identically
+                         Math.abs(cu.usdFor('claude-haiku-4-5-20251001',
+                             { in: day.tokens_in, out: day.tokens_out, cr: day.cache_read, cw: day.cache_write, ttl: '1h' }) - oneHour) < 1e-9,
+                         // the TTL reaches the ledger from the one place that knows it
+                         vbc.includes('null, CACHE_TTL());'),
+                         cus.includes('cache_ttl: (usage.cache_creation_input_tokens ?? usage.cw ?? 0)'),
+                         acc.includes('cw: u.cache_write, ttl: u.cache_ttl')],
+                        [true, true, true, true, true, true, true, true, true]);
+                    // TWO PRICE TABLES IS TWO CHANCES TO BE WRONG, and they had already drifted once
+                    // (Sonnet 5 at $3/$15 and Opus at $15/$75 survived in one of them for days).
+                    check('claude cost: one price table, imported not copied',
+                        [acc.includes("const { usdFor } = require('./claude_usage');"),
+                         !acc.includes('const CLAUDE_PRICES = ['),
+                         !/p\.in \* 1\.25/.test(acc), !/p\.in \* 1\.25/.test(cus)],
+                        [true, true, true, true]);
+                    // .limit(20000) IS A LIE: PostgREST caps at 1,000 and says nothing. The old read asked
+                    // for 20,000 and got 1,000 of 3,222 rows — any range past ~2 days was priced from a
+                    // third of itself, and with no .order() the third was arbitrary.
+                    check('claude cost: the ledger is paged, not silently capped at one page',
+                        [acc.includes('async function loadClaudeLedger('),
+                         acc.includes(".order('id', { ascending: true })"),
+                         acc.includes('.range(page * 1000, page * 1000 + 999)'),
+                         acc.includes('if (!data || data.length < 1000) break;'),
+                         !acc.includes('.limit(20000)')],
+                        [true, true, true, true, true]);
+                }
                 // A COUNT WITHOUT A DENOMINATOR SAYS NOTHING (user, 2026-09-08: "add % in outcome").
                 // "No answer 40" and "No answer 40 · 37%" are different facts, and the funnel above
                 // already read the second way — two cards side by side in different styles was the
@@ -2364,7 +2453,8 @@ function check(name, got, want) {
             // the stale price table (Sonnet 5 at $3/$15, Opus at $15/$75) was corrected.
             check('claude usage ledger: every Anthropic call logged (brain, opening, summarizer, learning, audits); statement adds a platform line; list prices correct',
                 [fs.existsSync(path.join(ROOT, 'app/api/claude_usage.js')),
-                 /\[\/sonnet-5\/, \{ in: 2, out: 10 \}\]/.test(cc) && /\[\/opus\/, \{ in: 5, out: 25 \}\]/.test(cc),
+                 (() => { const cus = fs.readFileSync(path.join(ROOT, 'app/api/claude_usage.js'), 'utf8');   // ONE table, and it lives here now
+                    return /\[\/sonnet-5\/i, \{ in: 2, out: 10 \}\]/.test(cus) && /\[\/opus\/i, \{ in: 5, out: 25 \}\]/.test(cus); })(),
                  /from\('claude_usage_ecom'\)/.test(cc), /platform_breakdown/.test(cc),
                  (() => { const b = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_bridge.js'), 'utf8');
                     return /logClaudeUsage\('call_brain'/.test(b) && /source: 'summarizer'/.test(b); })(),

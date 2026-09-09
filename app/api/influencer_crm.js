@@ -627,10 +627,16 @@ router.get('/inf/products', async (req, res) => {
     try {
         const { data, error } = await supabase.from('shopify_products')
             .select('id, shopify_product_id, shopify_variant_id, product_title, variant_title, sku, price, compare_at_price, product_type, tags, image_url, inventory_quantity, product_status')
-            .eq('product_status', 'active').order('product_title');
+            .eq('product_status', 'active')
+            // …and not one Shopify has since deleted. The sync used to keep those rows forever, so the
+            // picker was offering — and summing the stock of — variants that no longer exist (2026-09-09).
+            .is('removed_at', null)
+            .order('product_title');
         if (error) throw new Error(error.message);
         // Title lookup across ALL statuses so a previously-saved product_id that's now archived / drafted /
         // filtered-out still resolves to a name in the picker chips (instead of showing the raw numeric id).
+        // the NAME lookup deliberately still sees retired rows — a saved product id from an order placed
+        // months ago must still resolve to a name, not a bare number
         const { data: allNames } = await supabase.from('shopify_products').select('shopify_product_id, product_title, sku');
         const names = {};
         (allNames || []).forEach(p => { const k = String(p.shopify_product_id || ''); if (k && !names[k]) names[k] = p.product_title || (p.sku ? 'SKU ' + p.sku : null); });

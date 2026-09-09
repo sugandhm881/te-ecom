@@ -576,7 +576,9 @@ async function claudeChatStream(history, systemPrompt, onSentence, signal, model
     // …and into the cross-system ledger, so the cost statement can reconcile with
     // Anthropic's own console instead of seeing only in-call tokens (2026-09-02).
     if (tally) require('./claude_usage').logClaudeUsage('call_brain', model,
-        { in: lastIn, out: turnOut, cr: lastCr, cw: lastCw }, null);
+        // the TTL travels with the row: a 1-hour cache write bills at 2x input, a 5-minute one at
+        // 1.25x, and CLAUDE_CACHE_TTL can change under us
+        { in: lastIn, out: turnOut, cr: lastCr, cw: lastCw }, null, CACHE_TTL());
     return dr.finish();
 }
 

@@ -1231,6 +1231,73 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### The Anthropic bill was 29% light, and it was the cache TTL (2026-09-09)
+
+User: *"claude api costing also come incorrect figure — yesterday used 2.55 usd but in our dashboard cost show less."*
+The console said **$2.55** for 08-Sep; the statement said **$1.83**.
+
+**A 1-hour cache write bills at 2x input, not 1.25x.** The call brain has always asked for the extended
+cache — `CLAUDE_CACHE_TTL` defaults to `'1h'` and the request carries the
+`extended-cache-ttl-2025-04-11` beta — while **both** price tables charged the 5-minute rate. On 08-Sep
+the brain wrote 936,500 cache tokens: $1.17 at 1.25x, $1.87 at 2x. Re-priced, the day comes to
+**$2.5357** against the console's $2.55 — a 0.6% residual, i.e. right. Across the ledger's life so far
+(02→08 Sep) it had under-reported **$4.64 of $16.08, or 29%**.
+
+The multiplier now follows a TTL **stored on the row** (`claude_usage_ecom.cache_ttl`, migration
+`20260909_claude_usage_cache_ttl.sql`, 1,181 rows backfilled to `1h` — every cache write in the table
+is `call_brain`, and the bridge has asked for 1h since the ledger was created). Storing rather than
+inferring, because it is an env var: a future `'5m'` would otherwise misprice every historical row in
+the other direction.
+
+⚠️ **`.limit(20000)` IS A LIE, and this is the second time it has bitten.** PostgREST caps every
+response at 1,000 rows and reports nothing. The statement's ledger read asked for 20,000 and got
+**1,000 of 3,222** — so any range past about two days was priced from a third of itself, and with no
+`.order()` the third was arbitrary. Now paged with `.order('id')` + `.range()`, like `loadCalls()`.
+Today's figure had looked nearly right only because 08-Sep alone is 545 rows.
+
+**One price table, not two.** `ai_call_costs.js` carried its own copy of the table AND the arithmetic;
+they had already drifted once (Sonnet 5 at $3/$15 and Opus at $15/$75 survived in one of them for
+days), and the cache-write multiplier was wrong in both at once. It imports `usdFor()` now.
+
+### TE-UCSC showed two dropper bottles: every variant wore the product's first image (2026-09-09)
+
+User, from the influencer order-booking picker: *"TE-UCSC combo shows 2 drops when he has only one drop
+in the combo."* **Shopify was right all along** — TE-UCSC (Combo Pack) carries `comboucscv2.png` and
+TE-UCSC1M (1 Month Pack Combo) carries `comboucsc1mv2.png`, each attached to its own variant. Nothing
+needed correcting in Shopify; correcting it there would have been overwritten by the next sync.
+
+The damage was on the way in. `sync-shopify-products` did:
+
+```js
+const imageUrl = product.images?.[0]?.src || null;        // the PRODUCT's first image
+for (const variant of product.variants || []) { …, image_url: imageUrl, … }
+```
+
+— stamping one image onto every variant and throwing `variant.image_id` away. This product lists the
+1-Month artwork first, and that photo has two dropper bottles, so the Combo Pack row wore it. **19 of
+31 active multi-variant products had all their variants sharing one image.** The fix reads
+`variant.image_id` against the `images` array already in the response (no extra API call), falling back
+to the product's first image only when a variant genuinely has none. After one run: **87 variants now
+carry their own picture.**
+
+**And a deleted variant lived forever.** The sync only ever upserted, so a variant removed in Shopify
+kept its row — **27 of 198 were ghosts**, two of them (`TE-2SAS1`, `TE-BDR2`) on this very product,
+counted into the picker's stock total. Rows a completed run does not see are now marked
+`shopify_products.removed_at` (migration `20260909_shopify_products_removed_at.sql`); a variant that
+reappears has it cleared. **Marked, never deleted** — `cost_price` and old orders' product names live on
+those rows, so the picker filters `removed_at is null` while the name lookup deliberately still sees
+them (otherwise an order from months ago renders as a bare numeric id).
+
+⚠️ Two guards make the retirement safe to run unattended: it happens **only** after a run where every
+upsert batch succeeded and the catalogue was non-empty, and it refuses to retire more than a third of
+the catalogue at once — an outage returning an empty list must never read as "everything was deleted".
+
+⚠️ **The edge function's source now lives in the repo** at `supabase/functions/sync-shopify-products/index.ts`
+and the selftests read that file. It had existed only in the Supabase dashboard until now, which is
+exactly how the KwikShip and RapidShyp parsers drifted three times. Edit there, then deploy.
+
+Selftests **555 passing**.
+
 ### Call Insights reads like the rest of the dashboard, and every rate has its denominator (2026-09-08)
 
 **"Nothing changed in the UI/UX."** The user was right, and the reason is a trap worth naming: the

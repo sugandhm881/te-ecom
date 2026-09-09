@@ -19,16 +19,11 @@ const axios = require('axios');
 const { supabase } = require('../supabase');
 
 const USD_INR = () => Number(process.env.COST_USD_INR || 88);
-// Anthropic published list prices, USD per MILLION tokens (input / output).
-// Verified against Anthropic's published prices 2026-09-02. The previous table carried a stale
-// prior (Sonnet 5 at $3/$15, Opus at $15/$75) which mispriced every escalated turn.
-const CLAUDE_PRICES = [
-    [/haiku-4-5/, { in: 1, out: 5 }],
-    [/sonnet-5/, { in: 2, out: 10 }],
-    [/sonnet-4-6/, { in: 3, out: 15 }],
-    [/fable-5|mythos-5/, { in: 10, out: 50 }],
-    [/opus/, { in: 5, out: 25 }],
-];
+// THE PRICE TABLE LIVES IN claude_usage.js, AND ONLY THERE. This file used to carry its own copy of
+// both the table and the arithmetic; they drifted — a stale prior (Sonnet 5 at $3/$15, Opus at
+// $15/$75) mispriced every escalated turn for days before anyone compared them, and the cache-write
+// multiplier was wrong in both at once. Two definitions of one price is two chances to be wrong.
+const { usdFor } = require('./claude_usage');
 // CALIBRATED against the user's own Sarvam usage export (02-Sep-2026, ₹75.20 total day):
 //   · TTS ₹3.00/1k chars — EXACT match (22,084 chars billed ₹66.25 vs our measured ~21k+openings)
 //   · STT — the ₹30/hr list bills PROCESSED AUDIO, not connection time: actual ₹8.69 for ~42
@@ -51,14 +46,30 @@ const FIXED_MONTHLY = [
 ];
 const r2 = (n) => Math.round(n * 100) / 100;
 
-function claudeCostINR(meta) {
-    // meta = { '<model>': {in,out,cr,cw,turns} } → ₹ at list price
-    let usd = 0;
-    for (const [model, u] of Object.entries(meta || {})) {
-        const p = (CLAUDE_PRICES.find(([rx]) => rx.test(model)) || [null, { in: 3, out: 15 }])[1];
-        usd += (u.in || 0) * p.in / 1e6 + (u.out || 0) * p.out / 1e6
-             + (u.cr || 0) * p.in * 0.1 / 1e6 + (u.cw || 0) * p.in * 1.25 / 1e6;
+// PAGED, BECAUSE A BIG LIMIT IS A LIE. PostgREST caps every response at 1,000 rows and reports
+// nothing — the old read asked for twenty thousand and got 1,000 of the 3,222 rows, so any range
+// past about two days was priced from a third of itself. Worse, it had no .order(), so WHICH third
+// was arbitrary. Same shape as loadCalls() in ai_call_insights.js: walk in 1,000-row pages ordered by
+// a unique key until a short page comes back.
+async function loadClaudeLedger(fromIso, toIso, { cap = 60000 } = {}) {
+    const out = [];
+    for (let page = 0; page * 1000 < cap; page++) {
+        const { data, error } = await supabase.from('claude_usage_ecom')
+            .select('source, model, tokens_in, tokens_out, cache_read, cache_write, cache_ttl')
+            .gte('at', fromIso).lte('at', toIso)
+            .order('id', { ascending: true })
+            .range(page * 1000, page * 1000 + 999);
+        if (error) { console.warn('[cost] claude ledger read failed:', error.message); break; }
+        out.push(...(data || []));
+        if (!data || data.length < 1000) break;
     }
+    return { data: out };
+}
+
+function claudeCostINR(meta) {
+    // meta = { '<model>': {in,out,cr,cw,ttl,turns} } → ₹ at list price
+    let usd = 0;
+    for (const [model, u] of Object.entries(meta || {})) usd += usdFor(model, u);
     return usd * USD_INR();
 }
 
@@ -174,14 +185,13 @@ router.get('/support/ai-call-costs', async (req, res) => {
             // brain plus the work that is not attributable to one call: summaries, agent-learning
             // reviews, the Call Insights audit. Without this the statement showed only ~half of
             // what the Anthropic console billed (user, 2026-09-02).
-            supabase.from('claude_usage_ecom').select('source, model, tokens_in, tokens_out, cache_read, cache_write')
-                .gte('at', fromIso).lte('at', toIso).limit(20000),
+            loadClaudeLedger(fromIso, toIso),
         ]);
         if (error) throw new Error('call log read failed: ' + error.message);
         const platform = {};
         let platformInr = 0, brainLedgerInr = 0;
         for (const u of (ledger || [])) {
-            const inr = claudeCostINR({ [u.model]: { in: u.tokens_in, out: u.tokens_out, cr: u.cache_read, cw: u.cache_write } });
+            const inr = claudeCostINR({ [u.model]: { in: u.tokens_in, out: u.tokens_out, cr: u.cache_read, cw: u.cache_write, ttl: u.cache_ttl } });
             if (u.source === 'call_brain' || u.source === 'call_opening') { brainLedgerInr += inr; continue; }
             platform[u.source] = r2((platform[u.source] || 0) + inr);
             platformInr += inr;
