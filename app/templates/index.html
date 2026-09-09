@@ -262,6 +262,76 @@
     /* NDR-cohort split bar under a KPI headline. Real CSS, NOT Tailwind utilities — tailwind.css here is
        PREBUILT, so arbitrary values (text-[10px], h-[6px]) resolve to nothing and would silently collapse
        this to an unstyled row. */
+    /* The compare switch. Real CSS, because a Tailwind peer-checked switch needs arbitrary values and
+       this stylesheet is PREBUILT — it would have rendered as a naked checkbox. */
+    /* ── Label Splitter — the Delivery Performance language, in real CSS ── */
+    #label-splitter-view { background:
+        radial-gradient(1200px 400px at 100% -5%, rgba(249,168,37,.07), transparent 60%),
+        radial-gradient(900px 360px at -5% 0%, rgba(99,102,241,.05), transparent 55%),
+        #f8fafc; }
+    /* The wordmark is ~3.3:1, so it sits beside the title with a hairline divider rather than in a
+       square tile. Height-constrained, width auto, so the aspect can never be squashed. */
+    .ls-brand { display:block; height:26px; width:auto; flex:none; }
+    .ls-brand-rule { display:block; width:1px; height:30px; background:#e2e8f0; flex:none; }
+    .ls-ratio-chip { display:inline-flex; align-items:center; padding:5px 11px; border-radius:999px;
+        background:#eef2ff; color:#4338ca; font-size:12px; font-weight:700; letter-spacing:.02em; }
+    .ls-drop { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+        border:1.5px dashed #cbd5e1; border-radius:14px; padding:44px 24px; cursor:pointer;
+        transition:border-color .15s ease, background .15s ease, transform .15s ease; text-align:center; }
+    .ls-drop:hover, .ls-drop.is-over { border-color:#6366f1; background:#f5f7ff; }
+    .ls-drop.is-over { transform:scale(1.005); }
+    .ls-drop:focus-visible { outline:2px solid #4f46e5; outline-offset:3px; }
+    .ls-drop-icon { display:flex; align-items:center; justify-content:center; width:46px; height:46px;
+        border-radius:13px; background:#eef2ff; color:#4f46e5; margin-bottom:12px; }
+    .ls-drop-icon svg { width:22px; height:22px; }
+    .ls-drop-title { font-size:15px; font-weight:600; color:#334155; }
+    .ls-drop-sub { font-size:13px; color:#94a3b8; }
+    .ls-drop-sub b { color:#4f46e5; font-weight:600; }
+    .ls-row { display:flex; align-items:center; gap:12px; padding:10px 14px; background:#fff;
+        border:1px solid #e9edf3; border-radius:11px; }
+    .ls-row-icon { flex:none; width:32px; height:32px; border-radius:8px; background:#fef2f2; color:#e11d48;
+        display:flex; align-items:center; justify-content:center; }
+    .ls-row-icon svg { width:16px; height:16px; }
+    .ls-row-name { flex:1; min-width:0; font-size:13px; font-weight:500; color:#334155;
+        overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .ls-row-size { flex:none; font-size:12px; color:#94a3b8; font-variant-numeric:tabular-nums; }
+    .ls-row-x { flex:none; width:26px; height:26px; border-radius:7px; border:none; background:transparent;
+        color:#94a3b8; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:all .12s; }
+    .ls-row-x:hover { background:#fef2f2; color:#e11d48; }
+    .ls-row-x svg { width:14px; height:14px; }
+    /* The two download cards. Real CSS — this sheet is prebuilt, so a Tailwind-utility card would
+       render as unstyled text. Deliberately equal in weight: neither the label nor the invoice is the
+       secondary action, they go to two different people. */
+    .ls-dl-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:12px; }
+    .ls-dl { display:flex; align-items:center; gap:13px; padding:15px 17px; border-radius:13px;
+        border:1px solid #e9edf3; background:#fff; text-decoration:none; cursor:pointer;
+        transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
+    .ls-dl:hover { transform:translateY(-2px); box-shadow:0 12px 26px -16px rgba(15,23,42,.35); }
+    .ls-dl-icon { flex:none; width:40px; height:40px; border-radius:11px; display:flex;
+        align-items:center; justify-content:center; }
+    .ls-dl-icon svg { width:19px; height:19px; }
+    .ls-dl-text { display:flex; flex-direction:column; min-width:0; }
+    .ls-dl-text b { font-size:14px; font-weight:600; color:#1e293b; line-height:1.3; }
+    .ls-dl-text em { font-style:normal; font-size:11.5px; color:#94a3b8; margin-top:2px; }
+    /* Indigo for the packing bench, emerald for accounts — two destinations, two colours, so the
+       right button is picked without reading it twice. */
+    .ls-dl.is-label:hover { border-color:#c7d2fe; }
+    .ls-dl.is-label .ls-dl-icon { background:#eef2ff; color:#4f46e5; }
+    .ls-dl.is-invoice:hover { border-color:#bbf7d0; }
+    .ls-dl.is-invoice .ls-dl-icon { background:#dcfce7; color:#15803d; }
+    .ls-pill { flex:none; font-size:11px; font-weight:700; padding:3px 9px; border-radius:999px; }
+    .ls-pill.ok { background:#dcfce7; color:#15803d; } .ls-pill.bad { background:#ffe4e6; color:#be123c; }
+    .dp-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; user-select:none; }
+    .dp-switch input { position:absolute; opacity:0; width:0; height:0; }
+    .dp-switch-track { position:relative; width:38px; height:21px; border-radius:999px; background:#cbd5e1;
+                       transition:background .18s ease; flex:none; }
+    .dp-switch-knob { position:absolute; top:2.5px; left:2.5px; width:16px; height:16px; border-radius:999px;
+                      background:#fff; box-shadow:0 1px 3px rgba(15,23,42,.3); transition:transform .18s ease; }
+    .dp-switch input:checked + .dp-switch-track { background:#4f46e5; }
+    .dp-switch input:checked + .dp-switch-track .dp-switch-knob { transform:translateX(17px); }
+    .dp-switch input:focus-visible + .dp-switch-track { outline:2px solid #4f46e5; outline-offset:2px; }
+    .dp-switch-label { font-size:13px; font-weight:600; color:#475569; }
+    .dp-switch input:checked ~ .dp-switch-label { color:#4f46e5; }
     .dp-splitbar { display:flex; width:100%; height:6px; border-radius:999px; overflow:hidden; background:#f1f5f9; }
     .dp-splitbar .dp-seg { display:block; height:100%; }
     .dp-splitbar .dp-seg + .dp-seg { box-shadow:inset 1px 0 0 rgba(255,255,255,.75); }
@@ -1019,6 +1089,10 @@
                     <a href="#" id="nav-amazon-fba" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9"></path></svg>
                         <span class="ml-3 text-sm font-medium">Amazon FBA</span>
+                    </a>
+                    <a href="#" id="nav-label-splitter" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z"></path></svg>
+                        <span class="ml-3 text-sm font-medium">Label Splitter</span>
                     </a>
                 </div>
             </div>
@@ -2925,6 +2999,55 @@
              recon workspaces. Its charges are COMPUTED from the rate card, never read from an invoice. -->
         <div id="kwikship-recon-view" class="view-hidden"></div>
 
+        <!-- FLIPKART LABEL SPLITTER. One page carries a shipping label and a tax invoice stacked; this
+             cuts every page in two and returns a ZIP. Ported from a standalone Flask app so there is no
+             second runtime to keep alive on the VPS (user, 2026-09-09). -->
+        <div id="label-splitter-view" class="view-hidden">
+          <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">
+            <div class="flex items-center gap-3">
+              <!-- Flipkart's OWN wordmark, from Wikimedia Commons (Flipkart logo (2026).svg), served
+                   from our own /static — not hotlinked from their CDN, which would be an external
+                   request from an internal tool that can 404, be blocked or leak a referrer.
+                   Public domain there: the mark is below the threshold of originality. It remains a
+                   TRADEMARK, used here only to identify whose labels this tool cuts — which is also why
+                   it earns its place: the 55/45 crop fits Flipkart's page layout and no one else's, so
+                   an Amazon or Meesho PDF put through it comes out sliced in the wrong place.
+                   ⚠️ Replaced two hand-drawn approximations that were simply wrong (the first read as a
+                   padlock). Do not redraw this — replace the file. -->
+              <img class="ls-brand" src="/static/assets/flipkart-logo.svg" alt="Flipkart" height="26">
+              <span class="ls-brand-rule" aria-hidden="true"></span>
+              <div>
+                <h1 class="text-xl font-bold text-slate-800">Label Splitter</h1>
+                <p class="text-sm text-slate-400 mt-0.5">Flipkart PDFs — the shipping label and the tax invoice, cut apart into two printable stacks</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="ls-ratio-chip" title="Fixed cut at 55% of the page height from the bottom: the shipping label is the top 45%, the tax invoice the bottom 55%">55 / 45 split</span>
+              <button id="ls-clear" class="filter-btn" style="display:none">Clear</button>
+            </div>
+          </header>
+          <div class="p-8 space-y-6">
+            <div class="card p-6">
+              <label id="ls-drop" class="ls-drop" tabindex="0">
+                <input id="ls-input" type="file" accept="application/pdf,.pdf" multiple hidden>
+                <span class="ls-drop-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </span>
+                <span class="ls-drop-title">Drop Flipkart label PDFs here</span>
+                <span class="ls-drop-sub">or <b>browse</b> — several at once is fine</span>
+              </label>
+              <div id="ls-files" class="mt-4 space-y-2"></div>
+              <div id="ls-error" class="hidden mt-4 rounded-lg bg-rose-50 border border-rose-100 px-3 py-2 text-sm text-rose-700"></div>
+              <button id="ls-go" class="filter-btn-primary w-full mt-5" disabled>Split labels</button>
+              <p class="text-xs text-slate-400 mt-3 leading-relaxed">
+                Each page is cut once, at <b class="text-slate-600">55% of the page height from the bottom</b>: everything
+                above the line becomes the shipping label, everything below it becomes the tax invoice. The page content is never re-encoded —
+                only the crop box is set — so print quality and barcodes are untouched.
+              </p>
+            </div>
+            <div id="ls-result"></div>
+          </div>
+        </div>
         <div id="delivery-perf-view" class="view-hidden">
           <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex items-center justify-between flex-wrap gap-3">
             <div>
@@ -2979,6 +3102,19 @@
                 <input type="date" id="dp-from" class="px-2 py-1.5 text-sm border border-slate-200 rounded-lg bg-white text-slate-700">
                 <input type="date" id="dp-to" class="px-2 py-1.5 text-sm border border-slate-200 rounded-lg bg-white text-slate-700">
                 <button id="dp-apply" class="px-3 py-1.5 text-sm bg-slate-800 text-white rounded-lg hover:bg-slate-700">Apply</button>
+              </div>
+              <!-- COMPARE AGAINST A PERIOD YOU CHOOSE (user, 2026-09-09). Off = the deltas keep measuring
+                   against the immediately preceding equal-length window, which is what they always did.
+                   On = pick any two dates, and every delta on the page is measured against those. -->
+              <label id="dp-cmp-switch" class="dp-switch" title="Compare this range against a period you choose, instead of the one immediately before it">
+                <input type="checkbox" id="dp-cmp-on"><span class="dp-switch-track"><span class="dp-switch-knob"></span></span>
+                <span class="dp-switch-label">Compare</span>
+              </label>
+              <div id="dp-cmp-custom" class="hidden items-center gap-2">
+                <span class="text-xs font-semibold text-indigo-500 uppercase tracking-wide">vs</span>
+                <input type="date" id="dp-cmp-from" class="px-2 py-1.5 text-sm border border-indigo-200 rounded-lg bg-white text-slate-700">
+                <input type="date" id="dp-cmp-to" class="px-2 py-1.5 text-sm border border-indigo-200 rounded-lg bg-white text-slate-700">
+                <button id="dp-cmp-apply" class="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">Apply</button>
               </div>
             </div>
           </header>
@@ -4012,7 +4148,7 @@
      ONLY thing that makes a browser re-fetch. Forgetting it means the change ships and nobody sees it:
      on 2026-08-13 a whole session of Last-Mile + Purchase Order work was invisible for exactly this
      reason, and it looks identical to "the fix didn't work". -->
-<script src="/static/app.js?v=2026-09-09-statement"></script>
+<script src="/static/app.js?v=2026-09-09-splitter-two"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

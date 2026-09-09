@@ -1231,6 +1231,148 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### Undelivered works the freshest failure first — NDR1 on top (2026-09-09)
+
+User: *"undelivered tab sorting with NDR attempt, NDR1 on top and after that NDR2, NDR3 — prioritise
+this."* The queue was ordered confirmed-then-oldest, which buried every fresh NDR under a fortnight of
+parcels nobody could save. A parcel on its **first** failed attempt is the one still worth a call: the
+courier tries again tomorrow and one conversation usually saves it; by the third failure the same call
+rarely changes the outcome.
+
+Sorted on `shipment_journey_ecom.ndr_count`, **not `attempts`** — attempts counts every
+out-for-delivery scan, ndr_count only the ones that FAILED, and it is the failures that decide urgency
+(a parcel out for delivery right now has attempts 2, ndr_count 1). Populated on all three couriers.
+
+⚠️ Two things that would each have broken it silently. The sort must run **after** the journey overlay,
+which is where `ndr_attempt` arrives — sorting before it reads undefined on every row and does nothing.
+And a shipment with **no** NDR data sorts **last**, not as zero: unknown is not "no failures yet", and
+treating it as 0 would push real NDR1 parcels below parcels we know nothing about.
+
+A green/amber/rose **NDR column** was added so the ordering is legible rather than mysterious, and is
+sortable for anyone who wants the worst cases first. ⚠️ It sorts NUMERICALLY: as a string, 10 came
+before 2 and blanks came first — the one ordering a queue sorted by failure count must never produce.
+
+### The FBA restock plan was forecasting from a third of the demand (2026-09-09)
+
+User: *"on FBA forecasting dashboard need to overall sale FBM & FBA and then calc DRR."*
+`fba_sku_velocity` filters `fulfillment_channel='AFN'`, so the plan only ever saw Amazon's FBA orders:
+
+| last 30 days | units | ASINs |
+|---|---|---|
+| FBM (MFN) | **912** | 39 |
+| FBA (AFN) | 436 | 4 |
+| **total** | **1,348** | **39** |
+
+DRR was built on **32%** of Amazon demand, and the plan could not see **35 of the 39 selling ASINs at
+all** — a product doing well on FBM looked like a product with no demand and was never restocked. New
+`amazon_sku_velocity` RPC (migration `20260909_amazon_sku_velocity.sql`) returns both channels combined
+AND kept apart; the table shows **DRR / day** with `FBA n · FBM n` beneath it, and the CSV carries the
+same columns. The plan went from **4 ASINs to 41**.
+
+⚠️ **This changes what the page recommends, and one of those recommendations needs a human.** The top row
+became *"send 719"* for a product with **457 FBM units and zero FBA sales**. Folding FBM into DRR is
+right — it is real demand for the same product — but where that demand is already met from our own
+warehouse, shipping it into FBA MOVES stock rather than adding sales. Those rows now flag themselves in
+the action text rather than issuing the number silently.
+
+### Delivery Performance can compare against a period you choose (2026-09-09)
+
+User: *"give a compare switch button, and when that button is on a compare custom date should open and
+the dashboard comparison should be as the selected compare date."* The Δ pills always measured against
+the immediately preceding equal-length window — the right question most days, but *"this month vs the
+same month last year"* is not answerable by an offset, which is why they could not be trusted for
+anything seasonal. `cmp_from`/`cmp_to` override it; the default is unchanged.
+
+Design details that matter: the boxes **pre-fill with the window it would have used anyway**, so
+flipping the switch shows the same numbers until you change the dates — the switch reveals the control,
+it does not move the goalposts. The header names the window actually used, and the pills stop saying
+*"previous period"* over one you chose. And a custom window can be a **different length**, which makes
+the Δ a different claim — the page says *"20d vs 9d, so the Δ is not like-for-like"* rather than
+implying otherwise.
+
+⚠️ `delivery_reports.js` and `tests/selftest.js` are **CRLF** while the rest of the repo is LF. A
+multi-line edit written with \n matches NOTHING there: it silently applied half of this change and left
+`compareBasis` referenced but never declared. Every multi-line edit to those two files has to convert
+line endings first.
+
+### Flipkart Label Splitter, ported off Python into the dashboard (2026-09-09)
+
+User: *"integrate this in our dashboard… make sure this should not run on python, it runs with our
+project architecture."* A Flipkart shipping PDF stacks the shipping label and the tax invoice on one
+page. The original was **Flask + pypdf on port 5050** with its own React page and a health-poll — a
+second runtime to install, supervise, restart and secure on the VPS, for one button. Same arithmetic in
+`pdf-lib` inside the dashboard: already authenticated, already behind the permission gate, and no
+separate service that can be "offline".
+
+**Permission-based** (`label-splitter`, grantable on its own so warehouse staff can hold the tool
+without any operations dashboard). Listed explicitly in `_VIEW_PERMS` — an unlisted `/api` path falls
+through to *any* signed-in user. ⚠️ **Two new dependencies, `pdf-lib` and `jszip`** — the VPS needs
+`npm install` on this pull, not just a restart. (jszip was dropped again the same day, see below.)
+
+⚠️ **THE CUT WAS WRONG FIRST TIME, AND THE TESTS DID NOT CATCH IT.** A PDF's origin is bottom-left, so
+pypdf's `ratio = 0.55` means "cut at 55% measured UP FROM THE BOTTOM" — the shipping label is the top
+**45%**, the invoice the bottom **55%**. The Flask UI called that *"55/45 — if the shipping label is
+taller"*, which reads like the opposite; I trusted the label over the maths and cut at the top 55%.
+Every source-level assertion still passed. The fix: the constant is `SPLIT_AT_FROM_BOTTOM`, named for
+what it IS, the two percentages the page shows are derived from it, and there is now a test that **runs
+the splitter and reads the crop boxes back** against pypdf's arithmetic written out longhand —
+measurement, not a grep of the source.
+
+**Two PDFs, not a ZIP** (user, same day: *"instead of zip download give 2 option of download invoice and
+label"*). A ZIP had to be extracted before anything could be printed; the warehouse prints every label
+in one go and hands every invoice to accounts in one go. Merged into two stacks with page order
+preserved, so they line up order for order — one Ctrl+P each instead of sixty. Object URLs are released
+between batches; sixty files then sixty more would otherwise pin every PDF in memory.
+
+Other details: CropBox only, so nothing is re-encoded and barcodes are untouched; one bad PDF fails
+alone and is named on screen rather than losing the batch; filenames go through an **allowlist** before
+becoming download names. ⚠️ That allowlist shipped as `/.{2,}/` instead of `/\.{2,}/` — matching ANY
+two characters, so every file came out called "label". Backslashes eaten in transit, for the third time
+in one day. Caught by testing the OUTPUT, not the code.
+
+**The Flipkart mark is the real one, from Wikimedia Commons**, served from our own `/static`. ⚠️ It
+replaced two hand-drawn approximations that were simply wrong — the first read as a padlock, because
+the bag handle sat inside the bag body. **Do not redraw it; replace the file.** Not hotlinked from
+Flipkart's CDN: that is an external request from an internal tool that can 404, be blocked or leak a
+referrer. It earns its place beyond decoration — the 55/45 crop fits Flipkart's page layout and no one
+else's, so an Amazon or Meesho PDF put through it comes out sliced in the wrong place.
+
+Selftests **576 passing**.
+
+### TE-ABD1: physical 28 against a system 2, and a wrong answer corrected (2026-09-09, OPEN)
+
+User: *"ABD1 sale return and how this difference happen."* Investigated; **not closed**, and the first
+answer given was wrong.
+
+**What is solid.** The gap is not a drift, it is one window. Between the 04 Sep and 07 Sep counts the
+system fell **89 → 2 (−87)** while the shelf fell **94 → 30 (−64)**: 23 bottles deducted that never
+physically left. Everything before that was ±5 noise, and 08 Sep only moved −2/−2. **EasyEcom's
+deduction was correct** — the parcels dispatched in that window carry exactly 87 bottles, and all of
+them have onward courier scans, so the goods did leave.
+
+TE-ABD1 is consumed almost entirely through **multi-packs**: over 30 days TE-ABD4 sold 108 × 4 = 432
+bottles, TE-ABD2 48 × 2 = 96, singles only 31 — 559 of the snapshot's 565. TE-ABD2/3/4 hold no stock of
+their own; they deduct the base SKU.
+
+⚠️ **THE ANSWER I GAVE FIRST WAS WRONG, AND THE REASON IS WORTH KEEPING.** I reported *"50 bottles
+returned since 25 Aug, only 27 booked in"* and concluded returns were not being put away. **`rto_at` is
+stamped when RTO STARTS, not when the parcel arrives** — across the database, 204 rows sit at
+`rto_in_transit` and 165 at `RTO_INT` while carrying an `rto_at`. The true figure for this family is
+**14 bottles actually received back** against **27 booked as PutAway** — if anything returns are
+over-booked, which does not explain a physical surplus at all. The conclusion was withdrawn.
+
+**Still open: where those 23 bottles physically are.** Two candidates untested — parcels marked
+dispatched whose contents were never picked, and a picking substitution where 4-packs went out as
+pre-made kits while EasyEcom drew 4 loose bottles from a bin already drawn down.
+
+⚠️ **Our database cannot answer this, and that is the real finding.** `inventory_movements_ecom` carries
+only `PutAway`, `GRN` and `Status to Status` — **there is no sale or return leg in it**. Every statement
+above about what shipped had to be reconstructed from courier scans. Settling it needs EasyEcom's own
+stock ledger for the SKU; we hold API credentials but do not mirror the outbound side.
+
+**Currently on the road back for this family: 11 parcels, 36 bottles** (32 in transit, 4 out for
+delivery to us) — almost all TE-ABD4 four-packs. Seven parcels / 14 bottles have already been received.
+
 ### The call-type card gained an order count, and it caught a null pretending to be a customer (2026-09-09)
 
 User: *"in this card show unique order/call count also."* 86 RTO calls could be 86 customers rung once

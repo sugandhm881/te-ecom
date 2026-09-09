@@ -102,8 +102,16 @@ function aggByAsin(rows) {
     return m;
 }
 
+// DEMAND IS DEMAND, WHOEVER SHIPPED IT (user, 2026-09-09: "on FBA forecasting dashboard need to
+// overall sale FBM & FBA and then calc DRR"). `fba_sku_velocity` filters fulfillment_channel='AFN', so
+// the restock plan forecast from Amazon's FBA orders alone: 436 of the last 30 days' 1,348 units — 32% —
+// and it could not see 35 of the 39 selling ASINs AT ALL, so a product doing well on FBM looked like a
+// product with no demand and was never restocked.
+// The velocity now covers both channels and keeps them apart, so DRR is built on total demand while the
+// page can still show where that demand came from — the split is what you check before shipping
+// warehouse stock into FBA.
 async function getVelocity() {
-    const { data, error } = await supabase.rpc('fba_sku_velocity');
+    const { data, error } = await supabase.rpc('amazon_sku_velocity');
     if (error) throw new Error(error.message);
     const map = {};
     (data || []).forEach(v => { map[v.asin] = v; });
@@ -211,7 +219,11 @@ router.get('/fba/forecast', async (req, res) => {
             const iv = invByAsin[asin] || { fulfillable: 0, inbound: 0, inboundWorking: 0, inboundShipped: 0, inboundReceiving: 0, reserved: 0, unfulfillable: 0, skus: [] };
             const v = vel.map[asin] || {};
             const u30 = num(v.u30), u7 = num(v.u7);
+            // DRR = units per day. Named, because it is the number the whole plan hangs off and it was
+            // previously only implicit in `vel30`.
             const vel30 = round2(u30 / 30), vel7 = round2(u7 / 7);
+            const afnU30 = num(v.afn_u30), mfnU30 = num(v.mfn_u30);
+            const afnU7 = num(v.afn_u7), mfnU7 = num(v.mfn_u7);
             const unitPrice = num(v.unit_price);
             const avail = iv.fulfillable, inbound = iv.inbound;
 
@@ -226,7 +238,7 @@ router.get('/fba/forecast', async (req, res) => {
             const reorderByDate = (vel30 > 0 && isFinite(effCover)) ? fmtDate(today + Math.max(0, effCover - leadDays) * DAY) : null;
             const ohc = Math.round(onHandCover);
 
-            let band, action;
+            let band, action;   // `action` is appended to below, so it is `let`
             if (vel30 === 0 && avail === 0 && inbound === 0) { band = 'inactive'; action = 'No FBA sales, no stock — inactive listing'; }
             else if (vel30 === 0) { band = 'ok'; action = `In stock (${avail}), no sales in 90d — monitor`; }
             else if (avail === 0) {
@@ -251,6 +263,18 @@ router.get('/fba/forecast', async (req, res) => {
             }
             else { band = 'ok'; action = `Healthy — ~${ohc}d on hand${inbound ? `, ${inbound} inbound` : ''}`; }
 
+            // ⚠️ A "SEND 719" ON A PRODUCT WITH ZERO FBA SALES IS A DECISION, NOT A CALCULATION.
+            // Folding FBM into DRR is right — it is real demand for the same product — but where that
+            // demand is being met from our OWN warehouse today, shipping it into FBA moves stock rather
+            // than adding sales, and the plan must say so instead of issuing the number silently.
+            // The top row on the day this shipped: 457 FBM units, 0 FBA, suggesting 719 into Amazon.
+            const fbmHeavy = u30 > 0 && mfnU30 / u30 >= 0.6 && suggestQty > 0;
+            if (fbmHeavy) {
+                action += afnU30 === 0
+                    ? ` — ⚠ all ${mfnU30} of the last 30 days' units shipped FBM, none via FBA: this moves warehouse stock into Amazon rather than adding sales`
+                    : ` — ⚠ ${Math.round(mfnU30 / u30 * 100)}% of demand is FBM today; confirm you want it served from FBA`;
+            }
+
             const mm = master[asin] || {};
             rows.push({
                 asin, title: v.title || mm.masterName || iv.name || (iv.skus[0]) || asin,
@@ -258,6 +282,11 @@ router.get('/fba/forecast', async (req, res) => {
                 fulfillable: avail, inbound, inboundWorking: iv.inboundWorking, inboundShipped: iv.inboundShipped,
                 inboundReceiving: iv.inboundReceiving, reserved: iv.reserved, unfulfillable: iv.unfulfillable,
                 vel30, vel7, u30, u7,
+                // DRR and its channel split — vel30 IS the DRR, exposed under the name the plan is read by
+                drr: vel30, drr7: vel7,
+                afnU30, mfnU30, afnU7, mfnU7,
+                drrAfn: round2(afnU30 / 30), drrFbm: round2(mfnU30 / 30),
+                fbmShare: u30 > 0 ? Math.round(mfnU30 / u30 * 100) : 0,
                 trendPct: vel30 > 0 ? Math.round(((vel7 - vel30) / vel30) * 100) : (vel7 > 0 ? 999 : 0),
                 daysCover: isFinite(onHandCover) ? Math.round(onHandCover) : null,
                 daysCoverInbound: isFinite(effCover) ? Math.round(effCover) : null,

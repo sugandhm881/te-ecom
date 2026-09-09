@@ -248,6 +248,9 @@ const _VIEW_PERMS = [
     // permissions) would match here and get a flat 403.
     // Batch approve/reject/build are admin-only, enforced inside tally_batch.js (a role check, which
     // _VIEW_PERMS cannot express). Listing batches is open to any finance user.
+    // Flipkart label splitter — its own right, so warehouse staff can be given the tool without any of
+    // the surrounding operations dashboards (user, 2026-09-09: "this dashboard should be permission based").
+    [/^\/label-splitter/i, 'label-splitter'],
     [/^\/tally\/bank\//i, ['finance-entry']],   // bank import lives in Data Entry
     [/^\/tally\/batches/i, ['finance-entry', 'finance-register', 'finance-books']],
     [/^\/tally\/vouchers\/post-bulk/i, 'finance-post-tally'],   // admin-only is enforced inside tally.js too
@@ -377,6 +380,7 @@ app.use('/api', require('./app/api/influencer_crm'));          // Influencer Mar
 app.use('/api', require('./app/api/inventory').router);       // Inventory Analytics (daily snapshot dashboard + Teams report)
 app.use('/api', require('./app/api/tally').router);           // Finance → Data Entry → Tally Prime (voucher queue + bridge)
 app.use('/api', require('./app/api/tally_batch').router);     // Finance → nightly batch push + Teams approval
+app.use('/api', require('./app/api/label_splitter').router);  // Tools → Flipkart label / invoice splitter
 app.use('/api', require('./app/api/tally_bank').router);      // Finance → bank statement upload, ledger suggestion, draft creation
 // Admin → Zone Mapping: upload Kwikship's pincode→zone sheet and re-derive `zone` on Kwikship
 // shipments from it. The router gates itself with tokenRequired + requireAdmin.

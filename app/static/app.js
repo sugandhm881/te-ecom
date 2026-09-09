@@ -1320,6 +1320,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('gokwik-pg-recon-view');
             if (typeof pgrInit === 'function') pgrInit();
             break;
+        case 'label-splitter':
+            activeLinkElement = document.getElementById('nav-label-splitter');
+            activeViewElement = document.getElementById('label-splitter-view');
+            if (typeof lsInit === 'function') lsInit();
+            break;
         case 'amazon-fba':
             activeLinkElement = document.getElementById('nav-amazon-fba');
             activeViewElement = document.getElementById('amazon-fba-view');
@@ -5147,6 +5152,22 @@ function supSyncStatusOptions(rows){
   sel.innerHTML='<option value="all">All statuses</option>'+opts.map(o=>`<option value="${escapeHtml(o)}">${escapeHtml(o)} (${tally[o]})</option>`).join('');
   sel.value=opts.includes(keep)?keep:'all';
 }
+// HOW MANY TIMES DELIVERY HAS ALREADY FAILED. The queue is ordered by this ascending (user, 2026-09-09:
+// "NDR1 on top, then NDR2, then NDR3"), because a parcel on its first failure is the one a call can
+// still save — by the third the same call rarely changes the outcome. Green is the winnable one; rose is
+// the one to escalate rather than dial again. A row whose journey we have no NDR count for shows a dash
+// and sorts last: unknown is not "no failures yet".
+function supNdrChip(r){
+  const n = Number(r.ndr_attempt);
+  if(!Number.isFinite(n) || n <= 0) return '<span class="text-slate-300" title="No failed-delivery count on this shipment yet">—</span>';
+  const cls = n === 1 ? 'bg-emerald-100 text-emerald-700'
+            : n === 2 ? 'bg-amber-100 text-amber-700'
+            :           'bg-rose-100 text-rose-700';
+  const tip = n === 1 ? 'First failed attempt — the courier will try again, and a call now usually saves it'
+            : n === 2 ? 'Second failed attempt — worth one more call, then escalate'
+            :           `${n} failed attempts — calling again rarely helps; escalate to the courier`;
+  return `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold tabular-nums ${cls}" title="${escapeHtml(tip)}">NDR ${n}</span>`;
+}
 function supStatusChip(r){
   const t=supStatusText(r);
   if(!t) return '<span class="text-slate-300">—</span>';
@@ -5418,8 +5439,15 @@ function supReasonChips(r){
 // Column comparator for header-click sorting. Time columns (created_at / last_scan_at) compare by epoch
 // with empty values ALWAYS last (regardless of direction); other columns are case-insensitive strings.
 function _supSortCmp(k,d){ const isTime=(k==='created_at'||k==='last_scan_at'||k==='raised_at'||k==='escalated_at');
+  // NDR is a NUMBER, and string-comparing it would put 10 before 2 — the one ordering a queue sorted by
+  // failure count must never produce. Absent stays at the bottom in BOTH directions: a shipment we have
+  // no count for is not "zero failures", and flipping to worst-first should surface NDR 5, not a blank.
+  const isNum=(k==='ndr_attempt'||k==='delivery_attempts'||k==='note_count');
   return (a,b)=>{ if(isTime){ const x=a[k]?new Date(a[k]).getTime():null, y=b[k]?new Date(b[k]).getTime():null;
       if(x===null&&y===null) return 0; if(x===null) return 1; if(y===null) return -1; return d*(x-y); }
+    if(isNum){ const x=Number(a[k]), y=Number(b[k]);
+      const xo=Number.isFinite(x)&&x>0, yo=Number.isFinite(y)&&y>0;
+      if(!xo&&!yo) return 0; if(!xo) return 1; if(!yo) return -1; return d*(x-y); }
     return d*String(a[k]||'').toLowerCase().localeCompare(String(b[k]||'').toLowerCase()); }; }
 // Date AND time for the Escalated column — "when did this actually leave" is the point of it.
 const supDT = iso => { const d=new Date(iso); return `${_dmy(iso)}, ${d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}`; };
@@ -5549,6 +5577,9 @@ function supQueueTable(){
     :[{h:'Order',k:'order_name',d:1},{h:'Customer',k:null},
     ...(showBucket?[showPlat?{h:'Status',k:'tracking_status',d:1}:{h:'Bucket',k:'bucket',d:1}]:[]),
     ...(showPay?[{h:'Payment',k:'payment',d:1}]:[]),{h:'Age',k:'created_at',d:1},{h:'Courier',k:'courier',d:1},
+    // NDR — the queue's DEFAULT order (user, 2026-09-09). Shown so the ordering is legible rather than
+    // mysterious, and sortable so a supervisor can flip to the worst cases when they want them.
+    ...(_supTab==='und'?[{h:'NDR',k:'ndr_attempt',d:1}]:[]),
     ...(showScan?[{h:'Last scan',k:'last_scan_at',d:-1}]:[]),
     // Called — on BOTH panels, because a COD confirmation on Hold Orders is as worth seeing as an
     // RTO dial on Undelivered. Sorts on the last attempt, so never-called rows gather at one end.
@@ -5597,6 +5628,7 @@ function supQueueTable(){
       ${showPay?`<td class="${TD}">${supPayChip(r)}</td>`:''}
       <td class="${TD}"><span class="font-semibold tabular-nums">${supAge(r.created_at)}</span> <span class="text-xs text-slate-400">${_dmy(r.created_at)}</span></td>
       <td class="${TD}"><div class="flex items-center gap-1.5 flex-wrap">${escapeHtml((r.courier||'—').replace(/\b\w/g,ch=>ch.toUpperCase()))}${showPlat?supPlatformTag(r.platform):''}</div>${r.awb_number?`<div class="text-[10px] mt-0.5">${supAwbLink(r.awb_number,r.order_name,r.courier)}</div>`:''}</td>
+      ${_supTab==='und'?`<td class="${TD} whitespace-nowrap">${supNdrChip(r)}</td>`:''}
       ${showScan?`<td class="${TD} whitespace-nowrap">${r.last_scan_at?`<span class="text-slate-500" title="Latest AWB scan by courier: ${new Date(r.last_scan_at).toLocaleString()}">🛰 ${supRelTime(r.last_scan_at)}</span>`:'<span class="text-slate-300">—</span>'}</td>`:''}
       <td class="${TD}">${supCallCell(r)}</td>
       ${showPlat?`<td class="${TD} whitespace-nowrap sup-raised-cell">${supRaisedCell(r)}</td>`:''}
@@ -6909,7 +6941,7 @@ const NAV_HREF = {
     'nav-adset-breakdown': 'adset-breakdown', 'nav-ad-analysis': 'ad-analysis', 'nav-settings': 'settings', 'nav-reports': 'reports-view',
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon', 'nav-kwikship-recon': 'kwikship-recon',
-    'nav-amazon-fba': 'amazon-fba', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics', 'nav-zone-mapping': 'zone-mapping',
+    'nav-amazon-fba': 'amazon-fba', 'nav-label-splitter': 'label-splitter', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics', 'nav-zone-mapping': 'zone-mapping',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning', 'nav-support-ai-costs': 'support-ai-costs', 'nav-support-call-insights': 'support-call-insights',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
@@ -8914,9 +8946,160 @@ function salRuns(){
   el.innerHTML = R.length ? R.map(r=>`<div>${new Date(r.started_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})} · ${r.trigger} · reviewed ${r.calls_reviewed}${r.calls_failed?` (failed ${r.calls_failed})`:''} · lessons +${r.lessons_new} / ${r.lessons_reinforced} reinforced / ${r.lessons_activated} activated${r.error?` · <span class="text-rose-600">${escapeHtml(r.error)}</span>`:''}${!r.finished_at?' · <i>running</i>':''}</div>`).join('') : '<div class="text-slate-400">No runs yet.</div>';
 }
 
+// ═══════════════ LABEL SPLITTER (2026-09-09) ═══════════════
+// A Flipkart shipping PDF stacks the shipping label and the tax invoice on one page. This picks the
+// files, sends them to /api/label-splitter/split, and hands back a ZIP.
+//
+// ⚠️ Ported from a standalone Flask + React app on port 5050 (user: "make sure this should not run on
+// python, it runs with our project architecture"). Its own health-check polling, CORS and localhost
+// URL are all gone: this is a view of the dashboard, so it is already authenticated, already behind
+// the permission gate, and there is no second service that can be "offline".
+//
+// There is NO ratio control (user: "split position should 55:45 be default, no other option"). The
+// server holds one constant. A control whose three options mostly produce a wrong cut is a way to get
+// it wrong, not a feature.
+let _lsFiles = [], _lsBusy = false, _lsWired = false, _lsUrls = [];
+// Object URLs live until the document does. The splitter is used in long sessions — sixty files, then
+// sixty more — so each render releases the previous batch's blobs rather than holding every PDF ever
+// produced in memory.
+function _lsRevoke(){ _lsUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch(_){} }); _lsUrls = []; }
+
+const _lsFmt = b => b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(1) + ' MB';
+const LS_MAX_FILES = 60, LS_MAX_BYTES = 40 * 1024 * 1024;
+
+function lsInit(){
+  if(!_lsWired){
+    _lsWired = true;
+    const drop = document.getElementById('ls-drop'), input = document.getElementById('ls-input');
+    input?.addEventListener('change', e => { lsAdd(e.target.files); e.target.value = ''; });
+    // The whole zone is a <label> for the input, so a click already opens the picker — only the drag
+    // events need wiring. dragover must be prevented or the browser navigates to the dropped file.
+    ['dragenter','dragover'].forEach(ev => drop?.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('is-over'); }));
+    ['dragleave','drop'].forEach(ev => drop?.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('is-over'); }));
+    drop?.addEventListener('drop', e => lsAdd(e.dataTransfer && e.dataTransfer.files));
+    drop?.addEventListener('keydown', e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); input.click(); } });
+    document.getElementById('ls-clear')?.addEventListener('click', () => { _lsFiles = []; _lsRevoke(); document.getElementById('ls-result').innerHTML = ''; lsRender(); });
+    document.getElementById('ls-go')?.addEventListener('click', lsRun);
+    // Delegated, because the rows are re-rendered on every change.
+    document.getElementById('ls-files')?.addEventListener('click', e => {
+      const b = e.target.closest('.ls-row-x'); if(!b || _lsBusy) return;
+      _lsFiles.splice(Number(b.dataset.i), 1); lsRender();
+    });
+  }
+  lsRender();
+}
+
+function lsAdd(list){
+  if(_lsBusy) return;
+  const pdfs = [...(list || [])].filter(f => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+  if(!pdfs.length) return lsError('Those were not PDFs. Flipkart labels download as PDF.');
+  // Name+size de-dupe: dropping the same folder twice is the normal accident, and splitting a file
+  // twice puts two identical folders in the ZIP.
+  const seen = new Set(_lsFiles.map(f => f.name + '|' + f.size));
+  const fresh = pdfs.filter(f => !seen.has(f.name + '|' + f.size));
+  _lsFiles = _lsFiles.concat(fresh);
+  if(_lsFiles.length > LS_MAX_FILES){
+    _lsFiles = _lsFiles.slice(0, LS_MAX_FILES);
+    lsError(`Only the first ${LS_MAX_FILES} were kept — that is the limit for one batch.`);
+  } else lsError('');
+  lsRender();
+}
+
+function lsError(msg){
+  const el = document.getElementById('ls-error'); if(!el) return;
+  el.textContent = msg || ''; el.classList.toggle('hidden', !msg);
+}
+
+function lsRender(){
+  const box = document.getElementById('ls-files'), go = document.getElementById('ls-go'),
+        clear = document.getElementById('ls-clear');
+  if(!box) return;
+  const bytes = _lsFiles.reduce((n, f) => n + f.size, 0);
+  box.innerHTML = _lsFiles.map((f, i) => `<div class="ls-row">
+      <span class="ls-row-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span>
+      <span class="ls-row-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+      <span class="ls-row-size">${_lsFmt(f.size)}</span>
+      ${_lsBusy ? '' : `<button class="ls-row-x" data-i="${i}" title="Remove"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`}
+    </div>`).join('');
+  if(_lsFiles.length) box.innerHTML += `<p class="text-xs text-slate-400 pt-1">${_lsFiles.length} file${_lsFiles.length === 1 ? '' : 's'} · ${_lsFmt(bytes)}${bytes > LS_MAX_BYTES ? ' — over the 40 MB batch limit, remove a few' : ''}</p>`;
+  if(clear) clear.style.display = _lsFiles.length && !_lsBusy ? '' : 'none';
+  if(go){
+    go.disabled = !_lsFiles.length || _lsBusy || bytes > LS_MAX_BYTES;
+    go.textContent = _lsBusy ? 'Splitting…'
+      : _lsFiles.length ? `Split ${_lsFiles.length} file${_lsFiles.length === 1 ? '' : 's'}` : 'Split labels';
+  }
+}
+
+// base64 in a JSON body, matching the bank-statement upload — no multer on the server for one screen.
+// FileReader rather than btoa(String.fromCharCode(...bytes)): spreading a multi-MB array blows the
+// argument limit and throws on exactly the large batches this exists for.
+const _lsB64 = file => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(String(r.result).split(',')[1] || '');
+  r.onerror = () => rej(new Error('could not read ' + file.name));
+  r.readAsDataURL(file);
+});
+
+async function lsRun(){
+  if(_lsBusy || !_lsFiles.length) return;
+  _lsBusy = true; lsError(''); lsRender();
+  document.getElementById('ls-result').innerHTML = brandLoader('Cutting the labels…');
+  try{
+    const files = [];
+    for(const f of _lsFiles) files.push({ name: f.name, data: await _lsB64(f) });
+    const r = await fetch('/api/label-splitter/split', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify({ files }),
+    });
+    const d = await r.json();
+    if(!d.success) throw new Error(d.error || 'the split failed');
+    lsResult(d);
+    showNotification(`Split ${d.split.length} file${d.split.length === 1 ? '' : 's'} ✓`);
+  }catch(e){
+    document.getElementById('ls-result').innerHTML = '';
+    lsError(e.message);
+  }finally{ _lsBusy = false; lsRender(); }
+}
+
+function lsResult(d){
+  // TWO STACKS, TWO BUTTONS (user, 2026-09-09: "instead of zip download give 2 option of download
+  // invoice and label"). A ZIP had to be extracted before anything could be printed; these are two
+  // ready-to-print PDFs — every label in one, every invoice in the other, in the order the files were
+  // added. One Ctrl+P each.
+  //
+  // The bytes arrive base64 and become blobs here, so neither download needs a second authenticated
+  // request and nothing is written to a temp file on the server. The URLs are revoked when the view is
+  // re-rendered, so a long session does not leak a blob per batch.
+  _lsRevoke();
+  const toUrl = b64 => {
+    const bin = atob(b64), bytes = new Uint8Array(bin.length);
+    for(let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const u = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    _lsUrls.push(u); return u;
+  };
+  const labels = toUrl(d.labels_base64), invoices = toUrl(d.invoices_base64);
+  const n = d.split.length, pages = d.pages;
+  const card = (href, name, title, sub, cls) => `<a class="ls-dl ${cls}" href="${href}" download="${escapeHtml(name)}">
+      <span class="ls-dl-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span>
+      <span class="ls-dl-text"><b>${title}</b><em>${sub}</em></span>
+    </a>`;
+  document.getElementById('ls-result').innerHTML = `
+    <div class="card p-5">
+      <p class="font-semibold text-slate-800">${n} order${n===1?'':'s'} split · ${pages} page${pages===1?'':'s'} each side</p>
+      <p class="text-xs text-slate-400 mt-0.5 mb-4">Cut at ${d.invoice_pct}% from the bottom — label ${d.shipping_pct}%, invoice ${d.invoice_pct}%. Page order is preserved, so the two stacks line up order for order.</p>
+      <div class="ls-dl-row">
+        ${card(labels, d.labels_name, 'Download labels', `${pages} shipping label${pages===1?'':'s'} · for the packing bench`, 'is-label')}
+        ${card(invoices, d.invoices_name, 'Download invoices', `${pages} tax invoice${pages===1?'':'s'} · for accounts`, 'is-invoice')}
+      </div>
+      ${(d.failed && d.failed.length) ? `<div class="mt-4 rounded-lg bg-amber-50 border border-amber-100 px-3 py-2">
+        <p class="text-xs font-semibold text-amber-800 mb-1">${d.failed.length} file${d.failed.length===1?'':'s'} could not be split — not in either stack</p>
+        ${d.failed.map(f=>`<p class="text-xs text-amber-700">${escapeHtml(f.name)} — ${escapeHtml(f.error)}</p>`).join('')}</div>` : ''}
+    </div>`;
+}
+
 // ═══════════════ USERS & PERMISSIONS (admin) ═══════════════
 const PERM_GROUPS = [
-  ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['last-mile','Last-Mile Funnel'],['amazon-fba','Amazon FBA']]],
+  ['Operations', [['orders-dashboard','Orders Dashboard'],['fulfillment-ops','Fulfillment Ops'],['delivery-perf','Delivery Performance'],['claims-sla','Silent-RTO & SLA'],['ops-control','Ops Control'],['last-mile','Last-Mile Funnel'],['amazon-fba','Amazon FBA'],['label-splitter','Label Splitter (Flipkart label / invoice PDFs)']]],
   // Reconciliation — one group per billing partner; each ledger stays SEPARATE (different money flows).
   ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon'],['gokwik-pg-recon','GoKwik PG Recon'],['kwikship-recon','KwikShip Freight Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
@@ -9625,7 +9808,14 @@ function _fbaRenderForecast(){
     _fbaKpi('Order now', FBA.nf(s.stockout+s.critical), 'out-of-stock + critical SKUs', (s.stockout+s.critical)>0?'text-rose-600':'text-slate-800'),
     _fbaKpi('Reorder soon', FBA.nf(s.reorder), 'below target cover', s.reorder>0?'text-amber-600':'text-slate-800'),
     _fbaKpi('Units to send', FBA.nf(s.suggestUnits), '≈ '+FBA.inrk(s.suggestValue)+' at retail','text-indigo-600'),
-    _fbaKpi('Overstocked', FBA.nf(s.overstock), 'hold replenishment')
+    _fbaKpi('Overstocked', FBA.nf(s.overstock), 'hold replenishment'),
+    // DEMAND IS DEMAND, WHOEVER SHIPPED IT (user, 2026-09-09). Until today this plan forecast from FBA
+    // orders alone — a third of Amazon's units, and blind to 35 of the 39 selling ASINs. The split is
+    // shown because it is what you check before shipping warehouse stock into FBA.
+    (()=>{ const rs=_fbaFc.rows||[];
+      const a=rs.reduce((n,r)=>n+(r.afnU30||0),0), m=rs.reduce((n,r)=>n+(r.mfnU30||0),0);
+      return (a+m)>0 ? _fbaKpi('30-day demand', FBA.nf(a+m),
+        `FBA ${FBA.nf(a)} + FBM ${FBA.nf(m)} · DRR ${Math.round((a+m)/30*10)/10}/day`,'text-emerald-600') : ''; })()
   ].join('');
   const rows=_fbaSortList(d.rows||[],_fbaFcSort);
   const H=(k,label,cls)=>`<th data-tbl="fc" data-k="${k}" class="px-4 py-3 ${cls||'text-right'} font-semibold">${label}${_fbaArrow(_fbaFcSort,k)}</th>`;
@@ -9637,7 +9827,9 @@ function _fbaRenderForecast(){
       <td class="px-4 py-3 text-center"><span class="fba-band fba-band-${r.band}">${_fbaBandLabel[r.band]||r.band}</span></td>
       <td class="px-4 py-3 text-right"><span class="tabular-nums font-semibold text-slate-800">${FBA.nf(r.fulfillable)}</span><div class="text-xs ${coverCls}">${cover!=null?cover+'d cover':'—'}</div></td>
       <td class="px-4 py-3 text-right"><span class="tabular-nums text-slate-600">${FBA.nf(r.inbound)}</span>${r.daysCoverInbound!=null?`<div class="text-xs text-slate-400">${r.daysCoverInbound}d w/ inb.</div>`:''}</td>
-      <td class="px-4 py-3 text-right"><span class="tabular-nums text-slate-600">${r.vel30>0?r.vel30+'/d':'—'}</span><div class="text-xs">${_fbaMomentum(r.trendPct)}</div></td>
+      <td class="px-4 py-3 text-right"><span class="tabular-nums font-semibold text-slate-700">${r.drr>0?r.drr+'/d':'—'}</span>
+        ${(r.afnU30!=null&&r.mfnU30!=null&&(r.afnU30+r.mfnU30)>0)?`<div class="text-xs text-slate-400 tabular-nums" title="Units in the last 30 days by fulfilment channel — DRR is built on both">FBA ${FBA.nf(r.afnU30)} · FBM ${FBA.nf(r.mfnU30)}</div>`:''}
+        <div class="text-xs">${_fbaMomentum(r.trendPct)}</div></td>
       <td class="px-4 py-3 text-center text-sm ${cover!=null&&cover<=14?'text-rose-600 font-semibold':'text-slate-500'}">${FBA.fdate(r.stockoutDate)}</td>
       <td class="px-4 py-3 text-center text-sm text-slate-600">${FBA.fdate(r.reorderByDate)}</td>
       <td class="px-4 py-3 text-right">${send}</td>
@@ -9645,7 +9837,7 @@ function _fbaRenderForecast(){
     </tr>`;
   }).join('');
   FBA.$('fba-fc-table').innerHTML=`<table class="w-full text-sm"><thead class="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide"><tr>
-    <th class="px-4 py-3 text-left font-semibold">Product</th>${H('band','Status','text-center')}${H('fulfillable','On hand')}${H('inbound','Inbound')}${H('vel30','Velocity')}
+    <th class="px-4 py-3 text-left font-semibold">Product</th>${H('band','Status','text-center')}${H('fulfillable','On hand')}${H('inbound','Inbound')}${H('drr','DRR / day')}
     <th class="px-4 py-3 text-center font-semibold">Runs out</th><th class="px-4 py-3 text-center font-semibold">Order by</th>${H('suggestQty','Send')}
     <th class="px-4 py-3 text-left font-semibold">What to do</th></tr></thead>
     <tbody>${body||'<tr><td colspan="9" class="px-4 py-6 text-center text-slate-400">No FBA SKUs</td></tr>'}</tbody></table>`;
@@ -9662,10 +9854,10 @@ function _fbaCopyPlan(){
 }
 function _fbaExportCsv(){
   if(!_fbaFc){ showNotification('Load the plan first'); return; }
-  const cols=['status','master_sku','amazon_sku','asin','title','on_hand','cover_days','inbound','velocity_per_day','trend_pct','runs_out','order_by','send_qty','send_value','action'];
+  const cols=['status','master_sku','amazon_sku','asin','title','on_hand','cover_days','inbound','drr_per_day','units_30d','fba_units_30d','fbm_units_30d','trend_pct','runs_out','order_by','send_qty','send_value','action'];
   const esc=v=>{ v=String(v==null?'':v); return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; };
   const lines=[cols.join(',')];
-  (_fbaFc.rows||[]).forEach(r=>lines.push([r.band,r.masterSku,r.sku,r.asin,r.title,r.fulfillable,r.daysCover,r.inbound,r.vel30,r.trendPct,r.stockoutDate,r.reorderByDate,r.suggestQty,r.suggestValue,r.action].map(esc).join(',')));
+  (_fbaFc.rows||[]).forEach(r=>lines.push([r.band,r.masterSku,r.sku,r.asin,r.title,r.fulfillable,r.daysCover,r.inbound,r.drr,r.u30,r.afnU30,r.mfnU30,r.trendPct,r.stockoutDate,r.reorderByDate,r.suggestQty,r.suggestValue,r.action].map(esc).join(',')));
   const blob=new Blob([lines.join('\n')],{type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download='fba-restock-plan-'+new Date().toISOString().slice(0,10)+'.csv'; a.click(); URL.revokeObjectURL(a.href);
@@ -11754,10 +11946,32 @@ function dpPresetRange(preset){
     if(preset==='this-week'){ const dow=(today.getDay()+6)%7; const mon=new Date(); mon.setDate(today.getDate()-dow); return { from:_ymd(mon), to:_ymd(today) }; } // Mon→today
     const n=parseInt(preset,10)||30; const from=new Date(); from.setDate(today.getDate()-(n-1)); return { from:_ymd(from), to:_ymd(today) };
 }
+// The chosen comparison window. Null = compare against the period immediately before, which is what
+// this page has always done and stays the default (user, 2026-09-09).
+let _dpCmpOn=false, _dpCmpFrom=null, _dpCmpTo=null;
+try{ const c=JSON.parse(localStorage.getItem('dp.compare')||'null');
+     if(c&&c.from&&c.to){ _dpCmpOn=!!c.on; _dpCmpFrom=c.from; _dpCmpTo=c.to; } }catch(_){}
+// The window the server picks on its own: the equal-length period ending the day before this one.
+function dpPrevWindow(from,to){
+  const d0=new Date(from), d1=new Date(to);
+  const len=Math.round((d1-d0)/86400000)+1;
+  const pTo=new Date(d0); pTo.setDate(pTo.getDate()-1);
+  const pFrom=new Date(pTo); pFrom.setDate(pFrom.getDate()-(len-1));
+  return { from:_ymd(pFrom), to:_ymd(pTo) };
+}
 function dpInit(){
     if(!_dpFrom){ _dpFrom = dpDaysAgo(30); _dpTo = _ymd(new Date()); }
     const fEl=document.getElementById('dp-from'), tEl=document.getElementById('dp-to');
     if(fEl) fEl.value=_dpFrom; if(tEl) tEl.value=_dpTo;
+    // Pre-fill the compare boxes with the window it would have used anyway, so flipping the switch on
+    // shows the SAME numbers until you change the dates. The switch reveals the control; it does not
+    // silently move the goalposts.
+    if(!_dpCmpFrom||!_dpCmpTo){ const p=dpPrevWindow(_dpFrom,_dpTo); _dpCmpFrom=p.from; _dpCmpTo=p.to; }
+    const cfEl=document.getElementById('dp-cmp-from'), ctEl=document.getElementById('dp-cmp-to');
+    if(cfEl) cfEl.value=_dpCmpFrom; if(ctEl) ctEl.value=_dpCmpTo;
+    const cOn=document.getElementById('dp-cmp-on'); if(cOn) cOn.checked=_dpCmpOn;
+    const cBox=document.getElementById('dp-cmp-custom');
+    if(cBox){ cBox.classList.toggle('hidden', !_dpCmpOn); cBox.classList.toggle('flex', _dpCmpOn); }
     // ₹ toggle visibility is decided on EVERY init, not once inside the _dpWired block below — the
     // wiring runs a single time per page load, so a different user signing in without a full reload
     // would otherwise inherit whatever the previous user was allowed to see. Hidden (not disabled), so
@@ -11772,7 +11986,26 @@ function dpInit(){
             if(v==='custom') return; // wait for Apply
             const r=dpPresetRange(v); _dpFrom=r.from; _dpTo=r.to;
             document.getElementById('dp-from').value=_dpFrom; document.getElementById('dp-to').value=_dpTo; dpLoad(); });
-        document.getElementById('dp-apply')?.addEventListener('click', ()=>{ _dpFrom=document.getElementById('dp-from').value; _dpTo=document.getElementById('dp-to').value; dpLoad(); });
+        document.getElementById('dp-apply')?.addEventListener('click', ()=>{
+            _dpFrom=document.getElementById('dp-from').value; _dpTo=document.getElementById('dp-to').value;
+            // The main range moved. A compare window left over from the OLD range would silently become
+            // a comparison nobody asked for, so it is re-based — unless the user picked it themselves.
+            if(!_dpCmpOn){ const p=dpPrevWindow(_dpFrom,_dpTo); _dpCmpFrom=p.from; _dpCmpTo=p.to;
+                const a=document.getElementById('dp-cmp-from'), b=document.getElementById('dp-cmp-to');
+                if(a) a.value=_dpCmpFrom; if(b) b.value=_dpCmpTo; }
+            dpLoad(); });
+        document.getElementById('dp-cmp-on')?.addEventListener('change', e=>{
+            _dpCmpOn=e.target.checked;
+            const box=document.getElementById('dp-cmp-custom');
+            box.classList.toggle('hidden', !_dpCmpOn); box.classList.toggle('flex', _dpCmpOn);
+            localStorage.setItem('dp.compare', JSON.stringify({on:_dpCmpOn, from:_dpCmpFrom, to:_dpCmpTo}));
+            dpLoad(); });
+        document.getElementById('dp-cmp-apply')?.addEventListener('click', ()=>{
+            const f=document.getElementById('dp-cmp-from').value, t=document.getElementById('dp-cmp-to').value;
+            if(!f||!t) return showNotification('Pick both compare dates',true);
+            _dpCmpFrom=f; _dpCmpTo=t;
+            localStorage.setItem('dp.compare', JSON.stringify({on:_dpCmpOn, from:f, to:t}));
+            dpLoad(); });
         document.getElementById('dp-source')?.addEventListener('click', e=>{ const b=e.target.closest('button'); if(!b) return;
             [...b.parentElement.children].forEach(x=>{ x.classList.remove('bg-indigo-600','text-white'); x.classList.add('text-slate-600'); });
             b.classList.add('bg-indigo-600','text-white'); b.classList.remove('text-slate-600');
@@ -11829,7 +12062,7 @@ function dpInit(){
 async function dpLoad(){
     const kpi=document.getElementById('dp-kpis'); if(kpi) kpi.innerHTML=brandLoader('Loading delivery data…');
     try{
-        const r=await fetch(`/api/delivery-performance?from=${_dpFrom}&to=${_dpTo}&source=${_dpSource}&payment=${_dpPayment}&zone=${encodeURIComponent(_dpZone.join(','))}&state=${encodeURIComponent(_dpState.join(','))}&courier=${encodeURIComponent(_dpCourier)}&order_type=${_dpOrderType}&compare=1`, { headers: getAuthHeaders() });
+        const r=await fetch(`/api/delivery-performance?from=${_dpFrom}&to=${_dpTo}&source=${_dpSource}&payment=${_dpPayment}&zone=${encodeURIComponent(_dpZone.join(','))}&state=${encodeURIComponent(_dpState.join(','))}&courier=${encodeURIComponent(_dpCourier)}&order_type=${_dpOrderType}&compare=1${_dpCmpOn&&_dpCmpFrom&&_dpCmpTo?`&cmp_from=${_dpCmpFrom}&cmp_to=${_dpCmpTo}`:''}`, { headers: getAuthHeaders() });
         const d=await r.json(); if(!d.success) throw new Error(d.error||'failed');
         await eeHoldRefresh();
         _dpData=d; dpRender(d);
@@ -11842,11 +12075,15 @@ const DP_ICONS={
   hash:'<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14"/></svg>'
 };
 // Δ pill vs the previous period. Literal direction colouring: ▲ up = green, ▼ down = red.
+// The window every Δ on this page is measured against — set on each render from what the server says
+// it actually used. Before the compare switch this was always "the previous period" and the pills said
+// so; now that it can be any window, saying "previous period" over a chosen one would be a lie.
+let _dpCmpLabel='previous period';
 function dpDelta(cur,prev,higherBetter,unit){ if(prev==null) return '';
     const diff=Math.round((cur-prev)*10)/10;
     if(diff===0) return `<span class="inline-flex items-center px-2 py-0.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-400">—</span>`;
     const up=diff>0, cls=up?'bg-emerald-50 text-emerald-700':'bg-rose-50 text-rose-700';
-    return `<span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-lg text-xs font-bold ${cls}" title="vs ${prev}${unit} previous period">${up?'▲':'▼'} ${Math.abs(diff)}${unit}</span>`;
+    return `<span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-lg text-xs font-bold ${cls}" title="vs ${prev}${unit} — ${_dpCmpLabel}">${up?'▲':'▼'} ${Math.abs(diff)}${unit}</span>`;
 }
 // Tiny inline pp-delta for chips (▲ up = green / ▼ down = red, literal). cur/prev are share %.
 function dpPP(cur,prev){ if(prev==null||!isFinite(prev)||!isFinite(cur)) return ''; const d=Math.round((cur-prev)*10)/10; if(d===0) return '';
@@ -11893,7 +12130,10 @@ function dpRender(d){
             ? `Revenue figures are incomplete — ${vc.failedBatches} order-value lookup(s) failed, so totals are understated. Counts are unaffected.`
             : `Revenue covers ${vc.matched} of ${vc.total} shipments — ${vc.total-vc.matched} have no matching Shopify order, so ₹ totals are understated.`;
     }
-    document.getElementById('dp-range').textContent=`${_dmy(d.range.from)} → ${_dmy(d.range.to)} · ${k.totalShipments} tracked = ${k.resolved} shipped (delivered+RTO) + ${k.pending} NDR-pending + ${k.inTransit} in-transit${k.lost?` + ${k.lost} lost`:''}`+(V?`  ·  ${dpMoneyFull(R.tracked)} order value`:'')+courierNote+(c?`  ·  vs prev ${_dmy(d.compare.range.from)} → ${_dmy(d.compare.range.to)} (${c.totalShipments} tracked)`:'');
+    _dpCmpLabel = d.compare
+        ? (d.compare.basis==='custom' ? `${_dmy(d.compare.range.from)} → ${_dmy(d.compare.range.to)}` : 'previous period')
+        : 'previous period';
+    document.getElementById('dp-range').textContent=`${_dmy(d.range.from)} → ${_dmy(d.range.to)} · ${k.totalShipments} tracked = ${k.resolved} shipped (delivered+RTO) + ${k.pending} NDR-pending + ${k.inTransit} in-transit${k.lost?` + ${k.lost} lost`:''}`+(V?`  ·  ${dpMoneyFull(R.tracked)} order value`:'')+courierNote+(c?`  ·  vs ${d.compare.basis==='custom'?'':'prev '}${_dmy(d.compare.range.from)} → ${_dmy(d.compare.range.to)} (${d.compare.shipments!=null?d.compare.shipments:c.totalShipments} tracked)`+(d.compare.same_length===false?` — ${d.compare.days}d vs ${d.compare.current_days}d, so the Δ is not like-for-like`:''):'');
     // NDR cohort split — the four ways an NDR shipment ends. They partition ndrTotal exactly.
     const nT = V?R.ndrTotal:k.ndrTotal;
     const seg = (label,val,color)=>({label,count:val,pct:nT>0?Math.round((val/nT)*1000)/10:0,color});

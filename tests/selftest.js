@@ -2061,6 +2061,162 @@ function check(name, got, want) {
                          apm.includes("e.target.closest('.sci-pick')")],
                         [true, true, true, true, true, true, true, true, true, true, true]);
                 }
+                // FLIPKART LABEL SPLITTER, IN OUR ARCHITECTURE (user, 2026-09-09: "integrate this in our
+                // dashboard… make sure this should not run on python, it runs with our project architecture").
+                // The original was Flask + pypdf on port 5050 with its own React page and a health-poll: a
+                // second runtime to install, supervise, restart and secure on the VPS, for one button. Same
+                // arithmetic in pdf-lib, inside the dashboard, behind its login and permission gate.
+                {
+                    const ls = fs.readFileSync(path.join(ROOT, 'app/api/label_splitter.js'), 'utf8');
+                    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+                    const apC = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+                    const mod = require(path.join(ROOT, 'app/api/label_splitter.js'));
+                    check('label splitter: node only, permission-gated, and one fixed 55/45 cut',
+                        [mod.SPLIT_AT_FROM_BOTTOM === 0.55 && mod.SHIPPING_PCT === 45 && mod.INVOICE_PCT === 55,
+                         // no ratio control anywhere: a picker whose three options mostly produce a WRONG
+                         // cut is a way to get it wrong, not a feature
+                         !apC.includes("RATIOS") || !apC.includes('45 / 55'),
+                         // its own right, so warehouse staff can hold the tool without the ops dashboards
+                         srv.includes("[/^\\/label-splitter/i, 'label-splitter'],"),
+                         srv.includes("require('./app/api/label_splitter').router"),
+                         apC.includes("['label-splitter','Label Splitter"),
+                         // the dependencies are DECLARED, not borrowed transitively — a fresh npm install
+                         // on the VPS must produce a working page
+                         !!(pkg.dependencies && pkg.dependencies['pdf-lib'] && pkg.dependencies['jszip']),
+                         // and nothing reaches for a python service or its port
+                         // (the comment naming the old Flask port is fine; a URL to it is not)
+                         !ls.includes('http://') && !ls.includes('localhost'),
+                         !apC.includes('http://localhost:5050')],
+                        [true, true, true, true, true, true, true, true]);
+                    // A PDF's origin is the BOTTOM-left, so "the top 55%" is the box from y = 0.45h to h.
+                    // The Flask version got its own labelling backwards — it called 0.55 "55/45, if the
+                    // shipping label is TALLER" while the maths gave the label the top 45%.
+                    check('label splitter: the cut reproduces the python exactly (label = top 45%)',
+                        [ls.includes('const splitY = mb.y + mb.height * SPLIT_AT_FROM_BOTTOM;'),
+                         // MediaBox, not getSize(): a page with a non-zero origin would be cut in the
+                         // wrong place entirely
+                         ls.includes('const mb = p.getMediaBox();'),
+                         // CropBox, so nothing is re-encoded — barcodes and print quality untouched
+                         ls.includes('p.setCropBox('),
+                         !ls.includes('drawImage') && !ls.includes('scaleContent')],
+                        [true, true, true, true]);
+                    // TWO STACKS, TWO BUTTONS (user, 2026-09-09: "instead of zip download give 2 option of
+                    // download invoice and label"). A ZIP had to be extracted before anything could be
+                    // printed; what the warehouse does is print every label in one go and hand every invoice
+                    // to accounts in one go. Merged into two PDFs, page order preserved, so the stacks line
+                    // up order for order — one Ctrl+P each instead of sixty.
+                    check('label splitter: two ready-to-print PDFs, not a ZIP to extract',
+                        [ls.includes('async function splitBatch(items)'),
+                         ls.includes('labels_base64:') && ls.includes('invoices_base64:'),
+                         !ls.includes('JSZip') && !ls.includes('zip_base64'),
+                         // named for the ORDER when there is one, so a single saved label still says which
+                         ls.includes('one ? `SHIPPING__${one}.pdf` : `shipping-labels-${stamp}.pdf`'),
+                         apC.includes('Download labels') && apC.includes('Download invoices'),
+                         // one definition of where the line falls, shared by the single and batch paths
+                         ls.includes('function cropHalf(p, topHalf)'),
+                         (ls.match(/setCropBox/g) || []).length === 2,
+                         // object URLs are released between batches — sixty files, then sixty more
+                         apC.includes('function _lsRevoke()') && apC.includes('URL.revokeObjectURL')],
+                        [true, true, true, true, true, true, true, true]);
+                    // ⚠️ THE FILENAME BECOMES A PATH INSIDE A ZIP THE USER EXTRACTS. An allowlist, because a
+                    // blocklist only covers the characters you thought of. (The first cut of this shipped as
+                    // /.{2,}/ instead of /\\.{2,}/ — matching ANY two characters, so every file came out
+                    // called "label". Backslashes eaten in transit, for the third time in one day.)
+                    check('label splitter: a filename can never escape the ZIP, or vanish',
+                        [mod.safeBase('../../etc/passwd.pdf') === 'etc_passwd',
+                         mod.safeBase('FMPC1234567.pdf') === 'FMPC1234567',   // ordinary names survive intact
+                         mod.safeBase('order 12 34.PDF') === 'order_12_34',
+                         mod.safeBase('') === 'label' && mod.safeBase('....pdf') === 'label',
+                         mod.safeBase('a'.repeat(200) + '.pdf').length === 80],
+                        [true, true, true, true, true]);
+                }
+                // WORK THE FRESHEST FAILURE FIRST (user, 2026-09-09: "undelivered sorting with NDR attempt,
+                // NDR1 on top and after that NDR2, NDR3 and so on by default — prioritise this").
+                // A parcel on its FIRST failed attempt is the one still worth a call: the courier tries again
+                // tomorrow and one conversation usually saves it. By the third failure the same call rarely
+                // changes anything. The queue was ordered confirmed-then-oldest, which buried every fresh NDR
+                // under a fortnight of parcels nobody could save.
+                {
+                    const sc = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+                    const ap9 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('undelivered queue: NDR1 first, and unknown never jumps the queue',
+                        [sc.includes("'awb, last_scan_at, attempts, ndr_count'"),
+                         // ndr_count is NOT attempts: attempts counts every out-for-delivery scan, ndr_count
+                         // only the ones that failed, and it is the failures that decide urgency
+                         sc.includes('if (ndrByAwb[awb] != null) r.ndr_attempt = ndrByAwb[awb];'),
+                         sc.includes("if (tab === 'und') {") && sc.includes('const ndrOf = r =>'),
+                         // absent sorts LAST — unknown is not "no failures yet"
+                         sc.includes('Number.isFinite(n) && n > 0 ? n : Infinity'),
+                         // …and it must run AFTER the journey overlay, which is where ndr_attempt arrives
+                         sc.indexOf('r.last_scan_at = scans[r.order_id] || null;') < sc.indexOf('const ndrOf = r =>'),
+                         // the column exists so the ordering is legible rather than mysterious
+                         ap9.includes('function supNdrChip(r){'),
+                         ap9.includes("{h:'NDR',k:'ndr_attempt',d:1}")],
+                        [true, true, true, true, true, true, true]);
+                    // NDR is a NUMBER. String-comparing it puts 10 before 2 — the one ordering a queue sorted
+                    // by failure count must never produce — and puts blanks at the top.
+                    check('undelivered queue: the NDR column sorts numerically, blanks pinned last',
+                        [ap9.includes("const isNum=(k==='ndr_attempt'||k==='delivery_attempts'||k==='note_count');"),
+                         ap9.includes('if(!xo&&!yo) return 0; if(!xo) return 1; if(!yo) return -1; return d*(x-y);')],
+                        [true, true]);
+                }
+                // DEMAND IS DEMAND, WHOEVER SHIPPED IT (user, 2026-09-09: "on FBA forecasting dashboard need
+                // to overall sale FBM & FBA and then calc DRR"). `fba_sku_velocity` filters
+                // fulfillment_channel='AFN', so the restock plan forecast from FBA orders alone: 436 of the
+                // last 30 days' 1,348 units, and it could not see 35 of the 39 selling ASINs AT ALL — a
+                // product doing well on FBM looked like a product with no demand and was never restocked.
+                {
+                    const fb = fs.readFileSync(path.join(ROOT, 'app/api/amazon_fba.js'), 'utf8');
+                    const apA = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('fba forecast: DRR is built on FBA + FBM demand, with the split kept visible',
+                        [fb.includes("supabase.rpc('amazon_sku_velocity')"),
+                         !fb.includes("supabase.rpc('fba_sku_velocity')"),
+                         fs.existsSync(path.join(ROOT, 'supabase/migrations/20260909_amazon_sku_velocity.sql')),
+                         fb.includes('drr: vel30, drr7: vel7,'),
+                         fb.includes('afnU30, mfnU30, afnU7, mfnU7,'),
+                         apA.includes("H('drr','DRR / day')"),
+                         // the CSV must carry what the screen shows, or the two disagree
+                         apA.includes("'drr_per_day','units_30d','fba_units_30d','fbm_units_30d'")],
+                        [true, true, true, true, true, true, true]);
+                    // ⚠️ A "send 719" on a product with ZERO FBA sales is a decision, not a calculation:
+                    // where that demand is served from our own warehouse today, shipping it into FBA moves
+                    // stock rather than adding sales. The plan says so instead of issuing the number quietly.
+                    check('fba forecast: an FBM-heavy restock suggestion flags itself',
+                        [fb.includes('const fbmHeavy = u30 > 0 && mfnU30 / u30 >= 0.6 && suggestQty > 0;'),
+                         fb.includes('moves warehouse stock into Amazon rather than adding sales')],
+                        [true, true]);
+                }
+                // COMPARE AGAINST A PERIOD YOU CHOOSE (user, 2026-09-09). The default stays the immediately
+                // preceding equal-length window — the right question most days — but "this month vs the same
+                // month last year" is not answerable by an offset, which is why the deltas could not be
+                // trusted for anything seasonal.
+                {
+                    const dr = fs.readFileSync(path.join(ROOT, 'app/api/delivery_reports.js'), 'utf8');
+                    const apB = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    const idxB = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+                    check('delivery performance: the compare window can be chosen, and the page says which it used',
+                        [dr.includes('const explicitCmp = compare && ymd.test(cmpFromQ) && ymd.test(cmpToQ);'),
+                         dr.includes("compareBasis = 'custom';") && dr.includes("compareBasis = 'previous';"),
+                         // a backwards range is a slip, not a reason to fail the page
+                         dr.includes('if (pFrom > pTo) { const t = pFrom; pFrom = pTo; pTo = t; }'),
+                         // an unequal-length comparison is a DIFFERENT claim, and the page must not imply
+                         // like-for-like
+                         dr.includes('same_length: cmpDays === curDays'),
+                         apB.includes('so the Δ is not like-for-like'),
+                         // the pills stop saying "previous period" over a window the user chose
+                         apB.includes("let _dpCmpLabel='previous period';"),
+                         apB.includes('${_dpCmpLabel}'),
+                         apB.includes('cmp_from=${_dpCmpFrom}&cmp_to=${_dpCmpTo}'),
+                         // switching it on must not silently move the goalposts: the boxes pre-fill with the
+                         // window it would have used anyway
+                         apB.includes('function dpPrevWindow(from,to){'),
+                         // real CSS — a peer-checked Tailwind switch needs arbitrary values, and this sheet
+                         // is prebuilt, so it would have rendered as a naked checkbox
+                         idxB.includes('.dp-switch input:checked + .dp-switch-track { background:#4f46e5; }'),
+                         idxB.includes('id="dp-cmp-on"')],
+                        [true, true, true, true, true, true, true, true, true, true, true]);
+                }
                 // CALLS AND ORDERS ARE DIFFERENT NUMBERS (user, 2026-09-09: "in this card show unique
                 // order/call count also"). 86 RTO calls could be 86 customers rung once or 40 rung twice and
                 // the card read identically. Adding it exposed something worse: over a week, COD confirmation
@@ -4158,6 +4314,28 @@ function check(name, got, want) {
         r = await quiet(() => enrichAWBsBackground(['E1']));
         check('rs sync: the 400 verdict survives a restart', [r.skipped, r.failed], [1, 0]);
 
+        // ⚠️ THE CUT ITSELF, MEASURED — not asserted from the source text. The first version read the
+        // Flask UI's label ("55/45, if the shipping label is taller") instead of its maths and cut at the
+        // TOP 55%; every source-level check still passed, and it was wrong on real Flipkart PDFs. This
+        // runs the splitter and reads the crop boxes back against pypdf's arithmetic written out
+        // longhand, so the code and the Python can never diverge again without a red test.
+        {
+            const { PDFDocument } = require('pdf-lib');
+            const ls = require(path.join(ROOT, 'app/api/label_splitter.js'));
+            const doc = await PDFDocument.create();
+            doc.addPage([595, 842]);
+            const r = await ls.splitPdf(Buffer.from(await doc.save()));
+            const boxOf = async (b) => { const d2 = await PDFDocument.load(b); const c = d2.getPage(0).getCropBox();
+                return { y: Math.round(c.y), h: Math.round(c.height) }; };
+            const ship = await boxOf(r.shipping), inv = await boxOf(r.invoice);
+            const H = 842, splitY = Math.round(H * 0.55);   // pypdf: split_y = h * ratio
+            check('label splitter: the crop boxes match pypdf, measured on a real PDF',
+                [ship.y === splitY && ship.h === H - splitY,   // pypdf shipping [0, split_y, w, h]
+                 inv.y === 0 && inv.h === splitY,              // pypdf invoice  [0, 0, w, split_y]
+                 ship.h + inv.h === H,                         // the halves tile the page exactly
+                 ship.h < inv.h],                              // the label is the SMALLER, top band
+                [true, true, true, true]);
+        }
         console.log(`\n${pass} passed, ${fail} failed`);
         process.exit(fail ? 1 : 0);
     })();

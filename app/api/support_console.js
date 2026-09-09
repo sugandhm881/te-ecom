@@ -163,9 +163,15 @@ async function overlayJourneyScans(rows, scans) {
     // `attempts` rides along on the same read (user, 2026-09-05: "show attempt count in status") —
     // it is the courier's own delivery-attempt counter, so "OFD Completed 2" means the courier tried
     // twice, not that we called twice. One extra column on a query already being made.
-    const jr = await chunkedIn('shipment_journey_ecom', 'awb, last_scan_at, attempts', 'awb', awbs);
-    const byAwb = {}, attByAwb = {};
-    jr.forEach(j => { if (j.last_scan_at) byAwb[j.awb] = j.last_scan_at; if (j.attempts != null) attByAwb[j.awb] = j.attempts; });
+    // `ndr_count` rides along too (user, 2026-09-09: "undelivered sorting with NDR attempt, NDR1 on top").
+    // It is NOT the same number as `attempts`: attempts counts every out-for-delivery scan, ndr_count only
+    // the ones that FAILED. A parcel out for delivery right now has attempts 2 and ndr_count 1, and it is
+    // the failures that decide how urgent the call is. Populated on all three couriers (86 kwikship,
+    // 72 rapidshyp, 1 docpharma at the time of writing), so it is safe to sort on.
+    const jr = await chunkedIn('shipment_journey_ecom', 'awb, last_scan_at, attempts, ndr_count', 'awb', awbs);
+    const byAwb = {}, attByAwb = {}, ndrByAwb = {};
+    jr.forEach(j => { if (j.last_scan_at) byAwb[j.awb] = j.last_scan_at; if (j.attempts != null) attByAwb[j.awb] = j.attempts;
+        if (j.ndr_count != null) ndrByAwb[j.awb] = j.ndr_count; });
     // ⚠️ AUTHORITATIVE — NOT "whichever is newer". `last_scan_at` is the newest entry in the actual scan
     // log; everything else is an estimate. Taking the later of the two looked safe but is precisely
     // wrong for a STALLED parcel: TE25-40300's last real scan was 07 Aug 18:23, while its tracking row
@@ -176,6 +182,7 @@ async function overlayJourneyScans(rows, scans) {
         const t = byAwb[awb];
         if (t) scans[r.order_id] = t;
         if (attByAwb[awb] != null) r.delivery_attempts = attByAwb[awb];
+        if (ndrByAwb[awb] != null) r.ndr_attempt = ndrByAwb[awb];
     });
     // SECOND PASS, BY ORDER NAME — for every row the AWB join missed. A DocPharma journey is keyed on
     // whatever identifier existed when it was written (DocPharma's tracking_number), while the order row
@@ -201,6 +208,7 @@ async function overlayJourneyScans(rows, scans) {
             if (!j) return;
             if (j.last_scan_at) scans[r.order_id] = j.last_scan_at;
             if (j.attempts != null && r.delivery_attempts == null) r.delivery_attempts = j.attempts;
+            if (j.ndr_count != null && r.ndr_attempt == null) r.ndr_attempt = j.ndr_count;
         });
     }
     return scans;
@@ -782,6 +790,25 @@ router.get('/support/queue', async (req, res) => {
         // Real-time courier scans beat the nightly tracking snapshot — see overlayJourneyScans().
         const scans = tab === 'und' ? await overlayJourneyScans(rows, scansRaw) : {};
         rows.forEach(r => { const n = notes[r.order_id]; r.note_count = n ? n.count : 0; r.latest_note = n ? n.latest : null; r.latest_note_by = n ? n.latest_by : null; r.latest_note_at = n ? n.latest_at : null; r.last_scan_at = scans[r.order_id] || null; });
+        // ── WORK THE FRESHEST FAILURE FIRST (user, 2026-09-09: "undelivered sorting with NDR attempt,
+        // NDR1 on top and after that NDR2, NDR3 and so on by default — prioritise this").
+        // A parcel on its FIRST failed attempt is the one still worth a call: the courier will try again
+        // tomorrow, the customer has not given up, and a single conversation usually saves it. By the
+        // third failure the same call rarely changes the outcome. The queue was ordered by confirmation
+        // then age, which buried every fresh NDR under a fortnight of parcels nobody could save.
+        //
+        // ⚠️ This must run AFTER the journey overlay above, which is where ndr_attempt arrives — sorting
+        // before it would read undefined on every row and silently do nothing.
+        // A row with no journey data sorts LAST rather than as 0: unknown is not "no failures yet", and
+        // putting it at the top would push real NDR1 parcels below parcels we know nothing about.
+        if (tab === 'und') {
+            const ndrOf = r => { const n = Number(r.ndr_attempt); return Number.isFinite(n) && n > 0 ? n : Infinity; };
+            rows.sort((x, y) => ndrOf(x) - ndrOf(y)
+                // within one NDR level the old order stands: confirmed customers first, then oldest
+                || (Number(!!y.msg91_confirmed) - Number(!!x.msg91_confirmed))
+                || String(x.created_at || '').localeCompare(String(y.created_at || ''))
+                || String(x.order_id).localeCompare(String(y.order_id)));
+        }
         // Courier platform — only for the shipped panels. Repeat-tab orders are still pre-dispatch (no AWB,
         // no journey row), so the lookup would cost a query and return nothing but nulls.
         if (isUndPanel && rows.length) {

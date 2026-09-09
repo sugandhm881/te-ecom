@@ -249,13 +249,31 @@ router.get('/delivery-performance', async (req, res) => {
         // then narrow in-memory (single query). Zone + State match ANY of the selected values.
         // Compute the previous equal-length window up-front so it fetches in PARALLEL with the current one
         // (compare mode) instead of after it — halving the DB wait when comparing.
-        let prevWin = null;
+        // COMPARE AGAINST A PERIOD YOU CHOOSE, NOT ONLY THE ONE BEFORE (user, 2026-09-09: "give a compare
+        // switch button, and when that button is on a compare custom date should open, and the dashboard
+        // comparison should be as the selected compare date").
+        // The default stays the immediately preceding equal-length window — the right question most days.
+        // But "this month vs the same month last year" is not answerable by an offset, which is why the
+        // deltas could not be trusted for anything seasonal. cmp_from/cmp_to override it, and the response
+        // always states which window it used so the pills can never claim a comparison never made.
+        const ymd = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
+        const cmpFromQ = String(req.query.cmp_from || ''), cmpToQ = String(req.query.cmp_to || '');
+        const explicitCmp = compare && ymd.test(cmpFromQ) && ymd.test(cmpToQ);
+        let prevWin = null, compareBasis = null;
         if (compare) {
-            const d0 = new Date(from.getFullYear(), from.getMonth(), from.getDate());
-            const d1 = new Date(to.getFullYear(), to.getMonth(), to.getDate());
-            const lenDays = Math.round((d1 - d0) / 86400000) + 1;      // inclusive day count
-            const pTo = new Date(d0); pTo.setDate(pTo.getDate() - 1);   // day before current start
-            const pFrom = new Date(pTo); pFrom.setDate(pFrom.getDate() - (lenDays - 1));
+            let pFrom, pTo;
+            if (explicitCmp) {
+                pFrom = new Date(cmpFromQ); pTo = new Date(cmpToQ);
+                if (pFrom > pTo) { const t = pFrom; pFrom = pTo; pTo = t; }   // a backwards range is a slip
+                compareBasis = 'custom';
+            } else {
+                const d0 = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+                const d1 = new Date(to.getFullYear(), to.getMonth(), to.getDate());
+                const lenDays = Math.round((d1 - d0) / 86400000) + 1;      // inclusive day count
+                pTo = new Date(d0); pTo.setDate(pTo.getDate() - 1);         // day before current start
+                pFrom = new Date(pTo); pFrom.setDate(pFrom.getDate() - (lenDays - 1));
+                compareBasis = 'previous';
+            }
             prevWin = { from: pFrom, to: pTo,
                 fromISO: new Date(pFrom.getFullYear(), pFrom.getMonth(), pFrom.getDate()).toISOString(),
                 toISO: new Date(pTo.getFullYear(), pTo.getMonth(), pTo.getDate(), 23, 59, 59).toISOString() };
@@ -295,7 +313,16 @@ router.get('/delivery-performance', async (req, res) => {
         let compareOut = null;
         if (compare && prevRowsRaw) {
             const pRows = prevRowsRaw.filter(matchFilters);
-            compareOut = { range: { from: fmtLocal(prevWin.from), to: fmtLocal(prevWin.to) }, kpis: summarizeAll(pRows) };
+            // `days` and `basis` travel with it: a custom window can be a DIFFERENT LENGTH from the
+            // current one, and a Δ between periods of unequal length is a different claim — the page
+            // says so rather than letting the pills imply like-for-like.
+            const cmpDays = Math.round((new Date(prevWin.to) - new Date(prevWin.from)) / 86400000) + 1;
+            const curDays = Math.round((new Date(to.getFullYear(), to.getMonth(), to.getDate())
+                                      - new Date(from.getFullYear(), from.getMonth(), from.getDate())) / 86400000) + 1;
+            compareOut = { range: { from: fmtLocal(prevWin.from), to: fmtLocal(prevWin.to) },
+                basis: compareBasis, days: cmpDays, current_days: curDays, same_length: cmpDays === curDays,
+                shipments: pRows.length,
+                kpis: summarizeAll(pRows) };
         }
 
         // ── KPIs — denominator is TOTAL SHIPPED (= resolved: delivered + RTO). In-transit shown apart.
