@@ -1231,6 +1231,196 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### The call-type card gained an order count, and it caught a null pretending to be a customer (2026-09-09)
+
+User: *"in this card show unique order/call count also."* 86 RTO calls could be 86 customers rung once
+or 40 rung twice — the card read identically either way. Each call type now shows the DISTINCT orders
+behind its calls and the repeat factor: *86 calls to 65 orders · 1.3× each*.
+
+⚠️ **The first version of this ratio was itself wrong, and it invented an alarm.** It divided ALL of a
+type’s calls by its KNOWN orders — but 18 of COD confirmation’s 30 calls that day carry no order id, so
+they are not in those 7 orders. It read **6.7× over the week** and I reported COD confirmation as
+pestering 19 customers seven times each. Dividing only the ATTRIBUTABLE calls gives **2.1× — the same as
+RTO recovery**. There was no over-dialling. The card now says "39 of them to 19 orders", so the
+numerator and the denominator can be checked against each other on the face of it.
+
+The real finding underneath was the missing ids, not the dialling.
+
+⚠️ **Because a call with no order_id was being counted as an order.** `byOrder[c.order_id]` keys an
+absent id as the STRING "null", so **89 unattributed calls piled into one pseudo-order** — which counted
+as an order called, and once past three calls, as an order *"called 3+ times"*. The tile whose whole job
+is naming customers we are pestering was naming a null. **94 of 133 COD-confirmation calls carry no
+order_id** (RTO recovery: zero), so this was not a rounding error, it was most of that call type.
+Fixed: an id-less call is excluded from the order tally and counted separately as
+`metrics.calls_without_order`, with the per-type card saying *"N with no order id"* instead of rendering
+*"to 0 orders · 0× each"*.
+
+⚠️ **Two follow-ups this leaves open.** (1) Why COD-confirmation calls lose their order id at all — the
+RTO path never does, so it is something in that dial path, and until it is fixed those calls cannot be
+traced to a customer from this page. (2) Nothing — the dialling rate was the artefact above, and COD confirmation
+runs at the same 2.1 dials per order as RTO recovery.
+
+Selftests **566 passing**.
+
+### Four numbers Call Insights could not show (2026-09-09)
+
+**The dialling was invisible.** Every figure on the page begins at a TRANSCRIPT, so a day where the
+agent rang 54 numbers and recorded 31 conversations read exactly like a day of 31 dials that all
+connected. **Dials placed** is now the first KPI tile, with the number that matters underneath it —
+*57% became a call with a transcript · 23 rang out*. Counted from the turnstile’s `attempt_log`, where
+each attempt carries its OWN `at`, so a dial falls in the same window as the calls rather than being
+dated by its row. Done in SQL (`count_vobiz_dials`, migration `20260909_count_vobiz_dials.sql`) because
+the alternative is pulling every order’s whole attempt log across the wire to count array elements.
+
+**And the outcome cards answered "what happened" without ever answering "how did we do".** Three shares
+now sit at the top of Outcomes, filling what was blank space, and they **partition the range**:
+
+| | 09-Sep | of every call |
+|---|---|---|
+| Settled — a real decision (re-attempt agreed / confirmed / cancelled) | 10 | 32% |
+| Reached but unresolved (unclear, or spoke with no outcome recorded) | 12 | 39% |
+| Nobody spoke (hung up, silent, never connected) | 9 | 29% |
+| **Total** | **31** | **100%** |
+
+⚠️ The middle one is computed as **(answered − settled)**, not as a list of its members. An outcome
+nobody has named yet then lands there and the three still total 100%, instead of quietly summing to 97%
+and making the page look broken — the same failure mode as the outcome/answered disagreement that this
+card exists to surface.
+
+The KPI row is seven tiles now, so it is `auto-fit` rather than a hard `xl:grid-cols-6`; seven does not
+divide by six and the last tile would have sat alone on its own line.
+
+Selftests **564 passing**.
+
+### The statement printed Sarvam's real bill and then didn't add it (2026-09-09)
+
+User, on the corrected page: *"check this and fix calculation."* Three defects, all in the total. **08-Sep
+went ₹514.03 → ₹585.57.**
+
+**The vendor's own bill belongs IN the total, not beside it.** The page was showing
+*"Sarvam — actually billed ₹198.69 · vs ₹127.15 measured"* in a line of its own — and totalling the
+**₹127.15**. Telephony had replaced its estimate with Vobiz's ledger since 08-Sep; Sarvam never got the
+same rule, so the grand total ran **₹71.54 light on a single day**. The bill is now the two component
+rows, **split by Sarvam's own model itemisation** rather than apportioned by a guess — `bulbul` is the
+voice, `saaras`/`saarika` are the ears:
+
+| | our meter | Sarvam's actual |
+|---|---|---|
+| TTS (voice) | ₹91.67 | **₹177.60** |
+| STT (ears)  | ₹35.48 | **₹21.09** |
+
+We were 94% *under* on speech — the characters synthesised for every ringing phone that never answered,
+which are never stored in a transcript — and *over* on listening. ⚠️ Two guards: an unrecognised model
+name is folded into STT rather than silently dropped from the total, and the bill only replaces the
+measurement when **the captured days cover the whole range** — the figures arrive from a bookmarklet the
+user clicks, and swapping a 7-day range for 2 days of real bills would understate far worse than the
+estimate. When it doesn't apply, the row says so instead of looking identical.
+
+**A manual call has no voice stack and no brain.** A person dialled it from the dashboard: Sarvam never
+heard it, never spoke on it, Claude never thought about it. The per-minute STT estimate was firing on all
+49 of them anyway — ~₹13/day of transcription we were never charged for, and most of the **₹17.64** the
+by-type card blamed on human calls (now **₹4.50**, pure telephony). The brain estimate would have done
+the same the moment a manual row carried an exchange count; today they are all zero, which is the only
+reason it had not surfaced too. And the brain's denominator counted human calls as ones we had *failed*
+to measure — *"114/167 calls"* is now *"114/118 AI calls · 49 manual calls have no brain and are charged
+none"*.
+
+### AI or human, on the statement too — and what it takes to split a bill (2026-09-09)
+
+User: *"give filter of AI Call Manual and change calculation accordingly."* The filter is the easy half.
+The hard half is that **each vendor bills ONE number for the line**: Vobiz charges ₹141.86 for the day
+whoever dialled, and the number rental is a monthly rent, not a per-call fee. So a filtered view has to
+apportion, and the basis has to be defensible:
+
+- **Telephony** — by each set's share of the per-call charges we could match to Vobiz's own CDR (the
+  closest thing to a real per-call reading we have), falling back to a plain call-count share if nothing
+  matched.
+- **Number rental** — by call count. It is one rent for the line; charging it whole to both views would
+  bill it twice.
+- **Sarvam and Claude** — no apportioning needed. A manual call uses neither, so they fall out at
+  100%/0% by themselves.
+
+**Every call is still PRICED before the filter is applied**, because the full set is the denominator
+those shares are computed from — filtering the database query instead would have thrown it away and left
+the shares unknowable. 08-Sep:
+
+| | All | AI | Manual |
+|---|---|---|---|
+| Telephony | ₹141.86 | ₹121.27 | ₹20.59 |
+| Sarvam TTS / STT | ₹177.60 / ₹21.09 | ₹177.60 / ₹21.09 | ₹0 / ₹0 |
+| Claude brain / platform | ₹202.39 / ₹19.37 | ₹202.39 / ₹19.37 | ₹0 / ₹0 |
+| **Grand** | **₹585.57** | **₹558.15** | **₹27.41** |
+| Calls | 167 | 118 | 49 |
+
+**The invariant that makes it trustworthy: AI + Manual add back to All** — exact on the variable total,
+within a paisa on the grand (the fixed line is rounded on both sides). Verified on a one-day and a
+seven-day range.
+
+⚠️ Unlike Call Insights, **"All" is meaningful here and stays the default** — the vendors bill one number
+for both kinds, so the pooled figure is a real bill rather than a corrupted average. There the pooling
+would have put untranscribed calls back into the answer rate.
+
+⚠️ A split bill that does not say it is split reads as a broken total, so a filtered view carries a note
+above the components: how many of the range's calls it covers, that Sarvam and Claude are whole numbers,
+and what percentage of the telephony and rental it carries. (Written with `text-xs`, not `text-[11px]` —
+this card sits outside the one view where that arbitrary value is defined as real CSS.)
+
+**Yesterday** joined the range picker at the same time, as a CLOSED one-day window (from yesterday TO
+yesterday) rather than "the last 1 day", which would have folded today’s part-day into it. It matters more
+on this page than the others: yesterday is the day whose vendor bills have SETTLED, so it is the one you
+can hold against Vobiz’s and Sarvam’s own consoles — the comparison that started this whole thread.
+
+⚠️ **And the wallet line was calling a sliver of the day definitive.** It billed itself as *"the only
+figure that cannot be argued with"* while, on 08-Sep, the balance snapshots did not begin until **17:21
+IST** — the feature first ran that evening — so ₹21.40 of measured spend sat beside a real telephony
+bill of ₹141.86 and made every honest figure next to it look wrong. It now reports the window it
+actually covered, counts its readings, and turns amber when that window does not span the range. From
+09-Sep the snapshots cover full days, so it becomes a real cross-check rather than a contradiction.
+On a filtered view it also says what it is: the wallet is ONE prepaid line and cannot be split by call
+type, so that figure always covers AI and manual together.
+
+Selftests **562 passing**.
+
+### OPEN: the prompt cache is costing more than not caching at all (found 2026-09-09, not yet fixed)
+
+User, on the corrected ₹4.94 per connected call: *"this is too high per call rate."* The arithmetic is
+right — brain ₹1.79, Sarvam voice ₹1.57, telephony ₹1.07, ears ₹0.19, platform ₹0.17, rental ₹0.15 — but
+one component is broken. On 08-Sep the call brain made **404 API calls: 184 WROTE the cache, only 153
+READ it** — 0.95 reads per write.
+
+A cache write costs **2×** normal input; a read saves 0.9×. Break-even is **1.11 reads per write**. We are
+below it, so:
+
+| | cost of those tokens, 08-Sep |
+|---|---|
+| Now (1-hour cache) | **$1.96** |
+| Same tokens, 5-minute cache | **$1.26** |
+| **No caching at all** | **$1.82** |
+
+⚠️ **Why it can never hit**: `buildPrompt` puts the per-call facts — customer name, order, amount,
+address, CALL FACTS, courier reason — at the TOP, ahead of the big static rulebook. Caching matches on a
+PREFIX, so a different customer’s name makes it a different prefix. It is rewritten every call, ~5,090
+tokens at 2× each time.
+
+⚠️ **Which also means the 1-hour TTL has never delivered what it was bought for.** The comment above the
+header records it was chosen on 2026-09-04 for LATENCY — *"delay reply of agent is still issue"* — to span
+the gap between calls. It cannot: the cached content is unique per call, so it misses on the first turn
+of every call whatever the TTL. We have been paying the 2× premium for a benefit that was never
+physically available.
+
+**Two options, neither taken yet (awaiting the user’s call):**
+
+- **A — TTL to 5 minutes.** One env var, no behaviour change, ~₹62/day. Turns caching from a loss into a
+  modest win; does not fix the miss rate.
+- **B — reorder the prompt**: static rulebook first (cached), per-call facts after it. The rulebook then
+  becomes identical across every call, written once an hour and read on all 404 requests — a much larger
+  saving, AND the first-turn latency the 1-hour TTL was meant to buy finally arrives.
+
+⚠️ **B is not mechanical.** Prompt ORDER is load-bearing in this file: the `switchBanner` comment records
+that moving the language instruction to position one is what stopped her answering English questions in
+Hindi. Reordering the whole prompt on a live caller needs test calls first, and the saving should be
+MEASURED afterwards rather than predicted.
+
 ### The Anthropic bill was 29% light, and it was the cache TTL (2026-09-09)
 
 User: *"claude api costing also come incorrect figure — yesterday used 2.55 usd but in our dashboard cost show less."*

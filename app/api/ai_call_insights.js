@@ -181,9 +181,15 @@ router.get('/support/call-insights', async (req, res) => {
             const o = outcomeOf(c.summary); outcomes[o] = (outcomes[o] || 0) + 1;
             langs[c.language || '?'] = (langs[c.language || '?'] || 0) + 1;
             const t = String(c.call_type || '').replace('_vobiz', ''); types[t] = (types[t] || 0) + 1;
-            byOrder[c.order_id] = (byOrder[c.order_id] || 0) + 1;
+            // A CALL WITH NO ORDER ID IS NOT AN ORDER. `byOrder[undefined]` keys as the STRING "null", so
+            // every unattributed call piled into one pseudo-order — and 94 of 133 COD-confirmation calls
+            // over the last week carry no order_id (RTO recovery: none). That single fake key counted as an
+            // order in "orders called" AND, once it passed three calls, as an order "called 3+ times", so
+            // the tile that exists to name customers we are pestering was naming a null.
+            if (c.order_id) byOrder[c.order_id] = (byOrder[c.order_id] || 0) + 1;
         }
         const repeatCalled = Object.values(byOrder).filter(n => n >= 3).length;
+        const callsWithoutOrder = ai.filter(c => !c.order_id).length;   // shown, not swallowed
         const ordersCalled = Object.keys(byOrder).length;   // the denominator for "called 3+ times"
         // SILENCE, CATEGORISED. One "one-sided" bar counted 116 calls and told you nothing you could
         // act on. These four separate a customer who hung up on the greeting from a line that stayed
@@ -193,8 +199,14 @@ router.get('/support/call-insights', async (req, res) => {
         const byType = {};
         for (const c of ai) {
             const k = String(c.call_type || 'unknown').replace('_vobiz', '');
-            const t = byType[k] = byType[k] || { calls: 0, answered: 0, silent_long: 0, won: 0, seconds: 0 };
+            // CALLS AND ORDERS ARE DIFFERENT NUMBERS (user, 2026-09-09: "in this card show unique
+            // order/call count also"). 86 RTO calls could be 86 customers rung once or 40 rung twice, and
+            // the card read identically either way — while "orders called 3+ times" up in the KPI row is
+            // one blended figure across both jobs. A Set per type, so a win rate can finally be read
+            // against the customers it was won from rather than against the dialling.
+            const t = byType[k] = byType[k] || { calls: 0, answered: 0, silent_long: 0, won: 0, seconds: 0, _orders: new Set() };
             t.calls++;
+            if (c.order_id) t._orders.add(c.order_id); else t.no_order = (t.no_order || 0) + 1;
             if (custTurns(c.transcript) > 0) t.answered++;
             if (custTurns(c.transcript) === 0 && durOf(c) >= 20) t.silent_long++;
             // the win condition differs by job: RTO wants a re-attempt agreed, COD wants a confirmation
@@ -205,6 +217,15 @@ router.get('/support/call-insights', async (req, res) => {
             const t = byType[k];
             t.avg_seconds = t.calls ? Math.round(t.seconds / t.calls) : 0;
             t.answer_rate = t.calls ? Math.round(t.answered / t.calls * 100) : 0;
+            t.orders = t._orders.size;
+            // JSON.stringify would silently render a Set as {} — it has to become a number first
+            // THE NUMERATOR MUST BELONG TO THE DENOMINATOR (found 2026-09-09 from the user's own question,
+            // "which is unique count of call?"). This divided ALL the type's calls by its known orders — but
+            // 18 of COD confirmation's 30 calls carry no order id, so they are not IN those 7 orders. It read
+            // "4.3x each" where the attributable calls give 1.7x. Only the calls we could attribute count.
+            t.calls_with_order = t.calls - (t.no_order || 0);
+            t.calls_per_order = t.orders ? Number((t.calls_with_order / t.orders).toFixed(1)) : 0;
+            delete t._orders;
             delete t.seconds;
         }
         const silentCalls = ai.filter(c => custTurns(c.transcript) === 0);
@@ -232,6 +253,37 @@ router.get('/support/call-insights', async (req, res) => {
             }
         } catch (e) { console.log('[CallInsights] dial history unavailable:', e.message); }
 
+        // WHAT WAS DIALLED, NOT JUST WHAT WAS RECORDED (user, 2026-09-09: "total attempt call before
+        // total call with transcript"). Every number on this page starts from a transcript, so the page
+        // could never show the dials that produced nothing — a day where the agent rang 54 numbers and
+        // recorded 29 conversations reads identically to a day of 29 dials that all connected. The
+        // turnstile's attempt_log is the record of the dialling itself: one entry per attempt, with its
+        // own timestamp, so it is counted in the SAME window as the calls rather than by row.
+        // A miss is absent, never fatal — this is a reporting surface, not the call path.
+        let dialsPlaced = null;
+        try {
+            const { data: dl } = await supabase.rpc('count_vobiz_dials', { from_ts: fromIso, to_ts: toIso });
+            if (typeof dl === 'number') dialsPlaced = dl;
+        } catch (_) { /* fall through to the client-side count below */ }
+        if (dialsPlaced == null) {
+            try {
+                const logs = [];
+                for (let page = 0; page * 1000 < 20000; page++) {
+                    const { data, error } = await supabase.from('vobiz_auto_calls_ecom')
+                        .select('attempt_log').not('attempt_log', 'is', null)
+                        .order('order_name', { ascending: true })
+                        .range(page * 1000, page * 1000 + 999);
+                    if (error) throw error;
+                    logs.push(...(data || []));
+                    if (!data || data.length < 1000) break;
+                }
+                const a = new Date(fromIso).getTime(), b = new Date(toIso).getTime();
+                dialsPlaced = logs.reduce((n, r) => n + (Array.isArray(r.attempt_log)
+                    ? r.attempt_log.filter(x => { const t = new Date(x && x.at).getTime(); return t >= a && t <= b; }).length
+                    : 0), 0);
+            } catch (e) { console.log('[CallInsights] dial count unavailable:', e.message); }
+        }
+
         // the cached audit for this window (newest first)
         const { data: cached } = await supabase.from('agent_call_insights_ecom')
             .select('*').eq('from_date', from).eq('to_date', to)
@@ -250,6 +302,8 @@ router.get('/support/call-insights', async (req, res) => {
                 avg_seconds: connected.length ? Math.round(connected.reduce((a, c) => a + durOf(c), 0) / connected.length) : 0,
                 avg_agent_turns: ai.length ? Number((b.agent_turns / ai.length).toFixed(1)) : 0,
                 repeat_called_orders: repeatCalled, orders_called: ordersCalled,
+                calls_without_order: callsWithoutOrder,
+                dials_placed: dialsPlaced,
             },
             outcomes, languages: langs, types, silence, by_type: byType,
             // EVERY CALL IN THE RANGE, with everything known about it (user, 2026-09-05: "i want full

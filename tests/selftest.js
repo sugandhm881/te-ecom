@@ -1925,7 +1925,8 @@ function check(name, got, want) {
                     check("cost: telephony comes from Vobiz's own transaction ledger, itemised",
                         [cc.includes('async function vobizBilled(from, to)'),
                          cc.includes('/api/v1/account/${id}/transactions'),
-                         cc.includes('if (telephonyBilled != null) comp.telephony = telephonyBilled;'),
+                         // …still the bill, now times this view's share of it (1 on the unfiltered view)
+                         cc.includes('if (telephonyBilled != null) comp.telephony = r2(telephonyBilled * telShare);'),
                          // the two charges nobody knew about until the ledger showed them
                          cc.includes("stream_cdr: 'media stream'") && cc.includes("recording: 'recordings'"),
                          cc.includes('telephony_breakdown'),
@@ -2059,6 +2060,214 @@ function check(name, got, want) {
                          apm.includes('<button data-pick="${o.pick}" class="sci-pick ${cls}"'),
                          apm.includes("e.target.closest('.sci-pick')")],
                         [true, true, true, true, true, true, true, true, true, true, true]);
+                }
+                // CALLS AND ORDERS ARE DIFFERENT NUMBERS (user, 2026-09-09: "in this card show unique
+                // order/call count also"). 86 RTO calls could be 86 customers rung once or 40 rung twice and
+                // the card read identically. Adding it exposed something worse: over a week, COD confirmation
+                // made 128 calls to 19 orders — 6.7 times each — which the blended "orders called 3+×" tile
+                // was supposed to catch and did not.
+                //
+                // It did not, because a call with NO order_id keys byOrder as the string "null": 89 of those
+                // calls piled into one pseudo-order that counted as an order called, and once past three
+                // calls, as an order "called 3+ times". The tile whose whole job is naming customers we are
+                // pestering was naming a null. 94 of 133 COD calls carry no order_id; RTO recovery, none.
+                {
+                    const ci5 = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_insights.js'), 'utf8');
+                    const ap8 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('call insights: a call with no order id is not counted as an order',
+                        [ci5.includes('if (c.order_id) byOrder[c.order_id] = (byOrder[c.order_id] || 0) + 1;'),
+                         // …and the gap is reported rather than swallowed
+                         ci5.includes('const callsWithoutOrder = ai.filter(c => !c.order_id).length;'),
+                         ci5.includes('calls_without_order: callsWithoutOrder,'),
+                         ci5.includes("if (c.order_id) t._orders.add(c.order_id); else t.no_order = (t.no_order || 0) + 1;")],
+                        [true, true, true, true]);
+                    check('call insights: the call-type card shows the orders behind the calls',
+                        [ci5.includes('t.orders = t._orders.size;'),
+                         // THE NUMERATOR MUST BELONG TO THE DENOMINATOR. The first cut divided ALL of a
+                         // type's calls by its KNOWN orders, and 18 of COD confirmation's 30 calls have no
+                         // order id — so it read 4.3x where the attributable calls give 1.7x, and over a
+                         // week it manufactured a 6.7x "over-dialling" alarm that did not exist.
+                         ci5.includes('t.calls_with_order = t.calls - (t.no_order || 0);'),
+                         ci5.includes('t.calls_per_order = t.orders ? Number((t.calls_with_order / t.orders).toFixed(1)) : 0;'),
+                         !ci5.includes('Number((t.calls / t.orders).toFixed(1))'),
+                         // a Set would serialise as {} — it has to leave as a number and the Set must go
+                         ci5.includes('delete t._orders;'),
+                         ap8.includes('with no order id'),
+                         // and never render "to 0 orders · 0x each", which is what COD confirmation showed.
+                         // The card states the numerator too — "39 of them to 19 orders" — so the ratio can
+                         // be checked against its own inputs on the face of it.
+                         ap8.includes("t.orders?`${t.calls_with_order} of them to ${t.orders} order")],
+                        [true, true, true, true, true, true, true]);
+                }
+                // FOUR NUMBERS THE PAGE COULD NOT SHOW (user, 2026-09-09). Every figure on Call Insights
+                // begins at a transcript, so the DIALLING was invisible: a day of 54 dials producing 31
+                // conversations read exactly like 31 dials that all connected. And the outcome detail
+                // answered "what happened" without ever answering "how did we do".
+                //
+                // The three shares PARTITION the range — settled + unresolved + never-spoke = every call,
+                // always. Which is why the middle one is (answered − settled) rather than a list of its
+                // members: an outcome nobody has named yet lands there and the three still total 100%,
+                // instead of quietly summing to 97% and making the page look broken.
+                {
+                    const ci4 = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_insights.js'), 'utf8');
+                    const ap7 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    const idx2 = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+                    check('call insights: the dials placed before any transcript are counted, in the same window',
+                        [ci4.includes("supabase.rpc('count_vobiz_dials', { from_ts: fromIso, to_ts: toIso })"),
+                         // a dial is dated by its OWN timestamp inside attempt_log, not by its row
+                         fs.existsSync(path.join(ROOT, 'supabase/migrations/20260909_count_vobiz_dials.sql')),
+                         ci4.includes('dials_placed: dialsPlaced,'),
+                         // and a missing count must never 500 a reporting page
+                         ci4.includes("console.log('[CallInsights] dial count unavailable:'"),
+                         ap7.includes("tile('Dials placed', m.dials_placed,"),
+                         ap7.includes('became a call with a transcript')],
+                        [true, true, true, true, true, true]);
+                    check('call insights: the three shares partition every call in the range',
+                        [ap7.includes("const SETTLED = ['reattempt','confirmed','cancelled'];"),
+                         // (answered − settled), so an unnamed outcome cannot fall through the gap
+                         ap7.includes('const unresolvedN = Math.max(0, ansCalls.length - settledN);'),
+                         ap7.includes('const noSpeakN = silCalls.length;'),
+                         // all three measured against the same denominator: every call with a transcript
+                         ap7.includes('const shareTile = (n,label,sub,tone)=>mini({ n, of:m.calls||1, label, sub, tone });'),
+                         ap7.includes("shareTile(settledN, 'Settled") && ap7.includes("shareTile(noSpeakN, 'Nobody spoke'"),
+                         // seven KPI tiles do not divide by six — the row is auto-fit, not a hard 6
+                         idx2.includes('.sci-kpirow { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));'),
+                         !idx2.includes('id="sci-kpis" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4"')],
+                        [true, true, true, true, true, true, true]);
+                }
+                // A PARTIAL MEASUREMENT MUST NOT CALL ITSELF DEFINITIVE (user, 2026-09-09: "is this price
+                // correct?"). The wallet line billed itself as "the only figure that cannot be argued with"
+                // while, on 08-Sep, the balance snapshots did not begin until 17:21 IST — it measured the last
+                // 6½ hours of the day and showed ₹21.40 beside a real telephony bill of ₹141.86, making every
+                // honest number next to it look wrong. It now reports the window it actually covered, and goes
+                // amber when that window does not span the range.
+                {
+                    const acc4 = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_costs.js'), 'utf8');
+                    const app6 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('ai-call costs: the wallet says what window it measured, and admits a partial one',
+                        [acc4.includes('const covers = startedAt <= new Date(fromIso).getTime() + GRACE && endedAt >= wantEnd - GRACE;'),
+                         // a range ending in the future is only ever expected to reach 'now'
+                         acc4.includes('const wantEnd = Math.min(new Date(toIso).getTime(), Date.now());'),
+                         acc4.includes('PART OF THE RANGE ONLY'),
+                         acc4.includes('measured_from: wallet.measured_from || null'),
+                         // …and the wallet is one prepaid line: it cannot be split by call type
+                         acc4.includes('The wallet is the whole phone line: it cannot be split by call type'),
+                         // the page turns it amber rather than leaving it looking authoritative
+                         app6.includes("d.wallet.covers?'text-slate-600':'text-amber-700 font-semibold'"),
+                         app6.includes("(part of the range)"),
+                         app6.includes('d.wallet.measured_from?`measured ')],
+                        [true, true, true, true, true, true, true, true]);
+                }
+                // YESTERDAY IS A CLOSED WINDOW, NOT "THE LAST 1 DAY" (user, 2026-09-09: "also add date filter
+                // yesterday option"). Every other preset means "the last N days, ENDING TODAY"; reusing that
+                // arithmetic would make Yesterday mean today AND yesterday, folding a part-day of calls into a
+                // figure meant to be final. It matters more here than anywhere: yesterday is the day whose
+                // vendor bills have settled, so it is the one you can hold against Vobiz's and Sarvam's own
+                // consoles — which is exactly the comparison that started this whole thread.
+                {
+                    const app5 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    const sac = app5.slice(app5.indexOf('function sacRenderRange'), app5.indexOf('async function sacLoad'));
+                    check('ai-call costs: Yesterday is a closed one-day window, like the other panels',
+                        [sac.includes('>Yesterday</option>'),
+                         sac.includes("_sac.range = v==='y' ? {from:_ymd(back(1)),to:_ymd(back(1))} : {from:_ymd(back(+v)),to:_ymd(d)};"),
+                         // the old shared arithmetic is gone — it is what would have silently included today
+                         !sac.includes('const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-(+v));'),
+                         // and it matches the wording the other two panels already use
+                         app5.includes("_sci.range = v==='y' ? {from:_ymd(back(1)),to:_ymd(back(1))}")],
+                        [true, true, true, true]);
+                }
+                // AI OR HUMAN, ON THE STATEMENT TOO (user, 2026-09-09: "give filter of AI Call Manual and
+                // change calculation accordingly"). The hard part is not the filter, it is that each vendor
+                // bills ONE number for the line: Vobiz charges ₹141.86 for the day whoever dialled, and the
+                // number rental is a monthly rent, not a per-call fee. So a filtered view has to APPORTION
+                // them, and the basis has to be defensible — telephony by each set's share of the per-call
+                // charges we could match to Vobiz's own CDR, the rental by call count. Sarvam and Claude need
+                // no apportioning: a manual call uses neither, so they fall out at 100%/0% on their own.
+                //
+                // The invariant that makes it trustworthy: AI + Manual must add back to All, to the rupee.
+                // Which is also why every call is still PRICED before filtering — filtering the query instead
+                // would throw away the denominator the shares are computed from.
+                {
+                    const acc3 = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_costs.js'), 'utf8');
+                    const app4 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('ai-call costs: the call-type filter apportions each shared bill, and the parts sum to the whole',
+                        [acc3.includes("const type = ['ai', 'manual'].includes(String(req.query.type || '')) ? String(req.query.type) : 'all';"),
+                         acc3.includes('const picked = type === ') && acc3.includes("isMan(c) === (type === 'manual')"),
+                         // shares are 1 on the unfiltered view, so it is unchanged to the rupee
+                         acc3.includes("const telShare = type === 'all' ? 1"),
+                         acc3.includes("const fixShare = type === 'all' ? 1"),
+                         acc3.includes('comp.telephony = r2(telephonyBilled * telShare);'),
+                         acc3.includes('bTts = r2(bTts * ttsShare); bStt = r2(bStt * sttShare);'),
+                         // neither the brain ledger nor the platform work belongs to a human's call
+                         acc3.includes("if (type !== 'manual' && brainLedgerInr > comp.brain)"),
+                         acc3.includes("comp.platform = type === 'manual' ? 0 : r2(platformInr);"),
+                         // the headline counts follow the filter as well
+                         acc3.includes('calls: picked.length, connected,'),
+                         acc3.includes('talk_seconds: picked.reduce('),
+                         acc3.includes("const connected = picked.filter(c => c.seconds > 0).length;")],
+                        [true, true, true, true, true, true, true, true, true, true, true]);
+                    // A SPLIT BILL THAT DOES NOT SAY IT IS SPLIT reads as a broken total: Vobiz charges
+                    // ₹141.86 and the AI view would show ₹121.27 with no explanation anywhere on the page.
+                    check('ai-call costs: a filtered view says how the shared bills were split',
+                        [acc3.includes('shares: type === ') && acc3.includes('of_calls: calls.length }'),
+                         app4.includes('sh=d.shares||null'),
+                         app4.includes('const shareNote = sh ?'),
+                         app4.includes("AI and Manual add back to the full bill."),
+                         app4.includes("innerHTML = shareNote +"),
+                         // the note uses a REAL utility — text-[11px] is not in the prebuilt sheet and this
+                         // card is outside the one view where that class is defined
+                         app4.includes('text-xs leading-relaxed text-amber-800'),
+                         app4.includes('&type=${_sac.type}'),
+                         app4.includes("localStorage.setItem('sac.callType'"),
+                         // "All" is meaningful HERE (both vendors bill one number for both kinds), unlike
+                         // Call Insights where pooling untranscribed calls corrupts the answer rate
+                         app4.includes('<option value="all" ${_sac.type===\'all\'?\'selected\':\'\'}>All calls</option>')],
+                        [true, true, true, true, true, true, true, true, true]);
+                }
+                // THE VENDOR'S OWN BILL BELONGS IN THE TOTAL, NOT BESIDE IT (user, 2026-09-09: "check this
+                // and fix calculation"; standing instruction: "don't take any assumption in cost, take actual
+                // which the platform provides"). The statement PRINTED Sarvam's real figure — ₹198.69 on
+                // 08-Sep — in a line of its own while totalling our own ₹115.81 measurement, so the grand
+                // total ran ₹71.54 light on one day. Telephony had worked the right way since 08-Sep; this is
+                // the same rule applied to the other vendor that publishes a real number.
+                // Split by MODEL because Sarvam itemises it (bulbul = voice, saaras/saarika = ears), so both
+                // component rows stay actual instead of one total apportioned by a guess.
+                {
+                    const acc2 = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_costs.js'), 'utf8');
+                    const app3 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('ai-call costs: Sarvam\u2019s own bill drives the total, split by model',
+                        [acc2.includes('sarvamBill.ok && sarvamBill.days >= rangeDays'),
+                         acc2.includes("const isTts = (m) => /bulbul/i.test(String(m || ''));"),
+                         acc2.includes('comp.tts = r2(bTts); comp.stt = r2(bStt);'),
+                         acc2.includes("sarvamBasis = 'billed';"),
+                         // a model name we do not recognise must not silently vanish from the total
+                         acc2.includes('if (named < sarvamBill.total) bStt = r2(bStt + (sarvamBill.total - named));'),
+                         // …and the per-call rows are rescaled, so the by-type card still sums to its column
+                         acc2.includes('c.cost.tts = r2(c.cost.tts * kTts); c.cost.stt = r2(c.cost.stt * kStt);'),
+                         // the page must say WHICH figure is counted — three Sarvam lines and no label was the bug
+                         app3.includes('sb.in_total') && app3.includes('not yet in the total')],
+                        [true, true, true, true, true, true, true]);
+                    // A PARTIAL CAPTURE MUST NOT REPLACE A FULL RANGE. The figures arrive from a bookmarklet
+                    // the user clicks; swapping a 7-day range for 2 days of real bills understates far worse
+                    // than the estimate it replaced.
+                    check('ai-call costs: a partly-captured range keeps the measurement, and says so',
+                        [acc2.includes('sarvamBill.days >= rangeDays'),
+                         acc2.includes('their own figures cover only ${sarvamBill.days} of ${rangeDays} days'),
+                         acc2.includes('in_total: sarvamBasis === ')],
+                        [true, true, true]);
+                    // A HUMAN'S CALL HAS NO VOICE STACK AND NO BRAIN. A person dialled it from the dashboard:
+                    // Sarvam never heard it, never spoke on it, Claude never thought about it. The per-minute
+                    // STT estimate was firing on all 49 of them — ~₹13/day of transcription never charged, and
+                    // most of the ₹17.64 the by-type card blamed on human calls (now ₹4.50, pure telephony).
+                    check('ai-call costs: a manual human call is charged telephony and nothing else',
+                        [acc2.includes("const isManual = String(c.call_type || '') === 'manual_human';"),
+                         acc2.includes('stt: isManual ? 0 :') && acc2.includes('tts: isManual ? 0 :'),
+                         acc2.includes('if (isManual) { brain = 0; brainActual = true; manualCalls++; }'),
+                         // and the brain denominator counts AI calls only — human calls are not ones we failed
+                         // to measure, they are ones with nothing to measure
+                         acc2.includes('${brainActualCalls}/${aiCalls} AI calls'),
+                         !acc2.includes('${brainActualCalls}/${calls.length} calls')],
+                        [true, true, true, true, true]);
                 }
                 // A VARIANT WEARS ITS OWN PICTURE (user, 2026-09-09: "TE-UCSC combo shows 2 drops when he has
                 // only one drop in the combo", influencer order booking). The sync stamped

@@ -8234,7 +8234,14 @@ async function sciLoad(){
       _sci.calls = d.calls || []; sciWireCalls(); sciRenderCalls(true);
       return;
     }
-    k.innerHTML = tile('AI calls with transcripts', m.calls, `${d.range.from} → ${d.range.to}` + (m.manual_calls ? ` · ${Math.round(m.calls/(m.calls+m.manual_calls)*100)}% of ${m.calls+m.manual_calls} logged · ${m.manual_calls} manual not scored` : ''))
+    k.innerHTML =
+      // THE DIALLING, WHICH THIS PAGE COULD NEVER SEE (user, 2026-09-09: "total attempt call before total
+      // call with transcript"). Every other figure here begins at a transcript, so a day of 54 dials that
+      // produced 31 conversations read exactly like a day of 31 dials that all connected. The percentage
+      // is the one that matters: how much of the dialling turned into a conversation at all.
+      (m.dials_placed != null ? tile('Dials placed', m.dials_placed,
+        `${m.calls ? Math.round(m.calls / m.dials_placed * 100) : 0}% became a call with a transcript · ${m.dials_placed - m.calls} rang out`) : '')
+      + tile('AI calls with transcripts', m.calls, `${d.range.from} → ${d.range.to}` + (m.manual_calls ? ` · ${Math.round(m.calls/(m.calls+m.manual_calls)*100)}% of ${m.calls+m.manual_calls} logged · ${m.manual_calls} manual not scored` : ''))
       + tile('Answered', m.answered, m.answer_rate+'% of calls — the customer actually spoke','text-emerald-700','is-good')
       + tile('Avg length', m.avg_seconds+'s', 'connected calls')
       + tile('Avg agent turns', m.avg_agent_turns, 'lower is tighter')
@@ -8319,7 +8326,11 @@ async function sciLoad(){
     document.getElementById('sci-bytype').innerHTML = Object.entries(d.by_type||{})
       .sort((a,b)=>b[1].calls-a[1].calls).map(([k,t])=>mini({
         n:t.calls, of:m.calls||1, label:TYPE_LABEL[k]||k, pick:'type:'+k,
-        sub:`answered ${t.answered} (${t.answer_rate}%) · won ${t.won} · silent 20s+ ${t.silent_long} · avg ${t.avg_seconds}s`,
+        // "to 0 orders · 0× each" is what this said for COD confirmation, because 71% of those calls
+        // carry no order_id at all. Naming the gap beats rendering a zero that looks like a bug.
+        sub:`${t.orders?`${t.calls_with_order} of them to ${t.orders} order${t.orders===1?'':'s'}${t.calls_per_order>1?` · ${t.calls_per_order}× each`:''}`:''}`
+          +`${t.no_order?`${t.orders?' · ':''}${t.no_order} with no order id`:''}`
+          +`${(t.orders||t.no_order)?' · ':''}answered ${t.answered} (${t.answer_rate}%) · won ${t.won} · silent 20s+ ${t.silent_long} · avg ${t.avg_seconds}s`,
         tip:'A different job with a different success condition',
       })).join('') || '<p class="text-sm text-slate-400">—</p>';
     // OUTCOMES SPLIT BY WHETHER ANYONE SPOKE (user, 2026-09-08: "based on answered call total, % of
@@ -8348,8 +8359,26 @@ async function sciLoad(){
             n:v, of, label:OUT_LABEL[k2]||k2, tone:OUT_MINI[k2]||'mute', pick:prefix+k2 })).join('')+`</div>`
           : '<p class="text-sm text-slate-400">—</p>');
     };
+    // ── THE DAY IN THREE SHARES (user, 2026-09-09). The two groups below answer "what happened"; these
+    // answer "how did we do", and they PARTITION every call in the range — settled + unresolved + never
+    // spoke = 100%, always. Which is why the middle one is computed as (answered − settled) rather than
+    // by naming its members: an outcome nobody has thought of yet lands there and the three still total,
+    // instead of quietly summing to 97% and making the page look broken.
+    const SETTLED = ['reattempt','confirmed','cancelled'];
+    const settledN = (d.calls||[]).filter(c=>SETTLED.includes(c.outcome)).length;
+    const unresolvedN = Math.max(0, ansCalls.length - settledN);
+    const noSpeakN = silCalls.length;
+    const shareTile = (n,label,sub,tone)=>mini({ n, of:m.calls||1, label, sub, tone });
     document.getElementById('sci-outcomes').innerHTML =
-      block('Of the answered calls', `${ansCalls.length} where the customer spoke`, tally(ansCalls,true), 'outa:')
+      `<div class="sci-grid mb-5">`
+      + shareTile(settledN, 'Settled — a real decision',
+          're-attempt agreed, confirmed, or cancelled', 'good')
+      + shareTile(unresolvedN, 'Reached but unresolved',
+          'unclear, or spoke with no outcome recorded', 'warn')
+      + shareTile(noSpeakN, 'Nobody spoke',
+          'hung up, silent, or never connected', 'bad')
+      + `</div>`
+      + block('Of the answered calls', `${ansCalls.length} where the customer spoke`, tally(ansCalls,true), 'outa:')
       + `<div class="mt-5">` + block('Nobody spoke', `${silCalls.length} calls`, tally(silCalls,false), 'outs:') + `</div>`;
     const langTot=Object.values(d.languages||{}).reduce((a,v)=>a+v,0)||1;
     document.getElementById('sci-langs').innerHTML = Object.entries(d.languages||{}).sort((a,b)=>b[1]-a[1])
@@ -8561,12 +8590,21 @@ let _sac = { wired: false,
     const d = new Date(), f = new Date(d.getFullYear(), d.getMonth(), d.getDate() - 7);
     return { from: _ymd(f), to: _ymd(d) }; })(), rangeSel: '7' };
 try { const r = JSON.parse(localStorage.getItem('sac.dateRange')); if (r && r.sel) _sac.rangeSel = r.sel; } catch (_) {}
+// WHOSE CALLS ARE WE COSTING (user, 2026-09-09). Unlike Call Insights, "All" is meaningful here — the
+// vendors bill one number for both — so it stays, and it is the default.
+_sac.type = (() => { try { const t = localStorage.getItem('sac.callType'); return ['ai','manual'].includes(t) ? t : 'all'; } catch (_) { return 'all'; } })();
 function sacRenderRange(){
   const el=document.getElementById('sac-range'); if(!el) return;
   el.innerHTML=`<div class="flex items-center gap-2 flex-wrap">
+    <select class="filter-select sac-type" title="Which calls this statement costs">
+      <option value="all" ${_sac.type==='all'?'selected':''}>All calls</option>
+      <option value="ai" ${_sac.type==='ai'?'selected':''}>AI calls</option>
+      <option value="manual" ${_sac.type==='manual'?'selected':''}>Manual calls</option>
+    </select>
     <select class="filter-select sac-preset">
       <option value="custom" ${_sac.rangeSel==='custom'?'selected':''}>Custom</option>
       <option value="0" ${_sac.rangeSel==='0'?'selected':''}>Today</option>
+      <option value="y" ${_sac.rangeSel==='y'?'selected':''}>Yesterday</option>
       <option value="7" ${_sac.rangeSel==='7'?'selected':''}>Last 7 days</option>
       <option value="30" ${_sac.rangeSel==='30'?'selected':''}>Last 30 days</option>
       <option value="90" ${_sac.rangeSel==='90'?'selected':''}>Last 90 days</option>
@@ -8576,13 +8614,24 @@ function sacRenderRange(){
       <input type="date" class="filter-input sac-to" value="${_sac.range.to}">
       <button class="filter-btn sac-apply">Apply</button></span></div>`;
   const save=()=>localStorage.setItem('sac.dateRange',JSON.stringify({..._sac.range,sel:_sac.rangeSel}));
+  el.querySelector('.sac-type').addEventListener('change',e=>{
+    _sac.type=e.target.value; localStorage.setItem('sac.callType',_sac.type); sacLoad();
+  });
   const custom=el.querySelector('.sac-custom');
   el.querySelector('.sac-preset').addEventListener('change',e=>{
     const v=e.target.value;
     if(v==='custom'){ _sac.rangeSel='custom'; custom.classList.remove('hidden'); custom.classList.add('flex'); return; }
     custom.classList.add('hidden'); custom.classList.remove('flex');
-    const d=new Date(), f=new Date(d.getFullYear(),d.getMonth(),d.getDate()-(+v));
-    _sac.range={from:_ymd(f),to:_ymd(d)}; _sac.rangeSel=v; save();
+    // YESTERDAY IS A CLOSED ONE-DAY WINDOW — from yesterday TO yesterday. Every other preset here means
+    // "the last N days, ending today", and reusing that arithmetic would have made Yesterday mean "today
+    // AND yesterday", quietly folding today's part-day of calls into a figure meant to be final. It also
+    // matters more on this page than on the others: yesterday is the day whose vendor bills have settled,
+    // so it is the one you can hold against Vobiz's and Sarvam's own consoles. (Call Insights and the
+    // support queue already draw this distinction; the statement now matches them.)
+    const d=new Date();
+    const back=(n)=>new Date(d.getFullYear(),d.getMonth(),d.getDate()-n);
+    _sac.range = v==='y' ? {from:_ymd(back(1)),to:_ymd(back(1))} : {from:_ymd(back(+v)),to:_ymd(d)};
+    _sac.rangeSel=v; save();
     el.querySelector('.sac-from').value=_sac.range.from; el.querySelector('.sac-to').value=_sac.range.to;
     sacLoad();
   });
@@ -8612,7 +8661,7 @@ async function sacLoad(silent){
   const k=document.getElementById('sac-kpis');
   if(k && !silent) k.innerHTML='<div class="col-span-full">'+brandLoader('Adding up the bills…')+'</div>';
   try{
-    const d=await supFetch(`/api/support/ai-call-costs?from=${_sac.range.from}&to=${_sac.range.to}`);
+    const d=await supFetch(`/api/support/ai-call-costs?from=${_sac.range.from}&to=${_sac.range.to}&type=${_sac.type}`);
     const t=d.totals;
     const tile=(label,val,sub,cls)=>`<div class="card p-4"><p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">${label}</p><p class="text-xl font-bold ${cls||'text-slate-800'} mt-1">${val}</p>${sub?`<p class="text-[11px] text-slate-400 mt-0.5">${sub}</p>`:''}</div>`;
     k.innerHTML =
@@ -8623,22 +8672,35 @@ async function sacLoad(silent){
       tile('Talk time', `${Math.round(t.talk_seconds/60)} min`, `${t.talk_seconds}s total`)+
       tile('Avg / connected call', _sacInr(t.avg_per_call), 'incl. fixed share','text-emerald-700');
     const row=(name,val,sub)=>`<div class="flex items-center justify-between py-1.5 border-b border-slate-50 text-sm"><span class="text-slate-600">${name}${sub?` <span class="text-[11px] text-slate-400">${sub}</span>`:''}</span><span class="font-semibold tabular-nums text-slate-800">${val}</span></div>`;
-    const c=d.components, src=d.sources||{};
-    document.getElementById('sac-components').innerHTML =
-      row('📞 Vobiz telephony', _sacInr(c.telephony), escapeHtml(src.telephony||''))+
+    const c=d.components, src=d.sources||{}, sb=d.sarvam_billed||null, sh=d.shares||null;
+    // one line, above the components, whenever the view is a slice rather than the whole bill
+    const shareNote = sh ? `<div class="rounded-lg bg-amber-50 border border-amber-100 px-3 py-2 mb-3 text-xs leading-relaxed text-amber-800">
+        Costing <b>${sh.calls} of ${sh.of_calls}</b> calls in this range.
+        Sarvam and Claude are charged where the work happened, so they are whole numbers here.
+        The <b>telephony</b> and <b>number rental</b> are single bills for the line, split by this set's share
+        of them — ${Math.round(sh.telephony*100)}% of the Vobiz charges we could match to a call, and
+        ${Math.round(sh.fixed*100)}% of the rental by call count. AI and Manual add back to the full bill.
+      </div>` : '';
+    document.getElementById('sac-components').innerHTML = shareNote +
+      row('📞 Vobiz telephony', _sacInr(c.telephony), sh?`this set's ${Math.round(sh.telephony*100)}% share of Vobiz's ₹${(d.telephony_breakdown||[]).reduce((a,b)=>a+b.inr,0).toFixed(2)} bill for the range`:escapeHtml(src.telephony||''))+
       // ITEMISED, because until 08 Sep nobody knew we were paying for media streams and recordings at
       // all — they are ~29% of the telephony bill and scale with every call the agent makes.
       ((d.telephony_breakdown&&d.telephony_breakdown.length)?`<div class="pl-4 mt-1">${d.telephony_breakdown.sort((a,b)=>b.inr-a.inr).map(b=>
         `<div class="flex items-center justify-between text-[11px] text-slate-400 py-0.5"><span>${escapeHtml(b.label)} <span class="text-slate-300">×${b.count}</span></span><span class="tabular-nums">${_sacInr(b.inr)}</span></div>`).join('')}</div>`:'')+
-      row('👂 Sarvam STT (ears)', _sacInr(c.stt), 'measured minutes')+
-      row('🗣 Sarvam TTS (voice)', _sacInr(c.tts), 'measured characters')+
-      // SARVAM'S OWN BILL, when the bookmarklet has captured it. The two lines above are what we
-      // measured at the synthesizer and the recognizer; this is what they charged. On 08 Sep those
-      // differed by 59%, all of it in characters we synthesized but never stored — so the gap is the
-      // number to watch, and hiding it inside a total would have kept it invisible for another month.
-      ((d.sarvam_billed&&d.sarvam_billed.inr!=null)?row('🧾 Sarvam — actually billed', _sacInr(d.sarvam_billed.inr),
-        Object.entries(d.sarvam_billed.by_model||{}).map(([m,v])=>`${escapeHtml(m)} ${_sacInr(v)}`).join(' · ')
-        +` · vs ${_sacInr((c.stt||0)+(c.tts||0))} measured`):'')+
+      ((sb&&sb.in_total)
+        ? row('🗣 Sarvam TTS (voice)', _sacInr(c.tts), "ACTUAL — Sarvam's own figure (bulbul)")+
+          row('👂 Sarvam STT (ears)', _sacInr(c.stt), "ACTUAL — Sarvam's own figure (saaras / saarika)")
+        : row('👂 Sarvam STT (ears)', _sacInr(c.stt), 'measured minutes')+
+          row('🗣 Sarvam TTS (voice)', _sacInr(c.tts), 'measured characters'))+
+      // SARVAM'S OWN BILL. Until 09 Sep this sat here as a THIRD line, displayed but not counted — the
+      // total quietly used our own measurement, so the statement showed ₹198.69 and added ₹115.81 of it.
+      // Now the bill IS the two rows above (split by model: bulbul is the voice, saaras/saarika the
+      // ears), and this line is the reconciliation rather than a competing figure. When the bookmarklet
+      // has not covered every day in the range the old behaviour stands, and it says so.
+      ((sb&&sb.inr!=null)?row(sb.in_total?'🧾 Sarvam — reconciles with their console':'🧾 Sarvam — actually billed (not yet in the total)', _sacInr(sb.inr),
+        Object.entries(sb.by_model||{}).map(([m,v])=>`${escapeHtml(m)} ${_sacInr(v)}`).join(' · ')
+        +` · our own meter measured ${_sacInr(sb.measured_inr!=null?sb.measured_inr:(c.stt||0)+(c.tts||0))}`
+        +(sb.in_total?'':` · covers ${sb.days} of ${d.range&&d.range.days} days, so the measurement is used`)):'')+
       row('🧠 Claude brain', _sacInr(c.brain), escapeHtml(src.brain||''))+
       row('⚙️ Claude — platform', _sacInr(c.platform||0), 'summaries, agent learning, audits')+
       ((d.platform_breakdown&&Object.keys(d.platform_breakdown).length)?`<div class="pl-4 mt-1">${Object.entries(d.platform_breakdown).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div class="flex items-center justify-between text-[11px] text-slate-400 py-0.5"><span>${escapeHtml(k.replace(/_/g,' '))}</span><span class="tabular-nums">${_sacInr(v)}</span></div>`).join('')}</div>`:'')+
@@ -8646,9 +8708,15 @@ async function sacLoad(silent){
       `<div class="text-[11px] text-slate-400 mt-1">${escapeHtml(src.platform||'')}</div>`+
       `<div class="flex items-center justify-between pt-2 text-sm font-bold"><span>Variable total</span><span class="tabular-nums text-indigo-700">${_sacInr(t.variable)}</span></div>`+
       // THE WALLET'S OWN VERDICT, shown under the total rather than folded into it: the components are
-      // what we can attribute, this is what actually left the account. A gap between them is a question.
-      ((d.wallet&&d.wallet.spend_inr!=null)?`<div class="flex items-center justify-between pt-1.5 text-[12px]"><span class="text-slate-500">Wallet actually paid${d.wallet.topups_inr?` <span class="text-slate-400">(excl. ${_sacInr(d.wallet.topups_inr)} top-ups)</span>`:''}</span><span class="tabular-nums font-semibold text-slate-700">${_sacInr(d.wallet.spend_inr)}</span></div>`
-        +`<div class="text-[11px] text-slate-400 mt-0.5">balance ${_sacInr(d.wallet.balance_inr)} · ${escapeHtml(d.wallet.note||'')}</div>`:'');
+      // what we can ATTRIBUTE, this is what was actually paid. It turns AMBER when the balance snapshots
+      // do not span the range — on 08-Sep they began at 17:21 and the line still called itself definitive.
+      ((d.wallet&&d.wallet.spend_inr!=null)?`<div class="flex items-center justify-between pt-2 text-sm">
+        <span class="${d.wallet.covers?'text-slate-600':'text-amber-700 font-semibold'}">Wallet actually paid${d.wallet.covers?'':' (part of the range)'}</span>
+        <span class="font-semibold tabular-nums ${d.wallet.covers?'text-slate-800':'text-amber-700'}">${_sacInr(d.wallet.spend_inr)}</span></div>
+        <div class="text-xs ${d.wallet.covers?'text-slate-400':'text-amber-600'} leading-relaxed">
+          ${d.wallet.measured_from?`measured ${new Date(d.wallet.measured_from).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})} → ${new Date(d.wallet.measured_to).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})} · ${d.wallet.readings} readings · `:''}${escapeHtml(d.wallet.note||'')}
+          ${d.wallet.topups_inr?`· excludes ${_sacInr(d.wallet.topups_inr)} of top-ups `:''}· balance ${_sacInr(d.wallet.balance_inr)}
+        </div>`:'');
     document.getElementById('sac-fixed').innerHTML =
       (d.fixed||[]).map(f=>row(f.name, _sacInr(f.in_range), `${f.note||''} · ${_sacInr(f.amount)}/month`)).join('')+
       `<div class="flex items-center justify-between pt-2 text-sm font-bold"><span>Fixed total (range share)</span><span class="tabular-nums text-slate-800">${_sacInr(t.fixed)}</span></div>`;
