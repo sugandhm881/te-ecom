@@ -29,106 +29,217 @@ function istDay(dayOffset = 0) {
         label: new Date(startIst).toISOString().slice(0, 10) };
 }
 
-async function buildAiCallReport(dayOffset = 0) {
-    const { fromISO, toISO, label } = istDay(dayOffset);
-    const { data: rows } = await supabase.from('vobiz_auto_calls_ecom')
-        .select('order_name, status, attempts, detail, phone, last_attempt_at, created_at')
-        .eq('purpose', 'cod_confirm')
-        .or(`and(last_attempt_at.gte.${fromISO},last_attempt_at.lt.${toISO}),and(last_attempt_at.is.null,created_at.gte.${fromISO},created_at.lt.${toISO})`)
-        .limit(500);
-    const all = rows || [];
-    const dialed = all.filter(r => ['placed', 'calling', 'retry', 'exhausted', 'failed'].includes(r.status));
-    const skipped = all.filter(r => r.status === 'skipped');
-    const gated = all.filter(r => r.status === 'gated');
-    const outcomeOf = r => r.status === 'exhausted' ? 'no_answer' : ((r.detail && r.detail.outcome) || (r.status === 'retry' ? 'retrying' : (r.status === 'failed' ? 'failed' : 'pending')));
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DAILY CARD IS NOW THE CALL INSIGHTS PAGE (user, 2026-09-09: "i want same as this screenshot as
+// call report of today in our Teams thread — where currently call report coming, stop that report and
+// send this report, and also only AI call report not manual call").
+//
+// What it replaced: a COD-confirmation-only report (`purpose='cod_confirm'`), which by September was a
+// minority of the calling — on 08 Sep, 30 of 116 AI calls. It reported on a slice and read like the
+// whole day.
+//
+// ⚠️ Built from `computeInsights`, the SAME function the dashboard renders from, with type='ai' so
+// manual human calls are excluded exactly as they are on screen. Re-deriving these numbers here would
+// have been two implementations of "how many calls were answered today" — and the disagreement would
+// have happened in a channel where the whole team can see it.
+//
+// Kept from the old report: the 20:15 IST cron, the post as a reply in Ops › Daily Reports by the
+// Pravidhi bot, TEAMS_AI_CALLS_THREAD as the target override, and the webhook as a bot-failure
+// fallback. An Adaptive Card rather than a rendered image — the image approach (edge function
+// `ai-call-report-image`) was weighed and rejected on 2026-08-31 and that decision still holds: a card
+// is searchable, readable on a phone, and does not go stale behind a URL.
+// ─────────────────────────────────────────────────────────────────────────────
 
-    // order values + the day's call logs (language, exchanges, summary) for the dialed orders
-    const names = dialed.map(r => r.order_name);
-    const priceBy = {}, logBy = {};
-    for (let i = 0; i < names.length; i += 100) {
-        const chunk = names.slice(i, i + 100);
-        const { data: ords } = await supabase.from('orders').select('name, total_price')
-            .in('name', chunk.flatMap(n => [n, '#' + n]));
-        (ords || []).forEach(o => { priceBy[String(o.name).replace(/^#/, '')] = Number(o.total_price) || 0; });
-        const { data: logs } = await supabase.from('agent_call_logs')
-            .select('order_id, language, exchanges, summary, called_at')
-            .in('order_id', chunk).gte('called_at', fromISO).lt('called_at', toISO)
-            .order('called_at', { ascending: true });
-        (logs || []).forEach(l => { logBy[l.order_id] = l; });        // last log of the day wins
+// Colour is meaning, not decoration — the same reading as the dashboard tiles.
+const GOOD = 'Good', WARN = 'Warning', BAD = 'Attention', MUTE = 'Default';
+
+const OUT_LABEL = {
+    reattempt: 'Re-attempt agreed', confirmed: 'Confirmed', cancelled: 'Cancelled',
+    unclear: 'Unclear', other: 'Other', no_outcome: 'Spoke, no outcome recorded',
+    no_answer: 'No answer', no_conversation: 'Ended before any conversation',
+};
+const OUT_COLOR = {
+    reattempt: GOOD, confirmed: GOOD, cancelled: BAD, unclear: WARN, other: WARN,
+    no_outcome: WARN, no_answer: MUTE, no_conversation: MUTE,
+};
+
+const pct = (n, of) => (of > 0 ? Math.round((n / of) * 100) : 0);
+// Tone per outcome for the rendered tiles — green won it back, rose lost it, amber needs a person.
+const OUT_TONE = {
+    reattempt: 'good', confirmed: 'good', cancelled: 'bad',
+    unclear: 'warn', other: 'warn', no_outcome: 'warn',
+};
+
+// One row of the "fact set" Teams renders as a two-column table.
+const fact = (title, value) => ({ title, value });
+
+async function buildAiCallReport(dayOffset = 0) {
+    const { label } = istDay(dayOffset);
+    const { computeInsights } = require('./ai_call_insights');
+    // type:'ai' — manual human calls are excluded, as the user asked and as the dashboard does.
+    const d = await computeInsights({ from: label, to: label, type: 'ai' });
+    const m = d.metrics, sil = d.silence || {}, calls = d.calls || [];
+
+    // The three shares that partition the day, computed exactly as the page does: settled, reached but
+    // unresolved (answered − settled, so an outcome nobody has named yet cannot make them sum to 97%),
+    // and nobody spoke.
+    const spoke = c => !!(c.flags && c.flags.customer_turns > 0);
+    const SETTLED = ['reattempt', 'confirmed', 'cancelled'];
+    const answered = calls.filter(spoke), silent = calls.filter(c => !spoke(c));
+    const settledN = calls.filter(c => SETTLED.includes(c.outcome)).length;
+    const unresolvedN = Math.max(0, answered.length - settledN);
+
+    // Outcomes among the answered calls, with the same no_answer → no_outcome remap the page uses: a
+    // call where the customer SPOKE cannot honestly be filed under "no answer".
+    const tally = {};
+    for (const c of answered) {
+        let k = c.outcome || 'other';
+        if (k === 'no_answer' || k === 'no_conversation') k = 'no_outcome';
+        tally[k] = (tally[k] || 0) + 1;
+    }
+    const outRows = Object.entries(tally).sort((x, y) => y[1] - x[1]);
+
+    const TYPE_LABEL = { rto_recovery: 'RTO recovery', cod_confirm: 'COD confirmation', cod_rejected: 'COD rejection check' };
+
+    // ── THE REPORT IS AN IMAGE (user, 2026-09-09: "i want report in image format not table format").
+    //
+    // Why: an Adaptive Card cannot scroll horizontally and is ~360px wide on Teams mobile, so a table
+    // of tiles either truncates or reflows to one word per line — the same reason the inventory DOI
+    // report went to an image in August. `ai-call-report-image` (Satori→PNG) renders the Call Insights
+    // layout in the dashboard's own palette and returns a public URL.
+    //
+    // ⚠️ The image is not the ONLY copy. The card keeps a one-line text headline so the report is
+    // searchable in Teams and readable in a notification preview, and so a render failure still posts
+    // something true rather than nothing — a report that silently stops arriving is worse than an ugly
+    // one. If the render fails we fall back to the block layout this replaced.
+    //
+    // ⚠️ ASCII ONLY in anything sent to the renderer: the Roboto latin subset has no rupee sign, emoji,
+    // en dash or middle dot, and the edge function strips them rather than drawing blank boxes. Hence
+    // "-" and "/" below, not the typographic characters used elsewhere in this file.
+    const T = (n, pct, lbl, sub, tone) => ({ n: String(n), pct: pct || '', label: lbl, sub: sub || '', tone: tone || '' });
+    const share = n => `${pct(n, m.calls)}%`;
+
+    const imgPayload = {
+        label,
+        subtitle: `The Element / AI calls only${m.manual_calls ? ` / ${m.manual_calls} manual calls not scored` : ''}`,
+        headline: `Of ${m.calls} AI calls, ${m.answered} reached someone and ${d.outcomes.reattempt || 0} agreed to a re-attempt.` +
+                  (sil.silent_long ? ` ${sil.silent_long} were lost to silence - the line stayed open 20 seconds or more and the customer was never heard.` : ''),
+        // THE DAY IN THREES (user, 2026-09-09: "make card 3x3 ... remove order called 3+ time card").
+        // Row 1 is the funnel down to a conversation, row 2 is the three-way partition of every call,
+        // row 3 is the two averages — the only figures here that are not a count of calls, which is why
+        // they sit apart at the bottom rather than interrupting the counts.
+        //
+        // Row 2 self-checks on the face of it: answered = settled + unresolved, and answered + nobody
+        // spoke = the call count. If those ever stop adding up, the report is wrong and it shows.
+        //
+        // ⚠️ Every tile carries its share EXCEPT the two averages. A percentage on "29s" or "3.1 turns"
+        // would be a number we invented — there is no whole for them to be a part of — so they are left
+        // bare rather than given a meaningless one.
+        kpis: [
+            T(m.dials_placed != null ? m.dials_placed : m.calls,
+              m.dials_placed ? `${pct(m.calls, m.dials_placed)}%` : '',
+              'Dials placed', m.dials_placed ? `${m.calls} became a call with a transcript` : ''),
+            T(m.calls, '100%', 'AI calls with transcripts', 'the denominator for everything below'),
+            T(m.answered, share(m.answered), 'Answered - customer spoke', 'settled + unresolved', 'good'),
+
+            T(silent.length, share(silent.length), 'Nobody spoke',
+              'ended before any conversation + no answer', 'mute'),
+            T(unresolvedN, share(unresolvedN), 'Reached but unresolved',
+              'spoke with no outcome recorded + unclear', 'warn'),
+            T(settledN, share(settledN), 'Settled - a real decision',
+              're-attempt, confirmed or cancelled', 'good'),
+
+            T(`${m.avg_seconds}s`, '', 'Avg length', 'connected calls'),
+            T(m.avg_agent_turns, '', 'Avg agent turns', 'lower is tighter'),
+        ],
+        funnel: [
+            T(m.answered, share(m.answered), 'Answered - customer spoke', '', 'good'),
+            T(sil.hung_up_fast || 0, share(sil.hung_up_fast || 0), 'Hung up within 5 seconds'),
+            T(sil.silent_short || 0, share(sil.silent_short || 0), 'Silent, under 20s'),
+            T(sil.silent_long || 0, share(sil.silent_long || 0), 'Silent 20s+ - agent may be deaf', '', 'bad'),
+            T(sil.never_connected || 0, share(sil.never_connected || 0), 'Never connected', '', 'mute'),
+        ],
+        answered_label: `Of the answered calls - ${answered.length} where the customer spoke`,
+        answered: outRows.map(([k, v]) => T(v, `${pct(v, answered.length)}%`, OUT_LABEL[k] || k, '', OUT_TONE[k] || '')),
+        silent_label: `Nobody spoke - ${silent.length} calls`,
+        silent: Object.entries(silent.reduce((o, c) => {
+            const k = c.outcome || 'other'; o[k] = (o[k] || 0) + 1; return o;
+        }, {})).sort((x, y) => y[1] - x[1])
+            .map(([k, v]) => T(v, `${pct(v, silent.length)}%`, OUT_LABEL[k] || k, '', 'mute')),
+        by_type: Object.entries(d.by_type || {}).sort((x, y) => y[1].calls - x[1].calls).map(([k, t]) =>
+            T(t.calls, `${pct(t.calls, m.calls)}%`, TYPE_LABEL[k] || k,
+              `${t.orders ? `to ${t.orders} orders / ` : ''}answered ${t.answered} (${t.answer_rate}%) / won ${t.won} / avg ${t.avg_seconds}s`)),
+    };
+
+    let imageUrl = null;
+    try {
+        const axios = require('axios');
+        const config = require('../../config');
+        const r = await axios.post(`${config.SUPABASE_URL}/functions/v1/ai-call-report-image`, imgPayload, {
+            headers: { Authorization: `Bearer ${config.SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
+            timeout: 120000, validateStatus: () => true,
+        });
+        if (r.status >= 400 || !r.data || !r.data.image_url) throw new Error((r.data && r.data.error) || `render returned ${r.status}`);
+        imageUrl = r.data.image_url;
+    } catch (e) {
+        console.warn('[AI-CallReport] image render failed - falling back to the text card:', e.message);
     }
 
-    const count = o => dialed.filter(r => outcomeOf(r) === o).length;
-    const sumVal = o => dialed.filter(r => outcomeOf(r) === o).reduce((a, r) => a + (priceBy[r.order_name] || 0), 0);
-    const totalDials = dialed.reduce((a, r) => a + (Number(r.attempts) || 1), 0);
-    const answered = dialed.filter(r => ['confirmed', 'denied', 'unclear'].includes(outcomeOf(r)));
-    const langs = {};
-    let exch = 0, exchN = 0;
-    Object.values(logBy).forEach(l => { const L = String(l.language || '').split('-')[0] || '?';
-        langs[L] = (langs[L] || 0) + 1; if (l.exchanges) { exch += l.exchanges; exchN++; } });
-    const langLine = Object.entries(langs).sort((a, b) => b[1] - a[1])
-        .map(([k, v]) => `${({ hi: 'Hindi', en: 'English', pa: 'Punjabi', bn: 'Bengali', ta: 'Tamil', te: 'Telugu', kn: 'Kannada', ml: 'Malayalam', mr: 'Marathi', gu: 'Gujarati' })[k] || k} ${v}`).join(' · ') || '—';
+    // ⚠️ SLACK BLOCK KIT, not Adaptive Card elements. teams.js translates blocks → card and returns
+    // null for anything it does not recognise, and buildCard's caller treats null as "card build
+    // failed" — which is exactly how the first version of this posted nothing at all while reporting
+    // success in the logs. `*bold*` here is Slack's single-asterisk; mrkdwn() converts it.
+    const fieldsOf = pairs => pairs.map(([t, v]) => ({ type: 'mrkdwn', text: `*${t}*\n${v}` }));
+    const shareLine = (n) => `${n}  ·  ${pct(n, m.calls)}%`;
 
-    const said = r => {
-        const l = logBy[r.order_name];
-        if (!l || !l.summary) return '—';
-        return String(l.summary).split('\n')[0].replace(/^OUTCOME[^:]*:\s*/i, '');
-    };
-    // TWO columns is the FINAL layout (user, 2026-08-31: "instead of image use this" after seeing
-    // both) — the number of columns that renders well everywhere: a 5-column card table shattered on
-    // the Teams phone app ("₹ Amount" one letter per line), and the PNG-image alternative (edge fn
-    // ai-call-report-image, still deployed but unused) was rejected in favour of this. Left cell =
-    // order + amount + tries stacked; right cell = outcome + quote. Worst outcomes first, cap 10.
-    const rankOrder = { denied: 0, unclear: 1, no_answer: 2, retrying: 3, failed: 4, confirmed: 5, pending: 6 };
-    const sorted = dialed.slice().sort((a, b) => (rankOrder[outcomeOf(a)] ?? 9) - (rankOrder[outcomeOf(b)] ?? 9));
-    const tableRows = sorted
-        .slice(0, 10).map(r => {
-            const o = outcomeOf(r);
-            const chip = (OUT[o] && OUT[o].chip) || (o === 'retrying' ? `📞 Retrying ${r.attempts}/3` : o);
-            const quote = said(r);
-            const tries = `${r.attempts || 1} ${(r.attempts || 1) === 1 ? 'try' : 'tries'}`;
-            // '\n\n' on purpose: an Adaptive Card TextBlock treats a single newline as a space —
-            // only the blank line forces the real line break inside a cell.
-            return [`*${r.order_name}*\n\n${inr(priceBy[r.order_name])} · ${tries}`,
-                `${chip}${quote && quote !== '—' ? `\n\n_"${quote}"_` : ''}`];
-        });
-    const extra = dialed.length - tableRows.length;
+    const headlineText = `Of *${m.calls}* AI calls, *${m.answered} reached someone* and *${d.outcomes.reattempt || 0} agreed to a re-attempt*.` +
+        (sil.silent_long ? ` *${sil.silent_long} were lost to silence* — the line stayed open 20 seconds or more and the customer was never heard.` : '');
 
-    const skipWhy = {};
-    skipped.forEach(r => { const w = (r.detail && r.detail.why) || 'skipped'; skipWhy[w] = (skipWhy[w] || 0) + 1; });
-    const skipLine = Object.entries(skipWhy).map(([w, n]) => `${n} ${w}`).join(' · ');
-
-    const dateLbl = new Date(label + 'T00:00:00Z').toUTCString().slice(0, 11);
     const blocks = [
-        { type: 'header', text: { type: 'plain_text', text: `📞 AI Calling Report — ${dateLbl}` } },
-        { type: 'section', text: { type: 'mrkdwn', text: `*${dialed.length} order${dialed.length === 1 ? '' : 's'} called* · ${totalDials} dial${totalDials === 1 ? '' : 's'} including retries · window 10:00–19:59 IST` } },
-        { type: 'section', fields: [
-            { type: 'mrkdwn', text: `✅ *Confirmed: ${count('confirmed')}* — ${OUT.confirmed.note}` },
-            { type: 'mrkdwn', text: `❌ *Denied: ${count('denied')}* — ${OUT.denied.note}` },
-            { type: 'mrkdwn', text: `😕 *Not confirmed: ${count('unclear')}* — ${OUT.unclear.note}` },
-            { type: 'mrkdwn', text: `🔇 *No answer: ${count('no_answer')}* — ${OUT.no_answer.note}` },
-        ] },
-        { type: 'section', text: { type: 'mrkdwn', text: `*₹ Impact:* ${inr(sumVal('confirmed'))} released to dispatch (confirmed) · ${inr(sumVal('denied'))} saved from likely RTO (denied caught before shipping)` } },
-        { type: 'section', text: { type: 'mrkdwn', text: `*Call quality:* answer rate ${dialed.length ? Math.round(answered.length / dialed.length * 100) : 0}% · avg ${exchN ? Math.round(exch / exchN) : 0} exchanges · languages: ${langLine}` } },
+        { type: 'header', text: { type: 'plain_text', text: `Call Insights — ${label}` } },
+        { type: 'context', elements: [{ type: 'mrkdwn',
+            text: `AI calls only${m.manual_calls ? `  ·  ${m.manual_calls} manual calls not scored` : ''}` }] },
+        { type: 'section', text: { type: 'mrkdwn', text: headlineText } },
     ];
-    if (tableRows.length) blocks.push({ type: 'table',
-        columns: [
-            { title: 'Order · ₹ Amount · Tries', width: 2, align: 'Left', wrap: true },
-            { title: 'Outcome — what the customer said', width: 5, align: 'Left', wrap: true },
-        ], rows: tableRows });
-    if (extra > 0) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `+ ${extra} more order${extra === 1 ? '' : 's'} — full list in Call Queue · Repeat` }] });
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `⏭ Skipped: ${skipLine || 'none'}${gated.length ? ` · ${gated.length} gated (test allowlist)` : ''} · transcripts & recordings → Pravidhi › Call Logs` }] });
 
-    return { payload: { blocks }, stats: { called: dialed.length, dials: totalDials, confirmed: count('confirmed'), denied: count('denied'), unclear: count('unclear'), no_answer: count('no_answer'), skipped: skipped.length, gated: gated.length } };
+    if (imageUrl) {
+        // allowExpand (set in teams.js) makes this tappable into Teams' own full-screen viewer, which is
+        // what makes a dense report usable on a phone.
+        blocks.push({ type: 'image', image_url: imageUrl, alt_text: `Call Insights ${label}` });
+    } else {
+        // The fallback: the same figures as text, so a render failure still posts a true report.
+        blocks.push({ type: 'section', fields: fieldsOf([
+            ['Answered', `${m.answered}  ·  ${m.answer_rate}% of calls`],
+            ['Re-attempts won', `${d.outcomes.reattempt || 0}  ·  ${pct(d.outcomes.reattempt || 0, m.answered)}% of answered`],
+            ['Settled — a real decision', shareLine(settledN)],
+            ['Reached but unresolved', shareLine(unresolvedN)],
+            ['Nobody spoke', shareLine(silent.length)],
+            ['Silent 20s+ — agent may be deaf', shareLine(sil.silent_long || 0)],
+        ]) });
+    }
+
+    if (sil.silent_long > 0) {
+        blocks.push({ type: 'section', text: { type: 'mrkdwn',
+            text: `⚠️ *${sil.silent_long} call${sil.silent_long === 1 ? '' : 's'} stayed open 20s+ with nothing heard back* — check the speech socket before tomorrow's window.` } });
+    }
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn',
+        text: 'Full detail, per call → Pravidhi › Customer Support › Call Insights' }] });
+
+    const payload = { blocks };
+    const stats = {
+        called: m.calls, answered: m.answered, reattempts: d.outcomes.reattempt || 0,
+        settled: settledN, silent_long: sil.silent_long || 0, manual_excluded: m.manual_calls || 0,
+    };
+    return { payload, stats };
 }
 
-// Delivery is BOT-FIRST by explicit instruction ("i want report go through our Own Bot"): the
-// Pravidhi bot replies INSIDE the Ops › Daily Reports thread the user pinned (a webhook cannot
-// reply into a thread at all), with the 1.5 rich card (real Table — the bot is not pinned to the
-// Workflows connector's 1.4). TEAMS_AI_CALLS_THREAD overrides the target ('<channelId>' for a new
-// channel post, '<channelId>;messageid=<rootId>' for a thread reply). TEAMS_WEBHOOK_AI_CALLS stays
-// as an optional fallback if the bot errors; with neither working the failure is logged, never thrown.
+// The Ops › Daily Reports thread the card replies into. Unchanged by the 2026-09-09 rewrite — only the
+// card's CONTENTS changed — but the constant lived inside the block that was replaced and went with it,
+// so the 20:15 cron would have thrown "AI_CALLS_THREAD is not defined" into an empty channel. The
+// selftest that pins this messageid is what caught it.
 const AI_CALLS_THREAD = () => String(process.env.TEAMS_AI_CALLS_THREAD
     || '19:69ffe3edf4044f958c54cb6bc57a4232@thread.tacv2;messageid=1788173520400').trim();
+
 async function sendAiCallReport(dayOffset = 0) {
     const { payload, stats } = await buildAiCallReport(dayOffset);
     if (!stats.called && !stats.skipped) { console.log('[AI-CallReport] nothing to report — no calls today, no post'); return { skipped: 'no activity' }; }
@@ -139,7 +250,7 @@ async function sendAiCallReport(dayOffset = 0) {
         const activity = buildCard(payload, { rich: true });   // { type:'message', attachments:[adaptive 1.5 card] }
         if (!activity) throw new Error('card build failed');
         await bot.sendToChannel(AI_CALLS_THREAD(), activity);
-        console.log(`[AI-CallReport] posted via the Pravidhi bot — ${stats.called} called, ${stats.confirmed} confirmed`);
+        console.log(`[AI-CallReport] posted via the Pravidhi bot — ${stats.called} AI calls, ${stats.answered} answered, ${stats.reattempts} re-attempts`);
         return { posted: true, via: 'bot', stats };
     } catch (e) {
         console.warn('[AI-CallReport] bot post failed:', e.message);

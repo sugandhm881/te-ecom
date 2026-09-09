@@ -2857,12 +2857,57 @@ function check(name, got, want) {
     {
         const rep = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_report.js'), 'utf8');
         const sv2 = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
-        check('ai call report: daily 20:15 IST, posted BY THE BOT as a reply in the Daily Reports thread (webhook only as fallback); outcomes, ₹ impact, quality, capped table; quiet on an empty day',
+        // THE DAILY CARD IS THE CALL INSIGHTS PAGE NOW (user, 2026-09-09: "same as this screenshot… stop
+        // that report and send this report, and also only AI call report not manual call"). What it
+        // replaced reported on COD confirmations alone — 30 of 116 AI calls on 08 Sep — while reading
+        // like the whole day.
+        // ⚠️ Built from computeInsights, the SAME function the dashboard renders from, with type='ai'.
+        // Re-deriving the numbers here would be two implementations of "how many calls were answered
+        // today", and the disagreement would happen in a channel the whole team reads.
+        check('ai call report: the daily card IS the Call Insights page, AI calls only, from one computation',
             [/bot\.sendToChannel\(AI_CALLS_THREAD\(\), activity\)/.test(rep), /messageid=1788173520400/.test(rep),
-             /TEAMS_WEBHOOK_AI_CALLS/.test(rep), /released to dispatch/.test(rep), /saved from likely RTO/.test(rep),
-             /slice\(0, 10\)/.test(rep), /no activity/.test(rep),
-             /AICallReport \(15 20/.test(sv2), /ai-call-report\)\$\/i/.test(sv2)],
-            [true, true, true, true, true, true, true, true, true]);
+             /TEAMS_WEBHOOK_AI_CALLS/.test(rep),
+             /computeInsights\(\{ from: label, to: label, type: 'ai' \}\)/.test(rep),
+             // the old COD-only report is gone, not merely hidden
+             !/released to dispatch/.test(rep) && !/saved from likely RTO/.test(rep),
+             !/'cod_confirm'\)/.test(rep),
+             // THE REPORT IS AN IMAGE (user, 2026-09-09: "i want report in image format not table
+             // format") — rendered by the ai-call-report-image edge fn, in the dashboard's own layout.
+             /ai-call-report-image/.test(rep) && /type: 'image', image_url: imageUrl/.test(rep),
+             // …but never the ONLY copy: a one-line headline keeps it searchable and readable in a
+             // notification, and a render failure must still post something true rather than nothing.
+             /image render failed - falling back to the text card/.test(rep),
+             /if \(imageUrl\) \{/.test(rep) && /\} else \{/.test(rep),
+             // ASCII only reaches the renderer: Roboto's latin subset draws a blank box for a middle
+             // dot, an em dash, a rupee sign or an emoji
+             // Checked on the payload's OWN literals, not a window around them: the text fallback a few
+             // lines below legitimately uses the typographic characters, and a proximity regex matched
+             // that instead of the payload.
+             rep.includes("'Answered - customer spoke'"),
+             rep.includes("'Silent 20s+ - agent may be deaf'"),
+             // the middle share is (answered − settled), so an unnamed outcome cannot break the total
+             /Math\.max\(0, answered\.length - settledN\)/.test(rep),
+             // an answered call is never filed as "no answer" — the same remap the page uses
+             /k = 'no_outcome'/.test(rep),
+             /no activity/.test(rep),
+             // 08:00 IST, covering YESTERDAY (user, 2026-09-09: "schedule it for 8 am daily of
+             // yesterday"). Moved off 20:15-today because that covered a day that was not over: the
+             // window runs to ~20:00 and late outcomes, RTO scans and summaries land afterwards. 08:00
+             // puts a FINISHED day in front of the team at the start of theirs, when the deaf-agent
+             // line can still be acted on before that day's window opens.
+             /AICallReport \(0 8 \* \* \*\)/.test(sv2) && /'0 8 \* \* \*'/.test(sv2),
+             /sendAiCallReport\(1\)/.test(sv2),          // 1 = yesterday, not today
+             !/AICallReport \(15 20/.test(sv2),
+             /ai-call-report\)\$\/i/.test(sv2)],
+            [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true]);
+        // ⚠️ The thread constant lived inside the block the rewrite replaced and went with it — the cron
+        // would have thrown "AI_CALLS_THREAD is not defined" into an empty channel at 20:15. This
+        // assertion is what caught it; keep it.
+        check('ai call report: the target thread constant survives a rewrite of the card',
+            [/const AI_CALLS_THREAD = \(\) =>/.test(rep)], [true]);
+        // AND THE CARD MUST AGREE WITH THE PAGE, measured rather than grepped: build yesterday's card
+        // and check its headline numbers against computeInsights for the same day.
+        // (runs in the async block at the end of this file)
         // behavioural: the IST day window really is midnight IST expressed in UTC
         const m = rep.match(/const IST = 5\.5 \* 3600e3/);
         check('ai call report: IST day window helper present', [!!m], [true]);
@@ -4335,6 +4380,29 @@ function check(name, got, want) {
                  ship.h + inv.h === H,                         // the halves tile the page exactly
                  ship.h < inv.h],                              // the label is the SMALLER, top band
                 [true, true, true, true]);
+        }
+        // THE CARD AND THE PAGE ARE THE SAME ARITHMETIC — measured, not asserted from source text.
+        // The old report derived its own figures and reported on a slice of the day; this proves the
+        // new one carries exactly what Call Insights shows for the same date, AI calls only.
+        {
+            const { buildAiCallReport } = require(path.join(ROOT, 'app/api/ai_call_report.js'));
+            const { computeInsights } = require(path.join(ROOT, 'app/api/ai_call_insights.js'));
+            const IST = 5.5 * 3600e3, nowIst = Date.now() + IST;
+            const dayIst = Math.floor(nowIst / 86400e3) * 86400e3 - 86400e3;      // yesterday, IST
+            const label = new Date(dayIst).toISOString().slice(0, 10);
+            const [card, page] = await Promise.all([
+                buildAiCallReport(1),
+                computeInsights({ from: label, to: label, type: 'ai' }),
+            ]);
+            check('ai call report: the card carries the page\u2019s own numbers for that day',
+                [card.stats.called === page.metrics.calls,
+                 card.stats.answered === page.metrics.answered,
+                 card.stats.reattempts === (page.outcomes.reattempt || 0),
+                 card.stats.silent_long === (page.silence.silent_long || 0),
+                 // manual calls are EXCLUDED from the count and named separately, as asked
+                 card.stats.manual_excluded === (page.metrics.manual_calls || 0),
+                 /AI calls only/.test(JSON.stringify(card.payload))],
+                [true, true, true, true, true, true]);
         }
         console.log(`\n${pass} passed, ${fail} failed`);
         process.exit(fail ? 1 : 0);

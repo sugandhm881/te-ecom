@@ -626,11 +626,19 @@ cronJob('RtoCall (*/2 * * * *)', '*/2 * * * *', async () => {
     await rtoCallTick().catch(e => console.error('[RTOCall] cron error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
-// Daily AI Calling Report → Teams (Ops › Daily Reports), 20:15 IST — right after the calling window
-// closes. Skips quietly when TEAMS_WEBHOOK_AI_CALLS is unset or the day had no calls.
-cronJob('AICallReport (15 20 * * *)', '15 20 * * *', async () => {
+// Daily Call Insights report → Teams (Ops › Daily Reports), 08:00 IST, covering YESTERDAY
+// (user, 2026-09-09: "schedule it for 8 am daily of yesterday").
+//
+// Moved from 20:15 today → 08:00 yesterday for two reasons. A report sent at 20:15 covers a day that
+// is not over: the calling window runs to ~20:00 and late outcomes, RTO scans and summaries land
+// afterwards, so the figures were always slightly provisional. And 08:00 puts a FINISHED day in front
+// of the team at the start of theirs, when they can still act on it — the deaf-agent line especially,
+// which asks someone to check the speech socket before that day's window opens.
+//
+// dayOffset 1 = yesterday. Skips quietly when the day had no calls.
+cronJob('AICallReport (0 8 * * *)', '0 8 * * *', async () => {
     const { sendAiCallReport } = require('./app/api/ai_call_report');
-    await sendAiCallReport().catch(e => console.error('[AI-CallReport] cron error:', e.message));
+    await sendAiCallReport(1).catch(e => console.error('[AI-CallReport] cron error:', e.message));
 }, { timezone: 'Asia/Kolkata' });
 
 // Influencer video metrics — every Friday 11:00 PM IST, refresh the last-30-days videos so the

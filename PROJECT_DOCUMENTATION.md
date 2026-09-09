@@ -1231,6 +1231,63 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### The daily Teams report is now the Call Insights page, as an image, at 08:00 for yesterday (2026-09-09)
+
+User: *"i want same as this screenshot as call report of today in our Teams thread — where currently
+call report coming, stop that report and send this report, and also only AI call report not manual
+call"*, then *"i want report in image format not table format"*, *"make these of our welcome screen
+color code"*, and *"schedule it for 8 am daily of yesterday"*.
+
+**What was stopped.** The old card reported only on COD confirmations (`purpose='cod_confirm'`). By
+September that was a minority of the calling — on 08 Sep, **30 of 116 AI calls** — so it reported a
+slice while reading like the whole day.
+
+**ONE COMPUTATION, TWO SURFACES.** The report is built from `computeInsights`, the same function the
+dashboard renders from, with `type: 'ai'`. The route is now a thin wrapper that turns a throw into a
+500 and nothing else. Re-deriving these figures in the report would have been two implementations of
+"how many calls were answered today", and the disagreement would have happened in a channel the whole
+team reads. A selftest builds the card and checks its numbers against the page for the same date —
+measured, not grepped.
+
+**An image, not a card table.** `ai-call-report-image` (Satori→PNG, the same machinery as the
+inventory DOI report) renders the Call Insights layout and uploads to the public `reports` bucket. An
+Adaptive Card cannot scroll horizontally and is ~360px on Teams mobile, so a wide layout truncates or
+reflows to one word per line. ⚠️ The image is **not the only copy**: the card keeps a one-line text
+headline so the report stays searchable and readable in a notification, and a render failure falls back
+to the figures as text — a report that silently stops arriving is worse than an ugly one.
+
+**Layout, after three rounds of looking at real renders.** The KPI block is 3 across, eight tiles as
+3 / 3 / 2, with the two averages last — the only figures there that are not a count of calls. Row 2 is
+the three-way partition and **self-checks on the face of it**: answered = settled + unresolved, and
+answered + nobody-spoke = the call count. Every tile carries its share EXCEPT the averages; a
+percentage on "30s" would be a number we invented.
+
+**The welcome-screen palette**: `linear-gradient(165deg, #211d54, #111536 60%, #0b0f26)` over `#14173a`
+surfaces with indigo borders — the login/welcome popup's own theme. ⚠️ Every colour had to move, not
+just the background: the light theme's ink and muted greys are invisible on a near-black ground, and
+the light semantic tones go muddy, so green/rose/amber were lifted to `#34d399`/`#fb7185`/`#fbbf24`.
+
+**08:00 IST, covering YESTERDAY** (`sendAiCallReport(1)`). Moved off 20:15-today because that covered a
+day that was not over — the window runs to ~20:00 and late outcomes, RTO scans and summaries land
+afterwards, so those figures were always provisional. 08:00 puts a settled day in front of the team at
+the start of theirs, while the deaf-agent line can still be acted on before that day's window opens.
+
+⚠️ **Four bugs this shipped through, each caught by running it rather than reading it.**
+
+1. **The card built from raw Adaptive Card elements and posted NOTHING.** `teams.js` speaks Slack Block
+   Kit and returns `null` for anything else; `null` becomes "card build failed". Had this only ever run
+   from the cron it would have failed silently every night with a line in a log nobody reads.
+2. **`AI_CALLS_THREAD` was defined inside the block the rewrite replaced** and went with it — the cron
+   would have thrown "AI_CALLS_THREAD is not defined" into an empty channel. The selftest pinning that
+   messageid is what caught it; keep it.
+3. **Untoned tiles drew a near-black rail** — a black bar across half the report. The default rail is
+   indigo, as on screen.
+4. **The image was named for the day RENDERED, not the day REPORTED.** Harmless while the report ran at
+   20:15 for today; the moment it moved to 08:00 for yesterday it would have filed every morning's
+   report under the wrong name and overwritten the file for a day that had not happened yet.
+
+Selftests **578 passing**. Edge function at v11.
+
 ### Undelivered works the freshest failure first — NDR1 on top (2026-09-09)
 
 User: *"undelivered tab sorting with NDR attempt, NDR1 on top and after that NDR2, NDR3 — prioritise

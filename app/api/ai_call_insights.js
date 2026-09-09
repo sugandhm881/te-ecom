@@ -128,8 +128,15 @@ function claudeCostOf(c) {
     return { inr: Math.round(usd * Number(process.env.COST_USD_INR || 88) * 100) / 100, tokens };
 }
 
-router.get('/support/call-insights', async (req, res) => {
-    try {
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ONE COMPUTATION, called by the route below AND by the daily Teams report (2026-09-09). A figure
+// posted to the channel at 20:15 and the same figure on the dashboard are now the same arithmetic —
+// two implementations of "how many calls were answered today" is two chances to disagree in public.
+// `query` is exactly what the route receives: { from, to, type }.
+// ─────────────────────────────────────────────────────────────────────────────
+async function computeInsights(query) {
+    const req = { query: query || {} };
+    {
         const from = String(req.query.from || '').slice(0, 10);
         const to = String(req.query.to || '').slice(0, 10);
         if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to))
@@ -289,7 +296,7 @@ router.get('/support/call-insights', async (req, res) => {
             .select('*').eq('from_date', from).eq('to_date', to)
             .order('created_at', { ascending: false }).limit(1).maybeSingle();
 
-        res.json({
+        return {
             success: true,
             range: { from, to, type },
             // Manual calls are logged without a transcript by design, so every transcript-derived card on
@@ -339,8 +346,14 @@ router.get('/support/call-insights', async (req, res) => {
                 lang_switched: b.lang_switched, one_sided: b.one_sided, total: ai.length,
             },
             audit: cached || null,
-        });
-    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+        };
+    }
+}
+
+// The route is now a thin wrapper: it exists to turn a thrown error into a 500 and nothing else.
+router.get('/support/call-insights', async (req, res) => {
+    try { res.json(await computeInsights(req.query)); }
+    catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // Run (or re-run) the AI audit for a window. Costs one Claude call over the richest conversations.
@@ -429,4 +442,4 @@ Exactly 5 in "improve" and 5 in "good". No markdown, no text outside the JSON.`;
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-module.exports = { router };
+module.exports = { router, computeInsights };
