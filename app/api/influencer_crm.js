@@ -243,7 +243,7 @@ router.post('/inf/influencers/bulk', async (req, res) => {
 const VIDEO_FIELDS_TEXT = ['video_url', 'ad_code', 'caption', 'language', 'notes', 'reference_url', 'payment_status', 'thumbnail_url'];
 const VIDEO_FIELDS_NUM = ['quoted_price', 'final_price', 'likes', 'comments', 'views', 'shares'];
 const VIDEO_FIELDS_DATE = ['expected_date', 'live_date', 'payment_due_date', 'payment_date'];
-const VIDEO_FIELDS_BOOL = ['gst_applicable', 'is_ad_run', 'email_sent', 'product_sent'];
+const VIDEO_FIELDS_BOOL = ['gst_applicable', 'is_ad_run', 'email_sent', 'product_sent', 'video_received'];
 
 function videoPatch(b) {
     const patch = {};
@@ -279,11 +279,39 @@ router.post('/inf/videos/:id', async (req, res) => {
     try {
         const patch = videoPatch(req.body || {});
         if (!Object.keys(patch).length) return res.status(400).json({ success: false, error: 'Nothing to update' });
-        const { data: before } = await supabase.from('influencer_videos').select('influencer_id, payment_status').eq('id', req.params.id).single();
+        const { data: before } = await supabase.from('influencer_videos')
+            .select('influencer_id, payment_status, video_received').eq('id', req.params.id).single();
+
+        // ⚠️ "VIDEO RECEIVED" IS ONE-WAY, AND IT HAS TO BE ENFORCED HERE (2026-09-10).
+        // The UI disables the checkbox once it is ticked, but a disabled button is decoration: anyone
+        // with the endpoint can POST video_received:false and quietly un-deliver a video. The rule is
+        // that a delivery, once recorded, is a fact — so the API refuses to take it back, and the
+        // disabled control is describing something real instead of pretending.
+        // Un-ticking is deliberately not offered anywhere; a genuine mistake is a database edit, which
+        // is the right amount of friction for reversing a recorded fact.
+        if (before && before.video_received && patch.video_received === false) {
+            return res.status(409).json({ success: false,
+                error: 'This video is already marked received, and that cannot be undone from here.' });
+        }
+        // The timestamp is set by the SERVER, never accepted from the client — it is the answer to
+        // "when did they deliver", and a client-supplied one can be anything.
+        const justReceived = !!(patch.video_received && !(before && before.video_received));
+        if (justReceived) patch.video_received_at = new Date().toISOString();
+
         const { error } = await supabase.from('influencer_videos').update(patch).eq('id', req.params.id);
-        if (error) throw new Error(error.message);
+        // Until the 20260910 migration is run the column does not exist, and PostgREST answers with a
+        // schema-cache error that means nothing to whoever clicked the button. Name the cause instead.
+        if (error) {
+            if (/video_received/.test(error.message || '')) {
+                throw new Error('The "video received" column is missing — run supabase/migrations/20260910_influencer_video_received.sql');
+            }
+            throw new Error(error.message);
+        }
         if (before && patch.payment_status && patch.payment_status !== before.payment_status) {
             await logActivity(before.influencer_id, 'payment', `Payment marked ${patch.payment_status} by ${actorName(req)}`);
+        }
+        if (justReceived && before) {
+            await logActivity(before.influencer_id, 'video_received', `Video received by ${actorName(req)}`);
         }
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }

@@ -14743,7 +14743,7 @@ function infMoney(n){ return '₹'+Math.round(Number(n||0)).toLocaleString('en-I
 function infAvatar(inf,cls){ const av=_avatar(inf.instagram_handle||inf.name||'?');
   return `<span class="relative inline-flex items-center justify-center rounded-full ${av.color} text-white font-bold shrink-0 ${cls||'w-9 h-9 text-xs'}">${av.initials}${inf.profile_image_url?`<img src="${escapeHtml(inf.profile_image_url)}" class="absolute inset-0 w-full h-full rounded-full object-cover" onerror="this.remove()">`:''}</span>`; }
 function infBucketOf(fc){ fc=Number(fc||0); if(fc>=1e6) return 'mega'; if(fc>=1e5) return 'macro'; if(fc>=1e4) return 'micro'; return 'nano'; }
-const INF_ACT_CHIP={note:'bg-indigo-50 text-indigo-700',status_change:'bg-slate-100 text-slate-600',video_added:'bg-violet-50 text-violet-700',payment:'bg-emerald-50 text-emerald-700',product_sent:'bg-amber-50 text-amber-700',email_sent:'bg-sky-50 text-sky-700'};
+const INF_ACT_CHIP={note:'bg-indigo-50 text-indigo-700',status_change:'bg-slate-100 text-slate-600',video_added:'bg-violet-50 text-violet-700',video_received:'bg-emerald-100 text-emerald-800',payment:'bg-emerald-50 text-emerald-700',product_sent:'bg-amber-50 text-amber-700',email_sent:'bg-sky-50 text-sky-700'};
 function infActChip(t){ return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${INF_ACT_CHIP[t]||'bg-slate-100 text-slate-500'}">${escapeHtml(String(t||'').replace(/_/g,' '))}</span>`; }
 
 // ── Pincode → City/State autofill ────────────────────────────────────────────────────────────────
@@ -15040,6 +15040,31 @@ function infDetailRender(wrap){
   const _emailSent=!!wrap._data.email_sent, _canEmail=inflCanEmail({outreach_status:inf.outreach_status,email_sent:_emailSent});
   const statusSel=`<select id="infd-status" class="filter-select">${Object.entries(INF_STATUS).map(([k,[l]])=>`<option value="${k}" ${inf.outreach_status===k?'selected':''}>${l}</option>`).join('')}</select>`;
   const info=(label,val)=>`<div class="flex justify-between gap-3 py-1.5 border-b border-slate-50 last:border-0"><span class="text-xs text-slate-400">${label}</span><span class="text-xs font-semibold text-slate-700 text-right break-all">${val||'—'}</span></div>`;
+  // ── "VIDEO RECEIVED" (user, 2026-09-10) ────────────────────────────────────────────────────────
+  // Shown only when the influencer is PARTNERED: that is the one status where a video is actually
+  // owed, so the control stays out of the way on the other nine. Until now the card could say a
+  // product was sent and a payment was due while nothing recorded the delivery itself — the only
+  // signal was someone pasting a reel URL, which arrives later, or never for a story or a private cut.
+  //
+  // ONE-WAY, on purpose. Once ticked it stays on screen and goes disabled: a delivery is a fact, and a
+  // control that can be toggled back invites someone to "fix" a record by erasing it. The server
+  // refuses to un-tick it too (409) — without that the disabled attribute would be decoration.
+  //
+  // ⚠️ An ALREADY-RECEIVED video keeps its chip whatever the status later becomes. Hiding a recorded
+  // fact because someone moved the influencer to Declined would make the card lie about what happened.
+  const infVideoReceivedChip=(influencer,v)=>{
+    const partnered=String(influencer&&influencer.outreach_status||'')==='partnered';
+    if(!partnered && !v.video_received) return '';
+    const tick='<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    if(v.video_received){
+      const when=v.video_received_at?` on ${_dmy(v.video_received_at)}`:'';
+      return `<span class="ivr-btn is-on" title="Marked received${when} — this cannot be undone">
+        <span class="ivr-box">${tick}</span>Video received</span>`;
+    }
+    return `<button type="button" class="ivr-btn infv-recv" data-vid="${v.id}"
+      title="Mark this video as delivered. This cannot be undone.">
+      <span class="ivr-box">${tick}</span>Video received</button>`;
+  };
   const vidCard=v=>{
     const overdue=v.expected_date&&!v.live_date&&v.expected_date<_ymd(new Date());   // local today — UTC lags IST by a day before 5:30 AM
     return `<div class="rounded-xl border border-slate-100 p-4" data-vid="${v.id}">
@@ -15047,6 +15072,7 @@ function infDetailRender(wrap){
         ${v.live_date?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700">LIVE ${_dmy(v.live_date)}</span>`:overdue?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-rose-50 text-rose-600">OVERDUE — expected ${_dmy(v.expected_date)}</span>`:v.expected_date?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-50 text-amber-700">Expected ${_dmy(v.expected_date)}</span>`:'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-100 text-slate-500">Unscheduled</span>'}
         ${v.is_ad_run?'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-violet-50 text-violet-700">Ad run</span>':''}
         ${v.product_sent?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-50 text-sky-700">Product sent</span>`:''}
+        ${infVideoReceivedChip(inf, v)}
         <span class="ml-auto flex items-center gap-1.5 text-xs">Payment:
           <select class="infv-pay filter-select" style="height:30px;padding:0 26px 0 8px" data-vid="${v.id}">
             ${['pending','partial','paid'].map(s=>`<option value="${s}" ${v.payment_status===s?'selected':''}>${s}</option>`).join('')}</select></span>
@@ -15171,6 +15197,35 @@ function infDetailRender(wrap){
   wrap.querySelectorAll('.infv-pay').forEach(s=>s.addEventListener('change',async()=>{
     try{ await infFetch('/api/inf/videos/'+s.dataset.vid,{method:'POST',body:JSON.stringify({payment_status:s.value,...(s.value==='paid'?{payment_date:_ymd(new Date())}:{})})}); showNotification('Payment status saved'); infDetailReload(wrap); }catch(e){ showNotification(e.message,true); } }));
   wrap.querySelectorAll('.infv-pay').forEach(s=>{ try{ ecEnhanceSelect(s); }catch(_){} });   // project-standard .csel dropdown (not the native OS one)
+  // Confirmed once, because there is no undo anywhere — not a habit worth forming for every button,
+  // but the right amount of friction for a one-way record.
+  //
+  // ⚠️ ecConfirm, NOT the browser's confirm() (user, 2026-09-10). A native dialog is chrome-styled,
+  // says "localhost:5002 says", cannot be branded, and — the part that actually matters here — cannot
+  // show WHICH video is being confirmed. On an influencer with several videos the native prompt was the
+  // same sentence every time. The rows below name the influencer and the video, so the click is made
+  // against something identifiable rather than against a generic question.
+  wrap.querySelectorAll('.infv-recv').forEach(b=>b.addEventListener('click',async()=>{
+    const v=vidById(b.dataset.vid)||{};
+    const when=v.live_date?`Live ${_dmy(v.live_date)}`
+      :v.expected_date?`Expected ${_dmy(v.expected_date)}`:'Unscheduled';
+    const go=await ecConfirm({
+      title:'Mark this video as received?',
+      intro:'Records that the influencer has delivered this video, and logs it to their activity.',
+      rows:[
+        ['Influencer', inf.name||('@'+(inf.instagram_handle||''))],
+        ['Video', when],
+        ...(v.final_price!=null?[['Final', infMoney(v.final_price)]]:[]),
+      ],
+      note:'This cannot be undone — a delivery, once recorded, stays recorded.',
+      confirmText:'Yes, mark received',
+    });
+    if(!go) return;
+    b.disabled=true;
+    try{
+      await infFetch('/api/inf/videos/'+b.dataset.vid,{method:'POST',body:JSON.stringify({video_received:true})});
+      showNotification('Video marked received'); infDetailReload(wrap);
+    }catch(e){ b.disabled=false; showNotification(e.message,true); } }));
   wrap.querySelectorAll('.infv-edit').forEach(b=>b.addEventListener('click',()=>infVideoModal(inf.id,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
   wrap.querySelectorAll('.infv-send').forEach(b=>b.addEventListener('click',()=>infSendProductModal(inf,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
   wrap.querySelectorAll('.infv-invoice').forEach(b=>b.addEventListener('click',()=>infInvoice(inf,vidById(b.dataset.vid))));

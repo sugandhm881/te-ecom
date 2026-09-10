@@ -1231,6 +1231,57 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### "Video received" — the delivery a card could never record (2026-09-10)
+
+User: *"if influencer status is partnered the open on check box button name video received and when
+click on that button should show but disabled and that response should saved in activity."*
+
+A video card could say a product was **sent** and a payment was **due**, but nothing recorded the thing
+in between — the influencer actually delivering. The only signal was someone pasting a reel URL, which
+arrives days later, or never for a story or a private cut.
+
+**The control.** On each video card, only when `outreach_status === 'partnered'` — the one status where
+a video is owed — a checkbox appears beside *Product sent*. Ticking it turns it into a filled emerald
+box that stays on screen and cannot be operated.
+
+⚠️ **ONE-WAY, AND THE SERVER IS WHAT MAKES IT SO.** The UI disabling the control is decoration: anyone
+with the endpoint can POST `video_received:false` and quietly un-deliver a video. `/inf/videos/:id`
+returns **409** on any attempt to take it back, so the locked checkbox describes something real. There
+is no undo anywhere — a genuine mistake is a database edit, which is the right amount of friction for
+reversing a recorded fact. `video_received_at` is set by the SERVER, never accepted from the client:
+it answers "when did they deliver", and a client-supplied timestamp can be anything.
+
+⚠️ **An already-received chip survives a later status change.** If the influencer is moved to Declined
+the tick stays. Hiding a recorded fact because a status changed would make the card lie about what
+happened.
+
+Migration `20260910_influencer_video_received.sql` — `video_received`, `video_received_at`, and a
+**partial** index on the false rows, because the only question anyone asks of this column is "which
+partnered videos are still outstanding". Until it is run the API names the migration in its error
+rather than leaking PostgREST's schema-cache message at whoever clicked.
+
+Activity gains a `video_received` type with its own colour in `INF_ACT_CHIP`.
+
+**Two UI lessons, both from looking at it rather than reading it.**
+
+At chip size the control read as one of the *read-only* pills beside it — something the card was
+telling you, not something you could click. It is taller than the chips now, carries a drawn box, and
+lifts on hover. ⚠️ The box is **drawn in CSS**, not written as U+2610/U+2713: those glyphs are missing
+from plenty of UI fonts, the browser substitutes a different face mid-line, and the control changed
+shape between machines. Real CSS (`.ivr-btn` / `.ivr-box`) because tailwind.css here is prebuilt, and
+**unscoped** because the modal is appended to `<body>`, not inside a view container — a scoped selector
+would never match it. The received state is a `<span>`, not a disabled `<button>`: a control nobody can
+operate should stop presenting itself as one.
+
+And the confirmation is `ecConfirm`, the app's own modal, not `confirm()` (user: *"confirmation popup
+should not browser base"*). Beyond the chrome and the "localhost:5002 says", the native dialog **could
+not name which video was being confirmed** — on an influencer with several it was the same sentence
+every time. The modal now carries the influencer, the video's date and its final price as rows, so the
+click lands against something identifiable. ⚠️ 13 other native `confirm()` calls remain in `app.js`
+(deletes, releases, cancellations); each would benefit from the same treatment, none is done.
+
+Selftests **582 passing**.
+
 ### The daily Teams report is now the Call Insights page, as an image, at 08:00 for yesterday (2026-09-09)
 
 User: *"i want same as this screenshot as call report of today in our Teams thread — where currently

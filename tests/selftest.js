@@ -2061,6 +2061,76 @@ function check(name, got, want) {
                          apm.includes("e.target.closest('.sci-pick')")],
                         [true, true, true, true, true, true, true, true, true, true, true]);
                 }
+                // "VIDEO RECEIVED" IS A ONE-WAY RECORD (user, 2026-09-10: "if influencer status is
+                // partnered ... check box button name video received, and when click on that button should
+                // show but disabled, and that response should saved in activity").
+                //
+                // Until now a card could say a product was sent and a payment was due while nothing
+                // recorded the delivery itself - the only signal was someone pasting a reel URL, which
+                // arrives later, or never for a story or a private cut.
+                //
+                // ⚠️ The DISABLED attribute is decoration unless the server refuses too: anyone with the
+                // endpoint can POST video_received:false and quietly un-deliver a video. The 409 is what
+                // makes the locked checkbox describe something real.
+                {
+                    const inf = fs.readFileSync(path.join(ROOT, 'app/api/influencer_crm.js'), 'utf8');
+                    const app9 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    const idxHtml = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+                    check('influencer video: "received" is one-way, and the SERVER is what enforces it',
+                        [/VIDEO_FIELDS_BOOL = \[[^\]]*'video_received'/.test(inf),
+                         inf.includes('before.video_received && patch.video_received === false'),
+                         /status\(409\)/.test(inf),
+                         // the timestamp is the answer to "when did they deliver" - never taken from the client
+                         inf.includes('patch.video_received_at = new Date().toISOString();'),
+                         // …and the delivery lands in the feed, with its own colour
+                         /logActivity\(before\.influencer_id, 'video_received'/.test(inf),
+                         app9.includes("video_received:'bg-emerald-100 text-emerald-800'")],
+                        [true, true, true, true, true, true]);
+                    // Shown only for PARTNERED - the one status where a video is actually owed - but an
+                    // ALREADY-RECEIVED chip survives a later status change, because hiding a recorded fact
+                    // would make the card lie about what happened.
+                    check('influencer video: the chip is gated on partnered, yet never hides a delivery',
+                        [app9.includes('const infVideoReceivedChip=(influencer,v)=>{'),
+                         app9.includes("if(!partnered && !v.video_received) return '';"),
+                         // the received state is a SPAN, not a disabled button: a control nobody can
+                         // operate should stop presenting itself as one
+                         app9.includes("<span class=\"ivr-btn is-on\"") && app9.includes('class="ivr-btn infv-recv"'),
+                         // one confirm, because there is no undo anywhere
+                         // ⚠️ the app's OWN confirm, not the browser's. A native confirm() is
+                         // chrome-styled, says "localhost:5002 says", and cannot name WHICH video is
+                         // being marked - on an influencer with several it was the same sentence every
+                         // time. ecConfirm carries the influencer and the video as rows.
+                         app9.includes("title:'Mark this video as received?'"),
+                         (() => { const hx = app9.slice(app9.indexOf("'.infv-recv'"));
+                            const handler = hx.slice(0, hx.indexOf("'.infv-edit'"));
+                            // the app's own modal is awaited, and the native one is gone from this handler
+                            return /await ecConfirm\(/.test(handler) && !/[^c]confirm\(/.test(handler); })(),
+                         app9.includes("infv-recv"),
+                         // and the migration that backs it exists
+                         fs.existsSync(path.join(ROOT, 'supabase/migrations/20260910_influencer_video_received.sql'))],
+                        [true, true, true, true, true, true, true]);
+                    // ⚠️ REAL CSS, and a DRAWN box. tailwind.css here is prebuilt, so a utility-built
+                    // control renders as unstyled text; and U+2610/U+2713 are missing from plenty of UI
+                    // fonts, so the glyph version changed shape between machines. A border plus a stroked
+                    // tick renders the same everywhere.
+                    // Unscoped `.ivr-` prefix on purpose: the modal is appended to <body>, not inside a
+                    // view container, so a scoped selector would never match it.
+                    check('influencer video: the checkbox is real CSS with a drawn box, not a glyph',
+                        [idxHtml.includes('.ivr-btn { display:inline-flex;') && idxHtml.includes('.ivr-box {'),
+                         idxHtml.includes('.ivr-btn.is-on .ivr-box { background:#059669;'),
+                         // scoped to THIS control: the tick glyph is used legitimately elsewhere in
+                         // app.js ("Email sent", the Call Insights funnel), so a whole-file check would
+                         // fail on code that has nothing to do with it
+                         !/[☐✓✔]/.test(app9.slice(app9.indexOf('const infVideoReceivedChip='),
+                                                                app9.indexOf('const vidCard=v=>{'))),
+                         app9.includes('<polyline points="20 6 9 17 4 12"/>')],
+                        [true, true, true, true]);
+                    // ⚠️ Until that migration is run the column does not exist and PostgREST answers with a
+                    // schema-cache error that means nothing to whoever clicked the button.
+                    check('influencer video: a missing column names itself instead of leaking PostgREST',
+                        [inf.includes('run supabase/migrations/20260910_influencer_video_received.sql')],
+                        [true]);
+                }
                 // FLIPKART LABEL SPLITTER, IN OUR ARCHITECTURE (user, 2026-09-09: "integrate this in our
                 // dashboard… make sure this should not run on python, it runs with our project architecture").
                 // The original was Flask + pypdf on port 5050 with its own React page and a health-poll: a

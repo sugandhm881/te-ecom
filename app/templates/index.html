@@ -271,6 +271,30 @@
         #f8fafc; }
     /* The wordmark is ~3.3:1, so it sits beside the title with a hairline divider rather than in a
        square tile. Height-constrained, width auto, so the aspect can never be squashed. */
+    /* ── "Video received" — a real checkbox, not another status pill ──────────────────────────
+       It sits in a row of read-only chips (Unscheduled / Product sent), and at chip size it read as
+       one of them: something the card was TELLING you, not something you could click. So it is
+       taller than the chips, carries a drawn box, and lifts on hover.
+       ⚠️ The box is drawn in CSS rather than written as U+2610/U+2713. Those glyphs are missing from
+       plenty of UI fonts and fall back to a different face mid-line, so the control changed shape
+       between machines. A border and a stroked tick render the same everywhere. */
+    .ivr-btn { display:inline-flex; align-items:center; gap:8px; height:30px; padding:0 12px;
+        border:1px solid #e2e8f0; border-radius:9px; background:#fff; cursor:pointer;
+        font-size:12px; font-weight:600; color:#475569; line-height:1; white-space:nowrap;
+        transition:border-color .13s ease, color .13s ease, background .13s ease, box-shadow .13s ease; }
+    .ivr-btn:hover { border-color:#6ee7b7; color:#047857; background:#f0fdf4;
+        box-shadow:0 4px 10px -6px rgba(5,150,105,.5); }
+    .ivr-btn:focus-visible { outline:2px solid #059669; outline-offset:2px; }
+    .ivr-box { flex:none; width:15px; height:15px; border-radius:4px; border:1.6px solid #cbd5e1;
+        background:#fff; display:inline-flex; align-items:center; justify-content:center;
+        transition:border-color .13s ease, background .13s ease; }
+    .ivr-btn:hover .ivr-box { border-color:#059669; }
+    .ivr-box svg { width:10px; height:10px; opacity:0; }
+    /* Received: filled, quiet, and plainly not a control any more — no pointer, no hover. */
+    .ivr-btn.is-on { background:#ecfdf5; border-color:#a7f3d0; color:#065f46; cursor:default; }
+    .ivr-btn.is-on:hover { box-shadow:none; background:#ecfdf5; border-color:#a7f3d0; color:#065f46; }
+    .ivr-btn.is-on .ivr-box { background:#059669; border-color:#059669; }
+    .ivr-btn.is-on .ivr-box svg { opacity:1; }
     .ls-brand { display:block; height:26px; width:auto; flex:none; }
     .ls-brand-rule { display:block; width:1px; height:30px; background:#e2e8f0; flex:none; }
     .ls-ratio-chip { display:inline-flex; align-items:center; padding:5px 11px; border-radius:999px;
@@ -4148,7 +4172,7 @@
      ONLY thing that makes a browser re-fetch. Forgetting it means the change ships and nobody sees it:
      on 2026-08-13 a whole session of Last-Mile + Purchase Order work was invisible for exactly this
      reason, and it looks identical to "the fix didn't work". -->
-<script src="/static/app.js?v=2026-09-09-splitter-two"></script>
+<script src="/static/app.js?v=2026-09-10-video-received"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {
