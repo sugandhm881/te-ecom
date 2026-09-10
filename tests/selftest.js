@@ -1434,25 +1434,67 @@ function check(name, got, want) {
                         [true, true, true]);
                 }
                 {
-                    // THE UNDELIVERED DATE MEANS "WHEN IT FAILED", NOT "WHEN IT WAS ORDERED" (user,
-                    // 2026-09-05: "how this possible last 3 days show que is clear"). A parcel fails a
-                    // median of 8 days after purchase, so filtering that tab on the order date matched
-                    // 3 orders while 132 parcels had actually gone undelivered in the window.
-                    // Two things are pinned because getting either wrong returns an empty queue that
-                    // looks like a working filter:
-                    //   · the UNION — a row counts if the courier scanned it in range OR it was ordered
-                    //     in range, so a shipment with no journey row at all (DocPharma often has none)
-                    //     cannot silently vanish;
-                    //   · BOTH NAME SPELLINGS — order_buckets stores "#TE25-44160", the journey stores
-                    //     "TE25-44160", and matching one form returned zero rows on the first attempt.
+                    // BOTH NDR TABS ARE WINDOWED ON THE NDR DATE (user, 2026-09-10: "date should work as
+                    // per NDR date when NDR start"). This date has now been wrong in three ways, so each
+                    // is pinned:
+                    //   · the ORDER date (until 2026-09-05) — a parcel fails a median of 8 days after
+                    //     purchase, so "Last 3 days" matched 3 orders while 132 parcels had actually
+                    //     failed in that window;
+                    //   · the LAST SCAN (until today) — it moves every day, so an old parcel still being
+                    //     scanned kept climbing back into a window it had already left;
+                    //   · the two tabs on DIFFERENT dates — Undelivered on the scan, Status changed on the
+                    //     order date, so a parcel ordered in June and failed yesterday was on neither.
+                    // The moment comes from the COURIER'S journey first and only then from
+                    // undelivered_tracking: a row written by rememberUndelivered() is stamped when a human
+                    // opened the tab, which for an old parcel is days after the failure.
                     const sc3 = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
-                    check('undelivered tab: the date range means when it went undelivered, order date kept as a union',
-                        [/\.select\('order_name'\)\.gte\('last_scan_at', fromISO\)\.lte\('last_scan_at', toISO\)/.test(sc3),
-                         /byScan\.flatMap\(n => \[n, '#' \+ n\]\)/.test(sc3),
-                         /const \[orderedRows, scannedRows\] = await Promise\.all\(\[/.test(sc3),
-                         // Hold Orders (the repeat tab) must NOT have been changed with it
-                         /\.eq\('bucket', 'repeat_cod'\)|repeat/.test(sc3)],
-                        [true, true, true, true]);
+                    // Behavioural: the REAL window test out of support_console.js.
+                    const wnd = new Function('rows', 'moments', 'fromISO', 'toISO',
+                        sc3.slice(sc3.indexOf('function withinNdrWindow('), sc3.indexOf('async function platformByOrder('))
+                        + ' return withinNdrWindow(rows, moments, fromISO, toISO);');
+                    const rowsW = [{ order_id: 'in' }, { order_id: 'early' }, { order_id: 'late' }, { order_id: 'none' }];
+                    const kept = wnd(rowsW, { in: '2026-09-05T10:00:00Z', early: '2026-08-01T10:00:00Z',
+                        late: '2026-09-30T10:00:00Z', none: null }, '2026-09-01T00:00:00Z', '2026-09-10T23:59:59Z');
+                    check('NDR tabs: the window is the NDR date, and the moment rides back on every row',
+                        [kept.map(r => r.order_id).join(','),
+                         // the moment is stamped on EVERY row, in or out — the row carries its own date
+                         rowsW.every(r => 'ndr_at' in r),
+                         // a row with no NDR moment at all is OUT, never silently kept
+                         kept.length === 1],
+                        ['in', true, true]);
+                    check('NDR tabs: both tabs read the same NDR moment, journey before first_seen_at',
+                        [// Undelivered sweeps the whole bucket and windows afterwards
+                         /rows = withinNdrWindow\(rows, await ndrMomentByOrder\(rows\), fromISO, toISO\);/.test(sc3),
+                         // Status changed uses the same helper, and no longer the order date
+                         /const inWindow = withinNdrWindow\(all, await ndrMomentByOrder\(all\), fromISO, toISO\);/.test(sc3),
+                         !/const inWindow = all\.filter\(r => \{ const t = new Date\(r\.created_at\)/.test(sc3),
+                         // journey first, tracking second, order date last
+                         /jByAwb\[String\(r\.awb_number \|\| ''\)\.trim\(\)\]/.test(sc3),
+                         /\|\| jByName\[_pk\(r\.order_name\)\] \|\| seen\[String\(r\.order_id\)\] \|\| r\.created_at/.test(sc3),
+                         // BOTH NAME SPELLINGS — order_buckets keeps the '#', the journey does not, and
+                         // matching one form returned zero rows the first time this was written
+                         /names\.flatMap\(n => \[n, '#' \+ n\]\)/.test(sc3)],
+                        [true, true, true, true, true, true]);
+
+                    // THE TAB COUNT COMES FROM slim=1, NOT FROM SHIPPING THE WHOLE TAB. Status changed is
+                    // a few thousand enriched rows; fetched whole for a number it would cost more than the
+                    // page the user is actually looking at.
+                    const appSlim = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    check('tab counts: the sibling tab is fetched slim, cached per window, master-filtered',
+                        [/if \(String\(req\.query\.slim \|\| ''\) === '1'\) \{/.test(sc3),
+                         // only the three fields supMasterMatch() reads — no notes, scans or call logs
+                         /return \{ order_id: r\.order_id, edd: r\.edd, created_at: r\.created_at,/.test(sc3),
+                         // the cache key carries the window, so changing the dates refetches
+                         appSlim.includes("return tab + '|' + r.from + '|' + r.to;"),
+                         // ONE RANGE PER PAGE (user, 2026-09-10). Both tabs read the same scope, so
+                         // the two counts sitting side by side cannot be counting different fortnights.
+                         appSlim.includes("const supQueueScope = () => 'queue.' + _supMode;"),
+                         !appSlim.includes("supRangeFor('queue.' + tab)"),
+                         !appSlim.includes("supRangeQS('queue.'+_supTab)"),
+                         // the master filter stays on the CLIENT — one copy of the rule, never two
+                         appSlim.includes("rows.filter(supMasterMatch).length : rows.length"),
+                         !/filter\(supMasterMatch\)|function supMasterMatch/.test(sc3)],
+                        [true, true, true, true, true, true, true, true]);
                 }
                 {
                     // MANUAL CALL — a human agent bridged to the customer (user, 2026-09-05).
@@ -2061,6 +2103,322 @@ function check(name, got, want) {
                          apm.includes("e.target.closest('.sci-pick')")],
                         [true, true, true, true, true, true, true, true, true, true, true]);
                 }
+                // HOLD ORDERS LEFT THE CALL QUEUE (user, 2026-09-10: "hold order tab need to move in new nav
+                // bar named Order Calling and update name of Call Queue as NDR Calling"). They are different
+                // jobs: Hold Orders is a PRE-DISPATCH call to confirm a COD order before it ships; the other
+                // three tabs are POST delivery failure. One tab strip made them look like stages of one queue.
+                //
+                // ⚠️ ONE view, TWO doors - not two copies. The queue is ~800 lines of shared table, filters,
+                // modals and row actions; a duplicate would drift on the first change made to either.
+                {
+                    const apn = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    const idn = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+                    check('call queue: Order Calling and NDR Calling are two doors into one view',
+                        [idn.includes('>Order Calling</span>') && idn.includes('>NDR Calling</span>'),
+                         !idn.includes('>Call Queue</span>'),          // the old name is gone from the nav
+                         apn.includes("case 'order-calling':"),
+                         // both routes point at the SAME view element
+                         // counted by splitting, not by regex: every escaped regex written into this file
+                         // through a shell today has arrived with its backslashes stripped
+                         apn.split("activeViewElement = document.getElementById('support-queue-view')").length - 1 === 2,
+                         !idn.includes('id="order-calling-view"'),
+                         // the tab sets are disjoint, so a row can never appear under both pages
+                         apn.includes("order: { tabs:['repeat','rejected']") && apn.includes("ndr:   { tabs:['und','changed']")],
+                        [true, true, true, true, true, true]);
+                    // ⚠️ A rename must not take access away: Order Calling rides the SAME right the Hold
+                    // Orders tab always did. Its own key would have hidden the page from everyone who could
+                    // already see those rows until an admin granted it.
+                    check('call queue: Order Calling inherits the support-queue right, and cleans up after itself',
+                        [apn.includes("const NAV_PERM_ALIAS = { 'order-calling': 'support-queue' };"),
+                         apn.includes('NAV_PERM_ALIAS[raw]) || raw'),
+                         // a tab left selected on the other page is pulled back, or the table renders empty
+                         apn.includes('if(!m.tabs.includes(_supTab)) _supTab = m.tabs[0];'),
+                         // one tab is not a choice - the strip hides rather than showing a lone button
+                         apn.includes("strip.style.display = m.tabs.length>1 ? '' : 'none';")],
+                        [true, true, true, true]);
+                }
+                // THE CALL QUEUE MASTER FILTER (user, 2026-09-10). One control that decides WHICH LIST -
+                // follow up with courier / with customer / status changed pending / all - on Hold Orders,
+                // Undelivered and Status changed. The filter bar below it narrows; this chooses.
+                //
+                // ⚠️ The sort is GROUPS, not a tiebreak chain (the user was asked and chose groups): first
+                // match wins, so a PREPAID REPEAT customer sits in Prepaid, not Repeat. Within a group,
+                // days-past ASCENDING - freshest first, the same reasoning as NDR1-on-top.
+                {
+                    const sc = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+                    const apq = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+
+                    // Behavioural: run the REAL filter + sort out of app.js against built rows.
+                    const block = apq.slice(apq.indexOf('function supEddBreached(r){'), apq.indexOf('}', apq.indexOf('return da-db;')) + 1);
+                    const day = n => new Date(Date.now() - n * 864e5).toISOString();
+                    const R = (name, payment, rep, conf, d, raised) => ({ order_name: name, payment,
+                        is_repeat_customer: rep, ai_call: conf ? { outcome: 'confirmed' } : null,
+                        raised_kind: raised || null, edd: d == null ? null : day(d), created_at: day(d == null ? 9 : d) });
+                    const rows = [
+                        R('raised-20d', 'COD', 0, 0, 20, 'raised'),
+                        R('cust-2d', 'COD', 0, 0, 2), R('cust-5d', 'COD', 0, 0, 5),
+                        R('pend-6d', 'COD', 0, 0, 6), R('no-edd', 'COD', 0, 0, null),
+                        R('prepaid-10d', 'Prepaid', 0, 0, 10), R('prepaid-repeat-8d', 'Prepaid', 1, 0, 8),
+                        R('cod-repeat-2d', 'COD', 1, 0, 2), R('cod-confirmed-3d', 'COD', 0, 1, 3),
+                    ];
+                    const run = new Function('rows', 'mode', block + `
+                        _supMaster = mode;
+                        const kept = rows.filter(supMasterMatch).sort(supGroupCmp);
+                        return { names: kept.map(r => r.order_name), groups: kept.map(supGroupOf) };`);
+
+                    const courier = run(rows, 'courier').names;
+                    const customer = run(rows, 'customer').names;
+                    const pending = run(rows, 'pending').names;
+                    check('call queue: the three master filters select what they say they select',
+                        [JSON.stringify(courier) === JSON.stringify(['raised-20d']),
+                         // 5 days is INCLUSIVE, and a raised order is never a customer follow-up
+                         customer.includes('cust-5d') && customer.includes('cust-2d') && !customer.includes('raised-20d'),
+                         pending.includes('pend-6d') && !pending.includes('cust-5d'),
+                         // ⚠️ no EDD lands in PENDING, not nowhere - an open order of unknown age is exactly
+                         // what needs a human, and dropping it from every filter would hide it
+                         pending.includes('no-edd'),
+                         // ⚠️ courier and pending OVERLAP by design: only "customer" carries the not-raised
+                         // test, so a raised parcel 20 days late is in both. The counts do not sum.
+                         pending.includes('raised-20d')],
+                        [true, true, true, true, true]);
+
+                    // ── THE SORT, IN ORDER ──────────────────────────────────────────────────────
+                    //   1. NDR attempt: NDR1 before NDR2 before NDR3
+                    //   2. the group sort: Prepaid → repeat → confirmed on the call
+                    //   3. COD only: Repeat → Unheld → EDD breached → rest   (the last GROUPING rule)
+                    //   4. days past the promised date, ASCENDING — inside each tier
+                    const RR = (name, o) => Object.assign({ order_name: name, payment: 'COD',
+                        is_repeat_customer: 0, edd: day(1), created_at: day(1) }, o);
+                    const ladder = new Function('rows', block +
+                        ' return rows.slice().sort(supGroupCmp).map(r => r.order_name);');
+
+                    // ⚠️ PLACED TWICE BEFORE AND WRONG BOTH TIMES - above everything (moved rows the older
+                    // rules had placed, reverted), then below days-past (could almost never fire, so the
+                    // tags came out scattered: "as per rule its not working, you can see in screenshot").
+                    // What is pinned here is the position between them, from BOTH sides.
+                    const T = ladder([
+                        RR('d-untagged',  { edd: new Date(Date.now() + 2 * 864e5).toISOString() }),
+                        RR('b-edd-2d',    { edd: day(2) }),
+                        RR('c-edd-8d',    { edd: day(8) }),
+                        RR('a-unheld-9d', { edd: day(9), unheld_at: day(2) }),
+                    ]);
+                    check('call queue: the COD tiers read as blocks, ascending inside each',
+                        [T.join(','),
+                         // ⚠️ FROM ABOVE: the ladder beats days-past, or the tags scatter down the page -
+                         // a 9-day unheld parcel still leads a 2-day breached one
+                         T[0] === 'a-unheld-9d',
+                         // "(EDD Breaced Should Be In Assending Order)" - freshest breach first INSIDE the tier
+                         T.indexOf('b-edd-2d') < T.indexOf('c-edd-8d'),
+                         // a parcel still inside its promise carries no tag and sits last
+                         T[T.length - 1] === 'd-untagged'],
+                        ['a-unheld-9d,b-edd-2d,c-edd-8d,d-untagged', true, true, true]);
+
+                    // ⚠️ FROM BELOW: NDR attempt still outranks the ladder. An untagged NDR1 parcel leads
+                    // an unheld NDR2 one - the 2026-09-09 rule is not repealed by this.
+                    const NT = ladder([
+                        RR('ndr2-unheld',   { ndr_attempt: 2, edd: day(3), unheld_at: day(2) }),
+                        RR('ndr1-untagged', { ndr_attempt: 1, edd: new Date(Date.now() + 2 * 864e5).toISOString() }),
+                    ]);
+                    check('call queue: NDR still outranks the COD ladder',
+                        [NT.join(',')], ['ndr1-untagged,ndr2-unheld']);
+
+                    // A PREPAID row is untouched by it: not COD, so it shares the bottom tier, and the
+                    // group rule above still lifts it exactly as before.
+                    const P = ladder([
+                        RR('cod-unheld', { edd: day(3), unheld_at: day(2) }),
+                        RR('prepaid',    { edd: day(3), payment: 'Prepaid' }),
+                    ]);
+                    check('call queue: the COD ladder leaves the prepaid rule alone',
+                        [P.join(',')], ['prepaid,cod-unheld']);
+
+                    // ⚠️ NDR1-FIRST WAS DEAD FOR A DAY. The server orders Undelivered by NDR attempt (user,
+                    // 2026-09-09), and supGroupCmp — added the day after — re-sorted the same list on the
+                    // client with no NDR term at all, silently throwing that order away. It leads now.
+                    const N = ladder([
+                        RR('ndr3', { ndr_attempt: 3, edd: day(2) }),
+                        RR('ndr1', { ndr_attempt: 1, edd: day(9) }),
+                        RR('ndr2', { ndr_attempt: 2, edd: day(4) }),
+                        RR('ndr-none', { edd: day(1) }),
+                    ]);
+                    check('call queue: NDR1 on top survives the group sort',
+                        [N.join(','),
+                         // a shipment we have no count for is NOT "no failures yet" — it sorts last, or it
+                         // would push real NDR1 parcels below parcels we know nothing about
+                         N[N.length - 1] === 'ndr-none'],
+                        ['ndr1,ndr2,ndr3,ndr-none', true]);
+
+                    const all = run(rows, 'all');
+                    check('call queue: the default sort is GROUPS, freshest first inside each',
+                        // prepaid (incl. the prepaid REPEAT) → repeat → COD-confirmed → rest
+                        [JSON.stringify(all.groups) === JSON.stringify([0, 0, 1, 2, 3, 3, 3, 3, 3]),
+                         all.names[0] === 'prepaid-repeat-8d',
+                         // ascending days-past within the prepaid group
+                         all.names.indexOf('prepaid-repeat-8d') < all.names.indexOf('prepaid-10d'),
+                         all.names.indexOf('cod-repeat-2d') < all.names.indexOf('cod-confirmed-3d'),
+                         // ⚠️ a COD row with NO edd carries no tag, so the ladder puts it BELOW every
+                         // tagged one - even a parcel 20 days past its promise, which is far older. That
+                         // is the ladder outranking days-past, which is the whole point of rule 3.
+                         all.names.indexOf('pend-6d') < all.names.indexOf('no-edd'),
+                         all.names.indexOf('raised-20d') < all.names.indexOf('no-edd')],
+                        [true, true, true, true, true, true]);
+
+                    // ⚠️ The COD-confirmation call used to be read ONLY inside the Hold-Orders block, so on
+                    // Undelivered and Status-changed `ai_call` was undefined and the sort group would have
+                    // silently never fired - the same trap msg91_confirmed sets (0 true rows of 47,107).
+                    check('call queue: the COD confirmation call is read on every tab, not just Hold Orders',
+                        [(() => { const rep = sc.indexOf("if (tab === 'repeat')");
+                            return sc.indexOf('r.ai_call = { status') < rep; })(),
+                         sc.includes("q => q.eq('purpose', 'cod_confirm')"),
+                         // only `confirmed` counts as a yes - denied/unclear/no_answer take no action anywhere
+                         apq.includes("r.ai_call && r.ai_call.outcome==='confirmed'")],
+                        [true, true, true]);
+
+                    // An empty filter must say WHY. "Queue is clear" is a lie when a filter emptied it, and
+                    // on Hold Orders "follow up with courier" is ALWAYS empty - those are pre-dispatch.
+                    check('call queue: an empty master filter explains itself',
+                        [// NDR CALLING ONLY (user, 2026-09-10). Both Order Calling tabs are pre-dispatch, so the three
+                         // filters answer questions that cannot apply: nothing is raised because nothing shipped,
+                         // and there is no delivery estimate to be 5 days past.
+                         apq.includes("const on=_supMode==='ndr';"),
+                         apq.includes("if(_supMode==='ndr' && _supMaster!=='all') list=list.filter(supMasterMatch);"),
+                         // the group sort rides with it - Order Calling keeps the server order it always had
+                         apq.includes("else if(_supMode==='ndr') list.sort(supGroupCmp);"),
+                         apq.includes("No orders are currently raised to the courier in this tab."),
+                         // real CSS, because tailwind here is prebuilt
+                         fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8').includes('.sup-mbtn { display:inline-flex;')],
+                        [true, true, true, true, true]);
+                }
+                // THE SECOND CHIP UNDER PAYMENT (user, 2026-09-10). One slot, first match wins:
+                // how it got out of hold, then Repeat, then EDD breached.
+                {
+                    const apf = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    const tw  = fs.readFileSync(path.join(ROOT, 'app/static/tailwind.css'), 'utf8');
+                    const blk = apf.slice(apf.indexOf('function supFlagChip(r){'), apf.indexOf('// ── Customer Support live-tracking modal'));
+                    // supEddBreached lives with supDaysPast (one definition, read by the chip AND the
+                    // sort) so it is sliced in separately here rather than stubbed - a stub would let the
+                    // tag and the row's position drift apart without a test noticing.
+                    const edd = apf.slice(apf.indexOf('function supEddBreached(r){'), apf.indexOf('// DAYS PAST THE PROMISED DATE.'));
+                    const run = new Function('r', 'const escapeHtml=s=>String(s); const _dmy=t=>String(t); '
+                        + edd + blk + ' return supFlagChip(r);');
+                    const day = n => new Date(Date.now() - n * 864e5).toISOString();
+                    const label = h => (String(h).match(/>([^<]+)<\/span>/) || [,''])[1];
+                    // COD is the default here because the chip is COD-only — see the prepaid check below.
+                    const C = o => run(Object.assign({ payment: 'COD' }, o));
+                    check('payment column: the second chip says how the order got out of hold, then who, then when',
+                        [label(C({ unheld_at: day(3), unheld_by: 'ai-call (customer confirmed)' })),
+                         label(C({ unheld_at: day(3), unheld_by: 'diksha.rana@theelement.skin',
+                                   call_attempts: { kinds: ['manual_ai'] } })),
+                         // released by a person with no call on the order - not a confirmation
+                         label(C({ unheld_at: day(3), unheld_by: 'diksha.rana@theelement.skin' })),
+                         // ⚠️ REPEAT OUTRANKS the hold story, because that is the order the SORT uses
+                         // (user, 2026-09-10: "1-Repeat, Unheld & EDD Breached"). The tag a row wears and
+                         // the place it sits have to be the same fact, or the queue argues with itself.
+                         label(C({ unheld_at: day(3), unheld_by: 'x@y.z', is_repeat_customer: true })),
+                         label(C({ is_repeat_customer: true })),
+                         label(C({ edd: day(2) })),
+                         // ⚠️ a FUTURE edd is not breached, and no edd is not an edd - supDaysPast()
+                         // falls back to the order date, which would brand every old parcel breached
+                         label(C({ edd: new Date(Date.now() + 864e5).toISOString() })),
+                         label(C({ created_at: day(40) }))],
+                        ['Unheld · AI call', 'Unheld · manual call', 'Unheld',
+                         'Repeat', 'Repeat', 'EDD breached', '', '']);
+
+                    // ⚠️ COD ONLY (user, 2026-09-10: "repeat, edd breached and other kind of tag should
+                    // not show in prepaid"). All three say how likely a parcel is to be refused at the
+                    // door, and a prepaid one cannot be - the money is already banked. The SAME test the
+                    // sort uses, so "no tag" and "bottom tier" are the same set; if these two ever
+                    // disagree, a row wears a tag that does not match where it sits.
+                    check('payment column: no tag on a prepaid row, whatever it carries',
+                        [label(run({ payment: 'Prepaid', is_repeat_customer: true })),
+                         label(run({ payment: 'Prepaid', edd: day(9) })),
+                         label(run({ payment: 'Prepaid', unheld_at: day(2), unheld_by: 'ai-call (x)' })),
+                         // an unknown payment (the order row is missing) is not COD either - guessing on
+                         // an unknown is how a prepaid row would end up wearing a COD warning
+                         label(run({ payment: null, is_repeat_customer: true }))],
+                        ['', '', '', '']);
+                    // ⚠️ tailwind.css is PREBUILT - a class it does not carry renders as nothing,
+                    // which is how the chip would have shipped borderless (border-violet-200 is absent).
+                    check('payment column: every chip class is really in the prebuilt tailwind',
+                        [(blk.match(/(?:bg|text|border)-[a-z]+-\d+/g) || [])
+                            .filter((c, i, a) => a.indexOf(c) === i)
+                            .filter(c => !tw.includes('.' + c)).join(',')],
+                        ['']);
+                }
+
+                // THE SUPPORT DATE PICKER (user, 2026-09-10: "give custom date option only if click in
+                // custom date and remove preset option and make 30 days default"). The dropdown now IS the
+                // control - it carries the loaded window by name - and the two date boxes appear only under
+                // "Custom date". Every support panel shares this picker, so it is tested once here.
+                {
+                    const apq = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                    const sc = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+
+                    // Behavioural: the REAL preset maths out of app.js.
+                    const ymd = "const _ymd = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); ";
+                    const block = apq.slice(apq.indexOf('const SUP_PRESETS = ['), apq.indexOf('// DEFAULT = 30 DAYS'));
+                    const o = new Function(ymd + block + [
+                        "const r30 = supPresetRange(SUP_PRESETS.find(p => p[0] === '30'));",
+                        "const days = Math.round((new Date(r30.to) - new Date(r30.from)) / 864e5) + 1;",
+                        "return { days, endsToday: r30.to === _ymd(new Date()), of30: supPresetOf(r30),",
+                        "         ofOdd: supPresetOf({ from: '2020-01-01', to: '2020-02-02' }) };"].join(' '))();
+                    check('support date range: "Last 30 days" is 30 days ending today, and it names itself',
+                        // ⚠️ THIRTY, not 31. The old default ran today-14 -> today (a 15-day window) which
+                        // matched no preset at all, so the dropdown could never state what was loaded.
+                        [o.days, o.endsToday, o.of30, o.ofOdd], [30, true, '30', 'custom']);
+
+                    check('support date range: preset-first picker, custom boxes on demand, 30-day default',
+                        [// the dead placeholder is gone
+                         !apq.includes('<option value="">Presets</option>'),
+                         apq.includes('<option value="custom"'),
+                         // the boxes start hidden unless the saved range IS a custom one
+                         apq.includes("display:${cur==='custom'?'inline-flex':'none'}"),
+                         apq.includes("const SUP_RANGE_DEFAULT = '30';"),
+                         // ...but NDR Calling opens on 7 (user, 2026-09-10). Now the window means the NDR
+                         // date, a month of failed deliveries is a backlog, not a queue.
+                         apq.includes("const SUP_RANGE_DEFAULTS = { 'queue.ndr': '7' };"),
+                         apq.includes("SUP_PRESETS.find(p => p[0] === supRangeDefault(scope))"),
+                         // ⚠️ storage key bumped with the default - what sat under the old key was the old
+                         // 14-day default written on first paint, not a choice, so honouring it would have
+                         // shipped the new default to nobody
+                         apq.includes("'support.range.v3.'"),
+                         !apq.includes("'support.dateRange'")],
+                        [true, true, true, true, true, true, true, true]);
+
+                    // ORDER CALLING DROPS THE SHIPPED-ONLY FILTERS (user, 2026-09-10: "remove those
+                    // highlighted filter in both tab of order calling"). Payment, platform, courier status
+                    // and raised all describe a parcel that has left; every Order Calling row is
+                    // pre-dispatch and COD, so there they could only narrow the list to nothing.
+                    check('order calling: the four shipped-only filters are hidden AND forced back to all',
+                        [apq.includes("const shipped=_supMode!=='order';"),
+                         // ⚠️ all four go through supShowFilter, which hides the .csel WRAPPER. Every
+                         // .filter-select is moved inside one by ecEnhanceSelect() and hidden there by CSS;
+                         // the control on screen is the .csel-btn twin. Hiding the <select> itself hides
+                         // something already invisible - which is why the old per-tab hiding of
+                         // platform/status/raised was dead on Hold Orders for as long as it existed.
+                         (apq.match(/supShowFilter\(/g) || []).length,
+                         apq.includes("(sel.closest('.csel')||sel).style.display=on?'':'none';"),
+                         // …and the reset repaints the twin, or the label lies when the filter returns
+                         apq.includes("if(!on && sel.value!=='all'){ sel.value='all'; ecSyncSelect(sel); }"),
+                         // "Refresh tracking" goes with them: it pulls courier scans for parcels in
+                         // flight, and nothing on Order Calling has shipped
+                         apq.includes("rf.style.display = _supMode==='order' ? 'none' : '';"),
+                         // the old test was per-TAB; the split into two pages made the page the right question
+                         !apq.includes('platOn')],
+                        [true, 6, true, true, true, true]);
+
+                    // …and the window on that page is the ORDER date on BOTH tabs. Rejected COD used to be
+                    // windowed on when the customer tapped REJECT, so an order placed on the 1st and
+                    // rejected on the 9th sat on one tab of the page and not the other for the same range.
+                    check('order calling: Rejected COD is windowed on the order date, not the rejection date',
+                        [// orders are resolved BEFORE the window is applied - that is the whole point
+                         sc.indexOf('const byName = new Map();') < sc.indexOf('const inWindow = cancels.filter'),
+                         sc.includes('const at = o ? o.created_at'),
+                         // a rejection with no order still shows, on its own date - an invisible rejection
+                         // is how a told-you-so parcel ships anyway
+                         sc.includes("((r.data && (r.data['Received At'] || r.updated_at)) || r.updated_at)")],
+                        [true, true, true]);
+                }
+
                 // "VIDEO RECEIVED" IS A ONE-WAY RECORD (user, 2026-09-10: "if influencer status is
                 // partnered ... check box button name video received, and when click on that button should
                 // show but disabled, and that response should saved in activity").
@@ -4286,7 +4644,15 @@ function check(name, got, want) {
     const map = {}; [...mapSrc.matchAll(/'(nav-[a-z0-9-]+)': '([a-z0-9-]+)'/g)].forEach(m => { map[m[1]] = m[2]; });
     const missing = navIds.filter(id => !map[id]);
     // `reports-view` is the one view whose NAME already ends in -view (its element is id="reports-view").
-    const noView = Object.values(map).filter(v => !new RegExp(`id="${v.endsWith('-view') ? v : v + '-view'}"`).test(html));
+    // ⚠️ SHARED VIEWS, declared here rather than by loosening the rule. `order-calling` is the Hold
+    // Orders tab that moved out of the Call Queue (2026-09-10): it renders the SAME #support-queue-view
+    // through a different door, because the queue is ~800 lines of shared table, filters and modals and
+    // a second copy would drift on the first change made to either. Everything NOT in this map must
+    // still own an element — that is what caught this in the first place.
+    const SHARED_VIEW = { 'order-calling': 'support-queue' };
+    const noView = Object.values(map)
+        .map(v => SHARED_VIEW[v] || v)
+        .filter(v => !new RegExp(`id="${v.endsWith('-view') ? v : v + '-view'}"`).test(html));
     check('deep links: every sidebar item is in NAV_HREF (reload-safe)', missing, []);
     check('deep links: every NAV_HREF view has a matching *-view element', noView, []);
 }

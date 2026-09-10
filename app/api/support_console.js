@@ -391,6 +391,59 @@ async function syncUndeliveredFromJourney(fromISO, toISO) {
     return missing.length;
 }
 
+// ── WHEN THE NDR STARTED (user, 2026-09-10: "date should work as per NDR date when NDR start") ───
+// Both NDR Calling tabs are windowed on THIS moment — not the order date, not the last scan.
+//   • the ORDER date asked the wrong question: a parcel is bought a median of 8 days before it fails
+//     delivery, so "Today" listed orders that cannot have failed yet and missed every parcel that
+//     failed today;
+//   • the LAST SCAN moved every day, so an old parcel still being scanned kept climbing back into a
+//     window it had already left, and the same list never settled.
+// The NDR date stays put, and it is the thing the tab is actually about.
+//
+// Source order, best first:
+//   1. the COURIER'S OWN JOURNEY through undeliveredMoment() — the first out-for-delivery scan, or the
+//      end of the promised day it missed;
+//   2. undelivered_tracking.first_seen_at;
+//   3. the order date, for a shipment with neither (a DocPharma parcel with no journey row).
+// ⚠️ first_seen_at is SECOND, not first. A row created by rememberUndelivered() is stamped when a human
+// happened to open the tab, which for an old parcel is days after the failure; syncUndeliveredFromJourney()
+// writes the real moment, but only for orders it has reached. The journey is the courier's own record and
+// is right in both cases.
+async function ndrMomentByOrder(rows) {
+    const out = {};
+    if (!rows || !rows.length) return out;
+    const JSEL = 'awb, order_name, outcome, ndr_count, ofd_dates, first_edd, delivered_at, order_date';
+    const awbs = [...new Set(rows.map(r => String(r.awb_number || '').trim()).filter(Boolean))];
+    const names = [...new Set(rows.map(r => _pk(r.order_name)).filter(Boolean))];
+    const ids = [...new Set(rows.map(r => String(r.order_id || '')).filter(Boolean))];
+    const [byAwbRows, byNameRows, tracked] = await Promise.all([
+        awbs.length ? chunkedIn('shipment_journey_ecom', JSEL, 'awb', awbs) : Promise.resolve([]),
+        // BOTH SPELLINGS — order_buckets keeps the '#', the journey does not.
+        names.length ? chunkedIn('shipment_journey_ecom', JSEL, 'order_name', names.flatMap(n => [n, '#' + n])) : Promise.resolve([]),
+        ids.length ? chunkedIn('undelivered_tracking', 'order_id, first_seen_at', 'order_id', ids) : Promise.resolve([]),
+    ]);
+    // EARLIEST wins: an order re-shipped on a second AWB has two journey rows, and the work started at
+    // the first failure, not the latest one.
+    const keep = (map, k, at) => { if (!k || !at) return; if (!map[k] || new Date(at) < new Date(map[k])) map[k] = at; };
+    const jByAwb = {}, jByName = {};
+    byAwbRows.forEach(j => { const [at] = undeliveredMoment(j); keep(jByAwb, String(j.awb || '').trim(), at); });
+    byNameRows.forEach(j => { const [at] = undeliveredMoment(j); keep(jByName, _pk(j.order_name), at); });
+    const seen = {};
+    tracked.forEach(t => { seen[String(t.order_id)] = t.first_seen_at; });
+    rows.forEach(r => {
+        out[String(r.order_id)] = jByAwb[String(r.awb_number || '').trim()]
+            || jByName[_pk(r.order_name)] || seen[String(r.order_id)] || r.created_at || null;
+    });
+    return out;
+}
+// Rows whose NDR started inside the window, with the moment stamped on each for the client.
+function withinNdrWindow(rows, moments, fromISO, toISO) {
+    const fromMs = new Date(fromISO).getTime(), toMs = new Date(toISO).getTime();
+    rows.forEach(r => { r.ndr_at = moments[String(r.order_id)] || null; });
+    return rows.filter(r => { const t = r.ndr_at ? new Date(r.ndr_at).getTime() : NaN;
+        return t >= fromMs && t <= toMs; });
+}
+
 async function platformByOrder(rows) {
     const names = [...new Set(rows.map(r => _pk(r.order_name)).filter(Boolean))];
     const jr = names.length ? await chunkedIn('shipment_journey_ecom', 'order_name, source', 'order_name', names) : [];
@@ -611,10 +664,24 @@ router.post('/support/cancel-order', requirePermission('support-cancel-order'), 
 });
 
 // ── GET /support/queue?tab=repeat|und|changed ────────────────────────────────
+// A tab count is worth one computation, not one per visit. The slim result is memoised for a minute:
+// every open of NDR Calling asks for the Status-changed count, and building it means resolving a few
+// thousand candidate orders through the `order_buckets` view — the slowest read in this file. A count
+// that is up to a minute old is fine; a queue is not, which is why only the slim shape is cached.
+const _slimCache = new Map();
+const SLIM_TTL_MS = 60000;
+
 router.get('/support/queue', async (req, res) => {
     try {
         const tab = req.query.tab || 'und';
         const { fromISO, toISO } = rangeISO(req);
+        const slimKey = tab + '|' + fromISO + '|' + toISO;
+        if (String(req.query.slim || '') === '1') {
+            const hit = _slimCache.get(slimKey);
+            if (hit && Date.now() - hit.at < SLIM_TTL_MS) {
+                return res.json({ success: true, slim: true, cached: true, total: hit.rows.length, rows: hit.rows });
+            }
+        }
         const SEL = 'order_id, order_name, phone, email, total_price, created_at, fulfillment_status, tracking_status, partner, courier, awb_number, bucket, msg91_confirmed, is_repeat_customer, dispatch_at, edd';
         let rows = [];
 
@@ -630,33 +697,16 @@ router.get('/support/queue', async (req, res) => {
             // range or the order was placed in range. The second half is what keeps a shipment with no
             // journey row at all — DocPharma orders often have none — from silently vanishing from the
             // queue the day this shipped.
-            const scanNames = await fetchPaged((f, t) => supabase.from('shipment_journey_ecom')
-                .select('order_name').gte('last_scan_at', fromISO).lte('last_scan_at', toISO)
-                .order('order_name', { ascending: true }).range(f, t));
-            const byScan = [...new Set((scanNames || []).map(j => String(j.order_name || '').replace('#', '').trim()).filter(Boolean))];
-            const [orderedRows, scannedRows] = await Promise.all([
-                fetchPaged((f, t) => supabase.from('order_buckets').select(SEL)
-                    .in('bucket', UNDELIVERED_BUCKETS).gte('created_at', fromISO).lte('created_at', toISO)
-                    .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true })
-                    .order('order_id', { ascending: true })
-                    .range(f, t)),
-                // BOTH SPELLINGS. `order_buckets.order_name` carries the '#' ("#TE25-44160") and
-                // `shipment_journey_ecom.order_name` does not ("TE25-44160") — matching on one form
-                // silently returns nothing, which is exactly how this first went out returning zero.
-                byScan.length
-                    ? chunkedIn('order_buckets', SEL, 'order_name', byScan.flatMap(n => [n, '#' + n]),
-                        q => q.in('bucket', UNDELIVERED_BUCKETS))
-                    : Promise.resolve([]),
-            ]);
-            // De-duped on order_id, then ordered exactly as before: confirmed customers first, oldest next.
-            const seen = new Set();
-            rows = [...orderedRows, ...scannedRows].filter(r => {
-                const k = String(r.order_id);
-                if (seen.has(k)) return false;
-                seen.add(k); return true;
-            }).sort((x, y) => (Number(!!y.msg91_confirmed) - Number(!!x.msg91_confirmed))
-                || String(x.created_at || '').localeCompare(String(y.created_at || ''))
-                || String(x.order_id).localeCompare(String(y.order_id)));
+            // THE WHOLE BUCKET, THEN THE NDR WINDOW. `bucket = 'undelivered'` is a CURRENT state, not a
+            // history — 204 rows in all — so sweeping it costs less than the two dated queries this
+            // replaces (an order-date sweep unioned with a scan-date lookup) and it can no longer miss a
+            // parcel because its ORDER fell outside the window. The window is applied below, on the date
+            // the NDR started; see ndrMomentByOrder().
+            rows = await fetchPaged((f, t) => supabase.from('order_buckets').select(SEL)
+                .in('bucket', UNDELIVERED_BUCKETS)
+                .order('msg91_confirmed', { ascending: false }).order('created_at', { ascending: true })
+                .order('order_id', { ascending: true })
+                .range(f, t));
             // ⚠️ REMEMBER FIRST, FILTER SECOND. Every order this query saw undelivered goes on record
             // BEFORE the terminal filter below removes any of them — a parcel that has just been delivered
             // or returned is exactly the one the Status-changed tab exists to show. This upsert used to sit
@@ -667,6 +717,8 @@ router.get('/support/queue', async (req, res) => {
             // a call to make.
             const done = await terminalByAwb(rows);
             if (done.size) rows = rows.filter(r => !done.has(String(r.awb_number || '').trim()));
+            // …and only the ones whose failed delivery falls in the window the user picked.
+            rows = withinNdrWindow(rows, await ndrMomentByOrder(rows), fromISO, toISO);
         } else if (tab === 'rejected') {
             // ⚠ COD REJECTIONS COME FROM THE CUSTOMER, NOT THE COURIER. The MSG91 WhatsApp webhook writes
             // a CANCEL row when the customer taps REJECT on the confirmation template. By explicit
@@ -678,16 +730,28 @@ router.get('/support/queue', async (req, res) => {
                 .eq('data->>Confirmation received', 'CANCEL')
                 .order('updated_at', { ascending: false })
                 .range(f, t));
+            // ⚠ THE WINDOW IS THE ORDER DATE, NOT THE REJECTION DATE (user, 2026-09-10: "date filter
+            // should work on order date for order calling"). Both Order Calling tabs now answer the same
+            // question — "which COD orders from this window still need a call" — and Hold Orders has
+            // always been on the order date, so a rejection dated window had the two tabs of one page
+            // measuring different things: an order placed on the 1st and rejected on the 9th showed on
+            // one tab and not the other for the same range.
+            // Every rejection is resolved to its order BEFORE the window is applied, which is why the
+            // whole CANCEL history is swept rather than a date slice of it. That is one paged read of a
+            // few hundred rows (508 rejections in fourteen months), not a table scan.
+            // A rejection the webhook could not pin to an order (id_key "PHONE:…") still gets a stub row
+            // and falls back to its rejection date — an invisible rejection is how a told-you-so parcel
+            // ships anyway.
+            const rejName = r => String((r.data && r.data['Order Number']) || '').trim();
+            const allNames = [...new Set(cancels.map(rejName).filter(Boolean))];
+            const byName = new Map();
+            (await chunkedIn('order_buckets', SEL, 'order_name', allNames)).forEach(o => byName.set(o.order_name, o));
             const inWindow = cancels.filter(r => {
-                const at = (r.data && (r.data['Received At'] || r.updated_at)) || r.updated_at;
+                const o = byName.get(rejName(r));
+                const at = o ? o.created_at
+                    : ((r.data && (r.data['Received At'] || r.updated_at)) || r.updated_at);
                 return at >= fromISO && at <= toISO;
             });
-            // Resolve rejections to real orders for the queue columns. A rejection the webhook could not
-            // pin to an order (id_key "PHONE:…") still gets a stub row — an invisible rejection is how a
-            // told-you-so parcel ships anyway.
-            const names = [...new Set(inWindow.map(r => String((r.data && r.data['Order Number']) || '').trim()).filter(Boolean))];
-            const byName = new Map();
-            (await chunkedIn('order_buckets', SEL, 'order_name', names)).forEach(o => byName.set(o.order_name, o));
             rows = inWindow.map(r => {
                 const d = r.data || {};
                 const name = String(d['Order Number'] || '').trim();
@@ -726,7 +790,7 @@ router.get('/support/queue', async (req, res) => {
             // seen undelivered, so the range control above it did nothing and the list only grew. The
             // window is filtered here rather than in the query because the candidate ids come from
             // `undelivered_tracking`, which has no order date of its own.
-            const fromMs = new Date(fromISO).getTime(), toMs = new Date(toISO).getTime();
+            // (the window itself is applied below, on the NDR date)
             // THE RULE (set by the user 2026-08-18): "if an order is undelivered → delivered or RTO, it
             // should go on Status changed". So the tab lists SETTLED outcomes only, not merely "no longer
             // undelivered". Aug MTD this drops 72 orders that were cancelled after going undelivered and
@@ -741,7 +805,11 @@ router.get('/support/queue', async (req, res) => {
             // a RapidShyp RTO invisible since 11 Aug. Same source for both tabs = no window at all.
             // Window FIRST, courier lookups second. Resolving outcomes for every order ever seen
             // undelivered (~7,000) and then throwing 85% away is what blew the fan-out up.
-            const inWindow = all.filter(r => { const t = new Date(r.created_at).getTime(); return t >= fromMs && t <= toMs; });
+            // ⚠️ THE SAME WINDOW AS UNDELIVERED — the NDR date (user, 2026-09-10). This tab used to
+            // filter on the ORDER date while its candidates were selected on first_seen_at, so the two
+            // tabs of one page measured different things: a parcel ordered in June and failed yesterday
+            // was on neither list. They hand over on the same boundary now.
+            const inWindow = withinNdrWindow(all, await ndrMomentByOrder(all), fromISO, toISO);
             const settled = await terminalByAwb(inWindow);
             // Only fills a bucket that has NOT yet resolved — never overrides `cancelled`, which is a
             // decision we made about the order, not a lagging courier snapshot. (Overriding it too pulled
@@ -756,6 +824,26 @@ router.get('/support/queue', async (req, res) => {
         } else { // repeat — reason-tagged COD/pre-pickup base (see findRepeatCandidates); shown/filtered below.
             rows = await findRepeatCandidates({ fromISO, toISO, skipDispatchFilter: true, anyReason: true });
             rows = rows.filter(r => !r._moved);   // orders the courier already took are gone — drop before enriching
+        }
+
+        // ── SLIM: THE COUNT, NOT THE TAB (user, 2026-09-10: "Undelivered and Status Changed number
+        // should show as per master filter and date filter"). Every tab of a page now carries a live
+        // count, which means loading the tab you are NOT looking at. Sent whole, Status changed is a few
+        // thousand fully-enriched rows — notes, scans, platforms, call logs, hold states — fetched for a
+        // number. `slim` stops here, once membership is decided, and sends only the three fields
+        // supMasterMatch() reads, so the count is exact and the payload is a rounding error.
+        // ⚠️ The MASTER FILTER stays on the client. Reimplementing it here would be a second copy of a
+        // rule the user has already changed once, and the two would drift apart silently.
+        if (String(req.query.slim || '') === '1') {
+            const raised = (tab === 'und' || tab === 'changed')
+                ? await raisedByOrder(rows.map(r => r.order_name)) : {};
+            const slim = rows.map(r => {
+                const rz = raised[String(r.order_name || '').replace('#', '').trim()];
+                return { order_id: r.order_id, edd: r.edd, created_at: r.created_at,
+                         raised_kind: rz ? rz.kind : null };
+            });
+            _slimCache.set(slimKey, { at: Date.now(), rows: slim });
+            return res.json({ success: true, slim: true, total: slim.length, rows: slim });
         }
 
         // NOTE CONTEXT — a note belongs to the panel it was written in, not to every panel that later
@@ -819,15 +907,28 @@ router.get('/support/queue', async (req, res) => {
                 // Automated escalations — a sheet push or a critical email. Distinct from the manual
                 // courier_raised mark: these carry WHEN the escalation actually left (mark timestamps),
                 // which the Escalated column shows with date AND time (user, 2026-08-19).
-                chunkedIn('order_marks_ecom', 'order_name, mark_type, updated_at, created_at', 'order_name', normNames,
-                    q => q.in('mark_type', ['sheet_escalated', 'critical_mail_sent'])),
+                // The HOLD RELEASE rides on this same read (user, 2026-09-10: "if that order is unhold
+                // from Hold Order and that kind of tag, confirmed by customer AI call, manual call").
+                // `created_by` is what separates them: the COD confirmation caller writes
+                // "ai-call (customer confirmed)", a person writes their email. One extra mark_type and one
+                // extra column on a query already being made — no new round trip.
+                chunkedIn('order_marks_ecom', 'order_name, mark_type, updated_at, created_at, created_by', 'order_name', normNames,
+                    q => q.in('mark_type', ['sheet_escalated', 'critical_mail_sent',
+                                            'shopify_hold_released', 'ee_hold_released'])),
                 // RTO auto-call state ON THE ROW (user, 2026-09-02: "on undelivered page give called
                 // kind of thing — not need to open order") — the chip renders without the modal.
             ]);
-            const escBy = {};
+            const escBy = {}, unheldBy = {};
             (escMarks || []).forEach(m => {
                 const k = String(m.order_name).replace('#', '').trim();
                 const at = m.updated_at || m.created_at;
+                if (m.mark_type === 'shopify_hold_released' || m.mark_type === 'ee_hold_released') {
+                    // The FIRST release is the one that decided this order shipped; a later one is a
+                    // re-hold undone, which says nothing about the call that let it go.
+                    const u = unheldBy[k];
+                    if (!u || String(at) < String(u.at)) unheldBy[k] = { at, by: m.created_by || null };
+                    return;
+                }
                 const e = escBy[k] || (escBy[k] = { kinds: new Set(), at: null });
                 e.kinds.add(m.mark_type === 'sheet_escalated' ? 'sheet' : 'mail');
                 if (!e.at || String(at) > String(e.at)) e.at = at;   // the LATEST escalation
@@ -842,6 +943,31 @@ router.get('/support/queue', async (req, res) => {
                 const esc = escBy[key];
                 r.escalated_kind = esc ? [...esc.kinds].sort().join('+') : null;   // 'mail' | 'sheet' | 'mail+sheet'
                 r.escalated_at = esc ? esc.at : null;
+                const uh = unheldBy[key];
+                r.unheld_at = uh ? uh.at : null;
+                r.unheld_by = uh ? uh.by : null;   // 'ai-call (customer confirmed)' | an agent's email
+            });
+        }
+
+        // THE COD CONFIRMATION CALL, ON EVERY PANEL (user, 2026-09-10: the master filter's sort puts
+        // "COD hold-to-unhold confirmation = yes" in its own group). This read used to live inside the
+        // Hold-Orders-only block, so `ai_call` was undefined on Undelivered and Status-changed and any
+        // rule keyed on it would have quietly done nothing there — the same trap msg91_confirmed sets,
+        // which has never been true on a single one of 47,107 rows.
+        // ⚠️ `confirmed` is the ONLY outcome that counts as a yes. denied / unclear / no_answer take no
+        // automatic action anywhere in this system, by explicit instruction, and must not sort as wins.
+        if (rows.length) {
+            const nkA = n => String(n || '').replace('#', '').trim();
+            const aiNames = [...new Set(rows.map(r => nkA(r.order_name)).filter(Boolean))];
+            const aiRows = aiNames.length ? await chunkedIn('vobiz_auto_calls_ecom',
+                'order_name, status, detail, attempts, created_at', 'order_name', aiNames,
+                q => q.eq('purpose', 'cod_confirm')) : [];
+            const aiBy = {}; aiRows.forEach(a => { aiBy[nkA(a.order_name)] = a; });
+            rows.forEach(r => {
+                const a = aiBy[nkA(r.order_name)];
+                if (a) r.ai_call = { status: a.status, at: a.created_at, attempts: a.attempts || 1,
+                    outcome: (a.detail && a.detail.outcome) || null,
+                    note: (a.detail && (a.detail.outcome_note || a.detail.why)) || null };
             });
         }
 
@@ -950,14 +1076,8 @@ router.get('/support/queue', async (req, res) => {
             // AI COD-confirmation call state (vobiz_auto_calls.js): outcome rides on each row so the
             // panel can highlight "denied on call" (red) / "not confirmed on call" (amber) — by explicit
             // instruction those take NO automatic action; only a confirmed call auto-releases the hold.
-            const aiRows = names.length ? await chunkedIn('vobiz_auto_calls_ecom', 'order_name, status, detail, attempts, created_at', 'order_name', names, q => q.eq('purpose', 'cod_confirm')) : [];
-            const aiBy = {}; aiRows.forEach(a => { aiBy[nk(a.order_name)] = a; });
             rows.forEach(r => {
                 const k = nk(r.order_name);
-                const a = aiBy[k];
-                if (a) r.ai_call = { status: a.status, at: a.created_at, attempts: a.attempts || 1,
-                    outcome: (a.detail && a.detail.outcome) || null,
-                    note: (a.detail && (a.detail.outcome_note || a.detail.why)) || null };
                 r.shopify_hold = holds[k] || null;
                 const ee = eeBy[k];
                 r.in_ee = !!ee;                                                   // imported into EasyEcom?
@@ -1310,6 +1430,9 @@ router.post('/support/refresh-tracking', async (req, res) => {
         const r = await axios.post(`${config.SUPABASE_URL}/functions/v1/track-orders`, { time: 'now' },
             { headers: { Authorization: `Bearer ${config.SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' }, timeout: 120000, validateStatus: () => true });
         if (r.status >= 400) return res.status(502).json({ success: false, error: `track-orders returned ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}` });
+        // The tracking this just rewrote is what the tab counts are derived from, so the memo is stale by
+        // definition — a refresh the user asked for must reach the counts too, not just the open tab.
+        _slimCache.clear();
         res.json({ success: true, result: r.data, lock: await lockState() });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });

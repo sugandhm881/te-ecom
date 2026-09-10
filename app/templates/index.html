@@ -278,6 +278,19 @@
        ⚠️ The box is drawn in CSS rather than written as U+2610/U+2713. Those glyphs are missing from
        plenty of UI fonts and fall back to a different face mid-line, so the control changed shape
        between machines. A border and a stroked tick render the same everywhere. */
+    /* ── Call Queue master filter: what am I doing right now ─────────────────────────────────────
+       Deliberately heavier than the filter selects below it — it chooses the LIST, they narrow it.
+       Each button carries its own count so the choice is made with the numbers visible. */
+    .sup-mbtn { display:inline-flex; align-items:center; gap:2px; height:34px; padding:0 14px;
+        border:1px solid #e2e8f0; border-radius:10px; background:#fff; cursor:pointer;
+        font-size:13px; font-weight:600; color:#64748b; white-space:nowrap;
+        transition:border-color .13s ease, color .13s ease, background .13s ease, box-shadow .13s ease; }
+    .sup-mbtn:hover { border-color:#c7d2fe; color:#4338ca; background:#f8faff; }
+    .sup-mbtn.is-on { background:#4f46e5; border-color:#4f46e5; color:#fff;
+        box-shadow:0 6px 16px -8px rgba(79,70,229,.75); }
+    .sup-mbtn.is-on:hover { background:#4338ca; border-color:#4338ca; color:#fff; }
+    .sup-mcount { font-weight:700; font-variant-numeric:tabular-nums; opacity:.62; margin-left:5px; }
+    .sup-mbtn.is-on .sup-mcount { opacity:.85; }
     .ivr-btn { display:inline-flex; align-items:center; gap:8px; height:30px; padding:0 12px;
         border:1px solid #e2e8f0; border-radius:9px; background:#fff; cursor:pointer;
         font-size:12px; font-weight:600; color:#475569; line-height:1; white-space:nowrap;
@@ -1203,9 +1216,13 @@
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h12a2 2 0 012 2v2H4V6zM4 10h16v8a2 2 0 01-2 2H6a2 2 0 01-2-2v-8z"/></svg>
                         <span class="ml-3 text-sm font-medium">Support Dashboard</span>
                     </a>
+                    <a href="#" id="nav-order-calling" class="sidebar-link flex items-center px-3 py-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                        <span class="ml-3 text-sm font-medium">Order Calling</span>
+                    </a>
                     <a href="#" id="nav-support-queue" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
-                        <span class="ml-3 text-sm font-medium">Call Queue</span>
+                        <span class="ml-3 text-sm font-medium">NDR Calling</span>
                     </a>
                     <a href="#" id="nav-support-orders" class="sidebar-link flex items-center px-3 py-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
@@ -2166,8 +2183,14 @@
 
         <div id="support-queue-view" class="view-hidden">
             <header class="bg-white px-8 py-5 border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-wrap items-center justify-between gap-3">
-                <div><h1 class="text-xl font-bold text-slate-800">Call Queue</h1>
-                    <p class="text-sm text-slate-400 mt-0.5">Customer-confirmed (MSG91) rows appear first</p></div>
+                <div><h1 id="sup-queue-title" class="text-xl font-bold text-slate-800">NDR Calling</h1>
+                    <p id="sup-queue-sub" class="text-sm text-slate-400 mt-0.5">Parcels that failed delivery — chase the courier or the customer</p></div>
+                <!-- The master filter lives in the HEADER, beside the date picker (user, 2026-09-10:
+                     "move master filter left side along with date filter on top"). Together those two
+                     are the page's frame — which window, which list — while the bar below only narrows
+                     what the frame has already chosen. mr-auto keeps it against the title and pushes the
+                     date controls to the far right. -->
+                <div id="sup-master" class="flex flex-wrap items-center gap-2 mr-auto ml-6"></div>
                 <div class="flex items-center gap-3 flex-wrap">
                     <span id="sup-sync-info" class="text-xs text-slate-400"></span>
                     <div id="sup-range-queue"></div>
@@ -2187,12 +2210,14 @@
                     <select id="sup-f-age" class="filter-select"><option value="any">Any age</option><option value="lt1">&lt; 1 day</option><option value="1-3">1–3 days</option><option value="3-7">3–7 days</option><option value="gt7">&gt; 7 days</option></select>
                     <select id="sup-f-hold" class="filter-select"><option value="all">All holds</option><option value="held">On hold</option><option value="notheld">Not held</option></select>
                     <select id="sup-f-pay" class="filter-select"><option value="all">All payments</option><option value="cod">COD</option><option value="prepaid">Prepaid</option></select>
-                    <!-- Courier platform (aggregator). Hidden on the Repeat tab — those orders haven't shipped yet, so they carry no platform. -->
+                    <!-- Payment / platform / status / raised are SHIPPED-ONLY filters: hidden on Order
+                         Calling, where every row is pre-dispatch and COD. See supQueueTable(). -->
+                    <!-- Courier platform (aggregator). -->
                     <select id="sup-f-platform" class="filter-select"><option value="all">All platforms</option><option value="rapidshyp">RapidShyp</option><option value="docpharma">DocPharma</option><option value="kwikship">KwikShip</option><option value="none">No platform</option></select>
                     <!-- Latest courier status. Options are built at render time from the statuses actually
                          present, so a new courier state appears here without a code change. -->
                     <select id="sup-f-status" class="filter-select"><option value="all">All statuses</option></select>
-                    <!-- Raised-with-courier state. Hidden on Repeat (pre-dispatch orders are never raised). -->
+                    <!-- Raised-with-courier state. -->
                     <select id="sup-f-raised" class="filter-select"><option value="all">All raised</option><option value="none">Not raised</option><option value="any">Raised (any)</option><option value="raised">Raised</option><option value="raised_voc">Raised with VOC</option><option value="customer_rto">Customer Requested RTO</option></select>
                     <select id="sup-f-calltype" class="filter-select"><option value="all">All call types</option><option value="none">Never called</option><option value="any">Called (any)</option><option value="auto_ai">Auto AI call</option><option value="manual_ai">Manual AI call</option><option value="manual">Manual call</option></select>
                     <!-- A SECOND date range, on WHEN THE CALL HAPPENED (user, 2026-09-05). It works
@@ -4172,7 +4197,7 @@
      ONLY thing that makes a browser re-fetch. Forgetting it means the change ships and nobody sees it:
      on 2026-08-13 a whole session of Last-Mile + Purchase Order work was invisible for exactly this
      reason, and it looks identical to "the fix didn't work". -->
-<script src="/static/app.js?v=2026-09-10-video-received"></script>
+<script src="/static/app.js?v=2026-09-10-master-filter"></script>
 <script>
 /* Mobile/tablet sidebar drawer — toggle, backdrop, close-on-nav, reset-on-resize */
 (function () {

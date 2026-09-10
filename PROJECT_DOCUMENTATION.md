@@ -1231,6 +1231,170 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### The Call Queue becomes two pages, and the NDR date becomes the date (2026-09-10)
+
+One tab strip had been carrying two unrelated jobs. **Hold Orders** is a call made *before* a COD parcel
+ships; **Undelivered** and **Status changed** are what happens *after* a delivery fails. Sharing a strip
+made them look like stages of one queue. User: *"Hold Order Tab need to move in new nav bar named Order
+Calling and update name of Call Queue as NDR Calling"*, then *"remove Rejected COD from NDR Calling and
+add on Order Calling"* — a customer tapping REJECT on the WhatsApp template is also pre-dispatch, and it
+was the only such row filed under parcels that had already failed.
+
+- **Order Calling** — Hold Orders · Rejected COD
+- **NDR Calling** — Undelivered · Status changed
+
+⚠️ **One VIEW, two doors — not two copies.** The queue is ~800 lines of shared table, filters, modals and
+row actions; a second copy would have drifted on the first change made to either. `_supMode` records
+which door was used and `SUP_MODES` decides which tabs exist, which title shows, and which rules apply.
+`NAV_PERM_ALIAS` maps `order-calling` back to the `support-queue` right, so the rename took access away
+from nobody.
+
+**The master filter.** Four buttons above the table — All · Follow up with courier · Follow up with
+customer · Status changed pending — each carrying its own count, so the choice is made with the numbers
+visible. "Courier" is *raised to the courier*; "customer" is *not raised and within 5 days of the EDD*;
+"pending" is *more than 5 days past it*. ⚠️ Courier and pending **overlap by design** — only "customer"
+carries the not-raised test — so the counts do not sum. ⚠️ A row with **no EDD at all** lands in
+*pending*, not nowhere: an open order of unknown age is exactly what needs a human. The default sort is
+GROUPS, not a tiebreak chain (asked and answered: *"Group them"*): first match wins, so a prepaid repeat
+customer sits in Prepaid, not Repeat.
+
+⚠️ **NDR CALLING ONLY** (*"latest master filter and sorting rule will not applied of order calling"*).
+Both Order Calling tabs are pre-dispatch, so all three filters ask questions that cannot apply there —
+nothing has been raised because nothing has shipped, and there is no delivery estimate to be 5 days past.
+
+**The COD confirmation call is now read on every tab.** It used to be fetched only inside the
+Hold-Orders block, so `ai_call` was `undefined` on Undelivered and Status changed and any rule keyed on
+it would have quietly done nothing — the same trap `msg91_confirmed` sets, which has never been true on
+one of 47,107 rows.
+
+#### The date picker, rebuilt
+
+*"give custom date option only if click in custom date and remove preset option and make 30 days
+default"*. The header used to show a dead "Presets" placeholder plus two date inputs and an Apply
+button at all times — three controls for a choice that is a preset nine times in ten. Now the dropdown
+**is** the control and states the window by name; the date boxes appear only under "Custom date…", and
+picking Custom merely opens them (nothing reloads until Apply, because a half-typed range is not a query
+anyone asked for). A hand-typed range that happens to be a preset relabels itself, so the dropdown never
+lies about what is loaded.
+
+⚠️ The old default ran `today-14 → today` — a **15-day** window matching no preset at all, which is why
+the dropdown could never have shown it. Defaults are now presets exactly: **NDR Calling opens on 7 days**
+(*"NDR Calling default date should be 7 days not 30 days"*), Order Calling on 30. Now that the window
+means the NDR date, a month of failed deliveries is a backlog rather than a queue.
+
+⚠️ **ONE RANGE PER PAGE, not per tab** (*"date filter should work same for both tab"*), superseding the
+2026-09-05 separate-ranges rule. That rule was right when all three tabs shared one strip and measured
+genuinely different dates; since the split, both tabs of each page answer to the same date, and two
+windows on one page was just a way for two tab counts sitting side by side to disagree about which
+fortnight they were counting. ⚠️ The storage key was bumped to `support.range.v3.` — what sat under the
+older keys was a previous default written on first paint, not a choice anybody made, so honouring it
+would have shipped each change to nobody.
+
+#### The window is the NDR date
+
+*"date should work as per NDR date when NDR start"*. This date has now been wrong in three ways:
+
+- **the ORDER date** (until 2026-09-05) — a parcel fails a median of 8 days after purchase, so "Last 3
+  days" matched 3 orders while 132 parcels had actually failed in that window;
+- **the LAST SCAN** (until today) — it moves every day, so an old parcel still being scanned kept
+  climbing back into a window it had already left, and the list never settled;
+- **the two tabs on DIFFERENT dates** — Undelivered on the scan, Status changed on the order date, so a
+  parcel ordered in June and failed yesterday appeared on neither.
+
+Both tabs now window on `ndrMomentByOrder()`: the **courier's own journey** first (`undeliveredMoment` —
+the first out-for-delivery scan, or the end of the promised day it missed), then
+`undelivered_tracking.first_seen_at`, then the order date. ⚠️ `first_seen_at` is **second, not first**: a
+row written by `rememberUndelivered()` is stamped when a human happened to open the tab, which for an old
+parcel is days after the failure. The moment rides back on every row as `ndr_at`.
+
+Undelivered also stopped being two dated queries (an order-date sweep unioned with a scan-date lookup)
+and became **one sweep of the whole bucket** — `bucket = 'undelivered'` is a current state, not a
+history, 204 rows in all — so a parcel can no longer be missed because its *order* fell outside the
+window. Measured at 30 days: Undelivered 163 → 165, Status changed ~2,321 → ~2,964. Small at a month,
+much larger on Today or Last 3 days, which is the case the change is for.
+
+Rejected COD moved to the **order date** for the same reason — it was windowed on when the customer
+tapped REJECT, so the two tabs of one page measured different things. Every rejection is resolved to its
+order before the window is applied (one paged sweep of the whole CANCEL history — 508 rows in fourteen
+months), and a rejection the webhook could not pin to an order still shows, on its own date. At 30 days
+this drops 41 of 352 rows: rejections that arrived recently for orders placed earlier.
+
+#### Every tab carries its own count
+
+*"Undelivered and Status Changed number should show as per master filter and date filter … currently
+that number show when i go on that page"*. The count was written for the active tab only, so the other
+sat blank until you opened it — you could not see where the work was without going to look.
+
+The sibling tab is fetched with **`slim=1`**, a branch that stops once membership is decided and returns
+only the three fields `supMasterMatch()` reads. Sent whole, Status changed is a few thousand fully
+enriched rows — notes, scans, platforms, call logs, hold states — fetched for a number. ⚠️ The master
+filter stays on the **client**: reimplementing it server-side would be a second copy of a rule that has
+already changed once, and the two would drift apart silently. The slim result is memoised for 60s
+server-side and cached per window on the client; Refresh tracking clears both.
+
+The count means **date window + master filter, and nothing else** — deliberately not the filter bar, so
+a search typed on one tab cannot rewrite the other's total.
+
+#### Filters that only exist after dispatch
+
+*"remove those highlighted filter in both tab of order calling"* — **payment, courier platform, courier
+status and raised-with-courier** are hidden on Order Calling, where every row is pre-dispatch and COD:
+no courier to have a platform, no scan to have a status, nothing raised. Each is also **forced back to
+`all` while hidden**, or a filter left set on NDR Calling would keep narrowing this page invisibly and
+the tab would read empty with nothing to blame. **Hold/Unhold** went the other way — hidden on NDR
+Calling, where a hold has no meaning left — and so did **Refresh tracking**, which pulls courier scans
+for parcels in flight.
+
+⚠️⚠️ **HIDING A `<select>` DOES NOTHING.** `ecEnhanceSelect()` moves every `.filter-select` inside a
+`.csel` wrapper, where `.csel > select { display:none }` already hides it, and paints a `.csel-btn` twin
+that is the control you actually see. `sel.style.display='none'` therefore hides something already
+invisible. This is not a new bug: the per-tab hiding of platform/status/raised on Hold Orders had been
+dead since the day the dropdowns were enhanced, and nobody noticed because the filters merely looked
+redundant rather than broken. Hide `sel.closest('.csel')`. For the same reason, setting `.value` in code
+fires no `change`, so the twin keeps the old label — `ecSyncSelect(sel)` repaints it. Clear had been
+leaving every pill showing the filter it had just cleared.
+
+#### A second chip under Payment, and the sort that follows it
+
+*"on payment tag just below show one more tag"*. One slot, first match wins: **Repeat** → **Unheld · AI
+call** / **Unheld · manual call** / **Unheld** → **EDD breached**. The hold story comes from
+`order_marks_ecom` — 1,194 `shopify_hold_released` rows, of which 19 carry
+`created_by = "ai-call (customer confirmed)"`, which is what separates the COD confirmation caller from a
+human release. It rides on the escalation-marks query that was already running: one extra `mark_type`
+and one extra column, no new round trip.
+
+⚠️ **COD only** (*"repeat, edd breached and other kind of tag should not show in prepaid"*). All three
+say how likely a parcel is to be refused at the door, and a prepaid one cannot be. A **null** payment
+(the order row is missing) is not COD either — guessing on an unknown is how a prepaid row would end up
+wearing a COD warning. The chip uses the **same predicate as the sort**, so "carries no tag" and "sits in
+the bottom tier" are the same set of rows.
+
+The same ladder became a sorting rule, and its **position was wrong twice**:
+
+1. **Above everything** — it moved rows the older rules had already placed. Reverted within the hour.
+2. **Below days-past** — days-past is whole days and rarely ties, so the rule could almost never fire and
+   the tags came out scattered down the page: *"as per rule its not working, you can see in screenshot"*.
+
+It is now the last rule that **groups**, with days-past ordering inside each tier — which is what
+*"(EDD Breached should be in ascending order)"* was asking for; below days-past that parenthetical would
+have been redundant. The full order on NDR Calling:
+
+1. **NDR attempt** — NDR1, then NDR2, then NDR3
+2. **Group** — Prepaid → repeat → confirmed on the call
+3. **COD ladder** — Repeat → Unheld → EDD breached → untagged *(COD only)*
+4. **Days past the promised date, ascending** — inside each tier
+
+⚠️ **NDR1-first had been dead for a day.** The server orders Undelivered by NDR attempt (2026-09-09,
+*"NDR1 on top — prioritise this"*), and `supGroupCmp` — added the day after — re-sorted the same list on
+the client with **no NDR term at all**, silently throwing that order away. It leads the comparator now,
+so both instructions hold at once instead of the newer one quietly winning. Both directions are pinned by
+tests, since this is the third placement and the two failure modes are opposite: the ladder must beat
+days-past, and NDR must beat the ladder.
+
+⚠️ A test now audits **every colour class in the chip against the prebuilt `tailwind.css`**. It caught
+`border-violet-200`, which does not exist in the build — the Repeat chip would have shipped borderless,
+the same class of failure as `text-[11px]`.
+
 ### "Video received" — the delivery a card could never record (2026-09-10)
 
 User: *"if influencer status is partnered the open on check box button name video received and when

@@ -874,7 +874,8 @@ function applyPermissions() {
         document.querySelectorAll('#app-sidebar .sidebar-link').forEach(a => {
             if (a.id === 'nav-home') { a.style.display = ''; return; }   // landing page — always visible
             if (a.id === 'nav-users' || a.id === 'nav-user-analytics' || a.id === 'nav-zone-mapping') { a.style.display = isAdmin ? '' : 'none'; return; }
-            const key = (typeof NAV_HREF !== 'undefined') ? NAV_HREF[a.id] : null;
+            const raw = (typeof NAV_HREF !== 'undefined') ? NAV_HREF[a.id] : null;
+            const key = (typeof NAV_PERM_ALIAS !== 'undefined' && NAV_PERM_ALIAS[raw]) || raw;
             a.style.display = (isAdmin || (key && perms.has(key))) ? '' : 'none';
         });
         // Collapse nav groups whose links are all hidden.
@@ -1234,6 +1235,14 @@ function navigate(view) {
         case 'support-queue':
             activeLinkElement = document.getElementById('nav-support-queue');
             activeViewElement = document.getElementById('support-queue-view');
+            if (typeof supApplyMode === 'function') supApplyMode('ndr');
+            if (typeof supQueueInit === 'function') supQueueInit();
+            break;
+        // Same view, different door — see SUP_MODES.
+        case 'order-calling':
+            activeLinkElement = document.getElementById('nav-order-calling');
+            activeViewElement = document.getElementById('support-queue-view');
+            if (typeof supApplyMode === 'function') supApplyMode('order');
             if (typeof supQueueInit === 'function') supQueueInit();
             break;
         case 'support-orders':
@@ -4874,7 +4883,50 @@ function supPayChip(r){
   const partial=String(r.financial_status||'')==='partially_paid';
   const cls=cod?'bg-amber-50 text-amber-800 border-amber-200':'bg-emerald-50 text-emerald-700 border-emerald-200';
   const tip=`Shopify payment status: ${r.financial_status||'unknown'}`+(partial?' — part-paid online, balance due on delivery':'');
-  return `<span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${cls} whitespace-nowrap" title="${escapeHtml(tip)}">${r.payment}${partial?' •':''}</span>`;
+  const pay=`<span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${cls} whitespace-nowrap" title="${escapeHtml(tip)}">${r.payment}${partial?' •':''}</span>`;
+  const flag=supFlagChip(r);
+  return flag ? `<div class="flex flex-col items-start gap-1">${pay}${flag}</div>` : pay;
+}
+// ── THE SECOND CHIP, UNDER PAYMENT (user, 2026-09-10) ────────────────────────────────────────────
+// ONE slot, first match wins, ordered by how much the fact changes what you do on the call:
+//   1. HOW IT GOT OUT OF HOLD. This order was stopped before dispatch and something let it go — and
+//      whether that was the AI COD-confirmation call, a person after a manual call, or a person on
+//      their own judgement is the single most useful thing to know before ringing a customer whose
+//      parcel then failed. `unheld_by` is what separates them: the caller writes
+//      "ai-call (customer confirmed)", a human writes their email.
+//   2. REPEAT customer — worth more effort than a first-time buyer.
+//   3. EDD BREACHED — past the promised day.
+// ⚠️ EDD breached is LAST on purpose. Rule (b) of "undelivered" is literally "past its promised date",
+// so it is true on most of this tab; first in the ladder it would drown the two facts that vary.
+// ⚠️ Real Tailwind classes only — tailwind.css here is PREBUILT, so an arbitrary value renders as
+// nothing (border-violet-200 does not exist in it; violet is why this uses purple).
+function supFlagChip(r){
+  if(!r) return '';
+  // COD ONLY (user, 2026-09-10: "repeat, edd breached and other kind of tag should not show in
+  // prepaid"). All three answer one question — how likely is this parcel to be refused at the door —
+  // and a prepaid parcel cannot be: the money is already banked. Same test as supCodTier(), so a row
+  // with no tag is exactly a row in the bottom tier. A null payment (the order row is missing) is not
+  // COD either, and guessing on an unknown is how a prepaid row would wear a COD warning.
+  if(String(r.payment||'')!=='COD') return '';
+  const chip=(label,cls,tip)=>`<span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${cls} whitespace-nowrap" title="${escapeHtml(tip)}">${escapeHtml(label)}</span>`;
+  if(r.is_repeat_customer) return chip('Repeat','bg-purple-50 text-purple-700 border-purple-200',
+    'Repeat customer — they have ordered before');
+  if(r.unheld_at){
+    const by=String(r.unheld_by||'');
+    const ai=/^ai-call/i.test(by);
+    const kinds=(r.call_attempts&&r.call_attempts.kinds)||[];
+    const manual=!ai&&(kinds.includes('manual_ai')||kinds.includes('manual'));
+    const when=_dmy(r.unheld_at);
+    if(ai) return chip('Unheld · AI call','bg-indigo-50 text-indigo-700 border-indigo-200',
+      `Released from hold on ${when} — the customer confirmed the COD order on the AI call`);
+    if(manual) return chip('Unheld · manual call','bg-sky-50 text-sky-700 border-sky-200',
+      `Released from hold on ${when} by ${by||'an agent'}, with a manual call on the order`);
+    return chip('Unheld','bg-slate-100 text-slate-600 border-slate-200',
+      `Released from hold on ${when} by ${by||'an agent'} — no call recorded against the order`);
+  }
+  if(supEddBreached(r)) return chip('EDD breached','bg-rose-50 text-rose-700 border-rose-200',
+    `Promised by ${_dmy(r.edd)} and still not delivered`);
+  return '';
 }
 // ── Customer Support live-tracking modal — click an AWB → courier scan log (like Fulfillment Ops). ────
 // Reuses the read-only, cached /api/delivery-performance/shipment/:awb (RapidShyp scans + DocPharma milestones).
@@ -4952,54 +5004,94 @@ async function supFetch(url, opts){ const r=await fetch(url,{...(opts||{}),heade
 // Orders too, and going back re-ran a query nobody had asked to change. Each panel now keeps its own
 // range under its own key, and the queue's three tabs count as three panels because that is how they
 // are used — the same order sits in each for different reasons.
-const SUP_RANGE_DEFAULT_DAYS = 14;
-const _supRanges = {};
-function _supRangeKey(scope){ return 'support.dateRange.' + (scope || 'default'); }
-function supRangeFor(scope){
-  if (_supRanges[scope]) return _supRanges[scope];
-  try { const s = JSON.parse(localStorage.getItem(_supRangeKey(scope)) || 'null');
-        if (s && s.from && s.to) return (_supRanges[scope] = s); } catch (_) {}
-  // Falls back to the OLD shared key once, so nobody's saved range is lost on the day this ships.
-  try { const s = JSON.parse(localStorage.getItem('support.dateRange') || 'null');
-        if (s && s.from && s.to) return (_supRanges[scope] = s); } catch (_) {}
-  const d = new Date(), f = new Date(d.getFullYear(), d.getMonth(), d.getDate() - SUP_RANGE_DEFAULT_DAYS);
-  return (_supRanges[scope] = { from: _ymd(f), to: _ymd(d) });
-}
-// Kept for the panels that read the range without owning a picker; `_supRange` stays a live alias of
-// whichever panel rendered last so no existing caller had to change.
-let _supRange = supRangeFor('default');
-function supRangeQS(scope){ const r = scope ? supRangeFor(scope) : _supRange; return `from=${r.from}&to=${r.to}`; }
 // Presets are OFFSETS in days from today, except the two that name a single day or a short window.
 // "Yesterday" is a one-day window, not "since yesterday" — that distinction is the whole point of it.
 const SUP_PRESETS = [
   ['0', 'Today', 0, 0], ['y', 'Yesterday', 1, 1], ['3', 'Last 3 days', 2, 0],
   ['7', 'Last 7 days', 6, 0], ['14', 'Last 14 days', 13, 0], ['30', 'Last 30 days', 29, 0],
 ];
+// A preset row → the dates it means today.
+function supPresetRange(p){
+  const d = new Date();
+  return { from: _ymd(new Date(d.getFullYear(), d.getMonth(), d.getDate() - p[2])),
+           to:   _ymd(new Date(d.getFullYear(), d.getMonth(), d.getDate() - p[3])) };
+}
+// …and back: which preset is this range, if any. This is what lets the dropdown show "Last 30 days"
+// instead of a dead placeholder, so the header states the window that is loaded rather than hiding it
+// behind two date boxes the reader has to subtract.
+function supPresetOf(r){
+  const m = SUP_PRESETS.find(p => { const x = supPresetRange(p); return x.from === r.from && x.to === r.to; });
+  return m ? m[0] : 'custom';
+}
+
+// DEFAULT = 30 DAYS (user, 2026-09-10: "make 30 days default as date filter"), and it is the '30'
+// PRESET, not "today minus 30". The old default ran today-14 → today — a 15-day window that matched no
+// preset at all, so the dropdown could never have shown what was actually loaded.
+const SUP_RANGE_DEFAULT = '30';
+// …EXCEPT NDR CALLING, WHICH OPENS ON 7 DAYS (user, 2026-09-10). Now that the window means the NDR date,
+// a month of failed deliveries is a backlog, not a queue: a parcel that failed three weeks ago is past
+// the point a call saves it, and it sits above the ones that failed this morning. Order Calling keeps 30
+// — those rows are waiting on us, not decaying.
+const SUP_RANGE_DEFAULTS = { 'queue.ndr': '7' };
+const supRangeDefault = scope => SUP_RANGE_DEFAULTS[scope] || SUP_RANGE_DEFAULT;
+const _supRanges = {};
+// ⚠️ KEY BUMPED to .v3 with the per-page defaults. What sits under an older key is not a choice anybody
+// made — it is a previous default, written to storage on first paint — so honouring it would have
+// shipped this change to nobody. One reset, then choices persist exactly as before.
+function _supRangeKey(scope){ return 'support.range.v3.' + (scope || 'default'); }
+function supRangeFor(scope){
+  if (_supRanges[scope]) return _supRanges[scope];
+  try { const s = JSON.parse(localStorage.getItem(_supRangeKey(scope)) || 'null');
+        if (s && s.from && s.to) return (_supRanges[scope] = s); } catch (_) {}
+  return (_supRanges[scope] = supPresetRange(SUP_PRESETS.find(p => p[0] === supRangeDefault(scope))));
+}
+// Kept for the panels that read the range without owning a picker; `_supRange` stays a live alias of
+// whichever panel rendered last so no existing caller had to change.
+let _supRange = supRangeFor('default');
+function supRangeQS(scope){ const r = scope ? supRangeFor(scope) : _supRange; return `from=${r.from}&to=${r.to}`; }
+// THE DROPDOWN IS THE CONTROL; THE DATE BOXES ARE THE EXCEPTION (user, 2026-09-10: "give custom date
+// option only if click in custom date and remove preset option"). The old header showed a dead
+// "Presets" placeholder plus two date inputs and an Apply button at all times — three controls for a
+// choice that is a preset nine times in ten. Now the dropdown carries the answer, and the date boxes
+// appear only on "Custom date".
 function supRenderRange(containerId, onChange, scope){
   const el=document.getElementById(containerId); if(!el) return;
   scope = scope || 'default';
   const r = supRangeFor(scope);
   const save=()=>{ _supRanges[scope]=r; _supRange=r; localStorage.setItem(_supRangeKey(scope), JSON.stringify(r)); };
   _supRange = r;
+  const cur = supPresetOf(r);
   el.innerHTML=`<div class="flex items-center gap-2 flex-wrap">
-    <select class="filter-select sup-preset"><option value="">Presets</option>${
-      SUP_PRESETS.map(([v,label])=>`<option value="${v}">${label}</option>`).join('')}</select>
-    <input type="date" class="filter-input sup-from" value="${r.from}"><span class="text-slate-400">→</span>
-    <input type="date" class="filter-input sup-to" value="${r.to}">
-    <button class="filter-btn sup-apply">Apply</button></div>`;
-  el.querySelector('.sup-preset').addEventListener('change',e=>{ const v=e.target.value; if(v==='') return;
+    <select class="filter-select sup-preset">${
+      SUP_PRESETS.map(([v,label])=>`<option value="${v}"${v===cur?' selected':''}>${label}</option>`).join('')
+      }<option value="custom"${cur==='custom'?' selected':''}>Custom date…</option></select>
+    <span class="sup-custom items-center gap-2" style="display:${cur==='custom'?'inline-flex':'none'}">
+      <input type="date" class="filter-input sup-from" value="${r.from}"><span class="text-slate-400">→</span>
+      <input type="date" class="filter-input sup-to" value="${r.to}">
+      <button class="filter-btn sup-apply">Apply</button></span></div>`;
+  const custom=el.querySelector('.sup-custom');
+  el.querySelector('.sup-preset').addEventListener('change',e=>{
+    const v=e.target.value;
+    // "Custom date" only OPENS the boxes — nothing reloads until Apply, because a half-typed range is
+    // not a query anybody asked for.
+    if(v==='custom'){ custom.style.display='inline-flex'; el.querySelector('.sup-from').focus(); return; }
+    custom.style.display='none';
     const p=SUP_PRESETS.find(x=>x[0]===v); if(!p) return;
-    const d=new Date();
-    const from=new Date(d.getFullYear(),d.getMonth(),d.getDate()-p[2]);
-    const to=new Date(d.getFullYear(),d.getMonth(),d.getDate()-p[3]);
-    r.from=_ymd(from); r.to=_ymd(to);
+    const n=supPresetRange(p); r.from=n.from; r.to=n.to;
+    // Kept in step even while hidden, so opening Custom starts from the window on screen.
     el.querySelector('.sup-from').value=r.from; el.querySelector('.sup-to').value=r.to;
     save(); onChange(); });
   el.querySelector('.sup-apply').addEventListener('click',()=>{
     const f=el.querySelector('.sup-from').value, t=el.querySelector('.sup-to').value;
     if(!f||!t) return showNotification('Pick both dates',true);
     if(f>t) return showNotification('The From date is after the To date',true);
-    r.from=f; r.to=t; save(); onChange(); });
+    r.from=f; r.to=t; save();
+    // A hand-typed range that happens to BE a preset says so — the dropdown never lies about the window.
+    // ecSyncSelect because this select is .csel-enhanced: setting .value in code fires no 'change', so
+    // the visible button twin would keep the old label.
+    const sel=el.querySelector('.sup-preset'), now=supPresetOf(r);
+    sel.value=now; ecSyncSelect(sel); custom.style.display=now==='custom'?'inline-flex':'none';
+    onChange(); });
 }
 
 // ── Support Dashboard ──────────────────────────────────────────────────────
@@ -5026,24 +5118,181 @@ async function supDashInit(){
 
 // ── Call Queue ─────────────────────────────────────────────────────────────
 let _supTab='und', _supQueueRows=[], _supCapped=false, _supTotal=0, _supQueueWired=false, _supSort=null;   // _supSort={k,d} set by clicking a column header
+
+// ── THE MASTER FILTER (user, 2026-09-10) ─────────────────────────────────────────────────────────
+// One control above the queue that answers "what am I doing right now", on Hold Orders, Undelivered
+// and Status changed alike. The existing filter bar narrows a list; this one decides WHICH LIST:
+//
+//   courier   — raised to the courier (any kind). The ball is with them; we are chasing a reply.
+//   customer  — NOT raised, and the parcel is at most 5 days past its EDD. Still recoverable by a call.
+//   pending   — more than 5 days past EDD. Nobody has moved it; it needs a decision, not a call.
+//   all       — everything, unchanged.
+//
+// ⚠️ 'courier' and 'pending' OVERLAP, and that is the spec as written: only 'customer' carries the
+// "not raised" condition. A parcel raised with the courier AND twenty days past its EDD appears in
+// both - correctly, because it is simultaneously "waiting on them" and "nobody has moved this".
+// So the button counts do NOT sum to the tab total. If they should be mutually exclusive, add the
+// raised test to 'pending' - one line - but do not do it silently: it hides the worst rows in the
+// queue behind a filter nobody opens.
+let _supMaster = (()=>{ try{ const v=localStorage.getItem('sup.master'); return ['courier','customer','pending'].includes(v)?v:'all'; }catch(_){ return 'all'; } })();
+
+const SUP_MASTER = [
+  ['all','All','Everything in this tab'],
+  ['courier','Follow up with courier','Raised to the courier — waiting on them'],
+  ['customer','Follow up with customer','Not raised, and within 5 days of the EDD'],
+  ['pending','Status changed pending','More than 5 days past the EDD'],
+];
+
+// A REAL EDD ONLY. supDaysPast() falls back to the ORDER date, which would brand every old parcel
+// "EDD breached" on the strength of a promise nobody ever made. One definition, read by both the chip
+// and the sort below — two copies of this test would drift the tag away from the row's own position.
+function supEddBreached(r){
+  if(!r||!r.edd) return false;
+  const end=new Date(r.edd); end.setHours(23,59,59,999);
+  return Date.now()>end.getTime();
+}
+// DAYS PAST THE PROMISED DATE. EDD wherever it exists — on Undelivered that is 99% of rows.
+// ⚠️ On Hold Orders it is under half: those orders are PRE-DISPATCH, so most have no delivery estimate
+// yet. Falling back to the order date keeps them in the filters instead of stranding ~50% of that tab
+// in "All" only, and on a queue that exists to ask "how long has this been waiting" the order date
+// answers the same question. supDaysBasis() says which was used, so the column never guesses quietly.
+function supDaysPast(r){
+  const d = r && (r.edd || r.created_at);
+  if(!d) return null;
+  return Math.floor((Date.now() - new Date(d).getTime())/86400000);
+}
+const supDaysBasis = r => (r && r.edd) ? 'EDD' : 'order date';
+const supRaised = r => !!(r && r.raised_kind);
+
+function supMasterMatch(r){
+  if(_supMaster==='all') return true;
+  if(_supMaster==='courier') return supRaised(r);
+  const d = supDaysPast(r);
+  // No date at all — neither recent nor old can be claimed, so it sits in "pending": unknown age on an
+  // open order is exactly the thing that needs a human, and dropping it from every filter would hide it.
+  if(d===null) return _supMaster==='pending';
+  if(_supMaster==='customer') return !supRaised(r) && d<=5;
+  return d>5;   // pending
+}
+
+// ── THE GROUP SORT (user, 2026-09-10: "group them") ──────────────────────────────────────────────
+// Four buckets in priority order, and the FIRST match wins — so a prepaid repeat customer sits in
+// Prepaid, not in Repeat. Within a bucket, days-past ASCENDING: the freshest first, the same reasoning
+// as NDR1-on-top — a parcel one day late is the one a call can still save, a thirty-day-old one rarely.
+// Rows with no date sort to the end of their bucket rather than to the front.
+const SUP_GROUP = [
+  r => String(r.payment||'')==='Prepaid',
+  r => !!r.is_repeat_customer,
+  r => !!(r.ai_call && r.ai_call.outcome==='confirmed'),   // COD hold→unhold confirmed ON THE CALL
+];
+const supGroupOf = r => { for(let i=0;i<SUP_GROUP.length;i++) if(SUP_GROUP[i](r)) return i; return SUP_GROUP.length; };
+// ── THE COD RISK LADDER — THE LAST GROUPING RULE (user, 2026-09-10: "along with all our current rule
+// this one is last sub sorting rule ... Repeat → Unheld → EDD breached — Rest All Without Tag") ──────
+// The tiers the user named, in the user's order, COD ONLY, sitting BELOW the NDR and group rules and
+// ABOVE days-past. It is the last rule that GROUPS; days-past then orders inside each tier, which is
+// what "(EDD Breached should be in ascending order)" asks for — freshest breach first.
+// ⚠️ PLACED TWICE BEFORE AND WRONG BOTH TIMES. First above everything, which moved rows the older
+// rules had already placed and was reverted. Then below days-past, where it could almost never fire —
+// days-past is whole days and rarely ties, so the tags came out scattered down the page and the rule
+// looked broken (user: "as per rule its not working, you can see in screenshot"). Between the two is
+// the position that does what was asked: the tags read as blocks, and Prepaid and NDR still win.
+// Same ladder as the chip under Payment, deliberately — the tag a row wears and the place it sits are
+// the same fact, or the queue argues with itself.
+// Tier 0 rarely decides anything on its own: a COD repeat customer is already group 1 in the rule
+// above, so it arrives here pre-sorted. The working difference is Unheld → EDD breached → untagged.
+const supCodTier = r => {
+  if(String((r&&r.payment)||'')!=='COD') return 3;
+  if(r.is_repeat_customer) return 0;
+  if(r.unheld_at) return 1;
+  if(supEddBreached(r)) return 2;
+  return 3;
+};
+// The courier's failed-attempt count. Absent sorts LAST rather than as 0 — a shipment we have no count
+// for is not "no failures yet", and putting it on top would push real NDR1 parcels below parcels we
+// know nothing about. (Only populated on the Undelivered tab, where the journey overlay runs.)
+const supNdrOf = r => { const n=Number(r&&r.ndr_attempt); return Number.isFinite(n)&&n>0 ? n : Infinity; };
+// ⚠️ NDR1-FIRST WAS DEAD FOR A DAY. The server orders the Undelivered tab by NDR attempt (user,
+// 2026-09-09: "NDR1 on top — prioritise this"), and this comparator, added the day after, re-sorted the
+// same list on the client with no NDR term at all — silently throwing that order away. It leads here
+// now, so both instructions hold at once instead of the newer one quietly winning.
+function supGroupCmp(a,b){
+  const na=supNdrOf(a), nb=supNdrOf(b);            // 1. NDR1 before NDR2 before NDR3
+  if(na!==nb) return na-nb;
+  const ga=supGroupOf(a), gb=supGroupOf(b);        // 2. Prepaid → repeat → confirmed on the call
+  if(ga!==gb) return ga-gb;
+  const ca=supCodTier(a), cb=supCodTier(b);        // 3. COD only: Repeat → Unheld → EDD breached → rest
+  if(ca!==cb) return ca-cb;
+  const da=supDaysPast(a), db=supDaysPast(b);      // 4. days past ASCENDING — the freshest first
+  if(da===null&&db===null) return 0;
+  if(da===null) return 1;
+  if(db===null) return -1;
+  return da-db;
+}
+// ONE RANGE PER PAGE, NOT PER TAB (user, 2026-09-10: "date filter should work same for both tab, no
+// need to date filter work separately for both tab"). The tabs of a page used to keep separate ranges,
+// from 2026-09-05, when Hold Orders and the two NDR tabs shared one strip and measured genuinely
+// different dates. Two things have changed since: the page split in two, and both tabs of each page now
+// answer to the SAME date — Order Calling to the order date, NDR Calling to the NDR date. Two windows on
+// one page is now just a way for the two tab counts sitting side by side to disagree about which
+// fortnight they are counting.
+const supQueueScope = () => 'queue.' + _supMode;
 function supQueueInit(){
-  supRenderRange('sup-range-queue', supLoadQueue, 'queue.'+_supTab);
+  supRenderRange('sup-range-queue', supLoadQueue, supQueueScope());
   if(!_supQueueWired){ _supQueueWired=true;
-    // Each tab carries its own range, so the picker is re-rendered on every switch — Undelivered
-    // narrowed to today must not silently narrow Hold Orders.
     document.querySelectorAll('.sup-tab').forEach(b=>b.addEventListener('click',()=>{ _supTab=b.dataset.tab; supTabPaint();
-      supRenderRange('sup-range-queue', supLoadQueue, 'queue.'+_supTab); supLoadQueue(); }));
+      supLoadQueue(); }));
     ['sup-f-notes','sup-f-age','sup-f-hold','sup-f-pay','sup-f-platform','sup-f-raised','sup-f-status','sup-f-calltype','sup-f-calldate','sup-f-callfrom','sup-f-callto'].forEach(id=>document.getElementById(id)?.addEventListener('change',supQueueTable));
     document.getElementById('sup-f-notesearch')?.addEventListener('input', debounce(supQueueTable,250));
     // Defaults live WITH their control, not in a parallel array — the array had seven entries for
     // eleven inputs, so every filter added since silently reset to undefined and only behaved by
     // luck (an empty string happening to read as 'all' downstream).
     const SUP_FILTER_DEFAULTS={'sup-f-notes':'all','sup-f-age':'any','sup-f-hold':'all','sup-f-pay':'all','sup-f-platform':'all','sup-f-raised':'all','sup-f-status':'all','sup-f-calltype':'all','sup-f-calldate':'all','sup-f-callfrom':'','sup-f-callto':''};
-    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ Object.entries(SUP_FILTER_DEFAULTS).forEach(([id,v])=>{ const el=document.getElementById(id); if(el) el.value=v; }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
+    // ecSyncSelect on each: these are .csel-enhanced, so a value set in code fires no 'change' and the
+    // visible button twin would keep showing the filter you just cleared.
+    document.getElementById('sup-f-clear')?.addEventListener('click',()=>{ Object.entries(SUP_FILTER_DEFAULTS).forEach(([id,v])=>{ const el=document.getElementById(id); if(el){ el.value=v; ecSyncSelect(el); } }); document.getElementById('sup-f-notesearch').value=''; _supSort=null; supQueueTable(); });
     document.getElementById('sup-refresh')?.addEventListener('click', supRefreshTracking);
   }
   supTabPaint(); supLoadQueue();
 }
+// ── ORDER CALLING vs NDR CALLING (user, 2026-09-10) ──────────────────────────────────────────────
+// Hold Orders left the Call Queue and became its own page; what remains was renamed NDR Calling.
+// They are genuinely different jobs: Hold Orders is a PRE-DISPATCH call to confirm a COD order before
+// it ships; the other three tabs are POST-delivery-failure. Sharing one tab strip made them look like
+// stages of one queue.
+//
+// ⚠️ Implemented as one VIEW with two entry points, not two copies. The queue is ~800 lines of shared
+// table, filters, modals and row actions; a second copy would drift on the first change made to either.
+// `_supMode` records which door was used and decides which tabs exist.
+const SUP_MODES = {
+  // Rejected COD sits with Hold Orders, not with the NDR tabs (user, 2026-09-10). Both are the SAME
+  // moment in the funnel: a COD order before it ships, where the customer has either not confirmed yet
+  // or has actively said no. Neither has an AWB. Filed under NDR they were the odd one out - the only
+  // pre-dispatch rows in a page about parcels that already failed delivery.
+  order: { tabs:['repeat','rejected'], title:'Order Calling',
+           sub:'COD orders before dispatch — confirm, release, or act on a rejection' },
+  ndr:   { tabs:['und','changed'], title:'NDR Calling',
+           sub:'Parcels that failed delivery — chase the courier or the customer' },
+};
+let _supMode = 'ndr';
+
+function supApplyMode(mode){
+  _supMode = SUP_MODES[mode] ? mode : 'ndr';
+  const m = SUP_MODES[_supMode];
+  // A tab left selected on the other page would render an empty table with no explanation, so the
+  // selection is pulled back into this page's own set.
+  if(!m.tabs.includes(_supTab)) _supTab = m.tabs[0];
+  document.querySelectorAll('.sup-tab').forEach(b=>{ b.style.display = m.tabs.includes(b.dataset.tab) ? '' : 'none'; });
+  // A single tab is not a choice — hide the strip entirely on Order Calling rather than showing one
+  // permanently-selected button.
+  const strip=document.getElementById('sup-tabs'); if(strip) strip.style.display = m.tabs.length>1 ? '' : 'none';
+  const t=document.getElementById('sup-queue-title'); if(t) t.textContent=m.title;
+  const sb=document.getElementById('sup-queue-sub'); if(sb) sb.textContent=m.sub;
+  // NO "REFRESH TRACKING" ON ORDER CALLING (user, 2026-09-10). It pulls courier scans for parcels in
+  // flight; every row on this page is pre-dispatch, so there is nothing out there to track and the
+  // button could only ever spend two minutes returning the same list. It belongs to NDR Calling.
+  const rf=document.getElementById('sup-refresh'); if(rf) rf.style.display = _supMode==='order' ? 'none' : '';
+}
+
 function supTabPaint(){ document.querySelectorAll('.sup-tab').forEach(b=>{ const on=b.dataset.tab===_supTab;
   b.classList.toggle('border-indigo-600',on); b.classList.toggle('text-indigo-700',on);
   b.classList.toggle('border-transparent',!on); b.classList.toggle('text-slate-500',!on); }); }
@@ -5051,7 +5300,7 @@ function supSyncInfo(lock){ const el=document.getElementById('sup-sync-info'); i
   const res=lock.last_result||{}; el.textContent = lock.is_running?'Sync running…':(lock.last_finished_at?`Last sync ${new Date(lock.last_finished_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}${res.updated!=null?` · ${res.updated} updated`:''}`:''); }
 async function supLoadQueue(quiet){
   const c=document.getElementById('sup-queue-table'); if(c && !quiet) c.innerHTML=brandLoader('Loading queue…');
-  try{ _eeHoldAt=0; const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS('queue.'+_supTab)); await eeHoldRefresh(); _supQueueRows=d.rows||[]; _supCapped=!!d.capped; _supTotal=d.total||0; supSyncInfo(d.lock); supQueueTable(); }
+  try{ _eeHoldAt=0; const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS(supQueueScope())); await eeHoldRefresh(); _supQueueRows=d.rows||[]; _supCapped=!!d.capped; _supTotal=d.total||0; supSyncInfo(d.lock); supQueueTable(); supLoadTabCounts(); }
   catch(e){ if(c && !quiet) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }   // quiet poll error → keep showing current data
 }
 // Real-time-ish: quietly re-fetch the queue every 30s WHILE the support view is visible, so agents see
@@ -5487,26 +5736,119 @@ function supBasketBtn(r){
   const inB=_dpBasket.has(r.awb_number);
   return `<button class="sup-basket-btn inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors ${inB?'bg-slate-700 text-white border-slate-700':'bg-white text-slate-500 border-slate-200 hover:border-slate-400'}" data-awb="${escapeHtml(r.awb_number)}" data-oname="${escapeHtml(r.order_name||'')}" data-plat="${escapeHtml(r.platform||'')}" title="${inB?'In escalation basket — click to remove':'Add to escalation basket (sheet / email)'}">🧺${inB?' ✓':''}</button>`;
 }
+function supMasterRender(){
+  const el=document.getElementById('sup-master'); if(!el) return;
+  // NDR CALLING ONLY (user, 2026-09-10: "master filter and sorting rule will not applied on Order
+  // Calling"). Both Order Calling tabs are PRE-DISPATCH — a COD order that has not shipped — so all
+  // three filters are answering questions that cannot apply there: nothing has been raised to a courier
+  // because nothing has left, and there is no delivery estimate to be 5 days past. Shown there it would
+  // have been one always-empty button and two that mostly guessed off the order date.
+  const on=_supMode==='ndr';
+  el.style.display=on?'':'none';
+  if(!on){ if(_supMaster!=='all'){ _supMaster='all'; try{ localStorage.setItem('sup.master','all'); }catch(_){} } return; }
+  el.innerHTML=SUP_MASTER.map(([k,label,tip])=>
+    `<button class="sup-mbtn${_supMaster===k?' is-on':''}" data-m="${k}" title="${escapeHtml(tip)}">${escapeHtml(label)}<span class="sup-mcount"></span></button>`).join('');
+  el.querySelectorAll('.sup-mbtn').forEach(b=>b.addEventListener('click',()=>{
+    _supMaster=b.dataset.m; try{ localStorage.setItem('sup.master',_supMaster); }catch(_){}
+    supQueueTable();   // re-renders this control too, so it is not called twice per click
+  }));
+  // Every button carries how many rows it WOULD show, so the choice is made with the numbers visible
+  // rather than by clicking each in turn.
+  const base=_supQueueRows||[];
+  const prev=_supMaster;
+  el.querySelectorAll('.sup-mbtn').forEach(b=>{
+    _supMaster=b.dataset.m;
+    const n=base.filter(supMasterMatch).length;
+    b.querySelector('.sup-mcount').textContent=' '+n;
+  });
+  _supMaster=prev;
+}
+
+// ⚠️ HIDE THE WRAPPER, NOT THE <select> (user, 2026-09-10: "i am still able to see removal request
+// filters from order calling"). ecEnhanceSelect() moves every .filter-select INSIDE a .csel div, where
+// `.csel > select { display:none }` already hides it, and paints a .csel-btn twin that is the control
+// you actually see. So `sel.style.display='none'` hides something invisible and changes nothing on
+// screen. This is why the old per-tab hiding of platform/status/raised never worked on Hold Orders
+// either — it was written before the dropdowns were enhanced and has been dead ever since.
+// Resetting the value needs ecSyncSelect() for the same reason: setting .value in code fires no
+// 'change', so the button twin would keep showing the old label when the filter comes back on NDR.
+function supShowFilter(sel,on){
+  if(!sel) return;
+  (sel.closest('.csel')||sel).style.display=on?'':'none';
+  if(!on && sel.value!=='all'){ sel.value='all'; ecSyncSelect(sel); }
+}
+
+// ── EVERY TAB CARRIES ITS OWN COUNT (user, 2026-09-10: "Undelivered and Status Changed number should
+// show as per master filter and date filter ... currently that number show when i go on that page").
+// The count was written for the ACTIVE tab only, from the rows already on screen, so the other tab sat
+// blank until you opened it — you could not see where the work was without going to look.
+// The sibling tab is fetched with slim=1, which returns only the fields supMasterMatch() reads, and is
+// cached against the exact window it was fetched for. Change the dates and the key changes with them.
+const _supSlim = {};            // "<tab>|<from>|<to>" -> slim rows
+const _supSlimKey = tab => { const r = supRangeFor(supQueueScope()); return tab + '|' + r.from + '|' + r.to; };
+// What a tab's number means: its rows under the DATE and the MASTER FILTER, and nothing else.
+// Deliberately not the filter bar below — a tab strip is for choosing where to work, so its numbers must
+// mean the same thing on every tab, and a search typed on one tab must not rewrite the other's total.
+function supTabCount(rows){
+  if(!rows) return null;
+  return (_supMode==='ndr' && _supMaster!=='all') ? rows.filter(supMasterMatch).length : rows.length;
+}
+function supTabCountsPaint(){
+  const tabs=(SUP_MODES[_supMode]||{}).tabs||[];
+  tabs.forEach(t=>{
+    const el=document.querySelector('.sup-tab[data-tab="'+t+'"] .sup-tab-count'); if(!el) return;
+    const n=supTabCount(t===_supTab ? _supQueueRows : _supSlim[_supSlimKey(t)]);
+    el.textContent = n===null ? '' : '('+n+')';
+  });
+}
+// Fetch the tabs the user is NOT on, quietly, once the one they are on has rendered. One request per tab
+// per window, and never on the 30s poll — the cache key has not changed, so nothing refetches.
+async function supLoadTabCounts(){
+  const tabs=((SUP_MODES[_supMode]||{}).tabs||[]).filter(t=>t!==_supTab);
+  for(const t of tabs){
+    const key=_supSlimKey(t);
+    if(_supSlim[key]) continue;
+    try{
+      const d=await supFetch('/api/support/queue?tab='+t+'&slim=1&'+supRangeQS(supQueueScope()));
+      _supSlim[key]=d.rows||[];
+      supTabCountsPaint();
+    }catch(_){ /* a tab count is not worth an error banner over the queue itself */ }
+  }
+}
+
 function supQueueTable(){
   const c=document.getElementById('sup-queue-table'); if(!c) return;
+  supMasterRender();
   const fN=document.getElementById('sup-f-notes')?.value||'all';
   const fQ=(document.getElementById('sup-f-notesearch')?.value||'').trim().toLowerCase();
   const fA=document.getElementById('sup-f-age')?.value||'any';
-  const fH=document.getElementById('sup-f-hold')?.value||'all';
-  const fP=document.getElementById('sup-f-pay')?.value||'all';
-  // Courier platform. Only meaningful once a shipment exists, so the control is hidden on Repeat — and
-  // forced back to 'all' there, otherwise a filter left set on Undelivered would silently empty that tab.
-  const platSel=document.getElementById('sup-f-platform'), platOn=_supTab!=='repeat';
-  if(platSel){ platSel.style.display=platOn?'':'none'; if(!platOn) platSel.value='all'; }
-  const fL=platOn?(platSel?.value||'all'):'all';
+  // ── FOUR FILTERS THAT ONLY EXIST AFTER DISPATCH (user, 2026-09-10: "remove those highlighted filter
+  // in both tab of order calling"). Payment, courier platform, courier status and raised-with-courier
+  // all describe a parcel that has SHIPPED. Every Order Calling row is pre-dispatch — a COD order still
+  // waiting on confirmation, or one the customer has just rejected — so on that page there is no
+  // courier to have a platform, no scan to have a status, nothing to have been raised, and the payment
+  // is COD by definition of the queue. Shown there they were four dropdowns that could only ever
+  // narrow the list to nothing.
+  // Each is also FORCED BACK TO 'all' while hidden: a filter left set on NDR Calling would otherwise
+  // keep filtering here invisibly, and the tab would read as empty with no control to blame.
+  // (This replaces the old per-tab _supTab!=='repeat' test — the split into two pages made the page,
+  // not the tab, the right thing to ask.)
+  const shipped=_supMode!=='order';
+  // HOLD/UNHOLD IS AN ORDER CALLING QUESTION (user, 2026-09-10: "remove Hold Unhold filter from NDR
+  // Calling"). A hold stops an order BEFORE dispatch; once a parcel has failed delivery the hold has no
+  // meaning left and every NDR row answers the filter the same way.
+  const holdSel=document.getElementById('sup-f-hold'); supShowFilter(holdSel,!shipped);
+  const fH=!shipped?(holdSel?.value||'all'):'all';
+  const paySel=document.getElementById('sup-f-pay');   supShowFilter(paySel,shipped);
+  const fP=shipped?(paySel?.value||'all'):'all';
+  const platSel=document.getElementById('sup-f-platform'); supShowFilter(platSel,shipped);
+  const fL=shipped?(platSel?.value||'all'):'all';
   // Status options are derived from the rows this tab actually holds — populate before reading the value.
-  const statusSel=document.getElementById('sup-f-status');
-  if(statusSel){ statusSel.style.display=platOn?'':'none'; if(!platOn) statusSel.value='all'; }
-  if(platOn) supSyncStatusOptions(_supQueueRows);
-  const fS=platOn?(statusSel?.value||'all'):'all';
-  const raisedSel=document.getElementById('sup-f-raised');
-  if(raisedSel){ raisedSel.style.display=platOn?'':'none'; if(!platOn) raisedSel.value='all'; }
-  const fR=platOn?(raisedSel?.value||'all'):'all';
+  const statusSel=document.getElementById('sup-f-status'); supShowFilter(statusSel,shipped);
+  if(shipped) supSyncStatusOptions(_supQueueRows);
+  const fS=shipped?(statusSel?.value||'all'):'all';
+  const raisedSel=document.getElementById('sup-f-raised'); supShowFilter(raisedSel,shipped);
+  const fR=shipped?(raisedSel?.value||'all'):'all';
   // Call type filters on every tab: a COD confirmation on Hold Orders is as real as an RTO dial on
   // Undelivered, so this one is not hidden with the shipped-only filters above.
   const fC=document.getElementById('sup-f-calltype')?.value||'all';
@@ -5547,14 +5889,31 @@ function supQueueTable(){
   // Raised filter — the point of storing it rather than leaving it in a note.
   if(fR!=='all') list=list.filter(r=> fR==='none' ? !r.raised_kind : fR==='any' ? !!r.raised_kind : r.raised_kind===fR);
   if(fS!=='all') list=list.filter(r=>supStatusText(r)===fS);
-  if(_supSort&&_supSort.k) list.sort(_supSortCmp(_supSort.k,_supSort.d));   // else keep the server order (confirmed → oldest)
+  // The master filter runs LAST among the filters, so the counts on the buttons above describe the
+  // whole tab while the table shows the intersection with the ordinary filter bar.
+  if(_supMode==='ndr' && _supMaster!=='all') list=list.filter(supMasterMatch);
+  // Clicking a column header still wins — the group sort is the default, not a cage.
+  if(_supSort&&_supSort.k) list.sort(_supSortCmp(_supSort.k,_supSort.d));
+  // ⚠️ The group sort rides with the filter: both are NDR-Calling rules. Order Calling keeps the SERVER
+  // order it always had (confirmed customers first, then oldest) — a queue worked by order age, which is
+  // the only age a pre-dispatch row has.
+  else if(_supMode==='ndr') list.sort(supGroupCmp);
   // Say when the SERVER truncated, not just how many survived the client filters — otherwise a capped
   // tab reads as complete. Only meaningful with no client filter narrowing the list further.
   const cnt=document.getElementById('sup-queue-count');
   if(cnt) cnt.textContent = (_supCapped && list.length===_supQueueRows.length)
     ? `${list.length} of ${_supTotal} — narrow the dates to see the rest` : `${list.length} shown`;
-  document.querySelector(`.sup-tab[data-tab="${_supTab}"] .sup-tab-count`).textContent=`(${list.length})`;
-  if(!list.length){ c.innerHTML='<div class="text-slate-400 text-sm p-10 text-center">Queue is clear 🎉</div>'; return; }
+  supTabCountsPaint();
+  if(!list.length){
+    // "Queue is clear 🎉" is a lie when a filter is what emptied it — and on Hold Orders "follow up with
+    // courier" is ALWAYS empty, because those orders are pre-dispatch and nothing has been raised. Say
+    // that, rather than implying the work is done.
+    const why = _supMode!=='ndr' ? 'Queue is clear 🎉'
+      : _supMaster==='courier' ? 'No orders are currently raised to the courier in this tab.'
+      : _supMaster==='customer' ? 'Nothing is within 5 days of its EDD and unraised.'
+      : _supMaster==='pending'  ? 'Nothing is more than 5 days past its EDD.'
+      : 'Queue is clear 🎉';
+    c.innerHTML=`<div class="text-slate-400 text-sm p-10 text-center">${escapeHtml(why)}</div>`; return; }
   const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
   const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
   // Click a column header to sort (asc/desc toggle); the caret shows the active column + direction.
@@ -5838,7 +6197,11 @@ async function supRefreshTracking(){
   const btn=document.getElementById('sup-refresh'); const orig=btn.textContent;
   btn.disabled=true; btn.textContent='Syncing…'; showNotification('Fetching latest tracking from RapidShyp…');
   try{ const d=await supFetch('/api/support/refresh-tracking',{method:'POST'});
-    showNotification('Tracking refreshed'+((d.result&&d.result.updated!=null)?` — ${d.result.updated} orders updated`:'')); supSyncInfo(d.lock); supLoadQueue(); }
+    showNotification('Tracking refreshed'+((d.result&&d.result.updated!=null)?` — ${d.result.updated} orders updated`:''));
+    // The sibling tab's count was computed from the tracking that just changed — drop it so this refresh
+    // reaches both tabs, not only the one on screen.
+    Object.keys(_supSlim).forEach(k=>delete _supSlim[k]);
+    supSyncInfo(d.lock); supLoadQueue(); }
   catch(e){ showNotification('Sync failed: '+e.message, true); }
   finally{ btn.disabled=false; btn.textContent=orig; }
 }
@@ -6942,7 +7305,7 @@ const NAV_HREF = {
     'nav-amazon-review': 'amazon-review', 'nav-fulfillment-ops': 'fulfillment-ops', 'nav-serviceability': 'serviceability',
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon', 'nav-kwikship-recon': 'kwikship-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-label-splitter': 'label-splitter', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics', 'nav-zone-mapping': 'zone-mapping',
-    'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-support-orders': 'support-orders',
+    'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-order-calling': 'order-calling', 'nav-support-orders': 'support-orders',
     'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning', 'nav-support-ai-costs': 'support-ai-costs', 'nav-support-call-insights': 'support-call-insights',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
     'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions',
@@ -6950,6 +7313,10 @@ const NAV_HREF = {
 };
 const VALID_VIEWS = new Set(Object.values(NAV_HREF));
 function viewFromHash() { const v = (location.hash || '').replace(/^#/, ''); return VALID_VIEWS.has(v) ? v : null; }
+// Order Calling is the Hold Orders tab that moved out of the Call Queue, so it rides the SAME right.
+// Giving it a key of its own would have hidden the page from everyone who could already see those rows
+// until an admin granted it — a rename should not take access away.
+const NAV_PERM_ALIAS = { 'order-calling': 'support-queue' };
 function applyNavHrefs() { Object.entries(NAV_HREF).forEach(([id, view]) => { const a = document.getElementById(id); if (a) a.setAttribute('href', '#' + view); }); }
 if (document.readyState !== 'loading') applyNavHrefs(); else document.addEventListener('DOMContentLoaded', applyNavHrefs);
 // Ctrl/Cmd/Shift-click a nav item → let the browser open the #hash in a new tab instead of navigating in place.
@@ -9104,7 +9471,7 @@ const PERM_GROUPS = [
   ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon'],['gokwik-pg-recon','GoKwik PG Recon'],['kwikship-recon','KwikShip Freight Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
-  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','Call Queue'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)'],['support-agent-learning','Agent Learning (self-learning voice agent)'],['support-call-insights','Call Insights (transcript audit)'],['support-ai-costs','AI Calling Statement (cost per call)']]],
+  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','NDR Calling + Order Calling'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)'],['support-agent-learning','Agent Learning (self-learning voice agent)'],['support-call-insights','Call Insights (transcript audit)'],['support-ai-costs','AI Calling Statement (cost per call)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
   ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)'],['purchase-orders','Purchase Order (EasyEcom PO book)'],['grn','GRN (EasyEcom goods receiving)'],['po-approvals','PO Approvals (release drafted POs to EasyEcom)']]],
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],
