@@ -3417,7 +3417,8 @@ function check(name, got, want) {
         // today", and the disagreement would happen in a channel the whole team reads.
         check('ai call report: the daily card IS the Call Insights page, AI calls only, from one computation',
             [/bot\.sendToChannel\(AI_CALLS_THREAD\(\), activity\)/.test(rep), /messageid=1788173520400/.test(rep),
-             /TEAMS_WEBHOOK_AI_CALLS/.test(rep),
+             // its OWN Workflows fallback (TEAMS_WEBHOOK_AI_CALLS) is gone — removed 2026-09-11, not switched off
+             !/postTeams\(hook, payload\)/.test(rep),
              /computeInsights\(\{ from: label, to: label, type: 'ai' \}\)/.test(rep),
              // the old COD-only report is gone, not merely hidden
              !/released to dispatch/.test(rep) && !/saved from likely RTO/.test(rep),
@@ -4982,28 +4983,31 @@ function check(name, got, want) {
             axiosLib.post = async () => { hookCalls++; return { status: 200, data: {} }; };
             process.env.TEAMS_WEBHOOK_ZZTEST = 'https://example.invalid/workflow-hook';
             process.env.TEAMS_CHANNEL_ZZTEST = '19:zztest@thread.tacv2';
-            const { postTeams, webhookFallbackOn } = require(teamsPath);
+            const { postTeams } = require(teamsPath);
             const card = { blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'selftest' } }] };
             try {
-                delete process.env.TEAMS_WEBHOOK_FALLBACK;                   // the default: switch absent
+                delete process.env.TEAMS_WEBHOOK_FALLBACK;
                 const off = await quiet(() => postTeams(process.env.TEAMS_WEBHOOK_ZZTEST, card));
-                const hooksWhileOff = hookCalls, defaultOff = webhookFallbackOn();
+                // ⚠️ REMOVED, NOT SWITCHED OFF (user, 2026-09-11: "stop this in code, don't wait for the .env
+                // update"). The switch that briefly existed must bring nothing back, even set to 'true'.
                 process.env.TEAMS_WEBHOOK_FALLBACK = 'true';
-                const on = await quiet(() => postTeams(process.env.TEAMS_WEBHOOK_ZZTEST, card));
-                check('teams: a failed bot post is NOT re-posted via the Workflows webhook, and the switch brings it back',
-                    [defaultOff, off, hooksWhileOff, botCalls >= 1, on, hookCalls],
-                    [false, false, 0, true, true, 1]);
+                const stillOff = await quiet(() => postTeams(process.env.TEAMS_WEBHOOK_ZZTEST, card));
+                check('teams: a failed bot post is never re-posted via the Workflows webhook — there is no switch',
+                    [off, stillOff, botCalls >= 2, hookCalls],
+                    [false, false, true, 0]);
             } finally {
                 if (saved.bot) require.cache[botPath] = saved.bot; else delete require.cache[botPath];
                 axiosLib.post = saved.post;
                 ENV.forEach(k => { if (saved.env[k] === undefined) delete process.env[k]; else process.env[k] = saved.env[k]; });
             }
-            // The AI call report carried its OWN copy of the fallback; it must obey the same switch.
+            // The AI call report carried its OWN copy of the fallback — gone too. And no code path in teams.js
+            // posts to a webhook URL at all any more; routing reports a report with no bot route as lost.
             const rep2 = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_report.js'), 'utf8');
-            check('teams: the AI call report obeys the same switch, and routing reports a lost report honestly',
-                [rep2.includes("if (!require('./teams').webhookFallbackOn()) {"),
-                 fs.readFileSync(path.join(ROOT, 'app/api/teams.js'), 'utf8').includes("(webhookFallbackOn() ? 'webhook' : 'not posted')")],
-                [true, true]);
+            const tms = fs.readFileSync(path.join(ROOT, 'app/api/teams.js'), 'utf8');
+            check('teams: no code path posts to a Workflows webhook, the AI report included, and routing says so',
+                [!/axios\.post\(webhookUrl/.test(tms), !/webhookFallbackOn/.test(tms), !/postTeams\(hook/.test(rep2),
+                 tms.includes("via: (botOn && channelId) ? 'bot' : (url ? 'not posted' : 'not configured'),")],
+                [true, true, true, true]);
         }
         // ── A PLAIN REFRESH PICKS UP A DEPLOY (user, 2026-09-11). /static is cached for 30 days, and the
         // cache-busters were typed by hand: app.js carried `?v=2026-09-10-master-filter` through every change
@@ -5026,6 +5030,95 @@ function check(name, got, want) {
                  sv.includes("res.set('Cache-Control', 'no-store, must-revalidate');\n    res.type('html').send(renderShell());")
                    || sv.includes("res.set('Cache-Control', 'no-store, must-revalidate');\r\n    res.type('html').send(renderShell());")],
                 [true, true, true, true, true]);
+        }
+        // ── NDR / ORDER CALLING SPEED (user, 2026-09-11: "take a time and show a timeout error when the date
+        // range is high … and the order popup takes time — without compromising any feature"). Every change is
+        // a REORDERING of the same reads; these pin the properties that keep it that way.
+        {
+            // repeat_rules.chunkedIn now runs 4 chunks at a time — MEASURED: rows still come back in CHUNK ORDER
+            // (callers dedupe first-wins, so order is part of the contract) and the first failure still throws.
+            const RRp = require(path.join(ROOT, 'app/api/repeat_rules.js'));
+            let live = 0, peak = 0;
+            const fakeSb = { from: () => ({ select: () => ({ in: (col, part) => ({ limit: async () => {
+                live++; peak = Math.max(peak, live);
+                await new Promise(r => setTimeout(r, 5 + (part[0] % 3) * 7));   // chunks finish OUT of order
+                live--; return { data: part.map(v => ({ v })), error: null }; } }) }) }) };
+            const vals = Array.from({ length: 1000 }, (_, i) => i + 1);
+            const got = await RRp.chunkedIn(fakeSb, 't', '*', 'c', vals);
+            const failSb = { from: () => ({ select: () => ({ in: (c, part) => ({ limit: async () =>
+                (part[0] === 201 ? { data: null, error: { message: 'boom' } } : { data: [], error: null }) }) }) }) };
+            let threw = null; try { await RRp.chunkedIn(failSb, 'order_buckets', '*', 'c', vals); } catch (err) { threw = err.message; }
+            check('speed: history chunks run in parallel, yet arrive in order, and a failed chunk still throws',
+                [got.length, got.every((r, i) => r.v === i + 1), peak > 1 && peak <= 4, threw],
+                [1000, true, true, 'order_buckets lookup failed: boom']);
+
+            const scp = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+            check('speed: Status changed is capped BEFORE enrichment, and still reports its true total',
+                [// the cap sits after the slim early-return (which needs every row) and before the lookups
+                 scp.indexOf("if (tab === 'changed' && rows.length > ROW_CAP) rows = rows.slice(0, ROW_CAP);") > scp.indexOf("return res.json({ success: true, slim: true, total: slim.length, rows: slim });"),
+                 scp.indexOf("if (tab === 'changed' && rows.length > ROW_CAP) rows = rows.slice(0, ROW_CAP);") < scp.indexOf('const undSince = await undeliveredSince(orderIds);'),
+                 scp.includes("const totalRows = tab === 'changed' ? fullTotal : rows.length;"),
+                 // ONLY Status changed: Undelivered re-sorts and Hold Orders filters after enrichment
+                 !/if \(\(tab === 'und'|tab === 'repeat'\) && rows\.length > ROW_CAP\)/.test(scp)],
+                [true, true, true, true]);
+            check('speed: the enrichment blocks run together, and the Hold Orders filter waits for all of them',
+                [(scp.match(/_enrich\.push\(\(async \(\) => \{/g) || []).length,
+                 scp.indexOf('await Promise.all(_enrich);') < scp.indexOf('// Show a candidate if it matches'),
+                 scp.includes('const [holds, eeRows, eeHoldRows, eeHoldIdRows, relRows] = await Promise.all([')],
+                [5, true, true]);
+            check('speed: the popup reads in two parallel stages, and its hold log is read for that order',
+                [scp.indexOf('const byId = Promise.all([') < scp.indexOf("const { data: b } = await supabase.from('order_buckets').select('*').eq('order_id', oid).maybeSingle();"),
+                 scp.includes('payload->>order.eq.${onmKey},payload->>order.eq.#${onmKey},payload->>orderName.eq.${onmKey},payload->>orderName.eq.#${onmKey}'),
+                 // an unusual name falls back to the old read rather than risk losing a timeline
+                 scp.includes('/^[A-Za-z0-9_-]+$/.test(onmKey)'),
+                 !scp.includes("const { data: msgs } = await supabase.from('msg91_messages')")],
+                [true, true, true, true]);
+
+            const app3 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+            check('speed: one queue load at a time, only the newest renders, and the popup prefetches on a resting pointer',
+                [app3.includes('if(quiet && _supInFlight) return;'),
+                 app3.includes('if(seq!==_supLoadSeq) return;'),
+                 app3.includes('finally{ _supInFlight--; }'),
+                 // a prefetch is used once, only while fresh, and every re-render drops them
+                 app3.includes('_supOrderPrefetch.delete(k);'), app3.includes('SUP_PREFETCH_FRESH_MS = 15000'),
+                 app3.includes('_supOrderPrefetch.clear();'), app3.includes('if(_supPrefetchLive>=2) return;'),
+                 app3.includes('const [d] = await Promise.all([supOrderDetail(orderId), eeHoldRefresh()]);')],
+                [true, true, true, true, true, true, true, true]);
+        }
+        // ── THE POSTGRES ERROR LOG (user, 2026-09-11: "why error increasing in postgres in supabase", with the
+        // log attached). Besides the statement timeouts (the NDR/Order Calling reads — see the speed checks), two
+        // errors were code that INSERTED, let the UNIQUE key reject a duplicate, then recovered: correct data, an
+        // error line every time. Both now reach the same end state without ever being rejected.
+        {
+            // seal() — MEASURED with a fake client: an existing row is UPDATED and no insert is even attempted
+            // (so no 23505 can be logged); a missing row is updated-then-inserted, the same row as before.
+            const vac = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8');
+            const sealSrc = vac.slice(vac.indexOf('async function seal('), vac.indexOf('// Claim the turnstile before dialing.'));
+            const mkSb = (exists) => { const calls = []; const sb = { from: () => {
+                const q = { _op: null,
+                    update(v) { this._op = 'update'; return this; }, insert(v) { this._op = 'insert'; return this; },
+                    eq() { return this; }, select() { return this; },
+                    then(ok) { calls.push(this._op);
+                        ok(this._op === 'update' ? { data: exists ? [{ id: 1 }] : [], error: null }
+                            : { data: null, error: exists ? { code: '23505', message: 'dup' } : null }); } };
+                return q; } }; return { sb, calls }; };
+            const sealOf = sb => new Function('supabase', 'PURPOSE', sealSrc + ' return seal;')(sb, 'cod_confirm');
+            const ex = mkSb(true), fresh = mkSb(false);
+            const r1 = await sealOf(ex.sb)('TE1', 'skipped', { why: 'order cancelled' });
+            const r2 = await sealOf(fresh.sb)('TE2', 'skipped', { why: 'order cancelled' });
+            check('postgres log: seal() updates an existing row without the insert that logged a duplicate-key error',
+                [ex.calls.join(','), fresh.calls.join(','), r1, r2], ['update', 'update,insert', true, true]);
+
+            const wa = fs.readFileSync(path.join(ROOT, 'app/api/msg91_wa.js'), 'utf8');
+            check('postgres log: the WhatsApp auto-send claims its slot with ON CONFLICT DO NOTHING, and a lost race still skips',
+                [// the two AUTO-send writes, by their exact call sites (a third, older seeding upsert already
+                 // used this pattern, so a plain count would say nothing about these two)
+                 wa.includes("}, { onConflict: 'order_name,sequence_key,version', ignoreDuplicates: true }).select('id');")
+                   && wa.includes("}, { onConflict: 'order_name,sequence_key,version', ignoreDuplicates: true }).then(() => {}).catch(() => {});"),
+                 wa.includes("if (!ins.data || !ins.data.length) return { skip: 'already sent/sealed' };"),
+                 // the MANUAL button keeps its visible answer to a race — an agent needs to see it
+                 wa.includes("return res.status(409).json({ success: false, error: `V${tpl.version} was just sent by someone else` });")],
+                [true, true, true]);
         }
         console.log(`\n${pass} passed, ${fail} failed`);
         process.exit(fail ? 1 : 0);

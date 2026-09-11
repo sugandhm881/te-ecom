@@ -75,15 +75,27 @@ function closeIdentity(seed, rows) {
 }
 
 // ── history fetch (one round trip per hop, chunked; order_buckets view) ───────────────────────────
+// ⚡ FOUR CHUNKS AT A TIME, NOT ONE AFTER ANOTHER (2026-09-11 perf: "NDR Calling and Order Calling take
+// a long time"). Hold Orders took 18 s for 67 rows, and 6 s of it was this loop walking the customer-history
+// and high-value reads through the `order_buckets` view one 200-value chunk at a time. The queries are the
+// same queries; only the waiting changed. Rows are appended in CHUNK ORDER, so every caller sees exactly
+// the sequence it saw before, and the first failed chunk still throws.
+const CHUNK_CONCURRENCY = 4;
 async function chunkedIn(supabase, table, select, col, values, extra) {
     const out = [];
     const vals = [...new Set(values.filter(Boolean))];
-    for (let i = 0; i < vals.length; i += 200) {
-        let q = supabase.from(table).select(select).in(col, vals.slice(i, i + 200));
-        if (extra) q = extra(q);
-        const { data, error } = await q.limit(1000);
-        if (error) throw new Error(`${table} lookup failed: ${error.message}`);
-        out.push(...(data || []));
+    const parts = [];
+    for (let i = 0; i < vals.length; i += 200) parts.push(vals.slice(i, i + 200));
+    for (let i = 0; i < parts.length; i += CHUNK_CONCURRENCY) {
+        const got = await Promise.all(parts.slice(i, i + CHUNK_CONCURRENCY).map(part => {
+            let q = supabase.from(table).select(select).in(col, part);
+            if (extra) q = extra(q);
+            return q.limit(1000);
+        }));
+        for (const { data, error } of got) {
+            if (error) throw new Error(`${table} lookup failed: ${error.message}`);
+            out.push(...(data || []));
+        }
     }
     return out;
 }

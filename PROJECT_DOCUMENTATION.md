@@ -1231,6 +1231,97 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### NDR / Order Calling stop timing out, the popup opens fast, and the Postgres error log goes quiet (2026-09-11)
+
+User: *"why NDR Calling and Order Calling take a time and show timeout error when date range is high … when
+we click on order it takes time to load and open popup … without compromise any feature, function and
+workflow"*, then *"why error increasing in postgres in supabase"* with the Postgres log attached.
+
+**Measured first** (real `/support/queue` handler, no server): Status changed 7 d 4.9 s · 30 d 14.4 s ·
+**90 d → HTTP 500 after 41 s, "canceling statement due to statement timeout"**; Hold Orders 18 s even at 7 d
+(67 rows). Phase timing put the cost in three places:
+- Status changed pulls every candidate through the **`order_buckets` VIEW** — 8,491 ids at 90 d = **11.3 s**
+  on its own (the same ids from `orders` = 0.56 s). 8,389 of them fall inside the window, so filtering by
+  date first cannot shrink it. Tried and measured: smaller chunks (100 → 43 s) and less concurrency (3 → 29 s)
+  are both WORSE — the view has a high fixed cost per statement. Column pruning helps (`order_id,bucket`
+  5.1 s) but membership needs several of the expensive columns. **Left as the known remaining cost**; the real
+  fix is the view itself (needs its SQL and a migration).
+- Every enrichment lookup ran over ALL rows before the response capped at 1,500 — 4,548 rows enriched to
+  show 1,500 (2.0 s vs 0.6 s).
+- Hold Orders' customer-history reads ran **one after another**: `RR.chunkedIn` walked 200-value chunks
+  sequentially (history 2.6 s, high-value-by-phone 2.7 s, by-email 0.9 s), and the route's hold/EasyEcom
+  reads were five sequential awaits.
+
+⚠️ **The timeout itself was a PILE-UP, not one request.** The 30 s poll fired whether or not the previous
+load had come back, so a 41 s request had two or three identical copies hitting the view at once — that is
+what tipped chunks past the statement timeout (the view read alone, measured in isolation, never timed out).
+The Postgres log confirms the shape: 57014s in bursts of 10–16 **in the same second**.
+
+**What changed — every change is a reordering of the same reads; nothing is dropped:**
+- **`supLoadQueue` is single-flight and newest-wins.** A quiet poll skips while any load is in flight; each
+  load takes a ticket and only the newest may render. This also fixes a real bug: switching Status changed →
+  Undelivered let the late Status-changed rows overwrite the Undelivered table under the Undelivered tab.
+- **Status changed is capped to ROW_CAP before enrichment.** Its order is final at that point (sorted
+  before, nothing after re-sorts or filters), so the first 1,500 are exactly the rows the response sent;
+  `fullTotal` keeps "1,500 of 4,548" true. ⚠️ Only this tab: Undelivered re-sorts on NDR attempt and Hold
+  Orders filters on hold state AFTER enrichment, so their first 1,500 is not known until then. The slim
+  (tab-count) branch returns before the cap, so counts still see every row.
+- **The five enrichment blocks run together** (`_enrich` → `Promise.all`): platform/marks, the COD call,
+  call attempts, payment, Hold Orders hold state — each reads its own tables and writes its own fields. The
+  Hold Orders filter, the only consumer of their results, runs after all of them.
+- **`RR.chunkedIn` runs 4 chunks at a time**, appending in CHUNK ORDER (callers dedupe first-wins, so order
+  is part of the contract); the first failed chunk still throws. `findRepeatCandidates` reads in two waves
+  instead of six steps (history ‖ candidate addresses, then cancelled ‖ high-value ×2 ‖ history addresses;
+  the EasyEcom-cancelled check ‖ payment status earlier).
+- **The order popup reads in two parallel stages.** Everything keyed only by order id starts alongside the
+  1.3 s header read instead of waiting for it; everything needing the header (name/phone/email) — including
+  the WhatsApp thread, the slowest single read at ~1.2 s, which used to run LAST — goes in one second wave.
+  The client fetches the EasyEcom chips alongside, not after, and **prefetches on a resting pointer** (200 ms
+  dwell, ≤2 in flight, a prefetch is used once, only under 15 s old, and every queue re-render drops them —
+  so a popup never opens on data older than the table).
+- ⚠️ **The popup's hold timeline was blind for older orders.** It read "the latest 2,000 hold events across ALL
+  orders" — but PostgREST caps responses at 1,000, so it saw the newest 1,000 events and an older order's
+  timeline came back EMPTY. Now filtered server-side on the same keys the exact-match checks (`payload->>order`
+  for shopify_*, `payload->>orderName` for easyecom_*, with and without '#'), equally fast. A name with
+  unusual characters falls back to the old read rather than risk a malformed filter.
+
+**Proven equivalent:** the last commit was exported and run side by side with the new code on identical
+requests — every tab IDENTICAL (Undelivered 30 d 3.1→2.1 s, Status changed 30 d 21.3→15.3 s, Hold Orders 30 d
+11.4→7.9 s, Rejected 30 d 1.9→0.7 s); popups 1.8–3.8 s → 1.2–2.3 s, identical except one order whose hold
+timeline now shows its real hold + release (the blind-spot fix) and a 20th-message tie on `sent_at` at the
+WhatsApp thread's limit (same query in both).
+
+#### The Postgres error log (11:30–12:28 IST, 11 Sep)
+
+- **~90 × `57014 statement timeout`**, bursts of 10–16 per second, 12:00–12:17 IST — the view reads above.
+  ⚠️ Part of that window was the diagnosis itself: 90-day loads run deliberately to find the bottleneck.
+- **~47 × `23505` on `vobiz_auto_calls_ecom_order_name_purpose_key`, every 2 minutes, all day.** `seal()`
+  INSERTED first and let the UNIQUE key reject it — and the engines re-seal the same skipped orders (cancelled,
+  no longer NDR, already replied) on EVERY tick, so the RtoCall cron alone logged 1–3 of these every 2
+  minutes. The app recovered each time; the error count is what grew. Now **update-first, insert only if
+  nothing was updated** — identical end state (an existing row gets the same three fields, a missing one the
+  same full insert), and the 23505 branch survives for a true race. Measured in the selftest with a fake
+  client: an existing row issues no insert at all.
+- **6 × `23505` on `wa_sends_msg91_order_name_sequence_key_version_key`.** The 2026-08-30 read-before-insert
+  had already removed the routine case (88k/week then); these were TRUE races between two paths claiming the
+  same slot. The auto-send claim (and its 'skipped' row) now use **`upsert … ignoreDuplicates: true`** — ON
+  CONFLICT DO NOTHING — so a lost race returns zero rows (still `skip: 'already sent/sealed'`) instead of an
+  error. The UNIQUE key still decides; nothing can be sent twice. The **manual** button deliberately keeps its
+  409 "just sent by someone else", which an agent needs to see.
+
+#### Teams: the Workflows path is removed from the code, not switched off
+
+User, same day: *"still report post through workflow — stop this in code, don't wait for the .env update
+and stop method"* — a 12:31 "Warehouse Ops Report" arrived from Workflows. It was **this app's own 12:30
+cron** (`WH Report (every 2h)`, `30 8-20/2 * * *`), and the local server was not running, so it came from
+**the VPS still on pre-fix code** — no code after the morning's change could post via Workflows unless the
+switch was set. As asked, the switch is gone too: `postTeams()` has no webhook POST at all, the AI call
+report's own `TEAMS_WEBHOOK_AI_CALLS` fallback is deleted, `webhookFallbackOn` no longer exists, and
+`/api/teams/routing` reports `not posted` for any report without a bot route. A bot failure is logged
+(`NOT re-posted via the Workflows webhook (that path was removed 2026-09-11)`). The selftest sets the old
+`TEAMS_WEBHOOK_FALLBACK=true` and proves the webhook is still never called. `TEAMS_WEBHOOK_*` URLs stay in
+`.env` — they are how each report finds its channel.
+
 ### Order Calling opened the Orders dashboard for every non-admin, and a deploy needed a hard refresh (2026-09-11)
 
 **Order Calling → Orders dashboard.** User: *"except my user, anyone logging in and opening Order Calling
@@ -1276,8 +1367,9 @@ the report a second time from the Workflows sender.
 
 - **Bot only.** A failed bot post is logged loudly (`[Teams] bot post failed (…) — NOT re-posting via the
   Workflows webhook`) and returns false. It is not retried anywhere else.
-- **`TEAMS_WEBHOOK_FALLBACK=true`** in `.env` (+ restart) brings the webhook back — a lever for a real bot
-  outage, no code change. Default off. `webhookFallbackOn()` is the one definition; the AI call report,
+- ~~**`TEAMS_WEBHOOK_FALLBACK=true`** in `.env` (+ restart) brings the webhook back — a lever for a real bot
+  outage, no code change. Default off.~~ **Superseded the same day: the switch and the webhook path were
+  removed from the code entirely** — see "NDR / Order Calling stop timing out…" above. `webhookFallbackOn()` is the one definition; the AI call report,
   which carried its **own** copy of the fallback (`TEAMS_WEBHOOK_AI_CALLS`), now obeys it too.
 - ⚠️ **Keep every `TEAMS_WEBHOOK_*` in `.env`.** Nothing is posted to them any more, but
   `channelForWebhook()` resolves each report's bot channel FROM its webhook URL

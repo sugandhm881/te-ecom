@@ -5313,10 +5313,28 @@ function supTabPaint(){ document.querySelectorAll('.sup-tab').forEach(b=>{ const
   b.classList.toggle('border-transparent',!on); b.classList.toggle('text-slate-500',!on); }); }
 function supSyncInfo(lock){ const el=document.getElementById('sup-sync-info'); if(!el||!lock) return;
   const res=lock.last_result||{}; el.textContent = lock.is_running?'Sync running…':(lock.last_finished_at?`Last sync ${new Date(lock.last_finished_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}${res.updated!=null?` · ${res.updated} updated`:''}`:''); }
+// ⚡ ONE LOAD AT A TIME, AND ONLY THE NEWEST MAY RENDER (2026-09-11 perf: "NDR Calling and Order Calling
+// take a long time and show a timeout error when the date range is high").
+//   · The 30 s poll fired whether or not the previous load had come back. Status changed took 41 s over 90
+//     days, so two or three identical requests piled onto the database at once — and the pile-up is what
+//     tipped each of them into "canceling statement due to statement timeout". A quiet poll now skips
+//     while any load is in flight; it had nothing to add that the running load will not bring.
+//   · A slow response could land on the WRONG tab: switch Status changed → Undelivered and the late Status
+//     changed rows overwrote the Undelivered table under the Undelivered tab. Every load takes a ticket;
+//     only the newest ticket may render, whatever order the responses arrive in.
+let _supLoadSeq = 0, _supInFlight = 0;
 async function supLoadQueue(quiet){
+  if(quiet && _supInFlight) return;
+  const seq = ++_supLoadSeq;
   const c=document.getElementById('sup-queue-table'); if(c && !quiet) c.innerHTML=brandLoader('Loading queue…');
-  try{ _eeHoldAt=0; const d=await supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS(supQueueScope())); await eeHoldRefresh(); _supQueueRows=d.rows||[]; _supCapped=!!d.capped; _supTotal=d.total||0; supSyncInfo(d.lock); supQueueTable(); supLoadTabCounts(); }
-  catch(e){ if(c && !quiet) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }   // quiet poll error → keep showing current data
+  _supInFlight++;
+  try{ _eeHoldAt=0;
+    // the EasyEcom hold chips are independent of the queue — fetched alongside it, not after it
+    const [d] = await Promise.all([supFetch(`/api/support/queue?tab=${_supTab}&`+supRangeQS(supQueueScope())), eeHoldRefresh()]);
+    if(seq!==_supLoadSeq) return;                     // a newer load (another tab or range) owns the table now
+    _supQueueRows=d.rows||[]; _supCapped=!!d.capped; _supTotal=d.total||0; supSyncInfo(d.lock); supQueueTable(); supLoadTabCounts(); }
+  catch(e){ if(seq===_supLoadSeq && c && !quiet) c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }   // quiet poll error → keep showing current data
+  finally{ _supInFlight--; }
 }
 // Real-time-ish: quietly re-fetch the queue every 30s WHILE the support view is visible, so agents see
 // current holds without a manual refresh. Skipped when hidden or a hold/cancel dialog is open (don't disrupt).
@@ -6044,6 +6062,14 @@ function supQueueTable(){
     if(e.target.closest('.csel, select, button, a, input, label')) return;
     supOrderModal(row.dataset.oid);
   }));
+  // A pointer that RESTS on a row for 200 ms starts that order's detail request (see supOrderPrefetch).
+  // Passing over rows does nothing; touch devices never fire these and simply load on tap, as before.
+  _supOrderPrefetch.clear();          // this table was just re-rendered: anything prefetched may be stale
+  c.querySelectorAll('.sup-row').forEach(row=>{
+    let t=null;
+    row.addEventListener('mouseenter',()=>{ t=setTimeout(()=>supOrderPrefetch(row.dataset.oid),200); });
+    row.addEventListener('mouseleave',()=>{ clearTimeout(t); });
+  });
   c.querySelectorAll('.sup-callinfo').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation();
     const row=_supQueueRows.find(x=>String(x.order_id)===String(b.dataset.oid));
     if(row) supCallLogModal(row);
@@ -6458,6 +6484,31 @@ function supMsgText(raw){
   }catch(_){ return s; }
 }
 // ── Order detail modal (customer · whom-to-call · items · timeline · calls · MSG91 · notes) ──
+// ⚡ THE POPUP STARTS LOADING WHILE THE POINTER IS STILL ON THE ROW (2026-09-11 perf: "when we click on an
+// order it takes time to load and open the popup"). Resting on a row for a moment starts its detail request,
+// so by the time the click lands most of the wait is already spent. The data is the same request the click
+// would have made; it is used once, only if it is under 15 s old, and every re-render of the queue (which
+// happens after any hold, note, raise or poll) throws the prefetches away — so a popup can never open on
+// data older than what the table itself is showing. At most two prefetches are in flight, so sweeping the
+// pointer down the list cannot flood the server.
+const _supOrderPrefetch = new Map();   // orderId → { p, at }
+const SUP_PREFETCH_FRESH_MS = 15000;
+let _supPrefetchLive = 0;
+function supOrderDetail(orderId){
+  const k=String(orderId), hit=_supOrderPrefetch.get(k);
+  _supOrderPrefetch.delete(k);
+  if(hit && Date.now()-hit.at < SUP_PREFETCH_FRESH_MS) return hit.p;
+  return supFetch('/api/support/order/'+encodeURIComponent(orderId));
+}
+function supOrderPrefetch(orderId){
+  const k=String(orderId), hit=_supOrderPrefetch.get(k);
+  if(hit && Date.now()-hit.at < SUP_PREFETCH_FRESH_MS) return;
+  if(_supPrefetchLive>=2) return;
+  _supPrefetchLive++;
+  const p=supFetch('/api/support/order/'+encodeURIComponent(orderId));
+  p.catch(()=>{}).finally(()=>{ _supPrefetchLive--; });   // an unused prefetch must not surface an error
+  _supOrderPrefetch.set(k,{ p, at: Date.now() });
+}
 async function supOrderModal(orderId){
   document.getElementById('sup-order-modal')?.remove();
   const wrap=document.createElement('div'); wrap.id='sup-order-modal';
@@ -6467,8 +6518,8 @@ async function supOrderModal(orderId){
   const close=()=>wrap.remove();
   wrap.addEventListener('click',e=>{ if(e.target===wrap) close(); });
   try{
-    const d=await supFetch('/api/support/order/'+encodeURIComponent(orderId));
-    await eeHoldRefresh();
+    // the EasyEcom chip data is independent of the order — fetched alongside it, not after it
+    const [d] = await Promise.all([supOrderDetail(orderId), eeHoldRefresh()]);
     const o=d.order, a=d.address||{}, ph=String(o.phone||'').replace(/\D/g,'').slice(-10);
     const days=Math.round((Date.now()-new Date(o.created_at))/86400000);
     const esc=d.escalation;

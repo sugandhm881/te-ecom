@@ -86,6 +86,18 @@ async function lastThreeIncludeDelivered(identity, orderName, orderCreatedAt) {
 // Record a settled non-call state (skipped, and its why). Upserts: a retry/gated row that turns out
 // to be cancelled/paid/replied must be closed too, or it would redial a dead order forever.
 async function seal(orderName, status, detail, phone, purpose = PURPOSE) {
+    // ⚡ UPDATE FIRST, INSERT ONLY IF THERE WAS NOTHING TO UPDATE (2026-09-11: "why error increasing in
+    // postgres"). This used to INSERT first and let the UNIQUE key reject it whenever the row already existed
+    // — and the engines re-seal the same skipped orders on every tick (a cancelled order, or one no longer
+    // NDR, stays in the candidate list), so "duplicate key value violates unique constraint
+    // vobiz_auto_calls_ecom_order_name_purpose_key" was logged 1-3 times every 2 minutes around the clock —
+    // ~47 an hour in the 11 Sep log. The app recovered every time; the Postgres error count is what grew.
+    // The end state is exactly as before: an existing row gets the same three fields, a missing row the same
+    // full insert. The 23505 branch stays for the one case it was ever meant for — two ticks racing.
+    const { data: upd, error: ue } = await supabase.from('vobiz_auto_calls_ecom')
+        .update({ status, detail: detail || null, next_attempt_at: null })
+        .eq('order_name', orderName).eq('purpose', purpose).select('id');
+    if (!ue && upd && upd.length) return true;
     const { error } = await supabase.from('vobiz_auto_calls_ecom')
         .insert({ order_name: orderName, purpose, status, detail: detail || null, phone: phone || null, last_attempt_at: new Date().toISOString() });
     if (!error) return true;

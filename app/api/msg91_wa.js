@@ -332,22 +332,27 @@ async function performAutoSend(orderName, sequenceKey, version, extraFields) {
     // a 'skipped' row so the turnstile stops every later path from retrying, and send nothing.
     const dup = await sentToPhoneRecently(order.phone, tpl.template_name);
     if (dup) {
-        await supabase.from('wa_sends_msg91').insert({
+        await supabase.from('wa_sends_msg91').upsert({
             order_name: orderName, sequence_key: sequenceKey, version, template_name: tpl.template_name,
             phone: last10(order.phone), status: 'skipped', payload: { fields, auto: true, skipped: dup }, sent_by: 'auto',
             response: { skipped: dup },
-        }).then(() => {}).catch(() => {});
+        }, { onConflict: 'order_name,sequence_key,version', ignoreDuplicates: true }).then(() => {}).catch(() => {});
         return { skip: dup };
     }
-    const ins = await supabase.from('wa_sends_msg91').insert({
+    // ⚡ ON CONFLICT DO NOTHING (2026-09-11: "why error increasing in postgres"). The read above already skips
+    // a settled slot; what was still reaching the Postgres error log was the TRUE race — two paths claiming the
+    // same (order, sequence, version) slot in the same second — and every lost race logged "duplicate key value
+    // violates unique constraint wa_sends_msg91_order_name_sequence_key_version_key". Same guarantee (the UNIQUE
+    // key still decides), same outcome (the loser skips, nothing is sent twice) — but an ignored conflict now
+    // comes back as ZERO ROWS instead of an error.
+    const ins = await supabase.from('wa_sends_msg91').upsert({
         order_name: orderName, sequence_key: sequenceKey, version,
         template_name: tpl.template_name, phone: last10(order.phone),
         payload: { fields, variables: tpl.variables, auto: true }, sent_by: 'auto',
-    }).select('id').single();
-    if (ins.error) {
-        if (String(ins.error.code) === '23505') return { skip: 'already sent/sealed' };
-        throw new Error(ins.error.message);
-    }
+    }, { onConflict: 'order_name,sequence_key,version', ignoreDuplicates: true }).select('id');
+    if (ins.error) throw new Error(ins.error.message);
+    if (!ins.data || !ins.data.length) return { skip: 'already sent/sealed' };
+    ins.data = ins.data[0];   // the rest of this function reads ins.data.id, exactly as it did after .single()
     try {
         const resp = await callMsg91Template(tpl, fields, order.phone);
         await supabase.from('wa_sends_msg91').update({ status: 'sent', response: resp }).eq('id', ins.data.id);

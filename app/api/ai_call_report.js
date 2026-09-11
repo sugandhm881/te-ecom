@@ -2,8 +2,8 @@
 // AI Calling Report → Teams (user approved the design 2026-08-31; sample at the artifact preview).
 // Daily at 20:15 IST — right after the calling window closes — one card posted BY THE PRAVIDHI BOT
 // as a reply inside the Ops › Daily Reports thread (user: "i want report go through our Own Bot";
-// verified live 2026-08-31). TEAMS_AI_CALLS_THREAD overrides the target; TEAMS_WEBHOOK_AI_CALLS is
-// only a fallback if the bot errors. Sections mirror the approved design: outcomes (colors = the Call
+// verified live 2026-08-31). TEAMS_AI_CALLS_THREAD overrides the target. (The Workflows
+// fallback, TEAMS_WEBHOOK_AI_CALLS, was removed 2026-09-11 - the bot is the only route.) Sections mirror the approved design: outcomes (colors = the Call
 // Queue chips), ₹ impact (released vs saved), call quality, per-order table capped at 10 rows,
 // skipped footer. Manual trigger: POST /api/vobiz/ai-call-report (?preview=1 returns the payload
 // without posting) — same capability gate as the other vobiz endpoints.
@@ -44,8 +44,8 @@ function istDay(dayOffset = 0) {
 // have happened in a channel where the whole team can see it.
 //
 // Kept from the old report: the 20:15 IST cron, the post as a reply in Ops › Daily Reports by the
-// Pravidhi bot, TEAMS_AI_CALLS_THREAD as the target override, and the webhook as a bot-failure
-// fallback. An Adaptive Card rather than a rendered image — the image approach (edge function
+// Pravidhi bot, and TEAMS_AI_CALLS_THREAD as the target override (the webhook
+// bot-failure fallback was removed 2026-09-11). An Adaptive Card rather than a rendered image — the image approach (edge function
 // `ai-call-report-image`) was weighed and rejected on 2026-08-31 and that decision still holds: a card
 // is searchable, readable on a phone, and does not go stale behind a URL.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -244,7 +244,7 @@ const AI_CALLS_THREAD = () => String(process.env.TEAMS_AI_CALLS_THREAD
 async function sendAiCallReport(dayOffset = 0) {
     const { payload, stats } = await buildAiCallReport(dayOffset);
     if (!stats.called && !stats.skipped) { console.log('[AI-CallReport] nothing to report — no calls today, no post'); return { skipped: 'no activity' }; }
-    const { buildCard, postTeams } = require('./teams');
+    const { buildCard } = require('./teams');
     try {
         const bot = require('./teams_bot');
         if (!bot.botEnabled()) throw new Error('bot not configured');
@@ -255,18 +255,12 @@ async function sendAiCallReport(dayOffset = 0) {
         return { posted: true, via: 'bot', stats };
     } catch (e) {
         console.warn('[AI-CallReport] bot post failed:', e.message);
-        // The Workflows webhook is OFF unless TEAMS_WEBHOOK_FALLBACK=true — the same switch every other
-        // report uses (teams.js). A bot post that timed out has usually already LANDED, and posting again
-        // here is exactly the "once from Pravidhi, once from Workflow" duplicate (user, 2026-09-11).
-        if (!require('./teams').webhookFallbackOn()) {
-            console.error('[AI-CallReport] NOT re-posting via the Workflows webhook (TEAMS_WEBHOOK_FALLBACK is off)');
-            return { skipped: 'bot failed, Workflows webhook off', error: e.message, stats };
-        }
-        const hook = String(process.env.TEAMS_WEBHOOK_AI_CALLS || '').trim();
-        if (!hook) { console.log('[AI-CallReport] no TEAMS_WEBHOOK_AI_CALLS fallback — report not posted'); return { skipped: 'bot failed, no webhook', error: e.message, stats }; }
-        const ok = await postTeams(hook, payload);
-        console.log(`[AI-CallReport] webhook fallback ${ok ? 'posted' : 'FAILED'}`);
-        return { posted: !!ok, via: 'webhook', stats };
+        // NO WORKFLOWS FALLBACK — removed, not switched off (user, 2026-09-11: "stop this in code"). This report
+        // carried its OWN copy of it (TEAMS_WEBHOOK_AI_CALLS), separate from teams.js. A bot post that timed out
+        // has usually already LANDED, and re-posting here was the "once from Pravidhi, once from Workflow"
+        // duplicate. A failure is logged and returned; nothing else is tried.
+        console.error('[AI-CallReport] NOT posted via any other route — the Workflows webhook fallback was removed 2026-09-11');
+        return { skipped: 'bot failed — no fallback', error: e.message, stats };
     }
 }
 

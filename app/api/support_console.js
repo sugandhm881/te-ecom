@@ -541,11 +541,16 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
     else cand = cand.filter(c => !isDispatched(c));
     // Drop candidates CANCELLED in EasyEcom — Shopify's cancelled_at / the bucket may still say active (sync
     // lag), but a cancelled order can't be held or called, so it's never a repeat candidate.
-    const candCancelled = await eeCancelledSet(cand.map(c => c.order_name));
+    // ⚡ The EasyEcom-cancelled check and the payment-status read both look at the SAME candidate set, so they
+    // run together (2026-09-11 perf) instead of one waiting on the other. Applying both filters afterwards
+    // leaves exactly the set the old one-then-the-other order did.
+    const [candCancelled, finRows] = await Promise.all([
+        eeCancelledSet(cand.map(c => c.order_name)),
+        cand.length ? chunkedIn('orders', 'id, financial_status', 'id', cand.map(c => c.order_id)) : Promise.resolve([]),
+    ]);
     cand = cand.filter(c => !candCancelled.has(String(c.order_name || '').replace('#', '').trim()));
     // (1) Drop FULLY-prepaid; keep COD + PARTIALLY-PAID (partial-paid still carries a COD balance, so it's held
     // on the high-value ≥₹1500 rule — the history/short-address reasons stay COD-only, gated by isPartialPaid below).
-    const finRows = cand.length ? await chunkedIn('orders', 'id, financial_status', 'id', cand.map(c => c.order_id)) : [];
     const finById = {}; finRows.forEach(o => { finById[String(o.id)] = (o.financial_status || '').toLowerCase(); });
     const _fullyPrepaid = new Set(['paid', 'refunded', 'partially_refunded']);
     cand = cand.filter(c => !_fullyPrepaid.has(finById[String(c.order_id)] || ''));
@@ -565,23 +570,32 @@ async function findRepeatCandidates({ fromISO, toISO, skipDispatchFilter = false
     // contacts found on the way; then each candidate's identity is closed over that pool.
     const seedPhones = [...new Set(cand.map(c => c.phone).filter(Boolean))];
     const seedEmails = [...new Set(cand.map(c => c.email).filter(Boolean))];
-    const hist = (seedPhones.length || seedEmails.length) ? await RR.fetchHistory(supabase, { phones: seedPhones, emails: seedEmails }) : [];
-    // EasyEcom-cancelled prior orders read as active in order_buckets (Shopify lag) — treat them as cancelled
-    // so a customer whose only "non-delivered" prior order was actually cancelled isn't flagged repeat-risk.
-    const histCancelled = await eeCancelledSet(hist.map(h => h.order_name));
-    const isCancelled = h => h.bucket === 'cancelled' || histCancelled.has(RR.orderKey(h.order_name));
-    // COMPLETE-history high-value deliveries for the pool (delivered + ≥₹1500 only, so the set is tiny).
-    const hvRows = hist.length ? await RR.chunkedIn(supabase, 'order_buckets', 'order_id, phone, email, created_at', 'phone',
-        [...new Set(hist.map(h => RR.phoneKey(h.phone)).filter(Boolean))].flatMap(RR.phoneVariants),
-        q => q.eq('bucket', 'delivered').gte('total_price', HIGH_VALUE_MIN)) : [];
-    const hvByEmail = hist.length ? await RR.chunkedIn(supabase, 'order_buckets', 'order_id, phone, email, created_at', 'email',
-        [...new Set(hist.map(h => RR.emailKey(h.email)).filter(Boolean))].flatMap(RR.emailVariants),
-        q => q.eq('bucket', 'delivered').gte('total_price', HIGH_VALUE_MIN)) : [];
-    const hvAll = [...hvRows, ...hvByEmail];
-    // Addresses: the candidates' own + every DELIVERED order in the pool (for the short-address trust exception).
-    const candAddrRows = cand.length ? await chunkedIn('order_shipping_addresses', 'order_id, address1, address2, city, province, zip', 'order_id', cand.map(c => c.order_id)) : [];
+    // ⚡ TWO WAVES INSTEAD OF SIX STEPS (2026-09-11 perf). Everything below depends on the candidates or on
+    // their history — never on each other — yet it ran strictly one after another: history, then the
+    // cancelled check, then high-value by phone, then by email, then two address reads. The candidates' own
+    // addresses need only the candidates, so they ride with the history read; the rest need only the history,
+    // so they go together once it is back. Same queries, same inputs, same results.
+    const [hist, candAddrRows] = await Promise.all([
+        (seedPhones.length || seedEmails.length) ? RR.fetchHistory(supabase, { phones: seedPhones, emails: seedEmails }) : Promise.resolve([]),
+        // Addresses: the candidates' own + every DELIVERED order in the pool (for the short-address trust exception).
+        cand.length ? chunkedIn('order_shipping_addresses', 'order_id, address1, address2, city, province, zip', 'order_id', cand.map(c => c.order_id)) : Promise.resolve([]),
+    ]);
     const deliveredHistIds = hist.filter(h => h.bucket === 'delivered').map(h => h.order_id);
-    const histAddrRows = deliveredHistIds.length ? await chunkedIn('order_shipping_addresses', 'order_id, address1, address2, city, province, zip', 'order_id', deliveredHistIds) : [];
+    const [histCancelled, hvRows, hvByEmail, histAddrRows] = await Promise.all([
+        // EasyEcom-cancelled prior orders read as active in order_buckets (Shopify lag) — treat them as cancelled
+        // so a customer whose only "non-delivered" prior order was actually cancelled isn't flagged repeat-risk.
+        eeCancelledSet(hist.map(h => h.order_name)),
+        // COMPLETE-history high-value deliveries for the pool (delivered + ≥₹1500 only, so the set is tiny).
+        hist.length ? RR.chunkedIn(supabase, 'order_buckets', 'order_id, phone, email, created_at', 'phone',
+            [...new Set(hist.map(h => RR.phoneKey(h.phone)).filter(Boolean))].flatMap(RR.phoneVariants),
+            q => q.eq('bucket', 'delivered').gte('total_price', HIGH_VALUE_MIN)) : Promise.resolve([]),
+        hist.length ? RR.chunkedIn(supabase, 'order_buckets', 'order_id, phone, email, created_at', 'email',
+            [...new Set(hist.map(h => RR.emailKey(h.email)).filter(Boolean))].flatMap(RR.emailVariants),
+            q => q.eq('bucket', 'delivered').gte('total_price', HIGH_VALUE_MIN)) : Promise.resolve([]),
+        deliveredHistIds.length ? chunkedIn('order_shipping_addresses', 'order_id, address1, address2, city, province, zip', 'order_id', deliveredHistIds) : Promise.resolve([]),
+    ]);
+    const isCancelled = h => h.bucket === 'cancelled' || histCancelled.has(RR.orderKey(h.order_name));
+    const hvAll = [...hvRows, ...hvByEmail];
     const candAddrById = {}; candAddrRows.forEach(a => { candAddrById[String(a.order_id)] = RR.fullAddr(a); });
     const histAddrNormById = {}; histAddrRows.forEach(a => { histAddrNormById[String(a.order_id)] = RR.normAddr(RR.fullAddr(a)); });
     return cand.filter(c => {
@@ -846,6 +860,18 @@ router.get('/support/queue', async (req, res) => {
             return res.json({ success: true, slim: true, total: slim.length, rows: slim });
         }
 
+        // ⚡ STATUS CHANGED IS CAPPED BEFORE IT IS ENRICHED (2026-09-11 perf). The response has always sent at
+        // most ROW_CAP rows, but every lookup below — notes, names, platforms, marks, calls, payment — ran over
+        // ALL of them first: 4,548 rows enriched to show 1,500 on a 90-day range. This tab's order is final
+        // at this point (sorted above; nothing below re-sorts or filters it), so the first ROW_CAP rows here
+        // are exactly the rows the response would have sent. `fullTotal` keeps the "1,500 of 4,548" line true.
+        // (The other tabs are left alone: Undelivered re-sorts on NDR attempt and Hold Orders filters on hold
+        // state below, so their first 1,500 is not known until then — and neither comes near the cap.)
+        const ROW_CAP = 1500;
+        const fullTotal = rows.length;
+        if (tab === 'changed' && rows.length > ROW_CAP) rows = rows.slice(0, ROW_CAP);
+        const lockP = lockState();   // independent of everything below — read now, not last
+
         // NOTE CONTEXT — a note belongs to the panel it was written in, not to every panel that later
         // shows the order. A "confirmed" note added on the Call Queue while the order was still
         // pre-dispatch was surfacing on the Undelivered panel days later, where it reads as a statement
@@ -897,9 +923,14 @@ router.get('/support/queue', async (req, res) => {
                 || String(x.created_at || '').localeCompare(String(y.created_at || ''))
                 || String(x.order_id).localeCompare(String(y.order_id)));
         }
+        // ⚡ THE FIVE ENRICHMENT BLOCKS BELOW RUN TOGETHER (2026-09-11 perf). Each reads its own tables and
+        // writes its own fields onto the rows — platform/marks, the COD call, call attempts, payment, and the
+        // Hold Orders hold state — so none waits on another; they used to run one after the other. The only
+        // step that needs their results, the Hold Orders filter, runs after all of them are back.
+        const _enrich = [];
         // Courier platform — only for the shipped panels. Repeat-tab orders are still pre-dispatch (no AWB,
         // no journey row), so the lookup would cost a query and return nothing but nulls.
-        if (isUndPanel && rows.length) {
+        _enrich.push((async () => { if (isUndPanel && rows.length) {
             const normNames = [...new Set(rows.map(r => String(r.order_name || '').replace('#', '').trim()).filter(Boolean))];
             const [plat, raised, escMarks] = await Promise.all([
                 platformByOrder(rows),
@@ -947,7 +978,7 @@ router.get('/support/queue', async (req, res) => {
                 r.unheld_at = uh ? uh.at : null;
                 r.unheld_by = uh ? uh.by : null;   // 'ai-call (customer confirmed)' | an agent's email
             });
-        }
+        } })());
 
         // THE COD CONFIRMATION CALL, ON EVERY PANEL (user, 2026-09-10: the master filter's sort puts
         // "COD hold-to-unhold confirmation = yes" in its own group). This read used to live inside the
@@ -956,7 +987,7 @@ router.get('/support/queue', async (req, res) => {
         // which has never been true on a single one of 47,107 rows.
         // ⚠️ `confirmed` is the ONLY outcome that counts as a yes. denied / unclear / no_answer take no
         // automatic action anywhere in this system, by explicit instruction, and must not sort as wins.
-        if (rows.length) {
+        _enrich.push((async () => { if (rows.length) {
             const nkA = n => String(n || '').replace('#', '').trim();
             const aiNames = [...new Set(rows.map(r => nkA(r.order_name)).filter(Boolean))];
             const aiRows = aiNames.length ? await chunkedIn('vobiz_auto_calls_ecom',
@@ -969,13 +1000,13 @@ router.get('/support/queue', async (req, res) => {
                     outcome: (a.detail && a.detail.outcome) || null,
                     note: (a.detail && (a.detail.outcome_note || a.detail.why)) || null };
             });
-        }
+        } })());
 
         // CALL ATTEMPTS ON EVERY PANEL (user, 2026-09-05: "call attempt date and time should show on
         // undelivered and hold order panel"). Deliberately OUTSIDE the shipped-panels block above:
         // Hold Orders is the `repeat` tab, whose orders are pre-dispatch and therefore skipped there,
         // yet it is exactly where COD confirmation calls land. Two reads, chunked, for any tab.
-        if (rows.length) {
+        _enrich.push((async () => { if (rows.length) {
             const callNames = [...new Set(rows.map(r => String(r.order_name || '').replace('#', '').trim()).filter(Boolean))];
             const [rtoCallRows, callLogRows] = await Promise.all([
                 chunkedIn('vobiz_auto_calls_ecom', 'order_name, purpose, status, attempts, detail, next_attempt_at, last_attempt_at, attempt_log', 'order_name', callNames),
@@ -1035,11 +1066,11 @@ router.get('/support/queue', async (req, res) => {
                     };
                 }
             });
-        }
+        } })());
         // Payment type (COD vs Prepaid) — `order_buckets` carries no payment column, so read
         // `orders.financial_status`. Same rule as the Orders dashboard: fully-settled = Prepaid;
         // anything else still has money to collect on delivery = COD (incl. partially_paid).
-        if (rows.length) {
+        _enrich.push((async () => { if (rows.length) {
             const finRows = await chunkedIn('orders', 'id, financial_status', 'id', rows.map(r => r.order_id));
             const finBy = {}; finRows.forEach(o => { finBy[String(o.id)] = String(o.financial_status || '').toLowerCase(); });
             const PREPAID = new Set(['paid', 'refunded', 'partially_refunded']);
@@ -1048,28 +1079,31 @@ router.get('/support/queue', async (req, res) => {
                 r.financial_status = f || null;
                 r.payment = f ? (PREPAID.has(f) ? 'Prepaid' : 'COD') : null;   // null = unknown (order row missing)
             });
-        }
+        } })());
         // Repeat tab: attach hold state + EasyEcom-import state so the panel offers the RIGHT control —
         // Shopify hold only while the order is still upstream of EasyEcom; once imported into EasyEcom the
         // Shopify hold is pointless, so offer an EasyEcom hold instead.
-        if (tab === 'repeat') {
+        _enrich.push((async () => { if (tab === 'repeat') {
             const nk = n => String(n || '').replace('#', '').trim();
-            const holds = await shopifyHold.getHoldStates(rows.map(r => r.order_name));
             const names = [...new Set(rows.map(r => nk(r.order_name)).filter(Boolean))];
-            const eeRows = names.length ? await chunkedIn('b2c_order_easycom', 'reference_code, order_id, order_status', 'reference_code', names) : [];
+            // ⚡ Five independent reads, one round trip (2026-09-11 perf) — they used to run one after another.
+            const [holds, eeRows, eeHoldRows, eeHoldIdRows, relRows] = await Promise.all([
+                shopifyHold.getHoldStates(rows.map(r => r.order_name)),
+                names.length ? chunkedIn('b2c_order_easycom', 'reference_code, order_id, order_status', 'reference_code', names) : Promise.resolve([]),
+                names.length ? chunkedIn('order_marks_ecom', 'order_name', 'order_name', names, q => q.eq('mark_type', 'ee_hold')) : Promise.resolve([]),
+                // EasyEcom's text `order_status` often stays "Open"/"Shipped" while the item is actually On Hold, so
+                // the authoritative held signal is `raw_data.order_status_id = 44` — without this, panel-held orders
+                // showed a "Hold" button instead of "Unhold" and were dropped as untouched-dispatched.
+                names.length ? chunkedIn('b2c_order_easycom', 'reference_code, updated_at', 'reference_code', names, q => q.filter('raw_data->>order_status_id', 'eq', '44')) : Promise.resolve([]),
+                // ⚠️ Same staleness rule as /ee-hold-marks: `order_status_id` is a SYNCED copy, so it still reads
+                // 44 after an unhold until the EasyEcom sync next touches the order. A human release newer than
+                // that sync wins — otherwise the panel shows "held" on an order EasyEcom reports as unheld, and
+                // the agent clicks Unhold over and over against an already-unheld order.
+                names.length ? chunkedIn('order_marks_ecom', 'order_name, created_at', 'order_name', names, q => q.eq('mark_type', 'ee_hold_released')) : Promise.resolve([]),
+            ]);
             const eeBy = {}; eeRows.forEach(e => { eeBy[nk(e.reference_code)] = e; });
-            const eeHoldRows = names.length ? await chunkedIn('order_marks_ecom', 'order_name', 'order_name', names, q => q.eq('mark_type', 'ee_hold')) : [];
             const eeHeld = new Set(eeHoldRows.map(m => nk(m.order_name)));
-            // EasyEcom's text `order_status` often stays "Open"/"Shipped" while the item is actually On Hold, so
-            // the authoritative held signal is `raw_data.order_status_id = 44` — without this, panel-held orders
-            // showed a "Hold" button instead of "Unhold" and were dropped as untouched-dispatched.
-            const eeHoldIdRows = names.length ? await chunkedIn('b2c_order_easycom', 'reference_code, updated_at', 'reference_code', names, q => q.filter('raw_data->>order_status_id', 'eq', '44')) : [];
             const eeHeldById = new Map(eeHoldIdRows.map(r => [nk(r.reference_code), r.updated_at]));
-            // ⚠️ Same staleness rule as /ee-hold-marks: `order_status_id` is a SYNCED copy, so it still reads
-            // 44 after an unhold until the EasyEcom sync next touches the order. A human release newer than
-            // that sync wins — otherwise the panel shows "held" on an order EasyEcom reports as unheld, and
-            // the agent clicks Unhold over and over against an already-unheld order.
-            const relRows = names.length ? await chunkedIn('order_marks_ecom', 'order_name, created_at', 'order_name', names, q => q.eq('mark_type', 'ee_hold_released')) : [];
             const releasedAt = {}; relRows.forEach(m => { releasedAt[nk(m.order_name)] = m.created_at; });
             const staleHold = (k, syncedAt) => { const rel = releasedAt[k]; if (!rel) return false;
                 return !syncedAt || new Date(rel) > new Date(syncedAt); };
@@ -1085,6 +1119,10 @@ router.get('/support/queue', async (req, res) => {
                 const syncedHeld = (eeHeldById.has(k) || /hold/i.test((ee && ee.order_status) || '')) && !staleHold(k, eeHeldById.get(k));
                 r.ee_hold = eeHeld.has(k) || syncedHeld;                          // already held in EasyEcom?
             });
+        } })());
+        await Promise.all(_enrich);
+
+        if (tab === 'repeat') {
             // Show a candidate if it matches ≥1 call-reason (in_flight / recent_undelivered / high_value) OR the
             // team is already working it (held on EasyEcom/Shopify — incl. a failed hold — or has agent notes).
             // MOVED orders were already dropped above. Untouched, no-reason orders (e.g. a first-time low-value
@@ -1103,9 +1141,11 @@ router.get('/support/queue', async (req, res) => {
         // table render sane, but a silent truncation reads as "that is all of them" — Status changed
         // crossed the cap the day it started catching late parcels (1,500 shown of 1,905 over 30 days).
         // `total` lets the count line say "1,500 of 1,905 — narrow the dates" instead of lying.
-        const ROW_CAP = 1500;
-        res.json({ success: true, tab, total: rows.length, capped: rows.length > ROW_CAP,
-            rows: rows.slice(0, ROW_CAP), lock: await lockState() });
+        // (ROW_CAP is declared above, where Status changed is capped BEFORE enrichment — so its true total is
+        // `fullTotal`, not the length of the already-capped list.)
+        const totalRows = tab === 'changed' ? fullTotal : rows.length;
+        res.json({ success: true, tab, total: totalRows, capped: totalRows > ROW_CAP,
+            rows: rows.slice(0, ROW_CAP), lock: await lockP });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
@@ -1139,27 +1179,54 @@ router.get('/support/orders', async (req, res) => {
 router.get('/support/order/:orderId', async (req, res) => {
     try {
         const oid = String(req.params.orderId).trim();
+        // ⚡ TWO PARALLEL STAGES, NOT A CHAIN (2026-09-11 perf: "when we click on an order it takes time to load
+        // and open the popup"). Measured: the header read from the order_buckets VIEW is ~1.3 s, and the reads
+        // keyed only by the order id — items, address, tracking, calls, notes, contacts — waited for it although
+        // none of them needs it; they now start alongside it. Everything that DOES need the header (the order
+        // name, phone, email) goes in one second wave — including the WhatsApp thread, the slowest single read
+        // (~1.2 s, a wildcard phone search), which used to run LAST, after everything else had finished.
+        const byId = Promise.all([
+            supabase.from('order_line_items').select('title, variant_title, sku, quantity, price').eq('order_id', oid),
+            supabase.from('order_shipping_addresses').select('*').eq('order_id', oid).maybeSingle(),
+            supabase.from('order_tracking').select('tracking_status, courier_name, awb_number, last_tracked_at, edd').eq('order_id', oid).order('last_tracked_at', { ascending: false }),
+            supabase.from('call_logs').select('id, outcome, notes, called_at, next_followup_at, agent_id').eq('order_id', oid).order('called_at', { ascending: false }),
+            supabase.from('order_notes').select('id, content, created_at, agent_id').eq('order_id', oid).order('created_at', { ascending: false }),
+            supabase.from('escalation_contacts').select('*'),
+        ]);
+        const myIdP = ensureProfile(req.user.sub).catch(() => null);   // needs neither stage
         const { data: b } = await supabase.from('order_buckets').select('*').eq('order_id', oid).maybeSingle();
-        if (!b) return res.status(404).json({ success: false, error: 'Order not found' });
+        if (!b) { byId.catch(() => {}); return res.status(404).json({ success: false, error: 'Order not found' }); }
         // Customer's other orders — match by NORMALIZED phone (last 10 digits) OR email, because the
         // stored phone format varies per order (+91…, bare 10-digit, spaced). Exact-match misses them.
         const last10 = String(b.phone || '').replace(/\D/g, '').slice(-10);
         const custEmail = String(b.email || '').trim();
         const CUST_SEL = 'order_id, order_name, bucket, created_at, total_price, tracking_status, courier, awb_number, phone, email';
-        const [items, addr, tracking, calls, aiCalls, aiAttempts, notes, contactsAll, custByPhone, custByEmail] = await Promise.all([
-            supabase.from('order_line_items').select('title, variant_title, sku, quantity, price').eq('order_id', oid),
-            supabase.from('order_shipping_addresses').select('*').eq('order_id', oid).maybeSingle(),
-            supabase.from('order_tracking').select('tracking_status, courier_name, awb_number, last_tracked_at, edd').eq('order_id', oid).order('last_tracked_at', { ascending: false }),
-            supabase.from('call_logs').select('id, outcome, notes, called_at, next_followup_at, agent_id').eq('order_id', oid).order('called_at', { ascending: false }),
+        const HOLD_ACTIONS = ['shopify_hold', 'shopify_release', 'shopify_cancel', 'easyecom_hold_order', 'easyecom_unhold_order'];
+        const onmKey = String(b.order_name || '').replace('#', '').trim();
+        const [[items, addr, tracking, calls, notes, contactsAll], aiCalls, aiAttempts, custByPhone, custByEmail, holdRowsRes, msgsRes] = await Promise.all([
+            byId,
             // REAL AI phone calls (Vobiz bridge) — keyed by order NAME in agent_call_logs
             supabase.from('agent_call_logs').select('id, call_type, language, summary, transcript, transcript_en, exchanges, recording_url, called_at').eq('order_id', String(b.order_name || '').replace(/^#/, '')).order('called_at', { ascending: false }).limit(10),
             // AI dial-ATTEMPT history (turnstile) — an unanswered dial opens no bridge session and so
             // has no agent_call_logs row; without this the modal showed only answered calls.
             supabase.from('vobiz_auto_calls_ecom').select('purpose, status, attempts, next_attempt_at, attempt_log, detail').eq('order_name', String(b.order_name || '').replace(/^#/, '')).in('purpose', ['cod_confirm', 'rto_recovery']),
-            supabase.from('order_notes').select('id, content, created_at, agent_id').eq('order_id', oid).order('created_at', { ascending: false }),
-            supabase.from('escalation_contacts').select('*'),
             last10 ? supabase.from('order_buckets').select(CUST_SEL).ilike('phone', `%${last10}`).order('created_at', { ascending: false }).limit(30) : Promise.resolve({ data: [] }),
             custEmail ? supabase.from('order_buckets').select(CUST_SEL).ilike('email', custEmail).order('created_at', { ascending: false }).limit(30) : Promise.resolve({ data: [] }),
+            // ⚠️ THE HOLD LOG IS READ FOR THIS ORDER, NOT "THE LATEST 2,000 ROWS". That read asked for 2,000 but
+            // the server caps every response at 1,000, so it saw only the newest 1,000 hold/unhold events across
+            // ALL orders — and an older order's timeline came back EMPTY once enough newer events had piled up.
+            // Filtered here on the same keys the exact-match below checks (`order` for shopify_*, `orderName`
+            // for easyecom_*, with and without the '#'), which is also no slower. An order name carrying anything
+            // unusual falls back to the old read, so the filter can never be the reason a timeline is lost.
+            /^[A-Za-z0-9_-]+$/.test(onmKey)
+                ? supabase.from('api_logs_ecom').select('action, status_code, payload, response, created_at').in('action', HOLD_ACTIONS)
+                    .or(`payload->>order.eq.${onmKey},payload->>order.eq.#${onmKey},payload->>orderName.eq.${onmKey},payload->>orderName.eq.#${onmKey}`)
+                    .order('created_at', { ascending: false }).limit(1000)
+                : supabase.from('api_logs_ecom').select('action, status_code, payload, response, created_at').in('action', HOLD_ACTIONS)
+                    .order('created_at', { ascending: false }).limit(2000),
+            // MSG91 thread by phone (last 20).
+            b.phone ? supabase.from('msg91_messages').select('direction, template_name, content, status, sent_at')
+                .ilike('phone', `%${last10}`).order('sent_at', { ascending: false }).limit(20) : Promise.resolve({ data: [] }),
         ]);
         // Merge phone- and email-matched orders (deduped), newest first.
         const custMap = new Map();
@@ -1168,7 +1235,12 @@ router.get('/support/order/:orderId', async (req, res) => {
         // Reflect EasyEcom cancellations Shopify hasn't synced yet — an order cancelled in EasyEcom still reads
         // as active (bucket order_to_dispatch) in order_buckets, which misleads the customer-history table. Show
         // it as cancelled so the agent isn't misguided into calling/holding a dead order.
-        const eeCanc = await eeCancelledSet([...custOrders.data.map(o => o.order_name), b.order_name]);
+        // ⚡ The EasyEcom check and the agents' names do not depend on each other — one round trip, not two.
+        const agentIds = [...new Set([...(calls.data || []), ...(notes.data || [])].map(x => x.agent_id).filter(Boolean))];
+        const [eeCanc, profs] = await Promise.all([
+            eeCancelledSet([...custOrders.data.map(o => o.order_name), b.order_name]),
+            agentIds.length ? chunkedIn('profiles', 'user_id, display_name', 'user_id', agentIds) : Promise.resolve([]),
+        ]);
         const nkn = n => String(n || '').replace('#', '').trim();
         if (eeCanc.has(nkn(b.order_name))) b.bucket = 'cancelled';
         custOrders.data.forEach(o => { if (eeCanc.has(nkn(o.order_name))) o.bucket = 'cancelled'; });
@@ -1182,10 +1254,7 @@ router.get('/support/order/:orderId', async (req, res) => {
         //   • key      — shopify_* writes `payload.order` (no #), easyecom_* writes `payload.orderName` (with #)
         //   • success  — easyecom_* always returns HTTP 200; the REAL result is in the body (`response.code`
         //                / `response.message`), so `status_code < 400` would score every failure as a success.
-        const { data: holdRows } = await supabase.from('api_logs_ecom')
-            .select('action, status_code, payload, response, created_at')
-            .in('action', ['shopify_hold', 'shopify_release', 'shopify_cancel', 'easyecom_hold_order', 'easyecom_unhold_order'])
-            .order('created_at', { ascending: false }).limit(2000);
+        const holdRows = (holdRowsRes && holdRowsRes.data) || [];   // read in stage two, above
         // Exact match on the order key (never a JSON substring test — that made TE25-3810/3811/…'s events
         // bleed into TE25-381's timeline via the prefix).
         const isEE = a => a === 'easyecom_hold_order' || a === 'easyecom_unhold_order';
@@ -1206,17 +1275,8 @@ router.get('/support/order/:orderId', async (req, res) => {
                     ok: isEE(l.action) ? eeOk(l.response) : (l.status_code || 0) < 400,
                     result: isEE(l.action) ? ((l.response || {}).message || null) : l.response, at: l.created_at }; })
             .sort((x, y) => new Date(x.at) - new Date(y.at));
-        // MSG91 thread by phone (last 20).
-        let msg91 = [];
-        if (b.phone) {
-            const last10 = String(b.phone).replace(/\D/g, '').slice(-10);
-            const { data: msgs } = await supabase.from('msg91_messages').select('direction, template_name, content, status, sent_at')
-                .ilike('phone', `%${last10}`).order('sent_at', { ascending: false }).limit(20);
-            msg91 = msgs || [];
-        }
-        // Agent names for calls/notes.
-        const agentIds = [...new Set([...(calls.data || []), ...(notes.data || [])].map(x => x.agent_id).filter(Boolean))];
-        const profs = agentIds.length ? await chunkedIn('profiles', 'user_id, display_name', 'user_id', agentIds) : [];
+        const msg91 = (msgsRes && msgsRes.data) || [];   // MSG91 thread by phone (last 20) — read in stage two
+        // Agent names for calls/notes (read above, alongside the EasyEcom check).
         const nameById = {}; profs.forEach(p => { nameById[p.user_id] = p.display_name; });
         // Whom-to-call: courier match → pincode prefix → region → first contact for that courier.
         const zip = (addr.data && addr.data.zip) || '';
@@ -1226,7 +1286,7 @@ router.get('/support/order/:orderId', async (req, res) => {
         const escalation = forCourier.find(c => c.pincode_pattern && zip && String(zip).startsWith(c.pincode_pattern))
             || forCourier.find(c => c.region && (province.includes(c.region.toLowerCase()) || city.includes(c.region.toLowerCase())))
             || forCourier[0] || null;
-        const myId = await ensureProfile(req.user.sub).catch(() => null);
+        const myId = await myIdP;
         res.json({ success: true, order: b, items: items.data || [], address: addr.data || null,
             tracking: tracking.data || [], msg91,
             calls: (calls.data || []).map(c => ({ ...c, agent_name: nameById[c.agent_id] || null })),
