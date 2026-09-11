@@ -1621,7 +1621,7 @@ function check(name, got, want) {
                 // outcome line says "no answer: customer never engaged" counted as answered. The tile
                 // read 19 · 100% on a day the Outcomes card underneath said no-answer 10 (2026-09-08).
                 check('call insights: answered means the customer spoke, not that a leg opened',
-                    [ci.includes('const answered = ai.filter(c => custTurns(c.transcript) > 0)'),
+                    [ci.includes('const answered = ai.filter(c => spokeTurns(c) > 0)'),
                      ci.includes('answered: answered.length'),
                      ci.includes('Math.round(answered.length / ai.length * 100)'),
                      !ci.includes('Math.round(connected.length / calls.length * 100)'),
@@ -1728,7 +1728,7 @@ function check(name, got, want) {
                 // now, and durOf reads an unfinalized call's live-backup seconds so a 36s conversation
                 // is not filed under 'never connected'.
                 check('call insights: the tile, the funnel and the per-type card all agree',
-                    [ci.includes('const answered = ai.filter(c => custTurns(c.transcript) > 0)'),
+                    [ci.includes('const answered = ai.filter(c => spokeTurns(c) > 0)'),
                      ci.includes('live backup, ([0-9]+)s'),
                      !ci.includes('const answered = connected.filter')],
                     [true, true, true]);
@@ -3079,13 +3079,117 @@ function check(name, got, want) {
                      /blocks\.map\(b => b\.text \|\| ''\)\.join\(''\)/.test(ai2)],
                     [true, true, true, true, true]);
             }
-            check('voice voicemail: the machine identifying itself hangs the call up instantly — no 125s chats with answering machines; carrier phrases only, a customer saying "I am busy" never matches',
-                [/VOICEMAIL_RX/.test(vb2), /voicemail greeting detected/.test(vb2),
-                 (() => { const m = vb2.match(/const VOICEMAIL_RX = (\/.*?\/i);/); if (!m) return false;
-                    const rx = eval(m[1]);
-                    return rx.test("The person you're trying to reach is not available. At the tone, please record your message.")
-                        && !rx.test('haan main busy hoon abhi') && !rx.test('yes I placed the order'); })()],
-                [true, true, true]);
+            // ── WHAT ANSWERED THE PHONE (2026-08-31, widened 2026-09-11) ─────────────────────────────────
+            // The phrases moved into app/api/call_machine.js so the live agent and Call Insights read ONE
+            // list. On 10 Sep 17 of 93 AI calls had a machine speaking as the customer — most written by the
+            // recogniser as English IN DEVANAGARI, which the old English-only pattern could never see.
+            {
+                const { machineKind } = require(path.join(ROOT, 'app/api/call_machine.js'));
+                const K = t => machineKind(t);
+                check('voice voicemail: every machine on 10 Sep is recognised, and the old catches all still hang up',
+                    [// the original sample, and every alternative of the old VOICEMAIL_RX (it is a strict superset)
+                     K("The person you're trying to reach is not available. At the tone, please record your message."),
+                     K('customer you are calling is not reachable'), K('the number is switched off'),
+                     K('out of coverage area'), K('जिस व्यक्ति से आप संपर्क करना चाहते हैं'), K('ग्राहक अभी व्यस्त है'),
+                     // "you ARE trying to reach" — the old pattern only knew "you're"
+                     K('The person you are trying to reach is not available.'),
+                     // ⚠️ the one that slipped through five times on TE25-47195: English written in Devanagari
+                     K('कॉल हैज़ बीन फॉरवर्डेड टू वॉइस मेल। द पर्सन यू आर ट्राइंग टू रीच इज़ नॉट अवेलेबल।'),
+                     K('आप जो पर्सन को पहुँच कर रहे हैं, वह उपलब्ध नहीं है।'),
+                     // Apple screening's LAST line — the person declined
+                     K("I'm sorry, this person is not available."),
+                     K('I cannot pick up the call right now. This is my true caller voice mail.')],
+                    ['unreachable', 'unreachable', 'unreachable', 'unreachable', 'unreachable', 'unreachable',
+                     'unreachable', 'unreachable', 'unreachable', 'unreachable', 'unreachable']);
+                check('voice voicemail: a machine still WAITING for the human is not hung up on',
+                    // Apple's screening opening and a network hold: the customer may yet pick up, so the
+                    // bridge keeps its 60 s wait — the words are only relabelled, never acted on
+                    [K('Hi, if you record your name and reason for calling, I will see if this person is available.'),
+                     K('इफ यू रिकॉर्ड योर नेम एंड रीज़न फॉर कॉलिंग, आई विल सी इफ दिस पर्सन इज अवेलेबल।'),
+                     K('Thanks, please stay on the line.'),
+                     K('The person you are speaking with has put your call on hold. Please stay on the line.'),
+                     K('द पर्सन यू आर स्पीकिंग विथ हैज़ पुट योर कॉल ऑन होल्ड, प्लीज स्टे ऑन द लाइन।')],
+                    ['waiting', 'waiting', 'waiting', 'waiting', 'waiting']);
+                check('voice voicemail: a CUSTOMER is never mistaken for a machine — a false match hangs up on them',
+                    [K('haan main busy hoon abhi'), K('yes I placed the order'), K('मुझे अभी नहीं चाहिए'),
+                     K("I can't talk right now, call me after 10 minutes"), K('हाँ जी बोलिए'), K('Hello'),
+                     K('नहीं, अभी नहीं, मैं बाहर हूँ।'), K('I did not receive my parcel'), K('hold on a minute'),
+                     K('वो अभी घर पर नहीं है')],
+                    [null, null, null, null, null, null, null, null, null, null]);
+                check('voice voicemail: the bridge hangs up on it, writes it as Machine:, and lets it choose nothing',
+                    [/voicemail greeting detected/.test(vb2),
+                     vb2.includes("const machine = machineKind(text);"),
+                     vb2.includes("this.s.transcript.push('Machine: ' + text);"),
+                     vb2.includes("this.s.transcript.push((machine ? 'Machine: ' : 'Customer: ') + text);"),
+                     // a screener or a hold keeps the EXISTING 60 s wait rather than being hung up on
+                     vb2.includes("if (SCREENER_RX.test(text) || machine === 'waiting') {"),
+                     // a machine never picks the call's language — a switch is a one-way door
+                     vb2.includes('const wantLang = machine ? null : requestedLanguage(text, this.s.lang);'),
+                     // one list, not two: the old inline pattern is gone
+                     !/const VOICEMAIL_RX = \//.test(vb2),
+                     // ⚠️ the REFUSAL check that sat mis-indented inside the voicemail branch is removed, NOT
+                     // moved: on real speech REFUSAL_RX reads "I didn't receive it" — an RTO customer who
+                     // WANTS the parcel — as a refusal. Enabling it needs that fixed first.
+                     !/if \(machine === 'unreachable'\) \{[\s\S]{0,400}REFUSAL_RX/.test(vb2)],
+                    [true, true, true, true, true, true, true, true]);
+                // WHO ENDED THE CALL — the "hangup webhook" reason fell from 10-12 calls a day (2-4 Sep) to 0
+                // (10 Sep) because the stream began closing first. The carrier's CDR says it outright.
+                check('voice hang-up: who ended the call is stamped from the carrier, after the log, never in its way',
+                    [vb2.includes('if (cdrUuid) setTimeout(() => stampHangupSource(this.logId, cdrUuid'),
+                     vb2.includes("hangup_by: cdr.by || null, hangup_cause: cdr.cause || null, answered: !!cdr.answered"),
+                     /fetchVobizCdr \}/.test(fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8')),
+                     fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260911_call_hangup_source.sql'), 'utf8')
+                        .includes('add column if not exists answered     boolean')],
+                    [true, true, true, true]);
+            }
+            // ── CALL INSIGHTS READS THE SAME LIST, ON HISTORY TOO ────────────────────────────────────────
+            {
+                const ins = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_insights.js'), 'utf8');
+                const { isMachineLine } = require(path.join(ROOT, 'app/api/call_machine.js'));
+                const src = ins.slice(ins.indexOf('const custTurns = '), ins.indexOf('const agentLines = '))
+                          + ins.slice(ins.indexOf('function outcomeOf('), ins.indexOf('// PAGED, because'));
+                const F = new Function('isMachineLine', src + ' return { custTurns, spokeTurns, callOutcome };')(isMachineLine);
+                const T = (...lines) => lines.join('\n');
+                check('insights: a machine written as Customer: in an OLD transcript no longer counts as the customer',
+                    [F.custTurns(T('Agent: Hello', 'Customer: द पर्सन यू आर ट्राइंग टू रीच इज़ नॉट अवेलेबल।')),
+                     F.custTurns(T('Agent: Hello', 'Machine: The person you are trying to reach is not available.')),
+                     F.custTurns(T('Agent: Hello', 'Customer: Hello', 'Customer: Yes I will take it')),
+                     // the carrier says the call never connected — nothing on it was a person
+                     F.spokeTurns({ answered: false, transcript: T('Customer: Functionally', 'Customer: College') }),
+                     // no stamp yet (every call before 2026-09-11) is UNKNOWN, never "not answered"
+                     F.spokeTurns({ transcript: T('Customer: Hello') }),
+                     // the bridge hung up on a machine: a garbled fragment it could not match on its own
+                     // ("at the town") is not a customer either — a voicemail answers INSTEAD of them
+                     F.spokeTurns({ summary: 'RESULT: no answer: voicemail reached. none',
+                         transcript: T('Customer: at the town', 'Machine: Please record your message',
+                                       '[voicemail greeting detected — hung up immediately, no message left]') }),
+                     // ⚠️ a SETTLED call keeps its speaker, or a confirmed call lands under "Nobody spoke"
+                     // and settled + unresolved + nobody-spoke stops summing to 100%
+                     F.spokeTurns({ summary: 'RESULT: reattempt agreed tomorrow', answered: false,
+                         transcript: T('Customer: Yes send it tomorrow') })],
+                    [0, 0, 2, 0, 1, 0, 1]);
+                check('insights: zero customer words is never Unclear, and a customer who hung up is named',
+                    [F.callOutcome({ summary: 'OUTCOME - no clear answer: greeting unanswered', transcript: T('Agent: Hello', '[no response from customer — call auto-ended]') }),
+                     // …unless we DROPPED their words as too quiet: they spoke, so unclear is honest
+                     F.callOutcome({ summary: 'OUTCOME: no clear answer - response inaudible', transcript: T('Agent: Hello', '[not heard — too quiet, peak 86: "Alright"]') }),
+                     F.callOutcome({ summary: 'RESULT: no answer: customer never engaged. none', transcript: T('Agent: Hi', 'Customer: हेलो।'), hangup_by: 'Callee' }),
+                     // WE ended it, or the network did — that is not the customer hanging up
+                     F.callOutcome({ summary: 'RESULT: no answer: customer never engaged. none', transcript: T('Agent: Hi', 'Customer: Hello'), hangup_by: 'Vobiz' }),
+                     F.callOutcome({ summary: 'RESULT: no answer: customer never engaged. none', transcript: T('Agent: Hi', 'Customer: Hello') }),
+                     // ⚠️ a settled decision is NEVER overridden by a mechanical rule
+                     F.callOutcome({ summary: 'RESULT: reattempt agreed tomorrow', transcript: T('Customer: Yes send it'), answered: false, hangup_by: 'Callee' })],
+                    ['no_answer', 'unclear', 'hung_up', 'no_answer', 'no_answer', 'reattempt']);
+                // The ONLY direct reads left are inside spokeTurns itself — the one function every count and
+                // outcome now goes through. Anywhere else, a raw read would bypass the machine filter.
+                const insRest = ins.replace(ins.slice(ins.indexOf('const spokeTurns = '), ins.indexOf('const agentLines = ')), '');
+                check('insights: every count and outcome goes through the corrected functions, and the page survives the migration not yet run',
+                    [!/custTurns\(c\.transcript\)/.test(insRest), !/outcomeOf\(c\.summary\)/.test(insRest),
+                     ins.includes('function callOutcome(call) {\n    const o = outcomeOf(call.summary);'),
+                     ins.includes('cols = CALL_COLS; page--; continue;'),
+                     fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8').includes("hung_up:'Customer hung up'"),
+                     fs.readFileSync(path.join(ROOT, 'app/api/ai_call_report.js'), 'utf8').includes("hung_up: 'Customer hung up'")],
+                    [true, true, true, true, true, true]);
+            }
             check('voice tone: no exclamation ever reaches the synthesizer (reads as excitement) — closing is calm, sanitize strips "!"',
                 // The English closing line moved into the registry as the {closing} value, so it is no
                 // longer a literal in the prompt prose — search both.
@@ -4839,6 +4943,48 @@ function check(name, got, want) {
                  card.stats.manual_excluded === (page.metrics.manual_calls || 0),
                  /AI calls only/.test(JSON.stringify(card.payload))],
                 [true, true, true, true, true, true]);
+        }
+        // ── THE WORKFLOWS WEBHOOK STAYS OFF (user, 2026-09-11: "on Teams report post come twice, once from
+        // Pravidhi and one from Workflow — I want to stop Workflow"). MEASURED, not read from the source:
+        // postTeams runs against a bot that fails the way a slow Teams acknowledgement does (the card has
+        // landed, the 20 s wait times out) and the webhook must not be touched. Then the one switch that
+        // brings it back is proven to work, so a real bot outage still has a lever.
+        {
+            const teamsPath = require.resolve(path.join(ROOT, 'app/api/teams.js'));
+            const botPath = require.resolve(path.join(ROOT, 'app/api/teams_bot.js'));
+            const axiosLib = require('axios');
+            const saved = { bot: require.cache[botPath], post: axiosLib.post, env: {} };
+            const ENV = ['TEAMS_WEBHOOK_ZZTEST', 'TEAMS_CHANNEL_ZZTEST', 'TEAMS_WEBHOOK_FALLBACK'];
+            ENV.forEach(k => { saved.env[k] = process.env[k]; });
+            let hookCalls = 0, botCalls = 0;
+            require.cache[botPath] = { id: botPath, filename: botPath, loaded: true, exports: {
+                botEnabled: () => true,
+                sendToChannel: async () => { botCalls++; throw new Error('timeout of 20000ms exceeded'); } } };
+            axiosLib.post = async () => { hookCalls++; return { status: 200, data: {} }; };
+            process.env.TEAMS_WEBHOOK_ZZTEST = 'https://example.invalid/workflow-hook';
+            process.env.TEAMS_CHANNEL_ZZTEST = '19:zztest@thread.tacv2';
+            const { postTeams, webhookFallbackOn } = require(teamsPath);
+            const card = { blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'selftest' } }] };
+            try {
+                delete process.env.TEAMS_WEBHOOK_FALLBACK;                   // the default: switch absent
+                const off = await quiet(() => postTeams(process.env.TEAMS_WEBHOOK_ZZTEST, card));
+                const hooksWhileOff = hookCalls, defaultOff = webhookFallbackOn();
+                process.env.TEAMS_WEBHOOK_FALLBACK = 'true';
+                const on = await quiet(() => postTeams(process.env.TEAMS_WEBHOOK_ZZTEST, card));
+                check('teams: a failed bot post is NOT re-posted via the Workflows webhook, and the switch brings it back',
+                    [defaultOff, off, hooksWhileOff, botCalls >= 1, on, hookCalls],
+                    [false, false, 0, true, true, 1]);
+            } finally {
+                if (saved.bot) require.cache[botPath] = saved.bot; else delete require.cache[botPath];
+                axiosLib.post = saved.post;
+                ENV.forEach(k => { if (saved.env[k] === undefined) delete process.env[k]; else process.env[k] = saved.env[k]; });
+            }
+            // The AI call report carried its OWN copy of the fallback; it must obey the same switch.
+            const rep2 = fs.readFileSync(path.join(ROOT, 'app/api/ai_call_report.js'), 'utf8');
+            check('teams: the AI call report obeys the same switch, and routing reports a lost report honestly',
+                [rep2.includes("if (!require('./teams').webhookFallbackOn()) {"),
+                 fs.readFileSync(path.join(ROOT, 'app/api/teams.js'), 'utf8').includes("(webhookFallbackOn() ? 'webhook' : 'not posted')")],
+                [true, true]);
         }
         console.log(`\n${pass} passed, ${fail} failed`);
         process.exit(fail ? 1 : 0);

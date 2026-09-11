@@ -57,17 +57,18 @@ const OUT_LABEL = {
     reattempt: 'Re-attempt agreed', confirmed: 'Confirmed', cancelled: 'Cancelled',
     unclear: 'Unclear', other: 'Other', no_outcome: 'Spoke, no outcome recorded',
     no_answer: 'No answer', no_conversation: 'Ended before any conversation',
+    hung_up: 'Customer hung up',   // spoke, then ended the call — from the carrier's CDR (2026-09-11)
 };
 const OUT_COLOR = {
     reattempt: GOOD, confirmed: GOOD, cancelled: BAD, unclear: WARN, other: WARN,
-    no_outcome: WARN, no_answer: MUTE, no_conversation: MUTE,
+    no_outcome: WARN, no_answer: MUTE, no_conversation: MUTE, hung_up: WARN,
 };
 
 const pct = (n, of) => (of > 0 ? Math.round((n / of) * 100) : 0);
 // Tone per outcome for the rendered tiles — green won it back, rose lost it, amber needs a person.
 const OUT_TONE = {
     reattempt: 'good', confirmed: 'good', cancelled: 'bad',
-    unclear: 'warn', other: 'warn', no_outcome: 'warn',
+    unclear: 'warn', other: 'warn', no_outcome: 'warn', hung_up: 'warn',
 };
 
 // One row of the "fact set" Teams renders as a two-column table.
@@ -145,7 +146,7 @@ async function buildAiCallReport(dayOffset = 0) {
             T(silent.length, share(silent.length), 'Nobody spoke',
               'ended before any conversation + no answer', 'mute'),
             T(unresolvedN, share(unresolvedN), 'Reached but unresolved',
-              'spoke with no outcome recorded + unclear', 'warn'),
+              'spoke with no outcome recorded + unclear + hung up', 'warn'),
             T(settledN, share(settledN), 'Settled - a real decision',
               're-attempt, confirmed or cancelled', 'good'),
 
@@ -254,6 +255,13 @@ async function sendAiCallReport(dayOffset = 0) {
         return { posted: true, via: 'bot', stats };
     } catch (e) {
         console.warn('[AI-CallReport] bot post failed:', e.message);
+        // The Workflows webhook is OFF unless TEAMS_WEBHOOK_FALLBACK=true — the same switch every other
+        // report uses (teams.js). A bot post that timed out has usually already LANDED, and posting again
+        // here is exactly the "once from Pravidhi, once from Workflow" duplicate (user, 2026-09-11).
+        if (!require('./teams').webhookFallbackOn()) {
+            console.error('[AI-CallReport] NOT re-posting via the Workflows webhook (TEAMS_WEBHOOK_FALLBACK is off)');
+            return { skipped: 'bot failed, Workflows webhook off', error: e.message, stats };
+        }
         const hook = String(process.env.TEAMS_WEBHOOK_AI_CALLS || '').trim();
         if (!hook) { console.log('[AI-CallReport] no TEAMS_WEBHOOK_AI_CALLS fallback — report not posted'); return { skipped: 'bot failed, no webhook', error: e.message, stats }; }
         const ok = await postTeams(hook, payload);

@@ -756,4 +756,4 @@ router.post('/vobiz/local-test-call', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-module.exports = { router, highValueCallTick, rtoCallTick, handleCodCallOutcome, handleRtoCallOutcome, handleUnansweredHangup, classifyOutcome };
+module.exports = { router, highValueCallTick, rtoCallTick, handleCodCallOutcome, handleRtoCallOutcome, handleUnansweredHangup, classifyOutcome, fetchVobizCdr };

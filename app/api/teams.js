@@ -1,4 +1,6 @@
 // Microsoft Teams reporting via a Workflows incoming webhook (replaces Slack chat.postMessage).
+// ⚠️ Since 2026-09-11 reports post through the PRAVIDHI BOT ONLY — the Workflows webhook is off unless
+// TEAMS_WEBHOOK_FALLBACK=true (see webhookFallbackOn). The webhook URLs below still identify the channel.
 // Setup per channel: Teams → "Workflows" app → template "Post to a channel when a webhook request is
 // received" → copy the URL into .env (TEAMS_WEBHOOK_WAREHOUSE / _DP / _HOLD / _AMAZON).
 // We convert the existing Slack Block-Kit payload into an Adaptive Card, so report builders don't change.
@@ -240,6 +242,15 @@ function channelForWebhook(url) {
     return null;
 }
 
+// THE WORKFLOWS WEBHOOK IS OFF (user, 2026-09-11: "on Teams report post come twice, once from Pravidhi and
+// one from Workflow — I want to stop Workflow"). The fallback existed so a report could never go missing
+// because the bot failed — but a bot post that "fails" has often already been delivered: sendToChannel
+// waits 20 s for Teams to acknowledge, and when Teams is slow the card lands, the wait times out, and the
+// report was then posted a second time from the Workflows sender. Off by default; set
+// TEAMS_WEBHOOK_FALLBACK=true in .env to bring the webhook back as a lever for a real bot outage — no
+// code change or redeploy needed, just a restart.
+const webhookFallbackOn = () => String(_envVal('TEAMS_WEBHOOK_FALLBACK') || '').trim().toLowerCase() === 'true';
+
 // Post a Slack-style payload to a Teams Workflow webhook as a native Adaptive Card.
 // The Workflow's "Post card in a chat or channel" reads triggerBody()?['card'] — a JSON string of the card.
 async function postTeams(webhookUrl, payload, opts = {}) {
@@ -249,17 +260,14 @@ async function postTeams(webhookUrl, payload, opts = {}) {
     const card = buildAdaptiveCard(payload, opts);
     if (!card) return false;
 
-    // Prefer the Pravidhi bot when we can: the card then comes from the bot's own identity instead of the
-    // generic "Workflows" sender, and the bot works in PRIVATE channels where an incoming webhook
-    // cannot be created at all. Falls back to the webhook whenever the bot is not configured, has
-    // never seen that channel (no serviceUrl learned yet), or errors — so this can only ever add a
-    // delivery path, never remove one. A report failing to post because we got clever is not a
-    // trade worth making.
+    // The Pravidhi bot is the delivery path: the card comes from the bot's own identity instead of the
+    // generic "Workflows" sender, and the bot works in PRIVATE channels where an incoming webhook cannot
+    // be created at all.
     //
     // The channel is resolved from the WEBHOOK URL rather than passed by every caller: each
-    // TEAMS_WEBHOOK_<X> has a matching TEAMS_CHANNEL_<X>, so one lookup switches every existing
-    // report to the bot with no call-site changes — and any report whose channel id is not
-    // configured simply keeps using its webhook.
+    // TEAMS_WEBHOOK_<X> has a matching TEAMS_CHANNEL_<X>, so one lookup routes every existing report to
+    // the bot with no call-site changes. The webhook URL is therefore still REQUIRED in .env — it is the
+    // key that finds the channel — even though nothing is posted to it any more.
     const channelId = opts.channelId || channelForWebhook(webhookUrl);
     if (channelId) {
         try {
@@ -273,10 +281,26 @@ async function postTeams(webhookUrl, payload, opts = {}) {
                 return true;
             }
         } catch (e) {
-            console.warn(`[Teams] bot post failed (${e.message}) — falling back to the webhook`);
+            // ⚠️ A FAILED BOT POST HAS OFTEN ALREADY LANDED. sendToChannel waits 20 s for Teams to
+            // acknowledge; when Teams is slow the card is delivered, the wait times out, and this used to
+            // post the SAME report again through the Workflows webhook — "once from Pravidhi, once from
+            // Workflow" (user, 2026-09-11). So a failure is logged loudly and NOT retried elsewhere.
+            if (!webhookFallbackOn()) {
+                console.error(`[Teams] bot post failed (${e.message}) — NOT re-posting via the Workflows webhook `
+                    + `(TEAMS_WEBHOOK_FALLBACK is off). If this card is missing in Teams, this line is why.`);
+                return false;
+            }
+            console.warn(`[Teams] bot post failed (${e.message}) — falling back to the webhook (TEAMS_WEBHOOK_FALLBACK=true)`);
         }
     }
 
+    // No bot route (bot not configured, or no TEAMS_CHANNEL_* for this webhook) and the Workflows path is
+    // off: say so, rather than disappearing a report without a trace.
+    if (!webhookFallbackOn()) {
+        console.error(`[Teams] report NOT posted — ${channelId ? 'the Pravidhi bot is not configured' : 'no TEAMS_CHANNEL_* matches its webhook'}, `
+            + `and the Workflows webhook is off (TEAMS_WEBHOOK_FALLBACK).`);
+        return false;
+    }
     if (!webhookUrl) return false;
     const body = { card: JSON.stringify(card) };
     // Optional plain HTML rendering, sent alongside the card. Used by flows that reply INTO a thread
@@ -321,11 +345,13 @@ router.get('/teams/routing', (req, res) => {
             target, env_var: key,
             webhook: !!url,
             channel_id: channelId,
-            via: (botOn && channelId) ? 'bot' : (url ? 'webhook' : 'not configured'),
+            // 'not posted' — no bot route and the Workflows webhook is off: that report would be LOST, which
+            // is exactly what this endpoint exists to surface before a cron finds out.
+            via: (botOn && channelId) ? 'bot' : (url ? (webhookFallbackOn() ? 'webhook' : 'not posted') : 'not configured'),
             why: !url ? `${key} is not set` : !channelId ? `no TEAMS_CHANNEL_* matches ${key}` : !botOn ? 'bot disabled (TEAMS_BOT_APP_ID / _APP_PASSWORD missing)' : null,
         };
     });
-    res.json({ success: true, bot_enabled: botOn, targets: rows });
+    res.json({ success: true, bot_enabled: botOn, webhook_fallback: webhookFallbackOn(), targets: rows });
 });
 
 // POST /api/teams/test?target=<one of TARGETS> — verify a channel is wired up, and report which path it used.
@@ -337,7 +363,7 @@ router.post('/teams/test', async (req, res) => {
     let botOn = false;
     try { botOn = require('./teams_bot').botEnabled(); } catch (_) {}
     const channelId = channelForWebhook(url);
-    const via = (botOn && channelId) ? 'bot' : 'webhook';
+    const via = (botOn && channelId) ? 'bot' : (webhookFallbackOn() ? 'webhook' : 'not posted');
     const ok = await postTeams(url, { blocks: [
         { type: 'header', text: { type: 'plain_text', text: '✅ Teams webhook test' } },
         { type: 'section', text: { type: 'mrkdwn', text: `This is a *test* card from Pravidhi for the *${target}* channel, sent via *${via === 'bot' ? 'the Pravidhi bot' : 'the Workflows webhook'}*. If you can see this, reports will arrive here.` } },
@@ -346,4 +372,4 @@ router.post('/teams/test', async (req, res) => {
     res.json({ success: ok, target, via, channel_id: channelId });
 });
 
-module.exports = { postTeams, buildCard, mrkdwn, router, channelForWebhook };
+module.exports = { postTeams, buildCard, mrkdwn, router, channelForWebhook, webhookFallbackOn };

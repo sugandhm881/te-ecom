@@ -1231,6 +1231,109 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### Teams reports post once, from Pravidhi — the Workflows fallback is off (2026-09-11)
+
+User: *"on Teams report post come twice, once from Pravidhi and one from Workflow — I want to stop
+Workflow."* Every report goes through `postTeams()` (teams.js), which tried the **Pravidhi bot** first and,
+on ANY error, posted the same card again through the report's **Workflows webhook**. The code never posted
+twice on purpose — but a bot post that "fails" has often already been delivered: `sendToChannel` waits 20 s
+for Teams to acknowledge, and when Teams is slow the card lands, the wait times out, and the catch posted
+the report a second time from the Workflows sender.
+
+- **Bot only.** A failed bot post is logged loudly (`[Teams] bot post failed (…) — NOT re-posting via the
+  Workflows webhook`) and returns false. It is not retried anywhere else.
+- **`TEAMS_WEBHOOK_FALLBACK=true`** in `.env` (+ restart) brings the webhook back — a lever for a real bot
+  outage, no code change. Default off. `webhookFallbackOn()` is the one definition; the AI call report,
+  which carried its **own** copy of the fallback (`TEAMS_WEBHOOK_AI_CALLS`), now obeys it too.
+- ⚠️ **Keep every `TEAMS_WEBHOOK_*` in `.env`.** Nothing is posted to them any more, but
+  `channelForWebhook()` resolves each report's bot channel FROM its webhook URL
+  (`TEAMS_WEBHOOK_<X>` → `TEAMS_CHANNEL_<X>`). Delete one and that report loses its channel.
+- `GET /api/teams/routing` now reports `via: 'not posted'` for a report with no bot route while the
+  fallback is off, plus `webhook_fallback`. Check it on the VPS after a deploy — a lost report shows there
+  before a cron finds out.
+- Selftest runs `postTeams` against a bot failing the way a slow acknowledgement does and proves the
+  webhook is never called — then flips the switch and proves it is.
+
+⚠️ **Staging posts to live channels.** `pravidhi-staging/.env` carries the same bot credentials and all
+eight webhooks as live, and `cronJob()` has no environment guard — so whenever the local server is running
+at a report's time it posts that report too (which would now appear as two *Pravidhi* posts). Not fixed;
+offered as a one-setting guard.
+
+### Machines stop counting as customers, and "who hung up" comes back (2026-09-11)
+
+User: *"check yesterday call spoken but no outcome recorded and unclear … earlier who hangup the call was
+saved now its not saved … fix apple screening … 'The person you're trying to reach isn't available' —
+make sure these kind of calls go in no answer."* Then: *"fix these without affect function and feature and
+quality of call."*
+
+**What 10 Sep actually held** (94 AI calls). *"Spoke, no outcome recorded"* is not an outcome the summary
+writes: the page takes any call filed no-answer / no-conversation and renames it if the transcript has even
+one `Customer:` line. So anything the recogniser wrote as a customer line landed there. **15 of its 30 calls
+were machines** — voicemail, Apple call screening, Truecaller voicemail, a network "your call is on hold" —
+17 across the day, 569 s of line time, 13 of them flipping the call's language. One voicemail box
+(TE25-47195) was rung **five times**, ~32 s each, never recognised, because the recogniser wrote the English
+announcement **in Devanagari** — *"द पर्सन यू आर ट्राइंग टू रीच इज़ नॉट अवेलेबल"* — and the old
+`VOICEMAIL_RX` only read English letters. It also only knew "you**'re**", not "you **are**", and never saw
+Apple's final *"I'm sorry, this person is not available"*, so the agent sat through its full 60 s wait.
+
+**`app/api/call_machine.js` — one list, read in two places.** `machineKind(text)` →
+`'unreachable'` (voicemail, carrier "not available", Apple's final line, Hindi carrier phrasing, the same
+English in Devanagari) or `'waiting'` (Apple's screening opening, a hold announcement) or `null`.
+- **Live** (vobiz_bridge `onCustomer`): `unreachable` → hang up in 200 ms, exactly as voicemail always did;
+  `waiting` → the **existing** 60 s screener wait, because the customer may still pick up. Either way the
+  words are written as **`Machine:`**, never `Customer:`, and a machine **never chooses the call's
+  language** (a switch is one-way — the human who picks up after an English screener was locked into
+  English).
+- **History** (Call Insights `custTurns`): a `Customer:` line whose text is a machine is not counted, so
+  transcripts saved before this correct themselves with no backfill.
+- ⚠️ **Precision over recall** — a false match HANGS UP ON A CUSTOMER. Every phrase is something a network
+  says *about* the customer. Tests pin ten real-customer phrases that must never match ("I'm busy", "call me
+  after 10 minutes", "नहीं, अभी नहीं, मैं बाहर हूँ", "I did not receive my parcel", "hold on a minute" …),
+  and that the list is a **strict superset** of the old `VOICEMAIL_RX` — nothing that used to hang up stops.
+- `UNREACHABLE` is checked before `WAITING`, preserving the old precedence: a Hindi hold message containing
+  "जिस व्यक्ति" still hangs up, as it always did.
+
+**Who hung up — regressed since 5 Sep, now read from the carrier.** The mechanical line's reason is
+whichever of two events reaches us first: the media stream closing, or Vobiz's hang-up webhook.
+`"hangup webhook"` was the reason on 12 / 10 / 11 calls on 2–4 Sep, then 1, 1, 1, 2, 3 — and **0 on 10 Sep**.
+No code changed on those dates; the race simply started going the other way, and a customer hanging up
+became indistinguishable from anything else. `close()` now schedules `stampHangupSource()` 5 s after the
+log is saved (fire-and-forget, never in the call's way): it reads the Vobiz CDR (`fetchVobizCdr`, now
+exported) and writes **`hangup_by`** (`Callee` = the customer, `Carrier`, `Vobiz`), **`hangup_cause`** and
+**`answered`** onto `agent_call_logs` — migration `20260911_call_hangup_source.sql` (**run 2026-09-11**).
+
+**Call Insights now classifies through `callOutcome()` and `spokeTurns()`** — every count and outcome on
+the page, the Teams report included:
+- **"Customer hung up"** (`hung_up`) — the customer spoke, nothing was settled, and the CDR says `Callee`.
+  It sits in *Reached but unresolved*, which is answered − settled, so no total had to change.
+- **Zero customer words is never "Unclear"** — two calls on 10 Sep were, because the label was read from
+  the summary alone. Except a call carrying `[not heard …]`: we dropped their words as too quiet, so they
+  did speak and "unclear" is honest.
+- **A call the carrier never connected** (`answered = false`), or one the bridge **hung up on as voicemail**
+  (its marker), has no speaker — which catches the garbled fragment the list cannot match safely on its own
+  ("at the town", a bare "Thanks" split off Apple's "Thanks, please stay on the line").
+- ⚠️ **A settled call is never touched** — not its outcome and not its speaker. Zeroing a confirmed call's
+  speaker would put it under "Nobody spoke" and break settled + unresolved + nobody-spoke = 100%.
+- `loadCalls` asks for the three new columns and **falls back** to the old select if they are missing, so
+  the page survived the window before the migration ran (verified live).
+
+**10 Sep, re-classified by the shipped code:** *Spoke, no outcome recorded* **30 → 17**, *Unclear* 14 → 12,
+*No answer* 6 → 20, *answered* **61 → 47**; confirmed / re-attempt / cancelled unchanged (6 / 11 / 2). The
+last two machine calls (TE25-47120, TE25-47317) predate the marker; a call like either is now caught live.
+"Customer hung up" only appears on calls made after the deploy — history carries no stamp.
+
+⚠️ **THE REFUSAL GUARD IS STILL DEAD — deliberately.** `refusalSeen` (which stops the agent promising a
+re-attempt after the customer refused — TE25-45876, 2026-09-08) was only ever set by a check that a merge
+had nested **inside the voicemail branch**, so it could only fire on a voicemail greeting, i.e. never. It was
+removed, **not moved**: on real speech `REFUSAL_RX` reads *"I didn't receive it"* — an RTO customer who
+**wants** the parcel — as a refusal, and turning it on would stop re-attempt offers to exactly them. Fix the
+pattern's precision first; the consumer (`if (this.s.refusalSeen && REATTEMPT_ASSERT_RX.test(spoken))`)
+is still in place.
+
+**Not addressed:** the main cause of *Unclear* is the ear — the noise floor dropped real "Yes", "Yeah",
+"Hello", "Alright" (peaks 8–181) as too quiet. Needs tuning with test calls. And TE25-47460 — *"नहीं, अभी
+नहीं, मैं बाहर हूँ"* ("not now, I'm outside") — was summarised as no answer; a summarizer wording issue.
+
 ### The Call Queue becomes two pages, and the NDR date becomes the date (2026-09-10)
 
 One tab strip had been carrying two unrelated jobs. **Hold Orders** is a call made *before* a COD parcel

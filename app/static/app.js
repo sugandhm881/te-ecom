@@ -8662,7 +8662,7 @@ async function sciLoad(){
     // call ended before there was anything to summarise. These labels are the human wording for that.
     const OUT_LABEL={ no_conversation:'Ended before any conversation', no_answer:'No answer', reattempt:'Re-attempt agreed',
                       confirmed:'Confirmed', cancelled:'Cancelled', unclear:'Unclear', other:'Other',
-                      no_outcome:'Spoke, but no outcome recorded' };
+                      no_outcome:'Spoke, but no outcome recorded', hung_up:'Customer hung up' };
     // ONE TILE, USED BY EVERY BREAKDOWN ON THE PAGE. A funnel step, a call type, an outcome and a
     // language are all the same thing — a count, its share of a stated whole, and a name — so they get
     // one shape rather than three hand-rolled row layouts that drift apart. `pick` makes it clickable;
@@ -8749,7 +8749,7 @@ async function sciLoad(){
       if(spoke && (k==='no_answer'||k==='no_conversation')) k='no_outcome';
       o[k]=(o[k]||0)+1; return o; },{});
     const ansCalls=(d.calls||[]).filter(spokeOf), silCalls=(d.calls||[]).filter(c=>!spokeOf(c));
-    const OUT_MINI={ confirmed:'good', reattempt:'good', cancelled:'bad', unclear:'warn', other:'warn', no_outcome:'warn' };
+    const OUT_MINI={ confirmed:'good', reattempt:'good', cancelled:'bad', unclear:'warn', other:'warn', no_outcome:'warn', hung_up:'warn' };
     const block=(title,sub,o,prefix)=>{
       const ent=Object.entries(o).sort((a,b)=>b[1]-a[1]);
       const of=ent.reduce((a,[,v])=>a+v,0)||1;   // each group is a share of ITSELF, never of the other
@@ -8773,7 +8773,7 @@ async function sciLoad(){
       + shareTile(settledN, 'Settled — a real decision',
           're-attempt agreed, confirmed, or cancelled', 'good')
       + shareTile(unresolvedN, 'Reached but unresolved',
-          'unclear, or spoke with no outcome recorded', 'warn')
+          'unclear, hung up, or spoke with no outcome recorded', 'warn')
       + shareTile(noSpeakN, 'Nobody spoke',
           'hung up, silent, or never connected', 'bad')
       + `</div>`

@@ -16,6 +16,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../supabase');
+const { isMachineLine } = require('./call_machine');   // the same list the live agent hangs up on
 
 // A call whose close() never ran (a restart mid-call) keeps its LIVE BACKUP summary — "⏳ call in
 // progress (live backup, 36s so far)" — which carries no "Ns call to" and so read as ZERO seconds.
@@ -26,7 +27,29 @@ const durOf = (c) => {
     const m = s.match(/([0-9]+)s call to/) || s.match(/live backup, ([0-9]+)s/);
     return Number((m || [])[1] || 0);
 };
-const custTurns = (t) => (String(t || '').match(/^customer:/gim) || []).length;
+// A LINE LABELLED `Customer:` IS NOT PROOF A CUSTOMER SPOKE (user, 2026-09-11). Until that day the bridge
+// wrote a voicemail greeting, a carrier "not available" and Apple's screening assistant as `Customer:`, so
+// on 10 Sep 15 of the 30 "Spoke, no outcome recorded" calls were machines. New calls write `Machine:`, which
+// this never counts; the filter below keeps transcripts saved BEFORE that from counting a machine as a
+// person, so the history corrects itself without a backfill.
+const custTurns = (t) => String(t || '').split('\n')
+    .filter(l => /^customer:/i.test(l) && !isMachineLine(l.replace(/^customer:\s*/i, ''))).length;
+// How many times the customer spoke ON THIS CALL. Zero in two cases where nothing on the line was a person:
+//   · the carrier says the call was never ANSWERED — whatever the recogniser transcribed was the network's
+//     own announcement: the call cut before, or after, a full ring (`answered` is stamped from the CDR,
+//     2026-09-11 onward; absent = unknown, never "no");
+//   · the bridge HUNG UP ON A MACHINE — it writes the voicemail marker only then, and a voicemail answers
+//     INSTEAD of the customer. This catches the garbled fragment the phrase list cannot match safely on its
+//     own ("at the town" for "at the tone", a bare "Thanks" split off Apple's "Thanks, please stay on the
+//     line"), which on 10 Sep kept 4 of the 15 machine calls reading as a customer who spoke.
+// ⚠️ A SETTLED call keeps its speaker. A decision needs a person, and zeroing it would put a confirmed
+// call under "Nobody spoke" — breaking settled + unresolved + nobody-spoke = 100% on the page.
+const spokeTurns = (c) => {
+    if (!c) return 0;
+    const settled = ['confirmed', 'reattempt', 'cancelled'].includes(outcomeOf(c.summary));
+    if (!settled && (c.answered === false || String(c.transcript || '').includes('[voicemail greeting detected'))) return 0;
+    return custTurns(c.transcript);
+};
 const agentLines = (t) => String(t || '').split('\n').filter(l => /^agent:/i.test(l));
 
 // Every counter here mirrors a RULE the agent is meant to follow, so a rising number is a
@@ -69,18 +92,42 @@ function outcomeOf(summary) {
     return 'other';
 }
 
+// THE OUTCOME OF ONE CALL — the summary's word, corrected by what the transcript and the carrier say
+// (user, 2026-09-11: machines and hang-ups were landing in "Spoke, no outcome recorded" and "Unclear").
+//   · NO CUSTOMER WORDS → never "unclear" or "other". Two calls reached Unclear on 10 Sep without one word
+//     from the customer, because the label was read from the summary alone. The exception is a call where
+//     we DROPPED their words as too quiet (`[not heard …]`): they did speak, so "unclear" is the honest word.
+//   · The customer spoke, nothing was settled, and the CARRIER says the customer ended it → "Customer hung
+//     up". That is what "hangup webhook" in the log used to tell you, until the stream began closing first.
+// Settled outcomes (confirmed / reattempt / cancelled) are never overridden — those are the summary
+// reading a real conversation, and a mechanical rule has no business second-guessing a decision.
+function callOutcome(call) {
+    const o = outcomeOf(call.summary);
+    const turns = spokeTurns(call);
+    if (!turns && (o === 'unclear' || o === 'other') && !/\[not heard/i.test(String(call.transcript || ''))) return 'no_answer';
+    if (turns && (o === 'no_answer' || o === 'no_conversation') && /^callee$/i.test(String(call.hangup_by || ''))) return 'hung_up';
+    return o;
+}
+
 // PAGED, because Supabase caps a read at 1,000 rows and silently returns the first page — at ~60
 // calls a day a month of history is ~1,800 and the tail would simply vanish from every number on
 // the page. Walks in 1,000-row pages until a short page comes back, with a hard ceiling so a huge
 // range cannot pull the server over.
+// hangup_by / hangup_cause / answered arrive with 20260911_call_hangup_source.sql. Until that migration runs,
+// NAMING them fails the whole read — so the page falls back to the columns it always had, rather than
+// going blank over three optional fields.
+const CALL_COLS = 'id, order_id, customer_name, call_type, language, exchanges, summary, transcript, called_at, recording_url, cost_meta';
+const CALL_COLS_CDR = CALL_COLS + ', hangup_by, hangup_cause, answered';
 async function loadCalls(fromIso, toIso, { cap = 5000 } = {}) {
     const out = [];
+    let cols = CALL_COLS_CDR;
     for (let page = 0; page * 1000 < cap; page++) {
         const { data, error } = await supabase.from('agent_call_logs')
-            .select('id, order_id, customer_name, call_type, language, exchanges, summary, transcript, called_at, recording_url, cost_meta')
+            .select(cols)
             .gte('called_at', fromIso).lte('called_at', toIso)
             .order('called_at', { ascending: false })
             .range(page * 1000, page * 1000 + 999);
+        if (error && cols === CALL_COLS_CDR && /hangup_|answered|column/i.test(error.message)) { cols = CALL_COLS; page--; continue; }
         if (error) throw new Error('call log read failed: ' + error.message);
         out.push(...(data || []));
         if (!data || data.length < 1000) break;
@@ -102,12 +149,12 @@ function flagsFor(c) {
         double_intro: ag.filter(l => /this is \w+ from The Element|मैं \w+ बोल|from The Element,? (calling|and)/i.test(l)).length > 1,
         hello_storm: t.split('\n').filter(l => /^customer:\s*(hello|हेलो|हैलो)[\s.,!?।]*$/i.test(l.trim())).length >= 3,
         wantit_overasked: ag.filter(l => /would you still like to receive|receive करना चाहेंगे|send (it|the .*) again|भेज (दूँ|दें|दीजिए)/i.test(l)).length >= 3,
-        one_sided: durOf(c) > 0 && custTurns(c.transcript) === 0,
+        one_sided: durOf(c) > 0 && spokeTurns(c) === 0,
         reached_closing: /great day|दिन शुभ हो|choosing The Element|चुनने के लिए/i.test(ag[ag.length - 1] || ''),
         lang_switched: /\[language switched/.test(t),
         blocked_line: /\[not spoken — blocked by rule\]/.test(t),
         agent_turns: ag.length,
-        customer_turns: custTurns(c.transcript),
+        customer_turns: spokeTurns(c),
     };
 }
 
@@ -182,10 +229,10 @@ async function computeInsights(query) {
         // them: the tile read 52 where RTO 51 + COD 2 made 53, and the funnel summed to 120 of 121.
         // Whether we reached someone is whether they SPOKE. How long the line was open is a different
         // question, and it stays where it belongs — on Avg length, which still uses `connected`.
-        const answered = ai.filter(c => custTurns(c.transcript) > 0);
+        const answered = ai.filter(c => spokeTurns(c) > 0);
         const outcomes = {}, langs = {}, types = {}, byOrder = {};
         for (const c of ai) {
-            const o = outcomeOf(c.summary); outcomes[o] = (outcomes[o] || 0) + 1;
+            const o = callOutcome(c); outcomes[o] = (outcomes[o] || 0) + 1;
             langs[c.language || '?'] = (langs[c.language || '?'] || 0) + 1;
             const t = String(c.call_type || '').replace('_vobiz', ''); types[t] = (types[t] || 0) + 1;
             // A CALL WITH NO ORDER ID IS NOT AN ORDER. `byOrder[undefined]` keys as the STRING "null", so
@@ -214,10 +261,10 @@ async function computeInsights(query) {
             const t = byType[k] = byType[k] || { calls: 0, answered: 0, silent_long: 0, won: 0, seconds: 0, _orders: new Set() };
             t.calls++;
             if (c.order_id) t._orders.add(c.order_id); else t.no_order = (t.no_order || 0) + 1;
-            if (custTurns(c.transcript) > 0) t.answered++;
-            if (custTurns(c.transcript) === 0 && durOf(c) >= 20) t.silent_long++;
+            if (spokeTurns(c) > 0) t.answered++;
+            if (spokeTurns(c) === 0 && durOf(c) >= 20) t.silent_long++;
             // the win condition differs by job: RTO wants a re-attempt agreed, COD wants a confirmation
-            if (['reattempt', 'confirmed'].includes(outcomeOf(c.summary))) t.won++;
+            if (['reattempt', 'confirmed'].includes(callOutcome(c))) t.won++;
             t.seconds += durOf(c);
         }
         for (const k of Object.keys(byType)) {
@@ -235,7 +282,7 @@ async function computeInsights(query) {
             delete t._orders;
             delete t.seconds;
         }
-        const silentCalls = ai.filter(c => custTurns(c.transcript) === 0);
+        const silentCalls = ai.filter(c => spokeTurns(c) === 0);
         const silence = {
             never_connected: silentCalls.filter(c => durOf(c) === 0).length,
             hung_up_fast:    silentCalls.filter(c => durOf(c) > 0 && durOf(c) < 6).length,
@@ -327,9 +374,10 @@ async function computeInsights(query) {
                     id: c.id, order_id: c.order_id, customer_name: c.customer_name || null,
                     call_type: String(c.call_type || '').replace('_vobiz', ''),
                     language: c.language, called_at: c.called_at,
-                    seconds: durOf(c), outcome: outcomeOf(c.summary), summary: c.summary || '',
+                    seconds: durOf(c), outcome: callOutcome(c), summary: c.summary || '',
                     exchanges: c.exchanges, transcript: c.transcript || '',
                     recording_url: c.recording_url || null,
+                    hangup_by: c.hangup_by || null,          // Callee = the customer, Carrier = network, Vobiz = us
                     claude: claudeCostOf(c),
                     flags: f,
                     dial: d ? {
@@ -370,13 +418,13 @@ router.post('/support/call-insights/run', async (req, res) => {
         const calls = await loadCalls(fromIso, toIso);
         // Real CONVERSATIONS only — a hello-only call teaches the audit nothing, and 60 is plenty
         // of signal without paying for a novel-sized prompt.
-        const rich = calls.filter(c => custTurns(c.transcript) >= 2).slice(0, 60);
+        const rich = calls.filter(c => spokeTurns(c) >= 2).slice(0, 60);
         if (rich.length < 3) return res.json({ success: false, error: 'not enough real conversations in this range yet' });
 
         // Each call carries its OUTCOME and length, so the audit can correlate behaviour with
         // results ("the calls that ended in no_answer all did X") instead of only reading prose.
-        const blob = rich.map((c, i) => `=== CALL ${i + 1} · ${c.order_id} · ${c.language} · ${durOf(c)}s · ${custTurns(c.transcript)} customer turns · outcome: ${outcomeOf(c.summary)}\n${String(c.transcript).slice(0, 1400)}`).join('\n\n');
-        const mix = {}; for (const c of calls) { const o = outcomeOf(c.summary); mix[o] = (mix[o] || 0) + 1; }
+        const blob = rich.map((c, i) => `=== CALL ${i + 1} · ${c.order_id} · ${c.language} · ${durOf(c)}s · ${spokeTurns(c)} customer turns · outcome: ${callOutcome(c)}\n${String(c.transcript).slice(0, 1400)}`).join('\n\n');
+        const mix = {}; for (const c of calls) { const o = callOutcome(c); mix[o] = (mix[o] || 0) + 1; }
         const aiCalls = calls.filter(c => String(c.call_type || '') !== 'manual_human');   // a human's call is not her score
         const context = `PERIOD TOTALS: ${aiCalls.length} calls logged, ${aiCalls.filter(c => durOf(c) > 0).length} connected, outcome mix ${JSON.stringify(mix)}.
 THE AGENT'S STANDING RULES (a breach is a real finding): introduce herself once per call; ask "do you still want it?" at most twice; never ask for a delivery time (the courier team schedules); answer "when will it arrive" with the courier-team assurance, never a date; give the courier's recorded NDR reason with attempt dates when asked; confirm the address ONLY when an address is provided in her prompt; acknowledge trouble in the customer's own language before continuing; never invent facts, never promise refunds; end with the brand closing.`;

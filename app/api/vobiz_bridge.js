@@ -31,6 +31,7 @@ const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const { supabase } = require('../supabase');
 const callRegistry = require('./call_registry');   // one number = one call, AI or human
+const { machineKind } = require('./call_machine');   // voicemail / carrier / screener — shared with Call Insights
 const { renderRules } = require('./agent_rules');   // the rule registry — see agent_rules.js
 const config = require('../../config');
 const { resolveOrderFields, allowlistBlocksFor } = require('./msg91_wa');
@@ -1411,27 +1412,34 @@ class VoiceCall {
     }
 
     onCustomer(text, sttLang) {
-        // VOICEMAIL: hang up the moment the machine identifies itself (user, 2026-08-31: "The person
-        // you're trying to reach is not available… hang up the call, don't wait") — before this, the
-        // agent chatted with an answering machine for 125 seconds (TE25-45530). Carrier phrases only,
-        // third-person, so a real customer saying "I am busy" can never match. The close reason makes
-        // the summary say voicemail → classifyOutcome files it no_answer → the retry ladder proceeds.
-        const VOICEMAIL_RX = /person you.?re trying to reach|at the tone|record your message|after the (beep|tone)|please record|customer you (are|have) (called|calling)|is not reachable|switched off|coverage area|not answering (the|your) call|जिस व्यक्ति|ग्राहक.{0,20}(व्यस्त|उपलब्ध नहीं|पहुंच)|संदेश रिकॉर्ड/i;
-        if (VOICEMAIL_RX.test(text)) {
-        // Once refused, always refused for the rest of the call — a later "okay" is politeness, not a
-        // reversal, and on a line this poor it is usually a mis-transcription.
-        if (!this.s.refusalSeen && REFUSAL_RX.test(text)) {
-            this.s.refusalSeen = true;
-            this.log('customer refused the order — no re-attempt may be promised from here');
-        }
-            this.s.transcript.push('Customer: ' + text);
+        // WHAT ANSWERED — a machine, or the customer? (user, 2026-08-31: "The person you're trying to
+        // reach is not available… hang up the call, don't wait" — before that the agent chatted with an
+        // answering machine for 125 s, TE25-45530. Widened 2026-09-11.) The phrases live in
+        // call_machine.js, SHARED with Call Insights, so the live agent and the dashboard cannot disagree
+        // about what a line was. Carrier phrases only, third-person — a customer saying "I am busy" never
+        // matches.
+        //   'unreachable' — voicemail, a carrier "not available", Apple's final "this person is not
+        //     available" → hang up now. The marker makes the summary say voicemail → classifyOutcome files
+        //     no_answer → the retry ladder proceeds, exactly as before.
+        //   'waiting' — a hold announcement or Apple's screening opening → the existing 60 s wait for the
+        //     human, below. The customer may still pick up; hanging up here could lose them.
+        // ⚠️ Its words are written as `Machine:`, never `Customer:`. On 2026-09-10 a machine written as the
+        // customer was 15 of the 30 "Spoke, no outcome recorded" calls, and every counter that reads
+        // `Customer:` lines — the COD and RTO outcome handlers, the answered rate — took it for a person.
+        // (A REFUSAL_RX check used to sit, mis-indented, inside this branch, where it could only ever fire
+        // on a voicemail greeting. It is removed, NOT moved: turned on for real speech it would read "I
+        // didn't receive it" — an RTO customer who WANTS the parcel — as a refusal. See the 2026-09-11 note
+        // in PROJECT_DOCUMENTATION.md before enabling it anywhere.)
+        const machine = machineKind(text);
+        if (machine === 'unreachable') {
+            this.s.transcript.push('Machine: ' + text);
             this.s.transcript.push('[voicemail greeting detected — hung up immediately, no message left]');
             this.log('voicemail detected — hanging up:', text.slice(0, 60));
             this.hangup(200, true);
             return;
         }
         const SCREENER_RX = /screening|name and reason|reason for calling|stay on the line|स्क्रीनिंग|रीजन फॉर|स्टे ऑन द|कॉलिंग/i;
-        if (SCREENER_RX.test(text)) {
+        if (SCREENER_RX.test(text) || machine === 'waiting') {
             this.screenerSeen = true;           // a robot answered — the REAL customer hasn't talked yet
             this.log('screening assistant detected — waiting for the human (60s cap)');
         } else {
@@ -1452,8 +1460,8 @@ class VoiceCall {
         const FILLER_RX = /^[\s]*(हम(्?म)*|म्म+|उम+|हूँ|हुं|आं*|hm+m*|um+|uh+|mm+)[\s।,.!]*$/i;
         if (FILLER_RX.test(text)) { this.log('filler ignored:', text.slice(0, 20)); return; }
         this.lastHeardAt = Date.now(); this._nudged = false;   // the mid-call watchdog measures silence from here
-        this.s.transcript.push('Customer: ' + text);
-        this.log('customer:', text.slice(0, 60));
+        this.s.transcript.push((machine ? 'Machine: ' : 'Customer: ') + text);
+        this.log(machine ? 'machine:' : 'customer:', text.slice(0, 60));
         if (this.closingDone) {
             const t = text.trim();
             const substantial = /[?？]/.test(t) || (t.length >= 25 && !THANKS_RX.test(t));
@@ -1464,7 +1472,10 @@ class VoiceCall {
             this.closingDone = false;           // a real question after the goodbye — answer it
             if (this.goodbyeTimer) { clearInterval(this.goodbyeTimer); this.goodbyeTimer = null; }
         }
-        const wantLang = requestedLanguage(text, this.s.lang);
+        // A MACHINE NEVER CHOOSES THE CUSTOMER'S LANGUAGE. A screener or a hold message speaks English on a
+        // Hindi customer's phone, and a switch is a one-way door — so the human who then picks up would be
+        // locked into the machine's language. The customer's own first sentence still switches as normal.
+        const wantLang = machine ? null : requestedLanguage(text, this.s.lang);
         if (wantLang) {
             this.switchLanguage(wantLang);
         } else {
@@ -1476,7 +1487,7 @@ class VoiceCall {
             // final, then the roman lexicon (two clearly-Hindi Latin words). One sighting = switch.
             // Same ordering as above: Devanagari-written English must be caught before the script check
         // decides "these are Devanagari letters, therefore Hindi".
-        const seen = (sttLang && sttLang !== this.s.lang ? sttLang : null) || devEnglishLangOf(text, this.s.lang) || scriptLangOf(text) || romanLangOf(text, this.s.lang);
+        const seen = machine ? null : ((sttLang && sttLang !== this.s.lang ? sttLang : null) || devEnglishLangOf(text, this.s.lang) || scriptLangOf(text) || romanLangOf(text, this.s.lang));
             // A SWITCH IS A ONE-WAY DOOR (user, 2026-09-08, on TE25-46457: "we already said that if once
             // language is switched don't need to go back on previous language"). Vishakha answered in
             // Hindi, the call switched to Hindi, then she said one English sentence — "I didn't get any
@@ -1699,6 +1710,17 @@ class VoiceCall {
                     transcript: this.s.transcript.join('\n'),   // the engine verifies the ask was actually answered
                 }).catch(e => this.log('rto outcome handling failed:', e.message));
             }
+            // WHO ENDED THE CALL, from the carrier's own record (user, 2026-09-11: "earlier who hangup the
+            // call was saved, now its not saved"). The reason in the mechanical line is whichever of two
+            // events reached us first — the media stream closing, or Vobiz's hang-up webhook — and since 5 Sep
+            // the stream has closed first almost every time: "hangup webhook" went from 10-12 calls a day on
+            // 2-4 Sep to 0 on 10 Sep, so a customer hanging up stopped being distinguishable from anything
+            // else. No code here changed on those dates; the race simply started going the other way.
+            // The CDR says it outright — Callee = the customer, Carrier = the network, Vobiz/API = us — and
+            // whether the call was ever ANSWERED. Read a few seconds after close, once the CDR exists; after
+            // the log is saved and fire-and-forget, so it can never delay, alter or fail a call.
+            const cdrUuid = this.callId || this.s.vuuid;
+            if (cdrUuid) setTimeout(() => stampHangupSource(this.logId, cdrUuid, (...a) => this.log(...a)), 5000);
         } catch (e) { this.log('log save failed:', e.message); }
     }
 }
@@ -2121,6 +2143,21 @@ async function startCallRecording(callId, tag, session) {
         console.log(`[vobiz ${tag}] record API:`, r.status, JSON.stringify(r.data || {}).slice(0, 140));
         if (session && r.data) session.recordingUrl = r.data.recording_url || r.data.url || null;
     } catch (e) { console.log(`[vobiz ${tag}] record API failed:`, e.message); }
+}
+
+// Stamp who ended a call onto its log row — see close(). The three columns arrive with
+// supabase/migrations/20260911_call_hangup_source.sql; until that runs the update fails, is logged, and
+// nothing else changes. Call Insights reads them to name "Customer hung up" and to file a call the
+// carrier never connected as no answer.
+async function stampHangupSource(logId, uuid, log) {
+    try {
+        const cdr = await require('./vobiz_auto_calls').fetchVobizCdr(uuid);
+        if (!cdr) return;
+        const { error } = await supabase.from('agent_call_logs')
+            .update({ hangup_by: cdr.by || null, hangup_cause: cdr.cause || null, answered: !!cdr.answered })
+            .eq('id', logId);
+        if (error) log('hang-up source not saved:', error.message);
+    } catch (e) { log('hang-up source not saved:', e.message); }
 }
 
 // The outcome, auto-captured: a short model pass over the transcript ("confirmed / wants cancel /
