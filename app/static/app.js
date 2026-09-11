@@ -6509,6 +6509,9 @@ function supOrderPrefetch(orderId){
   p.catch(()=>{}).finally(()=>{ _supPrefetchLive--; });   // an unused prefetch must not surface an error
   _supOrderPrefetch.set(k,{ p, at: Date.now() });
 }
+// (A half-size "preview" popup built from the clicked row was tried here on 2026-09-11 and taken out the same
+// day — user: "honestly i don't like much this". The popup keeps its full-size loader; the speed-ups behind it
+// — no unused WhatsApp scan, the second wave not waiting on the header, hover prefetch — are unchanged.)
 async function supOrderModal(orderId){
   document.getElementById('sup-order-modal')?.remove();
   const wrap=document.createElement('div'); wrap.id='sup-order-modal';

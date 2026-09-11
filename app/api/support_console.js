@@ -1194,17 +1194,26 @@ router.get('/support/order/:orderId', async (req, res) => {
             supabase.from('escalation_contacts').select('*'),
         ]);
         const myIdP = ensureProfile(req.user.sub).catch(() => null);   // needs neither stage
-        const { data: b } = await supabase.from('order_buckets').select('*').eq('order_id', oid).maybeSingle();
-        if (!b) { byId.catch(() => {}); return res.status(404).json({ success: false, error: 'Order not found' }); }
-        // Customer's other orders — match by NORMALIZED phone (last 10 digits) OR email, because the
-        // stored phone format varies per order (+91…, bare 10-digit, spaced). Exact-match misses them.
-        const last10 = String(b.phone || '').replace(/\D/g, '').slice(-10);
-        const custEmail = String(b.email || '').trim();
+        // ⚡ THE HEADER NO LONGER GATES THE SECOND WAVE (2026-09-11, round two: "still this taking time to open
+        // popup"). Measured on TE25-46873: 2.3 s = the order_buckets VIEW header (~1.2 s) and THEN the WhatsApp
+        // thread (~1.1 s, a wildcard phone scan) — the second wave waited on the header only to learn the order's
+        // name, phone and email. The `orders` table holds the same three (identical on 3,000 of 3,000 recent
+        // orders) and answers in ~80 ms, so the second wave now starts from it while the header is still being
+        // read. ⚠️ EXACTNESS IS KEPT, NOT ASSUMED: when the header lands, every value the second wave derived is
+        // compared with the header's (waveKey); on ANY difference the whole wave is re-run from the header,
+        // exactly as before. The popup can only get faster, never different.
         const CUST_SEL = 'order_id, order_name, bucket, created_at, total_price, tracking_status, courier, awb_number, phone, email';
         const HOLD_ACTIONS = ['shopify_hold', 'shopify_release', 'shopify_cancel', 'easyecom_hold_order', 'easyecom_unhold_order'];
-        const onmKey = String(b.order_name || '').replace('#', '').trim();
-        const [[items, addr, tracking, calls, notes, contactsAll], aiCalls, aiAttempts, custByPhone, custByEmail, holdRowsRes, msgsRes] = await Promise.all([
-            byId,
+        // Every input the second wave derives from the order, in one place — so "same inputs" is checkable.
+        const waveKey = (b) => JSON.stringify([String(b.order_name || '').replace(/^#/, ''), String(b.order_name || '').replace('#', '').trim(),
+            String(b.phone || '').replace(/\D/g, '').slice(-10), String(b.email || '').trim()]);
+        const stage2For = (b) => {
+            // Customer's other orders — match by NORMALIZED phone (last 10 digits) OR email, because the
+            // stored phone format varies per order (+91…, bare 10-digit, spaced). Exact-match misses them.
+            const last10 = String(b.phone || '').replace(/\D/g, '').slice(-10);
+            const custEmail = String(b.email || '').trim();
+            const onmKey = String(b.order_name || '').replace('#', '').trim();
+            return Promise.all([
             // REAL AI phone calls (Vobiz bridge) — keyed by order NAME in agent_call_logs
             supabase.from('agent_call_logs').select('id, call_type, language, summary, transcript, transcript_en, exchanges, recording_url, called_at').eq('order_id', String(b.order_name || '').replace(/^#/, '')).order('called_at', { ascending: false }).limit(10),
             // AI dial-ATTEMPT history (turnstile) — an unanswered dial opens no bridge session and so
@@ -1224,10 +1233,19 @@ router.get('/support/order/:orderId', async (req, res) => {
                     .order('created_at', { ascending: false }).limit(1000)
                 : supabase.from('api_logs_ecom').select('action, status_code, payload, response, created_at').in('action', HOLD_ACTIONS)
                     .order('created_at', { ascending: false }).limit(2000),
-            // MSG91 thread by phone (last 20).
-            b.phone ? supabase.from('msg91_messages').select('direction, template_name, content, status, sent_at')
-                .ilike('phone', `%${last10}`).order('sent_at', { ascending: false }).limit(20) : Promise.resolve({ data: [] }),
-        ]);
+            // (The WhatsApp thread is NOT read here any more — see the note where `msg91` used to be built.)
+            ]);
+        };
+        // Started, not awaited: a PostgREST builder only runs when something calls .then on it.
+        const headerP = Promise.resolve(supabase.from('order_buckets').select('*').eq('order_id', oid).maybeSingle());
+        const { data: hint } = await supabase.from('orders').select('name, phone, email').eq('id', oid).maybeSingle();
+        const early = hint ? { order_name: hint.name, phone: hint.phone, email: hint.email } : null;
+        const earlyWave = early ? stage2For(early) : null;
+        if (earlyWave) earlyWave.catch(() => {});        // if it is discarded below, its failure must not go unhandled
+        const { data: b } = await headerP;
+        if (!b) { byId.catch(() => {}); return res.status(404).json({ success: false, error: 'Order not found' }); }
+        const wave = (earlyWave && waveKey(early) === waveKey(b)) ? earlyWave : stage2For(b);
+        const [[items, addr, tracking, calls, notes, contactsAll], [aiCalls, aiAttempts, custByPhone, custByEmail, holdRowsRes]] = await Promise.all([byId, wave]);
         // Merge phone- and email-matched orders (deduped), newest first.
         const custMap = new Map();
         [...(custByPhone.data || []), ...(custByEmail.data || [])].forEach(o => { if (!custMap.has(o.order_id)) custMap.set(o.order_id, o); });
@@ -1275,7 +1293,12 @@ router.get('/support/order/:orderId', async (req, res) => {
                     ok: isEE(l.action) ? eeOk(l.response) : (l.status_code || 0) < 400,
                     result: isEE(l.action) ? ((l.response || {}).message || null) : l.response, at: l.created_at }; })
             .sort((x, y) => new Date(x.at) - new Date(y.at));
-        const msg91 = (msgsRes && msgsRes.data) || [];   // MSG91 thread by phone (last 20) — read in stage two
+        // ⚠️ NO `msg91` IN THIS RESPONSE ANY MORE (2026-09-11, round two). NOTHING READ IT: the popup's WhatsApp card
+        // fills itself from /support/wa/chat after the popup renders (supWaChat), and the notes dialog — the only
+        // other caller — reads `notes` alone. The read itself was a wildcard phone scan of msg91_messages: the
+        // slowest thing the popup waited on, and measured ALONE on TE25-46873 it ran past the 8-second statement
+        // timeout on a cold cache and came back EMPTY (both before and after the round-one changes). A popup that
+        // waited up to 8 s for data it then threw away. Nothing on screen changes.
         // Agent names for calls/notes (read above, alongside the EasyEcom check).
         const nameById = {}; profs.forEach(p => { nameById[p.user_id] = p.display_name; });
         // Whom-to-call: courier match → pincode prefix → region → first contact for that courier.
@@ -1288,7 +1311,7 @@ router.get('/support/order/:orderId', async (req, res) => {
             || forCourier[0] || null;
         const myId = await myIdP;
         res.json({ success: true, order: b, items: items.data || [], address: addr.data || null,
-            tracking: tracking.data || [], msg91,
+            tracking: tracking.data || [],
             calls: (calls.data || []).map(c => ({ ...c, agent_name: nameById[c.agent_id] || null })),
             ai_calls: (aiCalls.data || []),
             // both engines' dial-attempt ladders (2026-09-02): ai_attempts keeps its cod shape for the

@@ -1231,6 +1231,73 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### The popup, round two — no WhatsApp scan, the second wave stops waiting, and `order_buckets` gets its indexes (2026-09-11)
+
+User: *"still this taking time to open popup of customer details"* (TE25-46873), then — about a row-preview
+skeleton tried along the way — *"honestly i don't like much this … UI/UX feel is gone not good … make as
+previous work just make faster"*.
+
+**Measured on TE25-46873:** 2.3 s = the `order_buckets` VIEW header (~1.2 s) and THEN the WhatsApp thread
+(~1.1 s) — the second wave waited on the header only to learn the order's name, phone and email.
+
+- **The second wave starts from `orders`.** `orders` holds the same name/phone/email (identical on 3,000 of
+  3,000 recent orders) and answers in ~80 ms, so the second wave is started from it while the header is still
+  being read. ⚠️ Exactness is checked, not assumed: `waveKey` compares every value the wave derived with the
+  header's, and on ANY difference the wave is re-run from the header exactly as before.
+- **The popup no longer reads the WhatsApp thread at all.** Nothing read `msg91` in the response: the popup's
+  WhatsApp card fills itself from `/support/wa/chat` after it renders, and the notes dialog reads `notes` only.
+  That read was a wildcard phone scan which, alone on a cold cache, ran past the 8 s statement timeout and came
+  back EMPTY — the popup waited up to 8 s for data it threw away. Nothing on screen changes.
+- **The WhatsApp card's own read got an index.** `/support/wa/chat` searches `msg91_messages.phone ILIKE
+  '%<last 10>'`; a leading wildcard cannot use a b-tree, so every open read the whole table (1.1–8.2 s). A
+  pg_trgm GIN index serves that exact ILIKE — same query, same rows — in **0.15–0.44 s**. Migration
+  `20260911_msg91_messages_phone_trgm.sql` (**run 2026-09-11**). No application change.
+- **The row-preview skeleton was tried and taken out the same day.** The popup opens on its full-size
+  `brandLoader` as before; the selftest pins that `supOrderSkeleton` stays out.
+
+#### `order_buckets` — why every read of it was slow, and the test of a rewrite
+
+Its definition (`pg_get_viewdef`) builds "the latest row per key" in six CTEs over ENTIRE tables —
+`order_tracking`, `rapidshyp_tracking_ecom`, the dispatch minimum, incoming `msg91_messages`,
+`shipment_journey_ecom`, `order_customers` tags — then left-joins them to `orders`. Postgres can push an
+`order_id` filter into the two keyed on `order_id`, but the four joined on awb / phone / email / order name are
+rebuilt in full on EVERY query, even one reading a single order.
+⚠️ Found along the way: **`msg91_confirmed` is always false** — its CTE keeps `direction = 'incoming'`, and
+`msg91_messages` holds outbound messages only.
+
+Migration `20260911_order_buckets_v2_lateral.sql` (**run 2026-09-11**) added five indexes and, BESIDE the live
+view, `order_buckets_v2`: the same 23 columns and CASE, each CTE turned into a per-order `LEFT JOIN LATERAL …
+LIMIT 1` on the same keys and sort order. **Compared on all 47,356 orders: identical in every column.**
+Timings (three runs):
+
+| Read | `order_buckets` | `order_buckets_v2` |
+|---|---|---|
+| Status changed batch, `in (300 ids)` | 3.0 s | 0.13 s |
+| Popup "other orders", phone ILIKE | 0.4 s | 0.12 s |
+| 30-day exact count | 0.5–1.3 s | 0.4 s |
+| Hold Orders, 30 d | 0.37 s | 0.32 s |
+| Popup header, one order | 0.17 s | 0.11–0.18 s |
+| **Undelivered, whole bucket** | **0.6 s** | **1.7 s** — every one of 47k orders must be probed |
+
+Proposed: point every read except the Undelivered sweep at v2. **Declined by the user** — *"i am okay with
+current one nothing need to do i feel faster"*. So **`order_buckets` is unchanged and nothing reads
+`order_buckets_v2`**; it is harmless and can be dropped (`drop view public.order_buckets_v2;`). **Keep the
+five indexes** — the live view's popup header measured 1.1–2.6 s before them and ~0.2 s after.
+⚠️ If this is ever revisited: two views with one CASE means a bucket-rule change must land in BOTH.
+
+#### SQL and the Postgres log without the SQL editor
+
+`.env` key **`SUPBASE_ACCESS_KEY`** (that spelling) is a Supabase personal access token. It runs SQL through
+the Management API (`POST /v1/projects/<ref>/database/query`) and reads `postgres_logs`
+(`/analytics/endpoints/logs.all`). The anon and service keys can do neither. A Supabase MCP is registered for
+local sessions through a git-excluded `.mcp.json` whose launcher reads the token from `.env` at start — the
+token lives in one place.
+
+⚠️ **Pushed is not live.** At 13:58 IST the log still showed `23505` on `vobiz_auto_calls_ecom` (134 in 3 h) and
+`wa_sends_msg91` (20) — both fixed in the 13:00 push. The live site was serving `app.js?v=c75ee301b0`, the
+11:40 deploy. To see which deploy the VPS runs: `curl -s https://dashboard.theelement.skin/ | grep -o
+'static/app.js?v=[0-9a-f]*'` against `git show <commit>:app/static/app.js | sha1sum | cut -c1-10`.
+
 ### NDR / Order Calling stop timing out, the popup opens fast, and the Postgres error log goes quiet (2026-09-11)
 
 User: *"why NDR Calling and Order Calling take a time and show timeout error when date range is high … when

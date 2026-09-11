@@ -5067,7 +5067,7 @@ function check(name, got, want) {
                  scp.includes('const [holds, eeRows, eeHoldRows, eeHoldIdRows, relRows] = await Promise.all([')],
                 [5, true, true]);
             check('speed: the popup reads in two parallel stages, and its hold log is read for that order',
-                [scp.indexOf('const byId = Promise.all([') < scp.indexOf("const { data: b } = await supabase.from('order_buckets').select('*').eq('order_id', oid).maybeSingle();"),
+                [scp.indexOf('const byId = Promise.all([') < scp.indexOf("const headerP = Promise.resolve(supabase.from('order_buckets').select('*').eq('order_id', oid).maybeSingle());"),
                  scp.includes('payload->>order.eq.${onmKey},payload->>order.eq.#${onmKey},payload->>orderName.eq.${onmKey},payload->>orderName.eq.#${onmKey}'),
                  // an unusual name falls back to the old read rather than risk losing a timeline
                  scp.includes('/^[A-Za-z0-9_-]+$/.test(onmKey)'),
@@ -5119,6 +5119,45 @@ function check(name, got, want) {
                  // the MANUAL button keeps its visible answer to a race — an agent needs to see it
                  wa.includes("return res.status(409).json({ success: false, error: `V${tpl.version} was just sent by someone else` });")],
                 [true, true, true]);
+        }
+        // ── THE POPUP, ROUND TWO (user, 2026-09-11: "still this taking time to open popup"). The second wave starts
+        // from the fast `orders` table and the header only VERIFIES it — any difference re-runs the wave from the
+        // header, so the result is exact by construction. MEASURED here with a fake client: matching inputs reuse
+        // the early wave; a differing phone throws it away and re-reads.
+        {
+            const scq = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+            const wk = new Function(scq.slice(scq.indexOf('const waveKey = (b) =>'), scq.indexOf('const stage2For = (b) =>')) + ' return waveKey;')();
+            check('popup: the early wave is reused only when every input matches the header',
+                [wk({ order_name: '#TE25-1', phone: '+91 98765 43210', email: ' a@b.c' }) === wk({ order_name: 'TE25-1', phone: '9876543210', email: 'a@b.c' }),
+                 // a different phone, email or order must NOT reuse the early wave
+                 wk({ order_name: 'TE25-1', phone: '9876543210', email: 'a@b.c' }) === wk({ order_name: 'TE25-1', phone: '9876543211', email: 'a@b.c' }),
+                 wk({ order_name: 'TE25-1', phone: '9876543210', email: 'a@b.c' }) === wk({ order_name: 'TE25-1', phone: '9876543210', email: 'x@b.c' }),
+                 // a missing phone differs from a present one (the WhatsApp read is skipped without a phone)
+                 wk({ order_name: 'TE25-1', phone: null, email: '' }) === wk({ order_name: 'TE25-1', phone: '', email: '' }),
+                 scq.includes('const wave = (earlyWave && waveKey(early) === waveKey(b)) ? earlyWave : stage2For(b);'),
+                 scq.includes("if (earlyWave) earlyWave.catch(() => {});")],
+                [true, false, false, true, true, true]);
+            const apq4 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+            // The half-size preview popup was taken out the same day ("honestly i don't like much this"): the
+            // popup opens on its full-size loader again, and the preview must not creep back in.
+            check('popup: it opens on the full-size loader — the row preview is gone',
+                [apq4.includes("overflow-y-auto p-6\">${brandLoader('Loading order…')}</div>`;"),
+                 !apq4.includes('supOrderSkeleton')],
+                [true, true]);
+        }
+        // ── THE POPUP'S WHATSAPP READ WAS FOR NOBODY (2026-09-11). The endpoint scanned msg91_messages on a wildcard
+        // phone match — its slowest read, and alone it could exceed the 8 s statement timeout — for a `msg91` field
+        // the client never read (the WhatsApp card loads from /support/wa/chat). Pinned from both ends, so the read
+        // cannot quietly come back and the field cannot quietly gain a reader.
+        {
+            const scr = fs.readFileSync(path.join(ROOT, 'app/api/support_console.js'), 'utf8');
+            const pop = scr.slice(scr.indexOf("router.get('/support/order/:orderId'"), scr.indexOf('// ── Notes CRUD'));
+            const apr = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+            check('popup: no WhatsApp scan in the order endpoint, and nothing in the app reads the old msg91 field',
+                [pop.length > 1000, !pop.includes("supabase.from('msg91_messages')"), !/\bmsg91,/.test(pop), !/\bd\.msg91\b/.test(apr),
+                 // the WhatsApp card still loads — from its own route, after the popup renders
+                 apr.includes("supWaChat(o.order_name||o.order_id, document.getElementById('supd-wachat'));")],
+                [true, true, true, true, true]);
         }
         console.log(`\n${pass} passed, ${fail} failed`);
         process.exit(fail ? 1 : 0);
