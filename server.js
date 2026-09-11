@@ -215,6 +215,8 @@ const _VIEW_PERMS = [
     // rule and was 403'd before it ever reached the route. Worse, that 403 comes from middleware and
     // carries no CORS header, so the browser could only report "Failed to fetch" with no clue why.
     // Exactly the trap /tally/bridge/* has below, and the same lookahead fixes it.
+    // Do Not Call list (2026-09-11) — its own right; must precede the general support rule below.
+    [/^\/support\/dnc(\/|$)/i, 'support-dnc'],
     [/^\/support\/(?!sarvam-usage$)/i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist', 'customer-profile']],
     // Customer Profile page (replaces Blacklist Numbers) — same audience. Issuing store credit is gated
     // a SECOND time inside the router by requirePermission('support-store-credit'), so being able to
@@ -365,6 +367,7 @@ app.use('/api', require('./app/api/po_approvals'));   // Inventory → PO Approv
 app.use('/api', amazonFbaRoutes);
 app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll
+app.use('/api', require('./app/api/call_block').router);         // Do Not Call list — blocks every AI + manual call for an order
 app.use('/api', require('./app/api/support_console'));        // Customer Support console (queue/calls/notes/contacts)
 app.use('/api', require('./app/api/msg91_wa').router);   // manual WhatsApp sends (template sequences) — /support/wa/*
 app.use('/api', require('./app/api/agent_learning').router);   // voice-agent self-learning — /support/agent-learning/*, /voice-lessons

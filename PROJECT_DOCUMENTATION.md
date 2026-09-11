@@ -1231,6 +1231,74 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### The reason question goes, COD stops asking about availability, short replies are heard, and a Do Not Call list (2026-09-11)
+
+#### NDR 1/2/3 + RTO: the agent never asks why the delivery failed
+
+User: *"May I know the reason should remove from all 4 NDR1 to 3 and RTO"* — in all languages. NDR 1, 2, 3 and
+RTO are ONE script (`PURPOSES.rto_recovery` in `vobiz_bridge.js`; the NDR ladder places `call_type:
+'rto_recovery'` with `detail.ndr_no`), so one change covers all four. Measured first: the question was asked
+on 36 RTO-script calls in 3 days, in English and Hindi, and from a Tamil call in English.
+- The fixed step ("after the address is confirmed, ask the failure-reason question") and every rule about it
+  are gone. The flow is now: yes → the address read-back (only if an address is written) → one sentence that
+  the team will arrange the reattempt as soon as possible → close.
+- ⚠️ A SECOND copy was hiding in the courier-reason note (call facts): *"Still ask your own 'May I know what
+  went wrong with the delivery?' at its place in the order"*. Removed too, or the question would have come back.
+- **Kept:** when the CUSTOMER asks why, the agent still answers with the courier's reason, and goes deeper if
+  pressed. Only the agent's own question is gone.
+- The RTO summary now records a failure reason only if it came up in the call.
+- **Guard:** `REASON_ASK_RX` (English, Hindi, Tamil, Telugu, Kannada, Malayalam, Bengali, Gujarati, Punjabi,
+  Marathi) cuts a banned QUESTION sentence before the synthesizer, like the slot and arrival-date guards —
+  statements (the courier explanation) always play. Logged as `[not spoken — blocked by rule]`.
+
+#### COD: no "are you available for the delivery"
+
+User: *"COD have never asked this question May I know the reason; COD ask 'are you available' — that should be
+removed"*. It was asked on 19 of 58 COD calls, often straight after the customer's yes — the prompt said "do not
+ask about delivery-time availability", which the model read as allowing "available to receive". The rule now
+names the question outright, in any language, before or after a yes; `AVAIL_ASK_RX` is the net under it
+(COD only). The cancellation handling is untouched. `voice-agent.html`'s COD step 3 no longer asks it either.
+
+#### Short replies: the whole word, not its tail
+
+User: *"why minor Yes, Yeah, Okay not captured in case of Hello and confirmation talk"*. In the 3 days to 11
+Sep, 111 replies were dropped as "too quiet": **100 were one word, median peak 87**; 2-word ones measured 809
+and 3-4 word ones 5,341. The cause was the meter, not the customers: `_uttPeak` was reset at `vad.speech_start`
+— which Sarvam sends only after `MIN_SPEECH_MS` of speech plus its latency — and again at every final, so a one-
+word reply was judged on its fading tail. **Proven on the recording of TE25-45705:** the dropped "Okay" starts
+at 41.58 s and peaks at 24,154; the live reading, 247, is exactly what the recording holds from ~42.1 s on.
+- Every frame's peak is kept for 15 s; a final is judged on `max(old tail reading, wholeWordPeak(…))` — the
+  loudest frame from `VOBIZ_PEAK_PREROLL_MS` (default **800**) before its speech_start to now. Each
+  speech_start is used once; a final whose start was already used looks back 1.5 s.
+- ⚠️ It can only ADD: nothing the old meter accepted is dropped, and the floor, the ambient multiple, the
+  first-reply minimum and the rescue are unchanged — a hallucination on a quiet line still reads as the line.
+- Every word the old meter would have dropped is marked `[heard by the whole-word meter — the old meter read
+  X, the word peaked at Y]` (capped at 6 per call), so the fix is countable from `agent_call_logs`.
+- Current settings (live uses the code defaults): VAD 0.45 · min speech 250 ms · end-of-reply 400 ms · floor
+  5× ambient, 250–6,000 · first reply 150 · rescue 6 s · barge-in 1.2 s · nudge 7 s / end 15 s.
+
+#### Do Not Call list
+
+User: *"TE25-48244 make sure no further AI and manual should be in this order"*, then *"make a permission-based
+dashboard where if I put the order, that order should not get any call"* — calls only, WhatsApp untouched.
+- Table `call_block_ecom` (migration `20260911_call_block_ecom.sql`, **applied 2026-09-11**); module
+  `app/api/call_block.js`; page Customer Support → **Do Not Call**; permission **`support-dnc`** (admins always).
+- Only two places in the code start a call — `placeOrderCall` (every AI call: auto COD, auto NDR/RTO, the 🤖
+  button) and `/vobiz/manual-call` (📞 human). Both check the list first and refuse with who blocked it; an
+  unreadable list REFUSES, never dials. Both auto ticks skip blocked orders BEFORE claiming, so no attempt is
+  burned — the NDR tick before its NDR2/NDR3 re-arm. The popup shows ⛔ Do not call.
+- TE25-48244 (Rekha sajan) is the first entry. ⚠️ A blocked COD order still sits on hold — someone decides it.
+
+#### Teams reports twice — it was the STAGING dashboard
+
+Bot-first posting with a Workflows fallback dates from 14 Aug; the duplicates started 10 Sep. The fallback
+fired whenever the bot's 20 s acknowledgement timed out, although the card had usually landed. The code fix
+went out today (11:28 off by default, 13:00 removed) — but a **staging dashboard running under pm2 on the VPS**
+ran the same report crons with the same Teams links and older code, and its copy went through Workflows. The
+user stopped it. ⚠️ While staging runs it posts live reports (and runs the other crons); a "staging mode"
+guard was proposed and not yet built.
+⚠️ The site's `?v=` build hash is computed from the files ON DISK, so it proves a pull, not a restart.
+
 ### The popup, round two — no WhatsApp scan, the second wave stops waiting, and `order_buckets` gets its indexes (2026-09-11)
 
 User: *"still this taking time to open popup of customer details"* (TE25-46873), then — about a row-preview

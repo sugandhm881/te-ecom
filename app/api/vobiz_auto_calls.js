@@ -282,10 +282,14 @@ async function highValueCallTick(opts = {}) {
         (data || []).forEach(r => turn.set(r.order_name, r));
     }
 
+    // DO NOT CALL LIST (2026-09-11): blocked orders are skipped BEFORE the claim, so no attempt is burned.
+    let dnc; try { dnc = await require('./call_block').blockedSet(targets.map(t => t.name)); }
+    catch (e) { console.warn('[AutoCall] Do Not Call list unreadable — tick skipped:', e.message); return { skip: 'do-not-call list unreadable', targets: targets.length }; }
     let placed = 0, gated = 0; const results = [];
     for (const t of targets) {
         const name = t.name;
         const row = turn.get(name);
+        if (dnc.has(String(name).toUpperCase())) { results.push({ order: name, skip: 'do-not-call list' }); continue; }
         let redial = false;
         if (row) {
             if (row.status === 'retry') {
@@ -516,10 +520,14 @@ async function rtoCallTick(opts = {}) {
         (data || []).forEach(r => turn.set(r.order_name, r));
     }
 
+    // DO NOT CALL LIST (2026-09-11): blocked orders are skipped BEFORE the claim, so no attempt is burned.
+    let dnc; try { dnc = await require('./call_block').blockedSet(targets.map(t => t.name)); }
+    catch (e) { console.warn('[AutoCall] Do Not Call list unreadable — tick skipped:', e.message); return { skip: 'do-not-call list unreadable', targets: targets.length }; }
     let placed = 0, gated = 0; const results = [];
     for (const t of targets) {
         const name = t.name;
         let row = turn.get(name);
+        if (dnc.has(String(name).toUpperCase())) { results.push({ order: name, skip: 'do-not-call list' }); continue; }   // before any NDR re-arm
         let redial = false;
         // A NEW courier NDR (NDR2/NDR3) re-arms a settled row with a FRESH 2-call ladder (user
         // rev.3): the old outcome is archived into prev_outcome, ndr_no advances, and the row is

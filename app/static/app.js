@@ -1275,6 +1275,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('support-contacts-view');
             if (typeof supContactsInit === 'function') supContactsInit();
             break;
+        case 'support-dnc':
+            activeLinkElement = document.getElementById('nav-support-dnc');
+            activeViewElement = document.getElementById('support-dnc-view');
+            if (typeof supDncInit === 'function') supDncInit();
+            break;
         case 'customer-profile':
             activeLinkElement = document.getElementById('nav-customer-profile');
             activeViewElement = document.getElementById('customer-profile-view');
@@ -6547,7 +6552,7 @@ async function supOrderModal(orderId){
     wrap.firstElementChild.innerHTML=`
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div><div class="flex items-center gap-2 flex-wrap"><span class="font-mono text-lg font-bold text-slate-800">${escapeHtml(o.order_name||o.order_id)}</span>${supBadge(o.bucket)}
-          ${o.msg91_confirmed?'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}${eeHoldChip(o.order_name)}</div>
+          ${o.msg91_confirmed?'<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-100 text-sky-700">Customer confirmed</span>':''}${eeHoldChip(o.order_name)}${d.dnc?`<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-700" title="${escapeHtml('On the Do Not Call list'+(d.dnc.added_by?' — added by '+d.dnc.added_by:'')+(d.dnc.note?': '+d.dnc.note:''))}">⛔ Do not call</span>`:''}</div>
           <p class="text-xs text-slate-400 mt-1">Placed ${new Date(o.created_at).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})} · ${days} days ago</p></div>
         <div class="flex items-center gap-2"><span id="supd-aicall"></span><button id="supd-logcall" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700">📞 Log a call</button>
           <button class="supd-close text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg hover:bg-slate-100">✕</button></div></div>
@@ -6943,6 +6948,50 @@ function supCallsRender(d){
 
 // ── Escalation Contacts (admin CRUD) ───────────────────────────────────────
 let _supcWired=false;
+// ── Do Not Call list (2026-09-11) ─────────────────────────────────────────────────────────────────
+// An order here gets no call of any kind; the SERVER enforces it in both places a call can start, so this
+// page is only the switch. Gated by support-dnc (admins always).
+let _dncWired=false;
+function supDncInit(){
+  if(!_dncWired){ _dncWired=true;
+    document.getElementById('dnc-add')?.addEventListener('click',supDncAdd);
+    document.getElementById('dnc-order')?.addEventListener('keydown',e=>{ if(e.key==='Enter') supDncAdd(); }); }
+  supDncLoad();
+}
+async function supDncAdd(){
+  const inp=document.getElementById('dnc-order'), note=document.getElementById('dnc-note'), st=document.getElementById('dnc-status'), btn=document.getElementById('dnc-add');
+  const order=String(inp?.value||'').replace(/^#/,'').trim().toUpperCase();
+  if(!order){ st.innerHTML='<span class="text-rose-600">Enter an order number</span>'; inp?.focus(); return; }
+  btn.disabled=true; st.innerHTML='<span class="text-slate-400">Blocking…</span>';
+  try{
+    await supFetch('/api/support/dnc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_name:order,note:note?.value||''})});
+    st.innerHTML=`<span class="text-emerald-600 font-semibold">${escapeHtml(order)} blocked — no calls will be placed</span>`;
+    inp.value=''; if(note) note.value='';
+    supDncLoad();
+  }catch(e){ st.innerHTML=`<span class="text-rose-600">${escapeHtml(e.message)}</span>`; }
+  finally{ btn.disabled=false; }
+}
+async function supDncLoad(){
+  const c=document.getElementById('dnc-table'); if(!c) return; c.innerHTML=brandLoader();
+  try{
+    const d=await supFetch('/api/support/dnc');
+    const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+    const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-middle';
+    const fmt=t=>t?new Date(t).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—';
+    c.innerHTML=d.blocks.length?`<table class="w-full"><thead><tr>${['Order','Customer','Note','Added by','Added',''].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+      d.blocks.map(b=>`<tr class="hover:bg-slate-50">
+        <td class="${TD} font-mono font-semibold">${escapeHtml(b.order_name)}</td>
+        <td class="${TD}">${escapeHtml(b.order?.customer_name||'—')}</td>
+        <td class="${TD} text-xs text-slate-500 max-w-[260px]">${escapeHtml(b.note||'—')}</td>
+        <td class="${TD} text-xs">${escapeHtml(supPrettyUser(b.added_by)||'—')}</td>
+        <td class="${TD} text-xs text-slate-500 whitespace-nowrap">${fmt(b.created_at)}</td>
+        <td class="${TD}"><button class="dnc-del px-3 py-1 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100" data-o="${escapeHtml(b.order_name)}">Remove</button></td></tr>`).join('')
+    }</tbody></table>`:'<div class="text-slate-400 text-sm p-10 text-center">No orders are blocked — add one above</div>';
+    c.querySelectorAll('.dnc-del').forEach(b=>b.addEventListener('click',async()=>{
+      if(!(await supConfirm({ title:`Allow calls to ${b.dataset.o} again?`, message:'The automatic COD / NDR / RTO callers and both call buttons will be able to call this order again.', confirmLabel:'Remove from list', danger:true }))) return;
+      try{ await supFetch('/api/support/dnc/'+encodeURIComponent(b.dataset.o),{method:'DELETE'}); showNotification(b.dataset.o+' removed — calls allowed again'); supDncLoad(); }catch(e){ showNotification(e.message,true); } }));
+  }catch(e){ c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }
+}
 function supContactsInit(){
   if(!_supcWired){ _supcWired=true; document.getElementById('supc-add')?.addEventListener('click',supContactModal); }
   supContactsLoad();
@@ -7375,7 +7424,7 @@ const NAV_HREF = {
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon', 'nav-kwikship-recon': 'kwikship-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-label-splitter': 'label-splitter', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics', 'nav-zone-mapping': 'zone-mapping',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-order-calling': 'order-calling', 'nav-support-orders': 'support-orders',
-    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning', 'nav-support-ai-costs': 'support-ai-costs', 'nav-support-call-insights': 'support-call-insights',
+    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning', 'nav-support-ai-costs': 'support-ai-costs', 'nav-support-call-insights': 'support-call-insights', 'nav-support-dnc': 'support-dnc',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
     'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions',
     'nav-finance-entry': 'finance-entry', 'nav-finance-register': 'finance-register', 'nav-finance-books': 'finance-books'
@@ -8104,7 +8153,7 @@ document.getElementById('nav-gokwik-pg-recon')?.addEventListener('click', (e) =>
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
 document.getElementById('nav-claims-sla')?.addEventListener('click', (e) => { e.preventDefault(); navigate('claims-sla'); });
-['support-dashboard','support-queue','support-orders','support-calls','support-contacts','customer-profile','support-voice'].forEach(v =>
+['support-dashboard','support-queue','support-orders','support-calls','support-contacts','support-dnc','customer-profile','support-voice'].forEach(v =>
     document.getElementById('nav-' + v)?.addEventListener('click', (e) => { e.preventDefault(); navigate(v); }));
 document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
 document.getElementById('nav-amazon-fba')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-fba'); });
@@ -9536,7 +9585,7 @@ const PERM_GROUPS = [
   ['Reconciliation', [['docpharma-recon','DocPharma Recon'],['rapidshyp-recon','RapidShyp Recon'],['gokwik-pg-recon','GoKwik PG Recon'],['kwikship-recon','KwikShip Freight Recon']]],
   ['Analytics', [['order-insights','Order Insights'],['profitability','Profitability'],['customer-segments','Customer Segments'],['returns-analysis','Returns Analysis']]],
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
-  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','NDR Calling + Order Calling'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)'],['support-agent-learning','Agent Learning (self-learning voice agent)'],['support-call-insights','Call Insights (transcript audit)'],['support-ai-costs','AI Calling Statement (cost per call)']]],
+  ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','NDR Calling + Order Calling'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['support-dnc','Do Not Call list (block every AI + manual call for an order)'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)'],['support-agent-learning','Agent Learning (self-learning voice agent)'],['support-call-insights','Call Insights (transcript audit)'],['support-ai-costs','AI Calling Statement (cost per call)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
   ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)'],['purchase-orders','Purchase Order (EasyEcom PO book)'],['grn','GRN (EasyEcom goods receiving)'],['po-approvals','PO Approvals (release drafted POs to EasyEcom)']]],
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],

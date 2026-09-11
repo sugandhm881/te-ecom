@@ -69,6 +69,12 @@ router.post('/vobiz/manual-call', async (req, res) => {
         const b = req.body || {};
         const orderName = String(b.order_name || '').replace('#', '').trim();
         if (!orderName) return res.status(400).json({ success: false, error: 'order_name is required' });
+        // DO NOT CALL LIST (2026-09-11) — the human call is refused exactly like the AI one; a failed read refuses too.
+        {
+            const CB = require('./call_block');
+            let blk; try { blk = await CB.blockInfo(orderName); } catch (e) { return res.status(503).json({ success: false, error: 'Could not check the Do Not Call list — call not placed' }); }
+            if (blk) return res.status(403).json({ success: false, error: CB.refusal(blk) });
+        }
 
         const customer = await customerPhoneFor(orderName);
         if (!customer || customer.length !== 10) return res.status(404).json({ success: false, error: 'no customer phone on this order' });

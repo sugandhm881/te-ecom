@@ -1245,6 +1245,7 @@ router.get('/support/order/:orderId', async (req, res) => {
         const { data: b } = await headerP;
         if (!b) { byId.catch(() => {}); return res.status(404).json({ success: false, error: 'Order not found' }); }
         const wave = (earlyWave && waveKey(early) === waveKey(b)) ? earlyWave : stage2For(b);
+        const dncP = require('./call_block').blockInfo(b.order_name).catch(() => null);   // the popup's ⛔ tag (display only)
         const [[items, addr, tracking, calls, notes, contactsAll], [aiCalls, aiAttempts, custByPhone, custByEmail, holdRowsRes]] = await Promise.all([byId, wave]);
         // Merge phone- and email-matched orders (deduped), newest first.
         const custMap = new Map();
@@ -1312,6 +1313,7 @@ router.get('/support/order/:orderId', async (req, res) => {
         const myId = await myIdP;
         res.json({ success: true, order: b, items: items.data || [], address: addr.data || null,
             tracking: tracking.data || [],
+            dnc: await dncP,
             calls: (calls.data || []).map(c => ({ ...c, agent_name: nameById[c.agent_id] || null })),
             ai_calls: (aiCalls.data || []),
             // both engines' dial-attempt ladders (2026-09-02): ai_attempts keeps its cod shape for the

@@ -767,7 +767,7 @@ function check(name, got, want) {
                 [true, true, true]);
             check('voice rto training 2026-09-01: consistent one-register delivery, news-then-ask pacing, real address in RTO context, RTO summary vocabulary, outcome note on the order',
                 [hasRule('level-tone'),
-                 /May I know what went wrong with the delivery\?/.test(vb2),
+                 !/May I know what went wrong with the delivery\?/.test(vb2),   // removed 2026-09-11 (user)
                  hasRule('no-bare-ack'),
                  /NEVER REPEAT A COMPLETED STEP/.test(vb2),
                  /there is NO address step AT ALL/.test(vb2),
@@ -1333,6 +1333,35 @@ function check(name, got, want) {
                  // and the peak is logged on EVERY final, or the floor can never be calibrated
                  /this\.log\(`heard \(peak \$\{peak\}\)/.test(vb2)],
                 [true, true, true, true, true]);
+            // THE WHOLE WORD, NOT ITS TAIL (2026-09-11). A one-word reply was measured only on what arrived after
+            // speech_start — its quiet tail — and dropped as "too quiet" (TE25-45705: 247 live, 24,154 in the
+            // recording). The final is now judged on max(tail, whole word from PREROLL before speech_start).
+            {
+                const PEAK_KEEP_MS = 15000, PEAK_FALLBACK_MS = 1500;
+                const a = vb2.indexOf('function wholeWordPeak('), z = vb2.indexOf('}   // end wholeWordPeak');
+                const wholeWordPeak = eval('(' + vb2.slice(a, z + 1) + ')');
+                // 20 ms frames: line noise 30, a loud "Yeah" 40.00-40.86 s, a loud "Okay" onset 41.60-41.95 s
+                // fading to 247 by 42.14 s; Sarvam's speech_start for "Okay" lands at 42.00 s.
+                const log = []; const at = (sec) => 1e6 + Math.round(sec * 1000);
+                for (let t = 38; t < 42.8; t += 0.02) {
+                    const v = (t >= 40 && t < 40.86) ? 24000 : (t >= 41.6 && t < 41.95) ? 24154 : (t >= 41.95 && t < 42.14) ? 247 : 30;
+                    log.push(at(t), v);
+                }
+                const tailOnly = Math.max(...log.filter((x, i) => i % 2 === 1 && log[i - 1] >= at(42.0)));
+                const okayWhole = wholeWordPeak(log, at(42.7), at(42.0), 800);
+                const okayNoStart = wholeWordPeak(log, at(42.7), null, 800);          // its start already used by "Yeah"
+                // a hallucination out of the quiet line, with its own speech_start, 5 s after the loud words
+                const quiet = []; for (let t = 50; t < 55; t += 0.02) quiet.push(at(t), 30);
+                const halluc = wholeWordPeak(log.concat(quiet), at(55), at(54.6), 800);
+                check('stt noise: a short reply is judged on the whole word, never on its tail alone — and noise still reads as noise',
+                    [tailOnly === 247, okayWhole === 24154, okayNoStart === 24154, halluc === 30,
+                     /const PEAK_PREROLL_MS = \(\) => Number\(process\.env\.VOBIZ_PEAK_PREROLL_MS \|\| 800\)/.test(vb2),
+                     vb2.includes('const peak = Math.max(tailPeak, wholeWordPeak(this._peakLog || [], Date.now(), this._uttStartAt, PEAK_PREROLL_MS()));'),
+                     vb2.includes('this._uttStartAt = null;                  // one speech_start vouches for one final only'),
+                     vb2.includes('this._uttStartAt = Date.now();'),
+                     vb2.includes('[heard by the whole-word meter — the old meter read')],
+                    [true, true, true, true, true, true, true, true, true]);
+            }
             check('stt noise: VAD sensitivity is set explicitly and never left on the whisper-level default',
                 [/threshold=\$\{VAD_THRESHOLD\(\)\}/.test(vb2),
              // 0.75 made her partially deaf (TE25-46342, 2026-09-08): the customer spoke four times,
@@ -3215,6 +3244,51 @@ function check(name, got, want) {
                 [/s = s\.replace\(\/!\+\/g, '\.'\)/.test(vb2), /Have a great day\./.test(vb2 + REG.map(r => r.text).join('\n')),
                  hasRule('closing-calm')],
                 [true, true, true]);
+            // NDR 1/2/3 + RTO never ask why the delivery failed; COD never asks about availability
+            // (user, 2026-09-11). Gone from the prompts AND cut from speech by a guard, in every language.
+            {
+                const grabRx = (n) => { const a = vb2.indexOf('const ' + n + ' = '); const line = vb2.slice(a, vb2.indexOf('\n', a)).replace(/\r$/, ''); return eval(line.slice(('const ' + n + ' = ').length).replace(/;$/, '')); };
+                const RSN = grabRx('REASON_ASK_RX'), AV = grabRx('AVAIL_ASK_RX'), QQ = grabRx('QUESTION_RX');
+                const blocked = (rx, x) => x.split(/(?<=[.?!।？])\s+/).some(p => QQ.test(p) && rx.test(p));
+                check('voice: no reason question on NDR 1/2/3 + RTO, no availability question on COD — gone from the prompts and blocked in speech',
+                    [!/May I know what went wrong|failure-reason question|Still ask your own/.test(vb2),
+                     /that question is gone from this call/.test(vb2),
+                     /that question does not exist in this call/.test(vb2),
+                     blocked(RSN, 'May I know what went wrong with the delivery?'),
+                     blocked(RSN, 'क्या मैं जान सकती हूँ delivery में क्या दिक्कत हुई?'),
+                     !blocked(RSN, 'Our delivery partner went out on 10th and 11th September, but the delivery could not be completed.'),
+                     !blocked(RSN, 'Would you still like to receive it?'),
+                     blocked(AV, 'You placed it on Cash on Delivery, will you be available to receive the delivery?'),
+                     blocked(AV, 'तो आप delivery के लिए available रहेंगे?'),
+                     !blocked(AV, 'Can you confirm you placed this order?'),
+                     vb2.includes("const banned = this.s.callType === 'rto_recovery' ? REASON_ASK_RX")],
+                    [true, true, true, true, true, true, true, true, true, true, true]);
+            }
+            // DO NOT CALL LIST (user, 2026-09-11): an order on it gets no call — AI or manual. Both places a call
+            // can start refuse BEFORE the dial, an unreadable list refuses too, and both auto ticks skip before
+            // claiming (no attempt burned). The page is its own permission.
+            {
+                const cbSrc = fs.readFileSync(path.join(ROOT, 'app/api/call_block.js'), 'utf8');
+                const mcSrc = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_manual_call.js'), 'utf8');
+                const acSrc = fs.readFileSync(path.join(ROOT, 'app/api/vobiz_auto_calls.js'), 'utf8');
+                const svSrc = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+                const apSrc = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                const f0 = vb2.indexOf('async function placeOrderCall(b)');
+                const m0 = mcSrc.indexOf("router.post('/vobiz/manual-call'");
+                check('do not call: both dial paths refuse before dialling; both auto ticks skip; page + permission wired',
+                    [f0 > 0 && vb2.indexOf('CB.refusal(blk)', f0) > f0 && vb2.indexOf('/Call/`, {', f0) > vb2.indexOf('CB.refusal(blk)', f0),
+                     vb2.includes("return { error: 'Could not check the Do Not Call list — call not placed ("),
+                     m0 > 0 && mcSrc.indexOf('CB.refusal(blk)', m0) > m0 && mcSrc.indexOf('/Call/`, {', m0) > mcSrc.indexOf('CB.refusal(blk)', m0),
+                     (acSrc.match(/blockedSet\(targets\.map\(t => t\.name\)\)/g) || []).length === 2,
+                     (acSrc.match(/skip: 'do-not-call list' \}\); continue; \}/g) || []).length === 2,
+                     /router\.use\('\/support\/dnc', requirePermission\('support-dnc'\)\)/.test(cbSrc),
+                     svSrc.indexOf("[/^\\/support\\/dnc(\\/|$)/i, 'support-dnc']") > 0
+                        && svSrc.indexOf("[/^\\/support\\/dnc(\\/|$)/i, 'support-dnc']") < svSrc.indexOf('[/^\\/support\\/(?!sarvam-usage$)/i,'),
+                     apSrc.includes("['support-dnc','Do Not Call list (block every AI + manual call for an order)']"),
+                     apSrc.includes("case 'support-dnc':") && apSrc.includes("'nav-support-dnc': 'support-dnc'"),
+                     apSrc.includes('⛔ Do not call')],
+                    [true, true, true, true, true, true, true, true, true, true]);
+            }
             check('voice call polish 2026-08-31: denial asks the reason once; other-language replies are never a direct outcome; recordings not capped at 60s',
                 [/May I know the reason please\?/.test(vb2), hasRule('lang-reply-not-final'),
                  hasRule('lang-offer-only'),
@@ -3242,7 +3316,7 @@ function check(name, got, want) {
                 [/romanLangOf\(text, this\.s\.lang\)/.test(vb2), /ROMAN_HI_RX/.test(vb2),
                  hasRule('lang-never-reask'),
                  /return to the EXACT point where the call flow stopped/.test(vb2),
-                 /even a "nothing" or a brush-off, settles it FOREVER/.test(vb2),
+                 /an address confirmed once is never read again, track what is already settled/.test(vb2),
                  /deliver the WHOLE news line again/.test(vb2),
                  /WITHOUT re-reading the address/.test(vb2)],
                 [true, true, true, true, true, true, true]);
