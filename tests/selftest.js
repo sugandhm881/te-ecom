@@ -2128,6 +2128,25 @@ function check(name, got, want) {
                     // ⚠️ A rename must not take access away: Order Calling rides the SAME right the Hold
                     // Orders tab always did. Its own key would have hidden the page from everyone who could
                     // already see those rows until an admin granted it.
+                    // ⚠️ THE ALIAS GATES THE PAGE, NOT ONLY THE LINK (user, 2026-09-11: "except my user, anyone
+                    // opening Order Calling gets the Orders dashboard"). It was applied where the sidebar
+                    // decides which links to SHOW but not in canView(), where navigate() decides whether the
+                    // page may OPEN — so non-admins saw the link, failed the check on the literal key, and
+                    // were silently sent to their first permitted page. MEASURED with the real canView().
+                    {
+                        const cvSrc = apn.slice(apn.indexOf('const NAV_PERM_ALIAS = '), apn.indexOf('function canSendEmails('));
+                        const gate = (perms, view, admin) => new Function('currentUser', 'view',
+                            cvSrc + ' return canView(view);')({ isAdmin: !!admin, permissions: perms }, view);
+                        check('call queue: a non-admin with the Call Queue right can OPEN Order Calling, not just see it',
+                            [gate(['orders', 'support-queue'], 'order-calling'),      // the broken case
+                             gate(['orders', 'support-queue'], 'support-queue'),      // NDR Calling unchanged
+                             gate(['orders'], 'order-calling'),                       // no right, no page
+                             gate(['orders'], 'orders'),
+                             gate([], 'order-calling', true),                         // admins, as ever
+                             // the alias sits beside the gate that reads it (both readers run only after load)
+                             apn.indexOf('const NAV_PERM_ALIAS = ') < apn.indexOf('function canView(view)')],
+                            [true, true, false, true, true, true]);
+                    }
                     check('call queue: Order Calling inherits the support-queue right, and cleans up after itself',
                         [apn.includes("const NAV_PERM_ALIAS = { 'order-calling': 'support-queue' };"),
                          apn.includes('NAV_PERM_ALIAS[raw]) || raw'),
@@ -4985,6 +5004,28 @@ function check(name, got, want) {
                 [rep2.includes("if (!require('./teams').webhookFallbackOn()) {"),
                  fs.readFileSync(path.join(ROOT, 'app/api/teams.js'), 'utf8').includes("(webhookFallbackOn() ? 'webhook' : 'not posted')")],
                 [true, true]);
+        }
+        // ── A PLAIN REFRESH PICKS UP A DEPLOY (user, 2026-09-11). /static is cached for 30 days, and the
+        // cache-busters were typed by hand: app.js carried `?v=2026-09-10-master-filter` through every change
+        // after it, tailwind.css carried none. The shell now stamps each link with a hash of the file's
+        // CONTENT. Measured: the real renderShell() out of server.js, run against the real template.
+        {
+            const sv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+            const fnSrc = sv.slice(sv.indexOf('const _assetVer = new Map();'), sv.indexOf("app.get('/', (req, res) => {"));
+            const render = new Function('path', '__dirname', 'require', fnSrc + ' return renderShell;')(path, ROOT, require);
+            const html = render();
+            const links = html.match(/(?:src|href)="\/static\/[^"]+"/g) || [];
+            const appTag = (html.match(/src="\/static\/app\.js\?v=([0-9a-f]+)"/) || [])[1];
+            const expect = require('crypto').createHash('sha1').update(fs.readFileSync(path.join(ROOT, 'app/static/app.js'))).digest('hex').slice(0, 10);
+            check('shell: every /static link carries a content hash, so a plain refresh fetches a changed file',
+                [appTag === expect,                                               // app.js — the file that matters most
+                 /href="\/static\/tailwind\.css\?v=[0-9a-f]{10}"/.test(html),     // had no version at all
+                 !/\?v=2026-/.test(html),                                         // no hand-typed string survives
+                 links.length > 5 && links.every(l => /\?v=[0-9a-f]{10}"$/.test(l)),
+                 // and the page itself is still never cached
+                 sv.includes("res.set('Cache-Control', 'no-store, must-revalidate');\n    res.type('html').send(renderShell());")
+                   || sv.includes("res.set('Cache-Control', 'no-store, must-revalidate');\r\n    res.type('html').send(renderShell());")],
+                [true, true, true, true, true]);
         }
         console.log(`\n${pass} passed, ${fail} failed`);
         process.exit(fail ? 1 : 0);

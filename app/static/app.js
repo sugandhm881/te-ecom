@@ -888,7 +888,22 @@ function applyPermissions() {
         const sb = document.getElementById('app-sidebar'); if (sb) sb.setAttribute('data-perms', 'ready');
     }
 }
-function canView(view) { return !currentUser || currentUser.isAdmin || (currentUser.permissions || []).includes(view); }
+// Order Calling is the Hold Orders tab that moved out of the Call Queue, so it rides the SAME right.
+// Giving it a key of its own would have hidden the page from everyone who could already see those rows
+// until an admin granted it — a rename should not take access away.
+const NAV_PERM_ALIAS = { 'order-calling': 'support-queue' };
+// ⚠️ THE ALIAS MUST GATE THE PAGE, NOT ONLY THE LINK (user, 2026-09-11: "except my user, anyone logging
+// in and opening Order Calling gets the Orders dashboard instead"). The alias was applied where the
+// sidebar decides which links to SHOW, but not here, where navigate() decides whether the page may OPEN —
+// so every non-admin saw the Order Calling link, clicked it, failed this check on the literal key
+// 'order-calling' (which no user holds), and navigate() quietly swapped in their first permitted page:
+// the Orders dashboard. Admins never noticed because they skip this check entirely. Resuming the page
+// after a refresh reads this same function, so that path was broken too, and is fixed with it.
+function canView(view) {
+    if (!currentUser || currentUser.isAdmin) return true;
+    const perms = currentUser.permissions || [];
+    return perms.includes(view) || (!!NAV_PERM_ALIAS[view] && perms.includes(NAV_PERM_ALIAS[view]));
+}
 // Capability gate: send escalation/critical/claims emails. Admins always; other users only if the admin
 // granted the 'send-escalation-emails' permission on the Users page. The server enforces this too.
 function canSendEmails() { return !!(currentUser && (currentUser.isAdmin || (currentUser.permissions || []).includes('send-escalation-emails'))); }
@@ -7313,10 +7328,6 @@ const NAV_HREF = {
 };
 const VALID_VIEWS = new Set(Object.values(NAV_HREF));
 function viewFromHash() { const v = (location.hash || '').replace(/^#/, ''); return VALID_VIEWS.has(v) ? v : null; }
-// Order Calling is the Hold Orders tab that moved out of the Call Queue, so it rides the SAME right.
-// Giving it a key of its own would have hidden the page from everyone who could already see those rows
-// until an admin granted it — a rename should not take access away.
-const NAV_PERM_ALIAS = { 'order-calling': 'support-queue' };
 function applyNavHrefs() { Object.entries(NAV_HREF).forEach(([id, view]) => { const a = document.getElementById(id); if (a) a.setAttribute('href', '#' + view); }); }
 if (document.readyState !== 'loading') applyNavHrefs(); else document.addEventListener('DOMContentLoaded', applyNavHrefs);
 // Ctrl/Cmd/Shift-click a nav item → let the browser open the #hash in a new tab instead of navigating in place.

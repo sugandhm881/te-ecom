@@ -1231,6 +1231,40 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### Order Calling opened the Orders dashboard for every non-admin, and a deploy needed a hard refresh (2026-09-11)
+
+**Order Calling → Orders dashboard.** User: *"except my user, anyone logging in and opening Order Calling
+gets the Orders dashboard instead."* When Hold Orders moved into its own page (2026-09-10) it was given
+the **`support-queue`** right through `NAV_PERM_ALIAS = { 'order-calling': 'support-queue' }` — but the
+alias was applied only where `applyPermissions()` decides which sidebar links to **show**, not in
+`canView()`, where `navigate()` decides whether a page may **open**. Every non-admin therefore saw the link,
+clicked it, failed `canView('order-calling')` on a literal key nobody holds, and `navigate()` silently
+swapped in their first permitted view — the Orders dashboard. Admins never saw it: they skip the gate.
+Resuming the page after a refresh (`canView(resume)`) was broken the same way.
+
+`canView()` now honours the alias, so seeing the link and opening the page are the same rule. The alias
+declaration moved up beside `canView` (a `const` cannot be read before its line has run, even through
+`typeof`; both readers only run after load, so this is tidiness, not a fix). The server was already
+right — `/support/*` accepts `support-queue`, so the page's data loads for those users.
+Selftest runs the real `canView()`: `support-queue` opens Order Calling; without it, it stays shut.
+
+**A plain refresh now picks up every deploy.** User: *"when we live anything, simple refresh should detect
+changes."* `index.html` was already `no-store`, but it loads `/static` files that are cached for **30 days**,
+and their cache-busters were typed **by hand**: `app.js` carried `?v=2026-09-10-master-filter` through every
+change made after it, `tailwind.css` carried no version at all. So a normal refresh ran the old `app.js`
+and only a hard refresh showed a deploy.
+
+The `/` route now serves the shell through **`renderShell()`**, which rewrites every `src`/`href` pointing
+at `/static/` with **`?v=<first 10 hex of the file's SHA-1>`**. A changed file is a new URL (fetched once);
+an unchanged file keeps its URL and stays cached. Hashes are recomputed only when a file's mtime or size
+moves. Any `?v=` written in the template is replaced — ⚠️ **the hand-typed strings in `index.html` are now
+inert; do not bump them, and do not trust them when reading the file.** A missing file keeps its link as
+written, so this can never break the page. Selftest renders the real template through the real
+`renderShell()` and checks `app.js` carries its own content hash and no `?v=2026-…` survives.
+
+Takes effect after one server restart; from then on a normal refresh is enough. A tab left open without
+refreshing stays on the old version until it refreshes.
+
 ### Teams reports post once, from Pravidhi — the Workflows fallback is off (2026-09-11)
 
 User: *"on Teams report post come twice, once from Pravidhi and one from Workflow — I want to stop

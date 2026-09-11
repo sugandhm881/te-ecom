@@ -81,8 +81,9 @@ app.use((req, res, next) => {
 
 // Static Files
 // Long-cache static assets (JS/CSS/vendor/images) in the browser → no re-download on every visit, so the
-// app shell loads instantly on repeat loads. Safe: the versioned files carry `?v=` cache-busters that change
-// on each update (a new query string = a fresh URL), and index.html itself is served no-cache below.
+// app shell loads instantly on repeat loads. Safe because every /static link in index.html is stamped with
+// a CONTENT HASH when the page is served (see renderShell below) — a changed file is a new URL, so a plain
+// refresh fetches it — and index.html itself is never cached.
 app.use('/static', express.static(path.join(__dirname, 'app/static'), { maxAge: '30d', etag: true }));
 app.use('/templates', express.static(path.join(__dirname, 'app/templates'), { maxAge: '7d', etag: true }));
 // THE SARVAM HANDOFF PAGE. Public and session-free on purpose: it is opened by a bookmarklet from
@@ -925,10 +926,38 @@ app.get('/api/cod-confirmations', async (req, res) => {
 });
 
 // --- Serve Frontend ---
+// ── A PLAIN REFRESH PICKS UP EVERY DEPLOY (user, 2026-09-11: "when we live anything, simple refresh should
+// detect changes"). The shell was already uncached, but the files it loads were cache-busted BY HAND:
+// app.js had carried `?v=2026-09-10-master-filter` through every change made since, and tailwind.css carried
+// no version at all — so with /static cached for 30 days, a normal refresh kept running the old app.js and
+// only a hard refresh showed a deploy. Nobody can be relied on to bump a string on every change.
+// Now each /static link is rewritten on the way out with a hash of the file's CONTENT: a file that changed is
+// a new URL (fetched once), a file that did not keeps its URL (still served from cache). Whatever `?v=` the
+// template carries is replaced, so the hand-written strings there are now inert.
+// The hash is recomputed only when a file's mtime or size moves — one stat per link per page load otherwise.
+const _assetVer = new Map();   // absolute path → { mtimeMs, size, v }
+function assetVersion(rel) {
+    const abs = path.join(__dirname, 'app/static', rel);
+    try {
+        const st = require('fs').statSync(abs);
+        const hit = _assetVer.get(abs);
+        if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.v;
+        const v = require('crypto').createHash('sha1').update(require('fs').readFileSync(abs)).digest('hex').slice(0, 10);
+        _assetVer.set(abs, { mtimeMs: st.mtimeMs, size: st.size, v });
+        return v;
+    } catch (_) { return null; }   // a missing file keeps its link exactly as written — never a broken page
+}
+function renderShell() {
+    const html = require('fs').readFileSync(path.join(__dirname, 'app/templates/index.html'), 'utf8');
+    return html.replace(/((?:src|href)=")\/static\/([^"?#]+)(?:\?[^"#]*)?"/g, (m, pre, rel) => {
+        const v = assetVersion(rel);
+        return v ? `${pre}/static/${rel}?v=${v}"` : m;
+    });
+}
 app.get('/', (req, res) => {
     // Never cache the app shell — otherwise browsers/phones keep showing an old index.html after a deploy.
     res.set('Cache-Control', 'no-store, must-revalidate');
-    res.sendFile(path.join(__dirname, 'app/templates/index.html'));
+    res.type('html').send(renderShell());
 });
 
 
