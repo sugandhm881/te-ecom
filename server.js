@@ -28,7 +28,11 @@ app.use('/api/tally/bank/parse', express.json({ limit: '32mb' }));   // statemen
 // Kwikship pincode→zone sheet (base64 in JSON). India has ~19k live pincodes and a courier's
 // serviceability export lists one row per pincode, so the whole file is a few MB.
 app.use('/api/zone-mapping/upload', express.json({ limit: '32mb' }));
-app.use('/api/zone-mapping/pincode-directory/upload', express.json({ limit: '80mb' }));   // India Post directory CSV (~25 MB → ~34 MB base64)
+app.use('/api/zone-mapping/pincode-directory/upload', express.json({ limit: '80mb' }));
+// RTO / Return video upload (2026-09-12). The file arrives as a RAW body, not base64 in JSON: base64 would
+// add a third to every video and make a 200 MB cap cost 270 MB of body. Video types only, and the route
+// checks the length again before it stores anything.
+app.use('/api/return-videos/upload', express.raw({ type: ['video/*', 'application/octet-stream'], limit: '200mb' }));   // India Post directory CSV (~25 MB → ~34 MB base64)
 
 // Capture the raw body (used by the Shopify webhook HMAC check); does not change JSON parsing.
 // limit 5mb (default 100kb was too tight): the Ad-Set PDF/Excel download POSTs the full computed report JSON
@@ -215,6 +219,8 @@ const _VIEW_PERMS = [
     // rule and was 403'd before it ever reached the route. Worse, that 403 comes from middleware and
     // carries no CORS header, so the browser could only report "Failed to fetch" with no clue why.
     // Exactly the trap /tally/bridge/* has below, and the same lookahead fixes it.
+    // RTO / Return videos (2026-09-12) — short-goods evidence; its own right.
+    [/^\/return-videos(\/|$)/i, 'return-videos'],
     // Do Not Call list (2026-09-11) — its own right; must precede the general support rule below.
     [/^\/support\/dnc(\/|$)/i, 'support-dnc'],
     [/^\/support\/(?!sarvam-usage$)/i, ['support-dashboard', 'support-queue', 'support-orders', 'support-calls', 'support-contacts', 'support-blacklist', 'customer-profile']],
@@ -367,6 +373,7 @@ app.use('/api', require('./app/api/po_approvals'));   // Inventory → PO Approv
 app.use('/api', amazonFbaRoutes);
 app.use('/api', require('./app/api/teams').router);
 app.use('/api', require('./app/api/email_replies').router);   // escalation reply threads + poll
+app.use('/api', require('./app/api/return_videos').router);      // RTO / Return short-goods videos (private bucket)
 app.use('/api', require('./app/api/call_block').router);         // Do Not Call list — blocks every AI + manual call for an order
 app.use('/api', require('./app/api/support_console'));        // Customer Support console (queue/calls/notes/contacts)
 app.use('/api', require('./app/api/msg91_wa').router);   // manual WhatsApp sends (template sequences) — /support/wa/*
@@ -410,6 +417,9 @@ initFbaLocationCron();
 // 23:45 warm the ledger masters so the 23:50 validation reflects Tally as it is right now (a ledger
 // renamed during the day must not let a push silently create it afresh under Suspense).
 const tallyBatch = require('./app/api/tally_batch');
+// RTO / Return videos: 6-month retention (user, 2026-09-12). Deletes the file first, then the row —
+// an orphaned file would be invisible and billed forever. Also sweeps uploads that never finished.
+cronJob('return-video-purge', '20 2 * * *', () => require('./app/api/return_videos').purgeOldVideos());
 cronJob('TallyBatch (45 23 * * *)', '45 23 * * *', async () => {
     if (String(config.TALLY_BATCH_CRON_ENABLED || '').toLowerCase() !== 'true') return;
     console.log('[TallyBatch] 23:45 IST — refreshing Tally masters ahead of the nightly push…');

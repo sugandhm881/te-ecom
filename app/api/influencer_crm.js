@@ -289,9 +289,22 @@ router.post('/inf/videos/:id', async (req, res) => {
         // disabled control is describing something real instead of pretending.
         // Un-ticking is deliberately not offered anywhere; a genuine mistake is a database edit, which
         // is the right amount of friction for reversing a recorded fact.
+        // …AND SINCE 2026-09-12 AN ADMIN — AND ONLY AN ADMIN — CAN TAKE IT BACK (user: "give admin only too
+        // uncheck this and after uncheck activity log should deleted of check and uncheck both"). The rule
+        // still lives HERE rather than in the disabled control, because a hidden button is only hidden.
+        // The undo leaves NO trace: the tick's own activity entry is removed and the undo writes none, so
+        // the card reads exactly as it did before anyone ticked it. influencer_activities has no video
+        // column, so the newest 'video_received' row for this influencer is the one that tick wrote
+        // (checked 2026-09-12: no influencer has more than one such entry).
         if (before && before.video_received && patch.video_received === false) {
-            return res.status(409).json({ success: false,
-                error: 'This video is already marked received, and that cannot be undone from here.' });
+            const admin = req.user && (req.user.role === 'admin' || (req.user.permissions || []).includes('*'));
+            if (!admin) return res.status(403).json({ success: false,
+                error: 'Only an admin can undo "video received".' });
+            patch.video_received_at = null;
+            const { data: last } = await supabase.from('influencer_activities')
+                .select('id').eq('influencer_id', before.influencer_id).eq('activity_type', 'video_received')
+                .order('created_at', { ascending: false }).limit(1);
+            if (last && last.length) await supabase.from('influencer_activities').delete().eq('id', last[0].id);
         }
         // The timestamp is set by the SERVER, never accepted from the client — it is the answer to
         // "when did they deliver", and a client-supplied one can be anything.
@@ -536,7 +549,9 @@ router.get('/inf/calendar', async (req, res) => {
         const from = `${year}-${String(month).padStart(2, '0')}-01`;
         const to = monthEnd(year, month);   // last day as YYYY-MM-DD — see monthEnd note (no TZ shift)
         const { data: vids, error } = await supabase.from('influencer_videos')
-            .select('id, influencer_id, expected_date, live_date, payment_status, video_url')
+            // video_received drives the calendar's yellow pill (user, 2026-09-12: "tick on video received
+            // check box it should highlight with yellow color on video calendar") — see infCalLoad.
+            .select('id, influencer_id, expected_date, live_date, payment_status, video_url, video_received, video_received_at')
             .or(`and(expected_date.gte.${from},expected_date.lte.${to}),and(live_date.gte.${from},live_date.lte.${to})`);
         if (error) throw new Error(error.message);
         // Also surface each influencer's planned NEXT video (influencers.next_video_expected_date) as an
@@ -556,11 +571,29 @@ router.get('/inf/calendar', async (req, res) => {
                 .select('influencer_id, live_date').in('influencer_id', nextIds.slice(i, i + 300)).not('live_date', 'is', null);
             (lrs || []).forEach(r => { if (r.live_date && (!lastLive[r.influencer_id] || r.live_date > lastLive[r.influencer_id])) lastLive[r.influencer_id] = r.live_date; });
         }
+        // ⚠️ THE RECEIVED VIDEO IS USUALLY *UNSCHEDULED*, SO THE MARKER IS WHAT HAS TO GO YELLOW (user,
+        // 2026-09-12: "no change in color of video calendar after click video received"). Relatable Tanya's
+        // video 346 carries no expected_date and no live_date — it never appears on a calendar at all — while
+        // the 12 Sep pill is this influencer's next_video_expected_date marker, which knows nothing about the
+        // tick. So a marker inherits the tick: if the influencer has a video in hand that is not posted yet,
+        // the marker is flagged received and the page paints it yellow (and green still wins once it is live).
+        const rcvdAt = {};
+        for (let i = 0; i < nextIds.length; i += 300) {
+            const { data: rv } = await supabase.from('influencer_videos')
+                .select('influencer_id, video_received_at')
+                .in('influencer_id', nextIds.slice(i, i + 300))
+                .eq('video_received', true).is('live_date', null);
+            (rv || []).forEach(r => {
+                const at = r.video_received_at || '';
+                if (!(r.influencer_id in rcvdAt) || at > rcvdAt[r.influencer_id]) rcvdAt[r.influencer_id] = at;
+            });
+        }
         const nextEntries = (nexts || [])
             .filter(inf => !(lastLive[inf.id] && lastLive[inf.id] >= inf.next_video_expected_date))
             .map(inf => ({
                 id: `next-${inf.id}`, influencer_id: inf.id, expected_date: inf.next_video_expected_date,
                 live_date: null, payment_status: null, video_url: null, source: 'next_expected',
+                video_received: inf.id in rcvdAt, video_received_at: rcvdAt[inf.id] || null,
             }));
         const allVids = [...(vids || []), ...nextEntries];
         const ids = [...new Set(allVids.map(v => v.influencer_id))];

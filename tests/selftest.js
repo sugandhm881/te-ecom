@@ -3289,6 +3289,89 @@ function check(name, got, want) {
                      apSrc.includes('⛔ Do not call')],
                     [true, true, true, true, true, true, true, true, true, true]);
             }
+            // "VIDEO RECEIVED" IS ONE-WAY FOR EVERYONE EXCEPT AN ADMIN (user, 2026-09-12: "remove check box
+            // from this and give admin only too uncheck this and after uncheck activity log should deleted of
+            // check and uncheck both"). The chip carries no checkbox once recorded, the Undo renders for
+            // admins only, the server refuses everyone else, and the undo deletes the tick's activity entry
+            // and writes none of its own — so the card reads exactly as it did before the tick.
+            {
+                const icSrc2 = fs.readFileSync(path.join(ROOT, 'app/api/influencer_crm.js'), 'utf8');
+                const apSrc3 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                const chip = apSrc3.slice(apSrc3.indexOf('const infVideoReceivedChip='), apSrc3.indexOf('const vidCard='));
+                check('influencer video: only an admin can un-tick "video received", and the undo clears it from the activity log',
+                    [/Only an admin can undo "video received"/.test(icSrc2),
+                     /patch\.video_received_at = null;/.test(icSrc2),
+                     /activity_type', 'video_received'\)[\s\S]{0,220}delete\(\)\.eq\('id', last\[0\]\.id\)/.test(icSrc2),
+                     // no checkbox once recorded — scoped to that branch, since the UN-ticked button still
+                     // draws its box (that is the control you click to tick it in the first place)
+                     !/ivr-box/.test(chip.slice(chip.indexOf('if(v.video_received)'), chip.indexOf('class="ivr-btn infv-recv"'))),
+                     !/cannot be undone/i.test(chip),
+                     /currentUser&&currentUser\.isAdmin\)\s*\?`<button type="button" class="infv-unrecv"/.test(apSrc3),
+                     apSrc3.includes("querySelectorAll('.infv-unrecv')") && /video_received:false/.test(apSrc3)],
+                    [true, true, true, true, true, true, true]);
+            }
+            // THE VIDEO CALENDAR GOES YELLOW ONCE THE VIDEO IS IN (user, 2026-09-12: "tick on video received
+            // check box it should highlight with yellow color on video calendar"). The colour is inline, not a
+            // class: this project ships a PREBUILT tailwind.css and it carries no bg-yellow-* rule, so a class
+            // would have rendered nothing at all. The flag has to be fetched too — the route did not select it.
+            {
+                const icSrc = fs.readFileSync(path.join(ROOT, 'app/api/influencer_crm.js'), 'utf8');
+                const apSrc2 = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                const htSrc = fs.readFileSync(path.join(ROOT, 'app/templates/index.html'), 'utf8');
+                const cssSrc = fs.readFileSync(path.join(ROOT, 'app/static/tailwind.css'), 'utf8');
+                check('influencer calendar: a received video is yellow — flag fetched, pill coloured inline, legend says so',
+                    [/video_url, video_received, video_received_at/.test(icSrc),
+                     // a LIVE video stays green — yellow is only "in hand, not posted yet" (user, same day)
+                     /const rcvd=v\.video_received&&v\.kind!=='live';/.test(apSrc2),
+                     /\$\{rcvd\?'':kindCls\[v\.kind\]\}/.test(apSrc2),
+                     apSrc2.includes('style="background:#facc15;color:#713f12"'),
+                     /video received'\+\(v\.video_received_at/.test(apSrc2),
+                     htSrc.includes('style="background:#facc15"></span> video received'),
+                     !/\.bg-yellow-300[ ,{:]/.test(cssSrc),   // the reason it is inline — if this ever fails, a class is fine
+                     // the received video is usually UNSCHEDULED, so the next-expected marker inherits the
+                     // tick — otherwise the calendar never changes colour at all (user, 2026-09-12)
+                     /video_received: inf\.id in rcvdAt, video_received_at: rcvdAt\[inf\.id\] \|\| null/.test(icSrc),
+                     /\.eq\('video_received', true\)\.is\('live_date', null\)/.test(icSrc),   // in hand, not posted
+                     // …and the grid behind the card repaints itself, with no page reload
+                     apSrc2.includes('function infCalRepaint(infId, received)')
+                        && /infCalRepaint\(inf\.id, true\)/.test(apSrc2) && /infCalRepaint\(inf\.id, false\)/.test(apSrc2)
+                        // the in-place restyle needs the pill's own kind, and the re-sync must never blank the grid
+                        && /data-kind="\$\{v\.kind\}"/.test(apSrc2)
+                        && /if\(!quiet\) g\.innerHTML=brandLoader/.test(apSrc2)],
+                    [true, true, true, true, true, true, true, true, true, true]);
+            }
+            // RTO / RETURN VIDEOS (user, 2026-09-12): short-goods evidence. Private bucket, own permission, raw
+            // upload body (base64 would add a third to every video), signed download, 6-month retention.
+            {
+                const rvSrc = fs.readFileSync(path.join(ROOT, 'app/api/return_videos.js'), 'utf8');
+                const svSrc = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+                const apSrc = fs.readFileSync(path.join(ROOT, 'app/static/app.js'), 'utf8');
+                const sqlSrc = fs.readFileSync(path.join(ROOT, 'supabase/migrations/20260912_return_videos.sql'), 'utf8');
+                check('return videos: private bucket, own permission, raw upload body, signed download, 6-month purge',
+                    [/const RETENTION_MONTHS = 6;/.test(rvSrc),
+                     /router\.use\('\/return-videos', requirePermission\('return-videos'\)\)/.test(rvSrc),
+                     // the signed URL is made and used SERVER-side; the bytes are piped, never redirected to
+                     /createSignedUrl\(row\.file_path, 120\)/.test(rvSrc) && !/res\.redirect/.test(rvSrc)
+                        && /Readable\.fromWeb\(r\.body\)\.pipe\(res\)/.test(rvSrc),
+                     apSrc.includes("c.querySelectorAll('.rv-get')"),
+                     rvSrc.includes("const BUCKET = 'return-videos'") && /public, file_size_limit[\s\S]*'return-videos', false, 209715200/.test(sqlSrc),
+                     svSrc.includes("app.use('/api/return-videos/upload', express.raw({ type: ['video/*', 'application/octet-stream'], limit: '200mb' }));"),
+                     svSrc.indexOf("[/^\\/return-videos(\\/|$)/i, 'return-videos']") > 0
+                        && svSrc.indexOf("[/^\\/return-videos(\\/|$)/i, 'return-videos']") < svSrc.indexOf('[/^\\/support\\/(?!sarvam-usage$)/i,'),
+                     svSrc.includes("cronJob('return-video-purge', '20 2 * * *'"),
+                     // the purge removes the FILE before the row — an orphaned file would be billed forever
+                     rvSrc.indexOf('storage.from(BUCKET).remove(paths.slice') < rvSrc.indexOf("from(TABLE).delete().in('id', old.map"),
+                     apSrc.includes("case 'return-videos':") && apSrc.includes("'nav-return-videos': 'return-videos'"),
+                     apSrc.includes("['return-videos','RTO / Return Videos (short-goods evidence: upload + download)']"),
+                     // the browser shrinks before uploading, and falls back to the original if it cannot
+                     /const RV_MAX_SIDE=1280, RV_MIN_SIDE=720, RV_VIDEO_BPS=2500000/.test(apSrc),
+                     apSrc.includes('blob=original; shrunk=false;'),
+                     // deleting a video is ADMIN ONLY (user, 2026-09-12) — the server rule first, the button second
+                     /const admin = req\.user && \(req\.user\.role === 'admin'/.test(rvSrc)
+                        && /if \(!admin\) return res\.status\(403\)/.test(rvSrc),
+                     /currentUser&&currentUser\.isAdmin\)\?`<button class="rv-del/.test(apSrc)],
+                    [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true]);
+            }
             check('voice call polish 2026-08-31: denial asks the reason once; other-language replies are never a direct outcome; recordings not capped at 60s',
                 [/May I know the reason please\?/.test(vb2), hasRule('lang-reply-not-final'),
                  hasRule('lang-offer-only'),

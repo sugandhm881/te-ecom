@@ -1231,6 +1231,76 @@ Windows hid it, because `cmd.exe` tolerates the same line, so every local test p
 once succeeded. The shell is now win32-only, where it is genuinely needed (`claude` is `claude.cmd`).
 ⚠️ The selftest had asserted `shell: true` — it was pinning the bug in place.
 
+### RTO / Return videos, and "video received" gets an undo and a colour on the calendar (2026-09-12)
+
+#### RTO / Return Videos — short-goods evidence (Inventory → RTO / Return Videos)
+
+User: *"make a new dashboard for upload video with note … due to short goods received when shipment is RTO &
+Return … permission based … whenever we need we download that video and make sure no max storage use for video
+and quality of video should be also maintained"*, then *"this dashboard should be in under inventory nav bar"*
+and *"delete option give only admin"*.
+
+- **Page** (`return-videos` permission, admins always): marketplace (Amazon · Flipkart · Myntra · Shopify ·
+  Meesho, **+** adds more for everyone), order number, AWB, short qty / value, note, video. The list shows
+  size, who uploaded, and Download. **Delete is ADMIN ONLY** — enforced in the route, not by hiding the button;
+  uploading and downloading stay with the permission, so the team that files evidence cannot destroy it.
+- **Storage, from the project's real numbers:** Supabase Pro includes 100 GB file storage (then $0.0213/GB/mo)
+  and 250 GB egress (then $0.09/GB); the other buckets hold ~113 MB. The browser re-encodes to 720p before
+  upload (canvas + WebAudio → MediaRecorder, 2.5 Mbps / 64 kbps): **10-15 MB a minute instead of 100-150**, so
+  ~7,000 videos fit the included 100 GB instead of ~850. The tick box sends the original when it matters, and a
+  browser that cannot re-encode falls back to the original rather than failing.
+- **Private bucket** `return-videos` (200 MB a file, video types) — every other bucket in this project is
+  public. Migration `20260912_return_videos.sql` (**applied 2026-09-12**): `return_videos_ecom`,
+  `return_video_marketplaces_ecom`, the bucket. Nothing to run by hand.
+- ⚠️ **Upload is a RAW body, not base64 in JSON** (`express.raw`, mounted before the global parser): base64
+  would add a third to every video. Two steps — the row first, the file second — so a failed upload leaves a
+  traceable row, swept nightly.
+- ⚠️ **Download streams THROUGH us**, like the call recordings: the dashboard's CSP is `connect-src 'self'`, so
+  the browser may not fetch from `*.supabase.co`, and a plain `<a>` would carry no Authorization header. The
+  signed URL (120 s) is made and used server-side; the page fetches → blob → saves.
+- **6-month retention**, nightly at 02:20 IST (`return-video-purge`): the FILE goes before the row — an
+  orphaned file is invisible and billed forever.
+- **Verified end to end** on a temporary entry: upload, second-upload refused, list, byte-identical download,
+  purge leaves fresh rows alone, delete removes row *and* file; and non-admins refused delete (403) while admins pass.
+
+#### "Video received" — no checkbox, an admin-only undo, and no trace left
+
+User: *"remove check box from this and give admin only too uncheck this and after uncheck activity log should
+deleted of check and uncheck both"*.
+
+- The recorded state is now a plain green chip — no checkbox, and no ✓ glyph either (this control draws its own
+  tick precisely because U+2713 is missing from plenty of UI fonts). The un-ticked button keeps its drawn box.
+- **Undo renders for admins only**, and the route refuses everyone else (403) — the hidden button is not the
+  protection. The undo clears `video_received` and `video_received_at`, **deletes the tick's activity entry**
+  and writes none of its own, so the card reads exactly as it did before.
+  ⚠️ `influencer_activities` has no video column, so the newest `video_received` row for that influencer is
+  deleted (checked 2026-09-12: no influencer has more than one).
+- Verified on a temporary video row: staff tick → entry appears; staff undo → 403, nothing changed; admin undo
+  → flag, date and entry gone; row deleted, activity log back to its original state.
+
+#### The video calendar goes yellow — and repaints without a reload
+
+User: *"tick on video received check box it should highlight with yellow color on video calender"*, then *"when
+video is lived green already happen in calender make sure that that should not yellow"*, *"no change in color
+of video calender after click video received"*, and *"i don't want that should reload"*.
+
+- **Yellow = in hand, not posted yet.** A live video stays GREEN (the stronger fact); yellow only marks the days
+  where the video is with us. Legend: live · expected · overdue · **video received**.
+- ⚠️ **The colour had to land on the MARKER, not the video row.** The calendar route did not select
+  `video_received` at all — and the received video is usually **unscheduled**: Relatable Tanya's video 346 has
+  no expected_date and no live_date, so it is on no calendar, while the 12 Sep pill is her
+  `next_video_expected_date` marker, which knew nothing about the tick. Markers now inherit it: an influencer
+  with a video received and not live flags their marker, and it paints yellow.
+- ⚠️ **The colour is INLINE (`#facc15`), not a class.** tailwind.css here is prebuilt and carries no
+  `bg-yellow-*` rule, so a class would have rendered nothing at all. The selftest pins the reason.
+- **No reload, not even a flicker.** The first version called `infCalLoad()`, which blanks the grid for a
+  loader — on screen that reads as a page reload. `infCalRepaint(infId, received)` now restyles that
+  influencer's pills IN PLACE (each pill carries `data-kind`), then re-syncs quietly (`infCalLoad(true)` skips
+  the loader). Off the calendar page it does nothing.
+- Verified against the real September data (the 12 Sep marker paints yellow, the two live+received videos stay
+  green, exactly one yellow pill) and by running `infCalRepaint` against a stub grid: yellow in place, live
+  untouched, other influencers untouched, grid never blanked, undo restores amber.
+
 ### The reason question goes, COD stops asking about availability, short replies are heard, and a Do Not Call list (2026-09-11)
 
 #### NDR 1/2/3 + RTO: the agent never asks why the delivery failed

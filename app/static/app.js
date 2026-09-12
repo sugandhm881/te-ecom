@@ -1275,6 +1275,11 @@ function navigate(view) {
             activeViewElement = document.getElementById('support-contacts-view');
             if (typeof supContactsInit === 'function') supContactsInit();
             break;
+        case 'return-videos':
+            activeLinkElement = document.getElementById('nav-return-videos');
+            activeViewElement = document.getElementById('return-videos-view');
+            if (typeof rvInit === 'function') rvInit();
+            break;
         case 'support-dnc':
             activeLinkElement = document.getElementById('nav-support-dnc');
             activeViewElement = document.getElementById('support-dnc-view');
@@ -6948,6 +6953,156 @@ function supCallsRender(d){
 
 // ── Escalation Contacts (admin CRUD) ───────────────────────────────────────
 let _supcWired=false;
+// ── RTO / Return Videos (2026-09-12) ───────────────────────────────────────────────────────────────
+// Short-goods evidence for RTO and return parcels. The video is re-encoded in the BROWSER before it is
+// uploaded: a minute off a phone is 100-150 MB, and at 720p / 2.5 Mbps it is 10-15 MB — the difference
+// between ~850 and ~7,000 videos inside the storage the plan already includes. Audio is kept (it is
+// usually someone counting out loud) and routed through WebAudio, so nothing plays out loud while it runs.
+// If the browser cannot do it, the original file is uploaded instead — never a silent failure.
+let _rvWired=false, _rvFile=null, _rvBusy=false;
+const RV_MAX_SIDE=1280, RV_MIN_SIDE=720, RV_VIDEO_BPS=2500000, RV_AUDIO_BPS=64000;
+function rvInit(){
+  if(!_rvWired){ _rvWired=true;
+    document.getElementById('rv-pick')?.addEventListener('click',()=>document.getElementById('rv-file').click());
+    document.getElementById('rv-file')?.addEventListener('change',e=>{
+      _rvFile=e.target.files&&e.target.files[0]||null;
+      document.getElementById('rv-filename').textContent=_rvFile?`${_rvFile.name} · ${rvMB(_rvFile.size)}`:'No video chosen'; });
+    document.getElementById('rv-upload')?.addEventListener('click',rvUpload);
+    document.getElementById('rv-market-add')?.addEventListener('click',rvAddMarket);
+  }
+  rvLoad();
+}
+const rvMB=b=>b>=1048576?(b/1048576).toFixed(1)+' MB':Math.max(1,Math.round(b/1024))+' KB';
+function rvSay(html,bad){ const el=document.getElementById('rv-status'); if(el) el.innerHTML=html?`<span class="${bad?'text-rose-600':'text-emerald-600 font-semibold'}">${html}</span>`:''; }
+function rvProgress(pct,text){
+  const w=document.getElementById('rv-progress'), b=document.getElementById('rv-bar'), t=document.getElementById('rv-progress-text');
+  if(!w) return; w.classList.toggle('hidden',pct==null);
+  if(pct!=null){ b.style.width=Math.max(0,Math.min(100,pct))+'%'; t.textContent=text||''; }
+}
+async function rvAddMarket(){
+  const name=(prompt('Marketplace name')||'').trim(); if(!name) return;
+  try{ await supFetch('/api/return-videos/marketplaces',{method:'POST',body:JSON.stringify({name})}); showNotification(name+' added'); rvLoad(); }
+  catch(e){ showNotification(e.message,true); }
+}
+// Re-encode to 720p-class video. Canvas for the picture, WebAudio for the sound, MediaRecorder for both.
+async function rvShrink(file,onPct){
+  if(typeof MediaRecorder==='undefined') throw new Error('this browser cannot re-encode');
+  const v=document.createElement('video'); v.preload='metadata'; v.playsInline=true;
+  v.src=URL.createObjectURL(file);
+  await new Promise((ok,bad)=>{ v.onloadedmetadata=ok; v.onerror=()=>bad(new Error('the video could not be read')); });
+  const w0=v.videoWidth, h0=v.videoHeight;
+  if(!w0||!h0) throw new Error('the video has no picture');
+  const scale=Math.min(1, RV_MAX_SIDE/Math.max(w0,h0), RV_MIN_SIDE/Math.min(w0,h0));
+  const w=Math.round(w0*scale/2)*2, h=Math.round(h0*scale/2)*2;
+  const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+  const ctx=cv.getContext('2d',{alpha:false});
+  const stream=cv.captureStream(30);
+  let actx=null;
+  try{ actx=new (window.AudioContext||window.webkitAudioContext)();
+       const dest=actx.createMediaStreamDestination();
+       actx.createMediaElementSource(v).connect(dest);      // to the recorder only — never to the speakers
+       dest.stream.getAudioTracks().forEach(t=>stream.addTrack(t)); }catch(_){ /* silent video is still evidence */ }
+  const type=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));
+  if(!type) throw new Error('this browser has no video recorder');
+  const rec=new MediaRecorder(stream,{mimeType:type,videoBitsPerSecond:RV_VIDEO_BPS,audioBitsPerSecond:RV_AUDIO_BPS});
+  const chunks=[]; rec.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+  const done=new Promise(ok=>{ rec.onstop=ok; });
+  rec.start(1000);
+  const draw=()=>{ if(v.paused||v.ended) return; ctx.drawImage(v,0,0,w,h);
+    if(v.duration) onPct&&onPct(Math.round(v.currentTime/v.duration*100));
+    if(v.requestVideoFrameCallback) v.requestVideoFrameCallback(draw); else requestAnimationFrame(draw); };
+  await v.play();
+  draw();
+  await new Promise(ok=>{ v.onended=ok; });
+  rec.stop(); await done;
+  try{ actx&&actx.close(); }catch(_){}
+  URL.revokeObjectURL(v.src);
+  return new Blob(chunks,{type:type.split(';')[0]});
+}
+async function rvUpload(){
+  if(_rvBusy) return;
+  const market=document.getElementById('rv-market')?.value||'';
+  const note=(document.getElementById('rv-note')?.value||'').trim();
+  if(!market) return rvSay('Choose a marketplace',true);
+  if(!note) return rvSay('Write a note about what is short',true);
+  if(!_rvFile) return rvSay('Choose a video',true);
+  _rvBusy=true; document.getElementById('rv-upload').disabled=true; rvSay('');
+  const original=_rvFile;
+  try{
+    let blob=original, shrunk=false;
+    if(document.getElementById('rv-compress')?.checked){
+      try{ rvProgress(0,'Shrinking the video — keep this tab open…');
+           blob=await rvShrink(original,p=>rvProgress(p,`Shrinking the video… ${p}%`)); shrunk=true; }
+      catch(e){ blob=original; shrunk=false; rvProgress(null); showNotification('Uploading the original — '+e.message,true); }
+    }
+    rvProgress(0,`Uploading ${rvMB(blob.size)}${shrunk?` (was ${rvMB(original.size)})`:''}…`);
+    const meta=await supFetch('/api/return-videos',{method:'POST',body:JSON.stringify({
+      marketplace:market, note,
+      order_name:document.getElementById('rv-order')?.value||'', awb:document.getElementById('rv-awb')?.value||'',
+      short_qty:document.getElementById('rv-qty')?.value||null, short_value:document.getElementById('rv-value')?.value||null,
+      original_size:original.size, compressed:shrunk })});
+    await new Promise((ok,bad)=>{
+      const x=new XMLHttpRequest();
+      x.open('POST','/api/return-videos/upload/'+meta.id);
+      const h=getAuthHeaders(); Object.keys(h).forEach(k=>x.setRequestHeader(k,h[k]));
+      x.setRequestHeader('Content-Type',blob.type||'video/webm');
+      x.upload.onprogress=e=>{ if(e.lengthComputable) rvProgress(Math.round(e.loaded/e.total*100),`Uploading… ${Math.round(e.loaded/e.total*100)}%`); };
+      x.onload=()=>{ let d={}; try{ d=JSON.parse(x.responseText);}catch(_){}
+        x.status>=200&&x.status<300&&d.success?ok(d):bad(new Error(d.error||('upload failed ('+x.status+')'))); };
+      x.onerror=()=>bad(new Error('upload failed — check the connection'));
+      x.send(blob);
+    });
+    rvProgress(null);
+    rvSay(`Saved · ${rvMB(blob.size)}${shrunk?` (shrunk from ${rvMB(original.size)})`:''}`);
+    _rvFile=null; document.getElementById('rv-file').value=''; document.getElementById('rv-filename').textContent='No video chosen';
+    ['rv-note','rv-order','rv-awb','rv-qty','rv-value'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+    rvLoad();
+  }catch(e){ rvProgress(null); rvSay(escapeHtml(e.message),true); }
+  finally{ _rvBusy=false; document.getElementById('rv-upload').disabled=false; }
+}
+async function rvLoad(){
+  const c=document.getElementById('rv-table'); if(!c) return; c.innerHTML=brandLoader();
+  try{
+    const d=await supFetch('/api/return-videos');
+    const sel=document.getElementById('rv-market');
+    if(sel){ const cur=sel.value; sel.innerHTML='<option value="">Choose…</option>'+d.marketplaces.map(m=>`<option ${m===cur?'selected':''}>${escapeHtml(m)}</option>`).join('');
+             if(typeof ecSyncSelect==='function') ecSyncSelect(sel); }
+    const r=document.getElementById('rv-retention'); if(r) r.textContent=d.retention_months;
+    const TH='px-3 py-2.5 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-slate-50/60 whitespace-nowrap';
+    const TD='px-3 py-2.5 text-sm text-slate-700 border-b border-slate-100 align-top';
+    const fmt=t=>t?new Date(t).toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—';
+    const ready=d.videos.filter(v=>v.file_path);
+    c.innerHTML=ready.length?`<table class="w-full"><thead><tr>${['Uploaded','Marketplace','Order / AWB','Short','Note','Size','By',''].map(h=>`<th class="${TH}">${h}</th>`).join('')}</tr></thead><tbody>${
+      ready.map(v=>`<tr class="hover:bg-slate-50">
+        <td class="${TD} text-xs whitespace-nowrap">${fmt(v.created_at)}</td>
+        <td class="${TD} font-semibold">${escapeHtml(v.marketplace)}</td>
+        <td class="${TD} text-xs"><span class="font-mono">${escapeHtml(v.order_name||'—')}</span>${v.awb?`<div class="text-slate-400 font-mono">${escapeHtml(v.awb)}</div>`:''}</td>
+        <td class="${TD} text-xs">${v.short_qty!=null?escapeHtml(String(v.short_qty))+' pcs':''}${v.short_value!=null?`<div class="text-slate-400">₹${escapeHtml(String(v.short_value))}</div>`:''}${v.short_qty==null&&v.short_value==null?'—':''}</td>
+        <td class="${TD} text-xs text-slate-600 max-w-[320px] whitespace-pre-wrap">${escapeHtml(v.note||'—')}</td>
+        <td class="${TD} text-xs whitespace-nowrap">${rvMB(v.file_size||0)}${v.compressed?'<div class="text-slate-400">shrunk</div>':''}</td>
+        <td class="${TD} text-xs">${escapeHtml(supPrettyUser(v.uploaded_by)||'—')}</td>
+        <td class="${TD} whitespace-nowrap"><button class="rv-get px-3 py-1 rounded-lg text-xs font-semibold text-indigo-600 hover:bg-indigo-50" data-id="${v.id}">Download</button>
+          ${(currentUser&&currentUser.isAdmin)?`<button class="rv-del px-2 py-1 rounded-lg text-xs text-slate-400 hover:text-rose-600" data-id="${v.id}" title="Delete (admins only)">🗑</button>`:''}</td></tr>`).join('')
+    }</tbody></table>`:'<div class="text-slate-400 text-sm p-10 text-center">No videos yet — upload the first one above</div>';
+    // Downloaded through our own server (fetch → blob), like the call recordings: the page may not talk to
+    // Supabase (CSP connect-src 'self'), and a plain link would carry no sign-in.
+    c.querySelectorAll('.rv-get').forEach(b=>b.addEventListener('click',async()=>{
+      const old=b.textContent; b.disabled=true; b.textContent='…';
+      try{
+        const r=await fetch('/api/return-videos/'+b.dataset.id+'/download',{headers:getAuthHeaders()});
+        if(!r.ok){ let m='download failed'; try{ m=(await r.json()).error||m; }catch(_){} throw new Error(m); }
+        const cd=r.headers.get('content-disposition')||'';
+        const name=(cd.match(/filename="([^"]+)"/)||[])[1]||('return-video-'+b.dataset.id+'.webm');
+        const url=URL.createObjectURL(await r.blob());
+        const a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(()=>URL.revokeObjectURL(url),30000);
+      }catch(e){ showNotification(e.message,true); }
+      finally{ b.disabled=false; b.textContent=old; } }));
+    c.querySelectorAll('.rv-del').forEach(b=>b.addEventListener('click',async()=>{
+      if(!(await supConfirm({ title:'Delete this video?', message:'The video file and its note are removed for good.', confirmLabel:'Delete', danger:true }))) return;
+      try{ await supFetch('/api/return-videos/'+b.dataset.id,{method:'DELETE'}); showNotification('Deleted'); rvLoad(); }catch(e){ showNotification(e.message,true); } }));
+  }catch(e){ c.innerHTML=`<div class="text-rose-500 text-sm p-8">${escapeHtml(e.message)}</div>`; }
+}
 // ── Do Not Call list (2026-09-11) ─────────────────────────────────────────────────────────────────
 // An order here gets no call of any kind; the SERVER enforces it in both places a call can start, so this
 // page is only the switch. Gated by support-dnc (admins always).
@@ -7424,7 +7579,7 @@ const NAV_HREF = {
     'nav-delivery-perf': 'delivery-perf', 'nav-claims-sla': 'claims-sla', 'nav-ops-control': 'ops-control', 'nav-last-mile': 'last-mile', 'nav-docpharma-recon': 'docpharma-recon', 'nav-rapidshyp-recon': 'rapidshyp-recon', 'nav-gokwik-pg-recon': 'gokwik-pg-recon', 'nav-kwikship-recon': 'kwikship-recon',
     'nav-amazon-fba': 'amazon-fba', 'nav-label-splitter': 'label-splitter', 'nav-inventory': 'inventory', 'nav-inventory-count': 'inventory-count', 'nav-inventory-count-analysis': 'inventory-count-analysis', 'nav-purchase-orders': 'purchase-orders', 'nav-grn': 'grn', 'nav-po-approvals': 'po-approvals', 'nav-users': 'users', 'nav-user-analytics': 'user-analytics', 'nav-zone-mapping': 'zone-mapping',
     'nav-support-dashboard': 'support-dashboard', 'nav-support-queue': 'support-queue', 'nav-order-calling': 'order-calling', 'nav-support-orders': 'support-orders',
-    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning', 'nav-support-ai-costs': 'support-ai-costs', 'nav-support-call-insights': 'support-call-insights', 'nav-support-dnc': 'support-dnc',
+    'nav-support-calls': 'support-calls', 'nav-support-contacts': 'support-contacts', 'nav-customer-profile': 'customer-profile', 'nav-support-voice': 'support-voice', 'nav-support-agent-learning': 'support-agent-learning', 'nav-support-ai-costs': 'support-ai-costs', 'nav-support-call-insights': 'support-call-insights', 'nav-support-dnc': 'support-dnc', 'nav-return-videos': 'return-videos',
     'nav-inf-dashboard': 'inf-dashboard', 'nav-inf-discover': 'inf-discover', 'nav-inf-influencers': 'inf-influencers',
     'nav-inf-lists': 'inf-lists', 'nav-inf-calendar': 'inf-calendar', 'nav-inf-mentions': 'inf-mentions',
     'nav-finance-entry': 'finance-entry', 'nav-finance-register': 'finance-register', 'nav-finance-books': 'finance-books'
@@ -8153,7 +8308,7 @@ document.getElementById('nav-gokwik-pg-recon')?.addEventListener('click', (e) =>
 document.getElementById('nav-serviceability')?.addEventListener('click', (e) => { e.preventDefault(); navigate('serviceability'); });
 document.getElementById('nav-delivery-perf')?.addEventListener('click', (e) => { e.preventDefault(); navigate('delivery-perf'); });
 document.getElementById('nav-claims-sla')?.addEventListener('click', (e) => { e.preventDefault(); navigate('claims-sla'); });
-['support-dashboard','support-queue','support-orders','support-calls','support-contacts','support-dnc','customer-profile','support-voice'].forEach(v =>
+['support-dashboard','support-queue','support-orders','support-calls','support-contacts','support-dnc','return-videos','customer-profile','support-voice'].forEach(v =>
     document.getElementById('nav-' + v)?.addEventListener('click', (e) => { e.preventDefault(); navigate(v); }));
 document.getElementById('nav-ops-control')?.addEventListener('click', (e) => { e.preventDefault(); navigate('ops-control'); });
 document.getElementById('nav-amazon-fba')?.addEventListener('click', (e) => { e.preventDefault(); navigate('amazon-fba'); });
@@ -9587,7 +9742,7 @@ const PERM_GROUPS = [
   ['Marketing', [['ad-ranking','Ad Ranking'],['adset-breakdown','Ad Set Breakdown'],['ad-analysis','Ad Analysis']]],
   ['Customer Support', [['support-dashboard','Support Dashboard'],['support-queue','NDR Calling + Order Calling'],['support-orders','Support Orders'],['support-calls','Call Logs'],['support-contacts','Escalation Contacts'],['support-dnc','Do Not Call list (block every AI + manual call for an order)'],['customer-profile','Customer Profile'],['support-store-credit','↳ Issue store credit'],['support-voice','Voice Agent (beta)'],['support-agent-learning','Agent Learning (self-learning voice agent)'],['support-call-insights','Call Insights (transcript audit)'],['support-ai-costs','AI Calling Statement (cost per call)']]],
   ['Influencer Marketing', [['inf-dashboard','Influencer Dashboard'],['inf-discover','Discover'],['inf-influencers','Influencers'],['inf-lists','Lists & Campaigns'],['inf-calendar','Video Calendar'],['inf-mentions','Brand Mentions']]],
-  ['Inventory', [['inventory','Inventory Analytics'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)'],['purchase-orders','Purchase Order (EasyEcom PO book)'],['grn','GRN (EasyEcom goods receiving)'],['po-approvals','PO Approvals (release drafted POs to EasyEcom)']]],
+  ['Inventory', [['inventory','Inventory Analytics'],['return-videos','RTO / Return Videos (short-goods evidence: upload + download)'],['inventory-count','Stock Count (physical reconciliation)'],['inventory-count-analysis','Count Analysis (system vs physical, deep)'],['purchase-orders','Purchase Order (EasyEcom PO book)'],['grn','GRN (EasyEcom goods receiving)'],['po-approvals','PO Approvals (release drafted POs to EasyEcom)']]],
   ['Finance', [['finance-entry','Data Entry (compose Tally vouchers)'],['finance-register','Voucher Register'],['finance-books','Tally Books (read-only trial balance & day book)']]],
   ['System', [['reports-view','Reports'],['amazon-review','Amazon Review'],['serviceability','Serviceability'],['settings','Settings']]],
   // Capabilities (not dashboard views) — granted per-user by the admin. Server enforces each one too.
@@ -15538,12 +15693,19 @@ function infDetailRender(wrap){
     if(!partnered && !v.video_received) return '';
     const tick='<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
     if(v.video_received){
+      // NO CHECKBOX ONCE IT IS RECORDED (user, 2026-09-12: "remove check box from this and give admin only
+      // too uncheck this"). A ticked box invites a second click that does nothing for everyone who is not an
+      // admin; this is a plain chip stating the fact, with an Undo that only an admin sees — and the server
+      // refuses the undo for anyone else, because a hidden button is only hidden.
       const when=v.video_received_at?` on ${_dmy(v.video_received_at)}`:'';
-      return `<span class="ivr-btn is-on" title="Marked received${when} — this cannot be undone">
-        <span class="ivr-box">${tick}</span>Video received</span>`;
+      const undo=(currentUser&&currentUser.isAdmin)
+        ?`<button type="button" class="infv-unrecv" data-vid="${v.id}" title="Undo — admins only" style="margin-left:6px;font-size:11px;font-weight:700;color:#64748b;background:none;border:0;text-decoration:underline;cursor:pointer">Undo</button>`:'';
+      // No tick glyph either: U+2713 is missing from plenty of UI fonts, which is why this control draws
+      // its own tick in the un-ticked state. The recorded state is the green chip alone.
+      return `<span class="ivr-btn is-on" title="Marked received${when}">Video received</span>${undo}`;
     }
     return `<button type="button" class="ivr-btn infv-recv" data-vid="${v.id}"
-      title="Mark this video as delivered. This cannot be undone.">
+      title="Mark this video as delivered. Only an admin can undo it.">
       <span class="ivr-box">${tick}</span>Video received</button>`;
   };
   const vidCard=v=>{
@@ -15698,14 +15860,38 @@ function infDetailRender(wrap){
         ['Video', when],
         ...(v.final_price!=null?[['Final', infMoney(v.final_price)]]:[]),
       ],
-      note:'This cannot be undone — a delivery, once recorded, stays recorded.',
+      note:'Only an admin can undo this later, if it was ticked by mistake.',
       confirmText:'Yes, mark received',
     });
     if(!go) return;
     b.disabled=true;
     try{
       await infFetch('/api/inf/videos/'+b.dataset.vid,{method:'POST',body:JSON.stringify({video_received:true})});
-      showNotification('Video marked received'); infDetailReload(wrap);
+      showNotification('Video marked received'); infDetailReload(wrap); infCalRepaint(inf.id, true);
+    }catch(e){ b.disabled=false; showNotification(e.message,true); } }));
+  // THE UNDO IS ADMIN ONLY, AND IT TAKES THE ACTIVITY ENTRY WITH IT (user, 2026-09-12: "give admin only too
+  // uncheck this and after uncheck activity log should deleted of check and uncheck both"). The button is
+  // rendered only for an admin and the server refuses everyone else, so the two agree — and the undo writes
+  // no activity of its own, so the card ends up exactly as it was before the tick.
+  wrap.querySelectorAll('.infv-unrecv').forEach(b=>b.addEventListener('click',async()=>{
+    const v=vidById(b.dataset.vid)||{};
+    const when=v.live_date?`Live ${_dmy(v.live_date)}`
+      :v.expected_date?`Expected ${_dmy(v.expected_date)}`:'Unscheduled';
+    const go=await ecConfirm({
+      title:'Undo "video received"?',
+      intro:'Clears the delivery record for this video and removes that entry from the influencer activity log.',
+      rows:[
+        ['Influencer', inf.name||('@'+(inf.instagram_handle||''))],
+        ['Video', when],
+      ],
+      note:'Admins only. The card goes back to how it looked before the tick.',
+      confirmText:'Yes, undo it',
+    });
+    if(!go) return;
+    b.disabled=true;
+    try{
+      await infFetch('/api/inf/videos/'+b.dataset.vid,{method:'POST',body:JSON.stringify({video_received:false})});
+      showNotification('Video received undone'); infDetailReload(wrap); infCalRepaint(inf.id, false);
     }catch(e){ b.disabled=false; showNotification(e.message,true); } }));
   wrap.querySelectorAll('.infv-edit').forEach(b=>b.addEventListener('click',()=>infVideoModal(inf.id,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
   wrap.querySelectorAll('.infv-send').forEach(b=>b.addEventListener('click',()=>infSendProductModal(inf,vidById(b.dataset.vid),()=>infDetailReload(wrap))));
@@ -16688,10 +16874,34 @@ function infCalInit(){
   if(!_infcY){ const n=new Date(); _infcY=n.getFullYear(); _infcM=n.getMonth()+1; }
   infCalLoad();
 }
-async function infCalLoad(){
+// THE CALENDAR REPAINTS ITSELF, NO RELOAD (user, 2026-09-12: "it should work realtime without reload").
+// The influencer card opens OVER the calendar, so ticking or undoing a video must leave the grid behind it
+// correct the moment the modal is done with the server. Only when the calendar is the open page — anywhere
+// else this is a no-op, and navigating to the calendar loads it fresh anyway.
+const INFC_KIND_CLS={live:'bg-emerald-100 text-emerald-800',expected:'bg-amber-100 text-amber-800',overdue:'bg-rose-100 text-rose-700'};
+const INFC_RCVD_STYLE='background:#facc15;color:#713f12';
+// NO RELOAD, NOT EVEN A FLICKER (user, 2026-09-12: "after click on video received and undo, video calendar
+// page show reload — i don't want that"). The first version simply called infCalLoad(), which blanks the grid
+// for a loader, and on screen that reads exactly like a page reload. Now the pills for THIS influencer are
+// restyled in place at once — no fetch, no blanking — and the grid is re-synced from the server quietly
+// afterwards, so a change made elsewhere still lands without anyone seeing a spinner.
+function infCalRepaint(infId, received){
+  try{
+    if(typeof currentView==='undefined' || currentView!=='inf-calendar') return;
+    const g=document.getElementById('infc-grid'); if(!g) return;
+    g.querySelectorAll(`.infc-badge[data-inf="${infId}"]`).forEach(b=>{
+      const kind=b.dataset.kind||'expected';
+      const rcvd=!!received && kind!=='live';                 // a live video keeps its green, tick or not
+      b.setAttribute('style', rcvd?INFC_RCVD_STYLE:'');
+      b.className='infc-badge block w-full text-left px-1.5 py-0.5 rounded text-[10px] font-semibold truncate '+(rcvd?'':(INFC_KIND_CLS[kind]||''));
+    });
+    infCalLoad(true);                                        // confirm from the server, silently
+  }catch(_){}
+}
+async function infCalLoad(quiet){
   const g=document.getElementById('infc-grid');
   document.getElementById('infc-label').textContent=new Date(_infcY,_infcM-1,1).toLocaleString('en-IN',{month:'long',year:'numeric'});
-  g.innerHTML=brandLoader('Loading calendar…');
+  if(!quiet) g.innerHTML=brandLoader('Loading calendar…');
   try{ const d=await infFetch(`/api/inf/calendar?year=${_infcY}&month=${_infcM}`);
     const today=_ymd(new Date());   // local today — UTC lags IST by a day before 5:30 AM
     const byDay={};
@@ -16702,7 +16912,7 @@ async function infCalLoad(){
       (byDay[day]=byDay[day]||[]).push({...v,kind});
     });
     const first=new Date(_infcY,_infcM-1,1), days=new Date(_infcY,_infcM,0).getDate(), startDow=first.getDay();
-    const kindCls={live:'bg-emerald-100 text-emerald-800',expected:'bg-amber-100 text-amber-800',overdue:'bg-rose-100 text-rose-700'};
+    const kindCls=INFC_KIND_CLS;   // shared with infCalRepaint, so an in-place restyle cannot drift from this
     let cells='';
     for(let i=0;i<startDow;i++) cells+='<div class="min-h-[92px] bg-slate-50/40 rounded-lg"></div>';
     for(let day=1;day<=days;day++){
@@ -16710,7 +16920,12 @@ async function infCalLoad(){
       const items=byDay[key]||[];
       cells+=`<div class="min-h-[92px] rounded-lg ring-1 ring-slate-100 p-1.5 ${key===today?'ring-2 ring-indigo-400 bg-indigo-50/30':''}">
         <p class="text-[11px] font-semibold ${key===today?'text-indigo-600':'text-slate-400'}">${day}</p>
-        <div class="space-y-1 mt-0.5">${items.slice(0,4).map(v=>`<button class="infc-badge block w-full text-left px-1.5 py-0.5 rounded text-[10px] font-semibold truncate ${kindCls[v.kind]}" data-inf="${v.influencer_id}" title="@${escapeHtml(v.influencer&&v.influencer.handle||'')} (${v.kind})">@${escapeHtml(v.influencer&&v.influencer.handle||'?')}</button>`).join('')}
+        <div class="space-y-1 mt-0.5">${items.slice(0,4).map(v=>{
+          // YELLOW MEANS "IN HAND, NOT OUT YET" (user, 2026-09-12: "when video is lived green already happen
+          // in calendar make sure that that should not yellow"). A live video stays GREEN — it is the stronger
+          // fact — so the tick only repaints the days where the video is with us but not posted.
+          const rcvd=v.video_received&&v.kind!=='live';
+          return `<button class="infc-badge block w-full text-left px-1.5 py-0.5 rounded text-[10px] font-semibold truncate ${rcvd?'':kindCls[v.kind]}"${rcvd?' style="background:#facc15;color:#713f12"':''} data-inf="${v.influencer_id}" data-kind="${v.kind}" title="@${escapeHtml(v.influencer&&v.influencer.handle||'')} (${rcvd?'video received'+(v.video_received_at?' on '+_dmy(v.video_received_at):''):v.kind})">@${escapeHtml(v.influencer&&v.influencer.handle||'?')}</button>`;}).join('')}
         ${items.length>4?`<p class="text-[10px] text-slate-400 px-1">+${items.length-4} more</p>`:''}</div></div>`;
     }
     g.innerHTML=`<div class="grid grid-cols-7 gap-1.5 mb-1.5">${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=>`<p class="text-[11px] font-bold text-slate-400 uppercase text-center">${d}</p>`).join('')}</div>
